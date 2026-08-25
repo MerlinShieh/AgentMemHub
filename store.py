@@ -225,12 +225,31 @@ class Store:
         role: Optional[str] = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
-        """FTS5 全文搜索事件正文，返回命中事件 + 所在会话元数据。"""
+        """搜索事件正文。
+
+        策略：
+        - 查询含 CJK（连续中文）时用 LIKE 子串匹配 —— unicode61/trigram
+          tokenizer 对 2 字符中文短词（如"登录"）无法命中，LIKE 最可靠。
+        - 无 CJK（英文/词组）时用 FTS5 MATCH + snippet 高亮片段。
+        """
         conn = self.conn
-        # 处理 FTS MATCH 语法（简单词组包裹）
+        if _has_cjk(query):
+            return self._search_like(query, source=source, role=role, limit=limit)
+        return self._search_fts(query, source=source, role=role, limit=limit)
+
+    def _search_fts(
+        self,
+        query: str,
+        *,
+        source: Optional[str] = None,
+        role: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        conn = self.conn
         match = _fts_query(query)
         sql = (
-            "SELECT f.conversation_id, f.role, f.content, f.tool_name, f.snippet, "
+            "SELECT f.conversation_id, f.role, f.content, f.tool_name, "
+            "snippet(events_fts, 3, '', '', '…', 12) AS snippet, "
             "c.title, c.cwd, c.updated_at "
             "FROM events_fts f JOIN conversations c "
             "ON c.source = f.source AND c.id = f.conversation_id "
@@ -242,6 +261,36 @@ class Store:
             params.append(source)
         if role:
             sql += " AND f.role = ?"
+            params.append(role)
+        sql += f" LIMIT {int(limit)}"
+        rows = conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def _search_like(
+        self,
+        query: str,
+        *,
+        source: Optional[str] = None,
+        role: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """LIKE 子串搜索（中文可靠），JOIN 会话元数据。"""
+        conn = self.conn
+        like = f"%{query}%"
+        sql = (
+            "SELECT e.conversation_id, e.role, e.content, e.tool_name, '' AS snippet, "
+            "c.title, c.cwd, c.updated_at "
+            "FROM events e JOIN conversations c "
+            "ON c.source = e.source AND c.id = e.conversation_id "
+            "WHERE (e.content LIKE ?1 OR e.tool_output LIKE ?1 OR e.reasoning LIKE ?1 "
+            " OR e.shell_cmd LIKE ?1 OR e.shell_output LIKE ?1 OR e.patch_diff LIKE ?1)"
+        )
+        params: list[Any] = [like]
+        if source:
+            sql += " AND e.source = ?"
+            params.append(source)
+        if role:
+            sql += " AND e.role = ?"
             params.append(role)
         sql += f" LIMIT {int(limit)}"
         rows = conn.execute(sql, params).fetchall()
@@ -260,6 +309,11 @@ def _fts_query(query: str) -> str:
     if " " in q:
         return f'"{q}"'
     return f'"{q}"'
+
+
+def _has_cjk(text: str) -> bool:
+    """是否含 CJK（中日韩）字符 —— 有则走 LIKE 子串搜索。"""
+    return any("\u4e00" <= ch <= "\u9fff" for ch in text)
 
 
 def source_signature(path: Path) -> str:
