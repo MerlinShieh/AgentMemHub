@@ -117,6 +117,22 @@ def cmd_adapters(args) -> None:
         _stdout(f"[{d['source']}] {d['label']}: {'✓ ' + (d['path'] or '') if d['located'] else '✗ 未找到'}")
 
 
+def cmd_memos(args) -> None:
+    from memos_bridge import build_bundle, write_bundle, push_bundle
+    store = Store()
+    bundle = build_bundle(store, args.source)
+    store.close()
+    _stdout(f"生成 bundle: {len(bundle['traces'])} traces")
+    write_bundle(bundle, Path(args.out))
+    _stdout(f"已写入 → {args.out}")
+    if args.push:
+        try:
+            resp = push_bundle(bundle, args.push)
+            _stdout(f"已推送 MemOS: {resp}")
+        except Exception as e:
+            _stdout(f"推送失败（MemOS 可能在运行?）: {e}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="agentmemhub", description="AgentMemHub 统一 Agent 会话提取")
     sub = p.add_subparsers(dest="command")
@@ -145,6 +161,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     pst = sub.add_parser("stats", help="统计")
     pa = sub.add_parser("adapters", help="列出 adapter 状态")
+
+    pm = sub.add_parser("memos", help="生成/推送 MemOS 导入 bundle")
+    pm.add_argument("--source", default="")
+    pm.add_argument("--out", default="exports/memos_bundle.json")
+    pm.add_argument("--push", default="", help="MemOS base URL，例如 http://127.0.0.1:18800；非空则 POST")
     return p
 
 
@@ -153,7 +174,7 @@ def main() -> None:
     handlers = {
         "ingest": cmd_ingest, "list": cmd_list, "show": cmd_show,
         "search": cmd_search, "export": cmd_export, "stats": cmd_stats,
-        "adapters": cmd_adapters,
+        "adapters": cmd_adapters, "memos": cmd_memos,
     }
     fn = handlers.get(args.command)
     if fn is None:
