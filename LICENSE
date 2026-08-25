@@ -1,6 +1,19 @@
 MIT License
 
-Copyright (c) 2026 Mark Li
+AgentMemHub — 统一 Agent 会话提取与记忆平台
+============================================
+
+本仓库是基于以下开源项目 Fork 并进行二次开发的派生项目：
+
+    ai-conversation-hub  https://github.com/Mark-Libetter/ai-conversation-hub
+    Copyright (c) 2026 Mark Li
+
+按 MIT 许可的要求，fork 继承的代码保留原作者的版权声明（见下）。本项目在
+ai-conversation-hub 基础上新增/重写的代码（统一事件模型、SQLite 存储层、
+各 Agent 适配器、MemOS 桥接等）部分同样以 MIT 许可发布。
+
+Copyright (c) 2026 AgentMemHub 贡献者 (Merlin Shieh)
+部分代码（fork 自 ai-conversation-hub）Copyright (c) 2026 Mark Li
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
