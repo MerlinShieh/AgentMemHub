@@ -1,0 +1,33 @@
+# ==== 不纳入版本库的内容 ====
+# 用户数据库（笔记/收藏/项目归类/摘要，体积大且持续变化）
+hub_notes.sqlite
+hub_notes.sqlite-wal
+hub_notes.sqlite-shm
+hub_notes.sqlite-journal
+hub_notes.sqlite-*
+
+# 手动版本备份目录（体积大）
+Backups/
+
+# 本机数据源配置（含本机绝对路径，不适合入库；文件本身保留在磁盘）
+sources.json
+sources.json.backup-*
+
+# 运行时产物
+__pycache__/
+*.pyc
+*.log
+UserData/
+.trash/
+
+# PyInstaller 打包产物
+build/
+dist/
+*.spec
+.buildenv/
+
+# 运行时实例信息（端口复用）
+instance.json
+
+# 交接文档（仅供二次检查，不入库）
+HANDOFF.md

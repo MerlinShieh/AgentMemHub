@@ -1,0 +1,684 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>AI 对话中心 · 对话指挥中心</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/app.css?v=instant36">
+  </head>
+  <body>
+    <div id="hubOfflineBanner" class="hub-offline-banner" hidden>
+      对话中心暂时连不上。
+      <button id="hubReconnectButton" type="button">重新连接</button>
+    </div>
+    <div class="app-frame">
+      <aside id="primarySidebar" class="primary-sidebar" aria-label="侧边栏">
+        <div class="brand">
+          <span class="brand-mark">M</span>
+          <span class="brand-copy"><strong>对话中心</strong><small>LOCAL · 私有部署</small></span>
+          <button id="sidebarCollapseButton" class="sidebar-collapse-button" type="button"
+            aria-controls="primarySidebar" aria-expanded="true" title="收起侧边栏">‹</button>
+        </div>
+
+        <nav id="primaryNav" class="primary-nav" aria-label="主要功能">
+          <button class="primary-nav-item active" data-view="find" type="button" title="找对话">
+            <span class="nav-icon" aria-hidden="true">⌕</span>
+            <span class="nav-copy"><span>找对话</span><small>检索与继续工作</small></span>
+          </button>
+          <button class="primary-nav-item" data-view="daily" type="button" title="每日回顾">
+            <span class="nav-icon" aria-hidden="true">◎</span>
+            <span class="nav-copy"><span>每日回顾</span><small>成果与未完成事项</small></span>
+          </button>
+          <button class="primary-nav-item" data-view="projects" type="button" title="我的项目">
+            <span class="nav-icon" aria-hidden="true">▤</span>
+            <span class="nav-copy"><span>我的项目</span><small>把对话归堆组织</small></span>
+          </button>
+        </nav>
+
+        <div class="source-section">
+          <details id="sourceDetails" class="source-details" open>
+            <summary><span>数据来源</span><small>展开 / 收起</small></summary>
+            <nav class="agent-switcher" id="agentSwitcher" aria-label="数据来源">
+              <button class="source-row active" data-source="all" type="button">
+                <span class="source-dot all"></span><span>全部来源</span><b id="allCount">—</b>
+              </button>
+              <button class="source-row" data-source="workbuddy" type="button">
+                <span class="source-dot workbuddy"></span><span>WorkBuddy</span><b id="workbuddyCount">—</b>
+              </button>
+              <button class="source-row" data-source="codex" type="button">
+                <span class="source-dot codex"></span><span>Codex</span><b id="codexCount">—</b>
+              </button>
+              <button class="source-row" data-source="grok" type="button">
+                <span class="source-dot grok"></span><span>Grok Build</span><b id="grokCount">—</b>
+              </button>
+              <button class="source-row" data-source="claude" type="button">
+                <span class="source-dot claude"></span><span>Claude Code</span><b id="claudeCount">—</b>
+              </button>
+              <button class="source-row" data-source="cursor" type="button">
+                <span class="source-dot cursor"></span><span>Cursor</span><b id="cursorCount">—</b>
+              </button>
+              <button class="source-row" data-source="qclaw" type="button">
+                <span class="source-dot qclaw"></span><span>QClaw</span><b id="qclawCount">—</b>
+              </button>
+              <button class="source-row" data-source="qoderwork" type="button">
+                <span class="source-dot qoderwork"></span><span>QoderWork</span><b id="qoderworkCount">—</b>
+              </button>
+              <button class="source-row" data-source="zcode" type="button">
+                <span class="source-dot zcode"></span><span>ZCode</span><b id="zcodeCount">—</b>
+              </button>
+              <button class="source-row" data-source="codepilot" type="button">
+                <span class="source-dot codepilot"></span><span>CodePilot</span><b id="codepilotCount">—</b>
+              </button>
+              <button class="source-row" data-source="marvis" type="button">
+                <span class="source-dot marvis"></span><span>Marvis</span><b id="marvisCount">—</b>
+              </button>
+              <button class="source-row" data-source="hermes" type="button">
+                <span class="source-dot hermes"></span><span>Hermes</span><b id="hermesCount">—</b>
+              </button>
+              <button class="source-row" data-source="qoder" type="button">
+                <span class="source-dot qoder"></span><span>Qoder</span><b id="qoderCount">—</b>
+              </button>
+              <button class="source-row" data-source="qodercn" type="button">
+                <span class="source-dot qodercn"></span><span>QoderCN</span><b id="qodercnCount">—</b>
+              </button>
+              <button class="source-row" data-source="qwenworkcn" type="button">
+                <span class="source-dot qwenworkcn"></span><span>千问办公</span><b id="qwenworkcnCount">—</b>
+              </button>
+              <div id="customSourceRows" class="custom-source-rows"></div>
+            </nav>
+            <span id="refreshedAt" class="sidebar-refresh"></span>
+          </details>
+        </div>
+        <nav id="sidebarUtility" class="sidebar-utility" aria-label="辅助功能">
+          <button data-view="assets" type="button" title="工具"><span class="utility-icon" aria-hidden="true">T</span><span class="utility-copy"><span>工具</span><small>导出与续接</small></span></button>
+          <button data-view="settings" type="button" title="设置"><span class="utility-icon" aria-hidden="true">⚙</span><span class="utility-copy"><span>设置</span><small>数据源与备份</small></span></button>
+        </nav>
+      </aside>
+
+      <main class="app-workspace">
+        <header class="workspace-topbar">
+          <div class="workspace-title">
+            <p class="eyebrow">CONVERSATION COMMAND CENTER</p>
+            <h1>对话指挥中心</h1>
+          </div>
+          <div class="global-search">
+            <span class="search-mark" aria-hidden="true"></span>
+            <select id="searchAgentFilter" aria-label="搜索范围">
+              <option value="all">全部 Agent</option>
+              <option value="workbuddy">WorkBuddy</option>
+              <option value="codex">Codex</option>
+              <option value="grok">Grok Build</option>
+              <option value="claude">Claude Code</option>
+              <option value="cursor">Cursor</option>
+              <option value="qclaw">QClaw</option>
+              <option value="qoderwork">QoderWork</option>
+              <option value="zcode">ZCode</option>
+              <option value="codepilot">CodePilot</option>
+              <option value="marvis">Marvis</option>
+              <option value="hermes">Hermes</option>
+              <option value="qoder">Qoder</option>
+              <option value="qodercn">QoderCN</option>
+              <option value="qwenworkcn">千问办公</option>
+            </select>
+            <input id="searchInput" type="search" placeholder="搜索对话，支持 OR / NOT / &quot;短语&quot;">
+            <div class="global-search-nav" hidden>
+              <span id="searchNavState" class="global-search-state" hidden></span>
+              <button id="searchPrev" type="button" title="上一个结果" disabled>↑</button>
+              <button id="searchNext" type="button" title="下一个结果" disabled>↓</button>
+            </div>
+            <details class="search-syntax">
+              <summary aria-label="搜索语法帮助">语法</summary>
+              <div>
+                <strong>组合搜索</strong>
+                <p><code>模型 API</code>：同时包含两个词</p>
+                <p><code>"每日回顾"</code>：精确短语</p>
+                <p><code>Hermes OR Codex</code>：包含任一个</p>
+                <p><code>摘要 NOT 股票</code>：排除关键词</p>
+                <p><code>摘要 -股票</code>：减号也表示排除</p>
+                <p><code>(日报 OR 周报) API</code>：括号组合</p>
+              </div>
+            </details>
+            <kbd title="聚焦搜索框">/ 或 Ctrl K</kbd>
+          </div>
+          <div class="today-stamp">
+            <div><strong id="todayDate">—</strong><span>本机只读索引</span></div>
+            <button id="themeButton" class="theme-trigger" type="button" aria-haspopup="dialog">换肤</button>
+          </div>
+        </header>
+
+
+        <section id="findView" class="app-view active" aria-label="找对话">
+          <div class="find-layout">
+            <div class="workstream">
+              <section id="findDailyBrief" class="daily-brief" aria-label="今日回顾摘要">
+                <div class="brief-loading">正在整理今日工作…</div>
+              </section>
+
+              <div class="find-tools">
+                <div class="quick-ranges" id="quickRanges">
+                  <button class="quick-range" data-range="today" type="button">今天</button>
+                  <button class="quick-range" data-range="3d" type="button">近 3 天</button>
+                  <button class="quick-range" data-range="7d" type="button">近 7 天</button>
+                  <button class="quick-range" data-range="30d" type="button">近 30 天</button>
+                  <button class="quick-range active" data-range="all" type="button">全部</button>
+                </div>
+                <div class="filter-actions">
+                  <div id="sourceStarters" class="source-starters" hidden></div>
+                  <details id="moreFilters" class="more-filters">
+                    <summary>筛选</summary>
+                    <div class="more-filters-panel">
+                      <label>状态
+                        <select id="statusFilter" aria-label="管理状态">
+                          <option value="all">全部状态</option>
+                          <option value="todo">待继续</option>
+                          <option value="done">已完成</option>
+                          <option value="reference">重要参考</option>
+                          <option value="archive_candidate">可归档候选</option>
+                        </select>
+                      </label>
+                      <label>标签
+                        <select id="tagFilter" aria-label="标签">
+                          <option value="">全部标签</option>
+                        </select>
+                      </label>
+                      <label>工作区
+                        <select id="workspaceFilter" aria-label="工作区">
+                          <option value="all">全部工作区</option>
+                        </select>
+                      </label>
+                      <label>Agent 原生项目
+                        <select id="nativeProjectFilter" aria-label="Agent 原生项目">
+                          <option value="all">全部原生项目</option>
+                        </select>
+                      </label>
+                      <div class="filter-panel-actions">
+                        <button id="favoriteFilter" class="button ghost" type="button" aria-pressed="false">只看收藏</button>
+                        <button id="clearFiltersButton" class="button ghost" type="button">清除筛选</button>
+                      </div>
+                    </div>
+                  </details>
+                </div>
+              </div>
+
+              <details class="saved-views">
+                <summary>保存的视图</summary>
+                <div class="saved-view-controls">
+                  <select id="savedViewSelect" aria-label="选择保存的视图">
+                    <option value="">选择视图…</option>
+                  </select>
+                  <input id="savedViewName" type="text" maxlength="40" placeholder="例如：近 7 天 Codex">
+                  <button id="saveViewButton" class="button secondary" type="button">保存当前视图</button>
+                  <button id="deleteViewButton" class="button ghost" type="button" disabled>删除</button>
+                </div>
+              </details>
+
+              <section id="summary" class="summary" aria-label="对话统计"></section>
+              <div class="compat-heading" hidden>
+                <p id="workspaceEyebrow"></p><h2 id="workspaceTitle"></h2><p id="workspaceDescription"></p>
+              </div>
+
+              <section class="list-pane">
+                <div class="list-head">
+                  <span id="resultCount">正在读取…</span>
+                  <div id="tagChips" class="tag-chips"></div>
+                  <span class="list-head-actions">
+                    <span class="muted">按最近活动排列</span>
+                    <button id="detailToggleButton" class="button secondary detail-drawer-toggle" type="button"
+                      aria-controls="detailPane" aria-expanded="false">打开对话内容</button>
+                  </span>
+                </div>
+                <div id="selectionBar" class="selection-bar" hidden>
+                  <span id="selectionCount">已选 0 个对话</span>
+                  <span class="selection-actions">
+                    <button id="addToProjectButton" class="button secondary" type="button">归入项目</button>
+                    <button id="exportSelectedButton" class="button secondary" type="button">导出所选</button>
+                    <button id="selectAllVisibleButton" class="button ghost" type="button">全选当前结果</button>
+                    <button id="clearSelectionButton" class="button ghost" type="button">清除选择</button>
+                  </span>
+                </div>
+                <div id="conversationList" class="conversation-list" aria-live="polite"></div>
+                <button id="loadMoreButton" class="button secondary load-more" type="button" hidden>加载更多</button>
+              </section>
+            </div>
+
+            <div id="detailResizer" class="detail-resizer" role="separator" aria-label="调整对话详情宽度"
+              aria-orientation="vertical" aria-valuemin="300" aria-valuemax="720" aria-valuenow="400"
+              title="左右拖动调整详情宽度；双击恢复默认" tabindex="0"></div>
+            <aside id="detailPane" class="detail-pane" aria-label="对话详情" aria-hidden="true" hidden>
+              <div class="empty-detail">
+                <span class="empty-index">01</span>
+                <h2>选择一个对话</h2>
+                <p>这里会显示可追溯概览、最近上下文和你的管理信息。</p>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section id="dailyView" class="app-view" aria-label="每日回顾">
+          <section id="dailyReview" class="daily-review" aria-labelledby="dailyReviewTitle">
+            <div class="daily-head">
+              <div>
+                <p class="eyebrow">DAILY REVIEW</p>
+                <h2 id="dailyReviewTitle">每日工作回顾</h2>
+                <p class="muted">按消息发生时间汇总工作，每条判断都能回到原对话核对。</p>
+              </div>
+              <div class="daily-controls">
+                <button id="previousDayButton" class="button ghost day-step" type="button" aria-label="前一天">前一天</button>
+                <input id="reviewDate" class="review-date" type="date" aria-label="选择回顾日期">
+                <button id="nextDayButton" class="button ghost day-step" type="button" aria-label="后一天">后一天</button>
+                <button id="refreshDataButton" class="button ghost" type="button" title="重新读取各数据源、重建索引并刷新当前视图">刷新数据</button>
+              </div>
+            </div>
+            <div id="dailyDateStrip" class="daily-date-strip" aria-label="最近日期"></div>
+            <div id="dailyBody" class="daily-body" aria-live="polite">
+              <div class="daily-loading">正在整理当天对话…</div>
+            </div>
+          </section>
+        </section>
+
+        <section id="projectsView" class="app-view" aria-label="我的项目">
+          <div class="projects-page">
+            <div class="page-heading">
+              <p class="eyebrow">MY PROJECTS</p>
+              <h2>我的项目</h2>
+              <p class="muted">把相关对话归成一堆，自己命名、写说明。不自动归类，完全由你组织。</p>
+            </div>
+            <div class="projects-toolbar">
+              <button id="newProjectButton" class="button primary" type="button">＋ 新建项目</button>
+              <button id="backToProjectsButton" class="button ghost" type="button" hidden>← 返回项目列表</button>
+            </div>
+            <div id="projectList" class="project-list" aria-live="polite"></div>
+            <div id="projectDetail" class="project-detail" hidden></div>
+          </div>
+        </section>
+
+        <section id="assetsView" class="app-view" aria-label="成果库">
+          <div class="assets-page">
+            <div class="page-heading assets-heading">
+              <div>
+                <p class="eyebrow">EXPORT &amp; CONTINUATION</p>
+                <h2>成果库</h2>
+                <p>把对话按日期导出为安全的 Markdown / JSONL，便于归档和续接。</p>
+              </div>
+              <div class="privacy-badge">原始对话只读 · 不会自动调用模型</div>
+            </div>
+
+            <div class="assets-grid">
+              <section class="asset-card export-card">
+                <div class="asset-card-head">
+                  <div><span class="settings-index">01</span><h3>导出中心</h3><p>按日期导出安全的 Markdown / JSONL。</p></div>
+                </div>
+                <div class="export-fields">
+                  <label><span>导出范围</span><select id="exportScope">
+                    <option value="day">按日期</option>
+                    <option value="selected">已勾选的对话</option>
+                  </select></label>
+                  <label id="exportDateLabel"><span>日期</span><input id="exportDate" type="date"></label>
+                  <label><span>格式</span><select id="exportFormat">
+                    <option value="markdown">Markdown</option>
+                    <option value="jsonl">结构化 JSONL</option>
+                  </select></label>
+                </div>
+                <div class="export-options">
+                  <label><input id="exportMessages" type="checkbox" checked> 对话正文</label>
+                  <label><input id="exportNotes" type="checkbox" checked> 标签与备注</label>
+                  <label title="将 C:\Users\用户名 等主目录路径替换为 ~，避免泄露本机路径、减少知识库乱码"><input id="exportAnonPaths" type="checkbox" checked> 路径脱敏（主目录→~）</label>
+                </div>
+                <div class="asset-actions">
+                  <button id="previewExportButton" class="button secondary" type="button">生成预览</button>
+                  <button id="downloadExportButton" class="button primary" type="button" disabled>下载文件</button>
+                  <span id="exportState" class="muted"></span>
+                </div>
+                <textarea id="exportPreview" class="asset-preview" rows="14" readonly placeholder="导出预览会显示在这里"></textarea>
+              </section>
+            </div>
+          </div>
+        </section>
+
+        <section id="settingsView" class="app-view" aria-label="设置">
+          <div class="settings-page">
+            <div class="page-heading">
+              <p class="eyebrow">LOCAL SETTINGS</p>
+              <h2>设置</h2>
+              <p>管理本机数据源、备份与外观。原始对话始终保持只读。</p>
+            </div>
+            <div class="settings-grid">
+              <section class="settings-card">
+                <span class="settings-index">01</span>
+                <h3>数据源质量中心</h3>
+                <p>检查适配器、结构指纹、正文完整度和持久搜索索引。</p>
+                <div class="settings-card-actions">
+                  <button id="diagnoseSourcesButton" class="button secondary" type="button">运行兼容性检查</button>
+                  <button id="openSetupButton" class="button ghost" type="button">配置路径</button>
+                </div>
+              </section>
+              <section class="settings-card">
+                <span class="settings-index">02</span>
+                <h3>管理数据备份</h3>
+                <p>导出收藏与备注。不会包含 API 密钥或原始对话。</p>
+                <div class="settings-card-actions">
+                  <button id="exportBackupButton" class="button secondary" type="button">导出备份</button>
+                  <label class="button ghost file-button">导入预览<input id="backupFileInput" type="file" accept=".json,application/json" hidden></label>
+                </div>
+                <div id="backupState" class="muted"></div>
+              </section>
+              <section class="settings-card">
+                <span class="settings-index">03</span>
+                <h3>检查更新</h3>
+                <p>前往 GitHub Releases 下载最新版本，解压即用。</p>
+                <div class="settings-card-actions">
+                  <a class="button secondary" href="https://github.com/Mark-Libetter/ai-conversation-hub/releases" target="_blank" rel="noopener">打开下载页</a>
+                </div>
+                <div id="updateState" class="muted">正在读取当前版本…</div>
+              </section>
+              <section class="settings-card">
+                <span class="settings-index">04</span>
+                <h3>外观主题</h3>
+                <p>内置 Codex 热门换肤风格，完全本地、即时切换并记住选择。</p>
+                <button id="openThemeSettingsButton" class="button secondary" type="button">选择皮肤</button>
+              </section>
+            </div>
+            <section class="source-health-card">
+              <div><h3>数据源质量报告</h3><p id="sourceQualitySummary">路径、完整度、结构兼容性与索引消息数</p></div>
+              <div id="sourceHealth" class="source-health"><span class="muted">进入设置后读取状态…</span></div>
+            </section>
+          </div>
+        </section>
+
+      </main>
+    </div>
+
+    <template id="detailTemplate">
+      <div class="detail-inner">
+        <aside class="reader-toc" hidden>
+          <div class="reader-toc-bar">
+            <strong class="reader-toc-head">目录</strong>
+            <button class="reader-toc-close" type="button">收起</button>
+          </div>
+          <nav class="reader-toc-list"></nav>
+        </aside>
+        <div class="detail-head">
+          <div><div class="source-line"></div><h2 class="detail-title"></h2><p class="detail-meta"></p></div>
+          <div class="detail-head-actions">
+            <button class="button ghost reader-toc-toggle" type="button" aria-pressed="false">目录</button>
+            <details class="reader-look">
+              <summary>阅读外观</summary>
+              <div class="reader-look-panel">
+                <div class="reader-presets" role="group" aria-label="阅读配色">
+                  <button type="button" data-reader-preset="inherit">跟随皮肤</button>
+                  <button type="button" data-reader-preset="paper">米纸</button>
+                  <button type="button" data-reader-preset="night">夜间</button>
+                  <button type="button" data-reader-preset="sepia">旧书</button>
+                  <button type="button" data-reader-preset="green">护眼</button>
+                  <button type="button" data-reader-preset="contrast">高对比</button>
+                </div>
+                <label class="reader-color">背景<input class="reader-bg" type="color" value="#f6f1e6"></label>
+                <label class="reader-color">文字<input class="reader-ink" type="color" value="#2a241c"></label>
+                <label class="reader-font-field">字体
+                  <select class="reader-font">
+                    <option value="">跟随界面</option>
+                    <option value="Georgia, 'Songti SC', 'SimSun', serif">衬线 · 宋体</option>
+                    <option value="'Segoe UI', 'Microsoft YaHei UI', sans-serif">黑体</option>
+                    <option value="'KaiTi', 'STKaiti', serif">楷体</option>
+                  </select>
+                </label>
+              </div>
+            </details>
+            <button class="button ghost reader-toggle" type="button" aria-pressed="false" title="整页阅读对话">整页阅读</button>
+            <button class="favorite-button" type="button" aria-label="收藏"></button>
+            <button class="detail-close-button" type="button" aria-label="收起对话内容" title="收起对话内容">×</button>
+          </div>
+        </div>
+        <div class="detail-actions">
+          <div class="launch-targets"></div>
+          <button class="button secondary copy-id" type="button">复制 ID</button>
+          <button class="button ghost export-conversation" type="button">导出 Markdown</button>
+        </div>
+        <p class="launch-note muted"></p>
+        <section class="overview-block">
+          <div class="section-heading">
+            <h3>概览</h3>
+          </div>
+          <dl class="overview"></dl>
+        </section>
+        <section class="note-block">
+          <div class="section-heading"><h3>我的管理信息</h3><span class="save-state muted"></span></div>
+          <div class="note-grid">
+            <div class="note-field">
+              <span class="note-field-label">状态</span>
+              <select class="user-status" aria-label="自定义状态">
+                <option value="">未设置状态</option><option value="todo">待继续</option><option value="done">已完成</option>
+                <option value="reference">重要参考</option><option value="archive_candidate">可归档候选</option>
+              </select>
+            </div>
+            <div class="tags-field">
+              <div class="tags-field-head">
+                <span class="tags-field-label">标签</span>
+                <span class="tags-help" tabindex="0">?
+                  <span class="tags-help-pop">输入后按回车或逗号确认；可从下拉中选择已有标签；点标签上的 × 删除。单个标签最长 60 字，最多 20 个。修改后自动保存。</span>
+                </span>
+              </div>
+              <div class="tags-editor">
+                <span class="tags-chips"></span>
+                <input class="tags-input" type="text" placeholder="输入标签，回车确认" autocomplete="off">
+                <div class="tags-suggest" hidden></div>
+              </div>
+            </div>
+          </div>
+          <div class="note-field">
+            <span class="note-field-label">备注</span>
+            <textarea class="note-input" rows="3" placeholder="记录结论、下一步或为什么值得保留…（自动保存，支持 Ctrl+Z 撤销）"></textarea>
+          </div>
+        </section>
+        <section class="messages-block">
+          <div class="messages-toolbar">
+          <div class="messages-heading"><h3>对话</h3><span class="message-count muted"></span></div>
+          <section class="conversation-search-panel" aria-label="在当前对话中搜索">
+            <label>
+              <span class="search-mark"></span>
+              <input class="conversation-search-input" type="search"
+                placeholder="在当前对话中搜索…" autocomplete="off">
+            </label>
+            <div class="conversation-search-nav" hidden>
+              <span class="conversation-search-state" hidden></span>
+              <button class="conversation-search-previous" type="button" title="上一个匹配" disabled>↑</button>
+              <button class="conversation-search-next" type="button" title="下一个匹配" disabled>↓</button>
+              <button class="conversation-search-clear" type="button" title="清除搜索">×</button>
+            </div>
+          </section>
+          <div class="message-tools">
+            <div class="segments message-role-filter" role="group" aria-label="消息角色">
+              <button class="segment active" data-role="all" type="button">全部</button>
+              <button class="segment" data-role="user" type="button">你</button>
+              <button class="segment" data-role="assistant" type="button">助手</button>
+            </div>
+            <div class="segments message-order" role="group" aria-label="消息排序">
+              <button class="segment active" data-order="oldest" type="button">旧到新</button>
+              <button class="segment" data-order="newest" type="button">新到旧</button>
+            </div>
+            <div class="segments message-view-mode" role="group" aria-label="对话完整度">
+              <button class="segment active" data-view="clean" type="button">正文</button>
+              <button class="segment" data-view="full" type="button">完全体</button>
+            </div>
+          </div>
+          </div>
+          <div class="messages"></div>
+        </section>
+        <details class="detail-collapsible review-block">
+          <summary><span>对话回顾卡</span><span class="review-state muted"></span></summary>
+
+          <div class="continuation-actions">
+            <button class="button secondary generate-review" type="button">生成回顾卡</button>
+            <button class="button secondary copy-review" type="button" hidden>复制 Markdown</button>
+            <button class="button ghost download-review" type="button" hidden>下载 JSON</button>
+          </div>
+          <div class="review-preview" hidden>
+            <textarea class="review-output" rows="12" readonly aria-label="对话回顾卡 Markdown"></textarea>
+
+          </div>
+        </details>
+        <details class="detail-collapsible continuation-block">
+          <summary><span>跨 Agent 接续</span><span class="continuation-state muted"></span></summary>
+
+          <div class="continuation-actions">
+            <button class="button primary generate-continuation" type="button">生成接续包</button>
+            <button class="button secondary copy-continuation" type="button" hidden>复制 Markdown</button>
+            <button class="button ghost download-continuation" type="button" hidden>下载 JSON</button>
+          </div>
+          <div class="continuation-preview" hidden>
+            <textarea class="continuation-output" rows="9" readonly aria-label="接续包 Markdown"></textarea>
+
+          </div>
+          <details class="memory-card">
+            <summary>可选本地记忆卡 <span class="muted">默认不附带</span></summary>
+            <p class="muted">只写你确认过的长期偏好、规则或项目事实；可随时清空。</p>
+            <textarea class="memory-card-input" rows="5" maxlength="4000"
+              placeholder="例如：所有发布操作必须先征得我的确认。"></textarea>
+            <div class="memory-card-actions">
+              <label><input class="include-memory" type="checkbox"> 生成接续包时附带已保存的记忆卡</label>
+              <button class="button secondary save-memory-card" type="button">保存记忆卡</button>
+            </div>
+            <p class="memory-save-state muted"></p>
+          </details>
+        </details>
+        <section class="related-block" hidden>
+          <div class="section-heading"><h3>跨 Agent 相关对话</h3><span class="related-count muted"></span></div>
+          <div class="related-conversations"></div>
+        </section>
+      </div>
+    </template>
+
+    <dialog id="setupDialog" class="settings-dialog setup-dialog" aria-labelledby="setupTitle">
+      <div class="settings-dialog-inner">
+        <div class="settings-dialog-head">
+          <div><p class="eyebrow">FIRST-RUN SETUP</p><h2 id="setupTitle">连接本机对话数据</h2></div>
+          <button id="closeSetupButton" class="button ghost" type="button">稍后设置</button>
+        </div>
+        <p class="muted">自动发现只检查数据库结构和对话数量；不会读取或上传对话正文。也可以直接粘贴路径。</p>
+        <div class="setup-fields">
+          <label><span>Hermes 数据库（state.db）</span><input id="setupHermesPath" type="text" placeholder="例如 ~/.hermes/state.db，也可粘贴完整路径"></label>
+          <label><span>Codex 数据库（state_5.sqlite）</span><input id="setupCodexPath" type="text" placeholder="通常位于当前用户的 .codex 目录"></label>
+          <label><span>WorkBuddy 目录</span><input id="setupWorkbuddyPath" type="text" placeholder="包含 workbuddy.db 和 projects 文件夹"></label>
+          <label><span>额外搜索目录（可选）</span><input id="setupExtraRoot" type="text" placeholder="例如 ~/AI；只在点击自动发现时扫描"></label>
+        </div>
+        <section class="setup-extra-section">
+          <div>
+            <strong>扩展 Agent</strong>
+            <span>勾选后才会建立索引；路径可以在首次配置或以后随时修改。</span>
+          </div>
+          <div id="setupExtraSources" class="setup-extra-sources"></div>
+        </section>
+        <section class="setup-custom-section">
+          <div class="setup-custom-head">
+            <div>
+              <strong>自定义 Agent</strong>
+              <span>添加任意本地 Agent；支持 JSONL、带角色标题的 Markdown 导出和常见 SQLite 会话库。</span>
+            </div>
+            <button id="addCustomSourceButton" class="button ghost" type="button">＋ 添加 Agent</button>
+          </div>
+          <div id="setupCustomSources" class="setup-custom-sources"></div>
+          <p class="muted setup-custom-note">只读取用户与助手正文；系统提示、推理、工具调用和子任务会被过滤。SQLite 必须能识别会话 ID、角色和正文字段。</p>
+        </section>
+        <div id="setupSourceState" class="setup-source-state"></div>
+        <p id="setupDataDir" class="muted"></p>
+        <div class="settings-dialog-actions">
+          <button id="discoverSourcesButton" class="button secondary" type="button">自动发现</button>
+          <button id="saveSourcesButton" class="button primary" type="button">验证并开始使用</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="themeDialog" class="settings-dialog theme-dialog" aria-labelledby="themeDialogTitle">
+      <div class="settings-dialog-inner">
+        <div class="settings-dialog-head">
+          <div>
+            <p class="eyebrow">LOCAL THEME STUDIO</p>
+            <h2 id="themeDialogTitle">选择对话中心皮肤</h2>
+          </div>
+          <button id="closeThemeButton" class="button ghost" type="button">关闭</button>
+        </div>
+        <p class="muted">主题只改变本中心外观，不注入或修改 Codex。背景为原创 CSS，不包含人物、动漫或第三方素材。</p>
+        <div id="themeGallery" class="theme-gallery">
+          <button class="theme-card" data-theme-id="dream-glass" type="button">
+            <span class="theme-preview dream-glass"><i></i><i></i><i></i></span>
+            <span><strong>梦境流光</strong><small>Codex Dream Skin 热门玻璃风格</small></span>
+          </button>
+          <button class="theme-card" data-theme-id="violet-night" type="button">
+            <span class="theme-preview violet-night"><i></i><i></i><i></i></span>
+            <span><strong>紫夜星云</strong><small>深色 · 霓虹紫蓝</small></span>
+          </button>
+          <button class="theme-card" data-theme-id="warm-paper" type="button">
+            <span class="theme-preview warm-paper"><i></i><i></i><i></i></span>
+            <span><strong>温暖纸张</strong><small>Claude 风格 · 长时间阅读</small></span>
+          </button>
+          <button class="theme-card" data-theme-id="terminal" type="button">
+            <span class="theme-preview terminal"><i></i><i></i><i></i></span>
+            <span><strong>终端黑客</strong><small>深色 · 高对比绿</small></span>
+          </button>
+          <button class="theme-card" data-theme-id="archive" type="button">
+            <span class="theme-preview archive"><i></i><i></i><i></i></span>
+            <span><strong>档案纸张</strong><small>当前经典主题</small></span>
+          </button>
+          <button class="theme-card" data-theme-id="qingci" type="button">
+            <span class="theme-preview qingci"><i></i><i></i><i></i></span>
+            <span><strong>青花瓷</strong><small>浅色 · 钴蓝清雅</small></span>
+          </button>
+          <button class="theme-card" data-theme-id="shuimo" type="button">
+            <span class="theme-preview shuimo"><i></i><i></i><i></i></span>
+            <span><strong>水墨黑白</strong><small>浅色 · 极简灰墨</small></span>
+          </button>
+          <button class="theme-card" data-theme-id="senlin" type="button">
+            <span class="theme-preview senlin"><i></i><i></i><i></i></span>
+            <span><strong>松烟森林</strong><small>深色 · 治愈深绿</small></span>
+          </button>
+          <button class="theme-card" data-theme-id="luoxia" type="button">
+            <span class="theme-preview luoxia"><i></i><i></i><i></i></span>
+            <span><strong>落霞暖橙</strong><small>深色 · 暖调晚霞</small></span>
+          </button>
+        </div>
+        <div class="theme-dialog-footer">
+          <span id="themeSelectionState" class="muted"></span>
+          <button id="resetThemeButton" class="button ghost" type="button">恢复经典主题</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="projectAssignDialog" class="settings-dialog assign-dialog" aria-labelledby="projectAssignTitle">
+      <div class="settings-dialog-inner">
+        <div class="settings-dialog-head">
+          <div><p class="eyebrow">PROJECT</p><h2 id="projectAssignTitle">归入项目</h2></div>
+          <button id="closeAssignButton" class="button ghost" type="button">关闭</button>
+        </div>
+        <p class="muted" id="assignDialogHint">点击一个项目立即归入；或新建一个项目并归入。</p>
+        <div id="assignProjectList" class="assign-project-list"></div>
+        <div class="assign-create">
+          <label class="dialog-field"><span>新项目名字</span><input id="assignNewName" class="input" type="text" placeholder="给这堆对话起个名" maxlength="80"></label>
+          <label class="dialog-field"><span>说明（可选）</span><input id="assignNewDesc" class="input" type="text" placeholder="这个项目是关于什么的…" maxlength="2000"></label>
+          <div class="dialog-actions assign-create-actions">
+            <button id="assignCreateButton" class="button primary" type="button">创建并归入</button>
+          </div>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="projectFormDialog" class="settings-dialog" aria-labelledby="projectFormTitle">
+      <div class="settings-dialog-inner">
+        <div class="settings-dialog-head">
+          <div><p class="eyebrow">PROJECT</p><h2 id="projectFormTitle">新建项目</h2></div>
+          <button id="projectFormCancel" class="button ghost" type="button">取消</button>
+        </div>
+        <p class="muted">把相关的对话归到一起，方便集中回顾和导出。</p>
+        <label class="dialog-field"><span>项目名称</span><input id="projectNameInput" class="input" type="text" maxlength="80" placeholder="给这堆对话起个名"></label>
+        <label class="dialog-field"><span>说明（可选）</span><textarea id="projectDescInput" class="input" rows="3" maxlength="2000" placeholder="这个项目是关于什么的…"></textarea></label>
+        <div class="dialog-actions">
+          <button id="projectFormSave" class="button primary" type="button">保存</button>
+        </div>
+      </div>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/app.js?v=instant36" defer></script>
+  </body>
+</html>

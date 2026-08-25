@@ -1,0 +1,61 @@
+{
+  "_说明": "复制为 sources.json 后按本机实际路径修改。留空或不写的项会走默认发现逻辑（见 README「内置数据源」表）。不要把填好的 sources.json 提交到仓库。",
+  "hermes_db": "",
+  "codex_db": "",
+  "workbuddy_home": "",
+  "config_version": 5,
+  "core_sources": {
+    "hermes": true,
+    "codex": true,
+    "workbuddy": true
+  },
+  "extra_sources": {
+    "claude": {
+      "enabled": true,
+      "path": ""
+    },
+    "cursor": {
+      "enabled": false,
+      "path": ""
+    },
+    "qclaw": {
+      "enabled": false,
+      "path": ""
+    },
+    "qoderwork": {
+      "enabled": true,
+      "path": ""
+    },
+    "zcode": {
+      "enabled": true,
+      "path": ""
+    },
+    "codepilot": {
+      "enabled": false,
+      "path": ""
+    },
+    "marvis": {
+      "enabled": false,
+      "path": ""
+    },
+    "qoder": {
+      "enabled": false,
+      "path": ""
+    },
+    "qodercn": {
+      "enabled": false,
+      "path": ""
+    },
+    "qwenworkcn": {
+      "enabled": false,
+      "path": ""
+    },
+    "grok": {
+      "enabled": true,
+      "path": "",
+      "executable": "",
+      "proxy": ""
+    }
+  },
+  "custom_sources": []
+}

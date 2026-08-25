@@ -1,0 +1,48 @@
+AI Conversation Hub · 使用说明
+==============================
+
+一、安装（Windows）
+1. 把整个压缩包【完整解压】到一个文件夹（不要直接在压缩包里双击！）。
+2. 进入解压后的文件夹，双击 AIConversationHub.exe（或 启动.bat）。
+3. 首次打开浏览器后，在界面里确认/选择你的 AI 助手数据源，即可开始搜索和回顾。
+4. Windows 版会常驻系统托盘：单击图标打开中心；右键可设置开机启动或退出整个中心。
+
+二、安装（macOS）
+1. 把整个压缩包【完整解压】到一个文件夹。
+2. 首次运行，有两种方式（任选其一）：
+   方式 A（推荐，图形化引导）：双击文件夹里的 start-mac.command，
+        它会弹出提示框，一步步教你打开 App，全程不用碰终端。
+   方式 B（手动）：右键点击 AIConversationHub.app →「打开」→「仍要打开」。
+        （首次需要这样操作一次来通过 macOS 安全检查，以后双击就能直接用。）
+3. 首次打开浏览器后，在界面里确认/选择你的 AI 助手数据源即可。
+
+三、常见问题
+- 双击没反应？
+  · 确认已【解压】而不是在压缩包里直接运行；
+  · Windows：确认 _internal 文件夹和 AIConversationHub.exe 在同一目录；
+    可能被杀毒软件/SmartScreen 拦截，请选择「仍要运行」或添加信任。
+  · macOS：首次需要「右键 → 打开 → 仍要打开」，直接双击会被系统拦。
+    若右键打开也没反应，双击 start-mac.command 跟着提示走。
+- macOS 提示「已损坏，无法打开」？
+  · 文件没有真的损坏！这是 macOS 对未签名应用的安全拦截（故意这么提示）。
+  · 解决：双击文件夹里的 start-mac.command，它会自动处理。
+  · 或者手动：打开「终端」，粘贴这条命令执行（把路径换成你的实际文件夹位置）：
+    xattr -cr ~/Desktop/AIConversationHub-macOS
+  · 执行后再右键 AIConversationHub.app → 打开 → 仍要打开，就不会再提示了。
+- 会上传我的对话吗？
+  · 不会。软件只在本机运行，服务只绑定 127.0.0.1，原始对话只读、不上传。
+- 数据存在哪？
+  · 你的收藏/备注/项目等管理信息存在本机用户目录，与原始对话分开。
+
+四、卸载
+直接删除解压文件夹即可；如需清理管理数据：
+· Windows：删除 %LOCALAPPDATA%\AIConversationHub 文件夹
+· macOS：删除 ~/Library/Application Support/AIConversationHub 文件夹
+
+五、让 Codex / Grok / Claude 等 Agent 使用本中心（可选）
+· Windows：运行解压目录中的「安装Agent接入.bat」。
+· macOS：运行解压目录中的「install-agent.command」。
+安装助手会自动发现本机对话数据路径，安装 conversation-hub 与 find-agent-data，
+只更新 conversation-hub 自己的 Codex/Grok MCP 配置，并生成 AGENT_USAGE.md。
+AGENT_USAGE.md 位于本机 AI Conversation Hub 用户数据目录，包含这台电脑的绝对路径和使用命令；不要公开上传。
+如果移动了解压目录，请从新位置重新运行 Agent 接入助手，以更新 MCP 的绝对路径。

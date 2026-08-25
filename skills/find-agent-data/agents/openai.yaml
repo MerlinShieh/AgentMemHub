@@ -1,0 +1,4 @@
+interface:
+  display_name: "Find Agent Data"
+  short_description: "Safely locate and recover local AI assistant conversations"
+  default_prompt: "Use $find-agent-data to locate this assistant's local conversation data and report an evidence-backed, read-only recovery path."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Conversation Hub"
+  short_description: "Search AI history and safely contract project relays"
+  default_prompt: "Use $conversation-hub to initialize or continue this substantial project from its repository contract and traceable local conversation evidence."
