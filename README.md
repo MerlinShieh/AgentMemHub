@@ -78,6 +78,15 @@ python agentmemhub.py memos --push http://127.0.0.1:18800
 - Python 3.10+
 - `pip install zstandard`（仅 DSH 需要）
 
+## 隐私与脱敏
+
+本项目**本地运行、不上传任何数据**。推送到公开仓库的部分严格脱敏：
+
+- 代码用 `Path.home()` / 环境变量在运行时发现路径，**不硬编码真实用户名或绝对路径**
+- 敏感配置用示例文件给出：`.env.example`（环境变量占位）、`sources.example.json`（数据源示例）
+- 真实会话导出默认为 `exports/`（已在 `.gitignore`，勿强制推送）
+- 详细规则见 [SECURITY.md](./SECURITY.md)
+
 ## Roadmap
 
 - [x] 统一事件模型 + SQLite 存储（FTS5）
