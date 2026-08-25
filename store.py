@@ -248,7 +248,7 @@ class Store:
         conn = self.conn
         match = _fts_query(query)
         sql = (
-            "SELECT f.conversation_id, f.role, f.content, f.tool_name, "
+            "SELECT f.source, f.conversation_id, f.role, f.content, f.tool_name, "
             "snippet(events_fts, 3, '', '', '…', 12) AS snippet, "
             "c.title, c.cwd, c.updated_at "
             "FROM events_fts f JOIN conversations c "
@@ -278,7 +278,7 @@ class Store:
         conn = self.conn
         like = f"%{query}%"
         sql = (
-            "SELECT e.conversation_id, e.role, e.content, e.tool_name, '' AS snippet, "
+            "SELECT e.source, e.conversation_id, e.role, e.content, e.tool_name, '' AS snippet, "
             "c.title, c.cwd, c.updated_at "
             "FROM events e JOIN conversations c "
             "ON c.source = e.source AND c.id = e.conversation_id "

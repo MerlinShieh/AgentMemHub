@@ -223,9 +223,9 @@ def renumber(events: list[Event], start: int = 1) -> list[Event]:
     return sorted_events
 
 
-def events_to_markdown(events: list[Event], title: str = "") -> str:
-    """事件流 → 人类可读 Markdown。"""
-    lines = [f"# {title}", ""]
+def events_to_markdown(events: list[Event], title: str | None = None) -> str:
+    """事件流 → 人类可读 Markdown。title 为 None 时不渲染标题行。"""
+    lines = [f"# {title}", ""] if title else []
     role_icons = {
         "user": "👤 用户", "assistant": "🤖 助手", "tool": "🔧 工具",
         "reasoning": "💭 思考", "patch": "📝 修改", "shell": "⚙️ Shell", "meta": "📋 元数据",
