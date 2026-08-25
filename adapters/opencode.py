@@ -1,6 +1,6 @@
 """OpenCode Adapter。
 
-数据位置：~/.local/share/opencode/opencode.db（Windows 下即 %USERPROFILE%\.local\share\opencode\opencode.db）
+数据位置：~/.local/share/opencode/opencode.db（Windows 下即 %USERPROFILE%\\.local\\share\\opencode\\opencode.db）
 复用通用 SQLite 会话 Adapter（session/message/part 结构）。
 """
 from __future__ import annotations

@@ -1,6 +1,6 @@
 """Hermes Agent Adapter。
 
-数据位置（Windows）：%LOCALAPPDATA%\hermes\state.db
+数据位置（Windows）：%LOCALAPPDATA%\\hermes\\state.db
 表结构：
     sessions(id, title, started_at, message_count, model, cwd, system_prompt, ...)
     messages(id, session_id, role, content, tool_calls, tool_name, reasoning_content,
@@ -42,7 +42,7 @@ class HermesAdapter(AgentAdapter):
         try:
             for s in conn.execute("SELECT * FROM sessions").fetchall():
                 sid = s["id"]
-                events = self._load_events(conn, sid, s)
+                events = renumber(self._load_events(conn, sid, s))
                 sessions.append({
                     "source": self.source,
                     "id": sid,
