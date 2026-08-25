@@ -26,7 +26,7 @@ class Event:
     """一条标准对话事件（每行一个，构成完整事件流）。"""
 
     role: str                      # user | assistant | tool | reasoning | patch | shell | meta
-    seq: int                       # 会话内排列序号（从 1 开始）
+    seq: int = 0                   # 会话内排列序号（renumber 会重排，默认 0）
     time: Optional[float] = None   # Unix 时间戳（秒）
     content: Optional[str] = None  # user/assistant/reasoning 的正文
     parent_id: Optional[str] = None
