@@ -32,3 +32,7 @@ instance.json
 # 交接文档（仅供二次检查，不入库）
 HANDOFF.md
 "exports/"  
+
+# Python 虚拟环境 (uv)（uv.lock 应提交以复现构建）
+.venv/
+.uv/
