@@ -20,23 +20,23 @@
 
 ```bash
 # 1. 提取所有 Agent 并入库
-python agentmemhub.py ingest
+python -m agentmemhub ingest
 
 # 2. 搜索（FTS5 英文 + 中文子串）
-python agentmemhub.py search "登录"
+python -m agentmemhub search "登录"
 
 # 3. 查看某个会话（Markdown，含思维链+工具）
-python agentmemhub.py show zcode sess_xxxx
+python -m agentmemhub show zcode sess_xxxx
 
 # 4. 导出全量（JSONL 每行一事件 / Markdown 可读）
-python agentmemhub.py export --format jsonl --out exports/
-python agentmemhub.py export --format markdown --out exports_md/
+python -m agentmemhub export --format jsonl --out exports/
+python -m agentmemhub export --format markdown --out exports_md/
 
 # 5. 生成 MemOS 导入 bundle
-python agentmemhub.py memos --out exports/memos_bundle.json
+python -m agentmemhub memos --out exports/memos_bundle.json
 
 # 6. 推送到运行中的 MemOS Local Plugin
-python agentmemhub.py memos --push http://127.0.0.1:18800
+python -m agentmemhub memos --push http://127.0.0.1:18800
 ```
 
 ## 查询示例
@@ -44,38 +44,38 @@ python agentmemhub.py memos --push http://127.0.0.1:18800
 ```bash
 # ---- 关键词搜索 ----
 # 中文自动走 LIKE 子串匹配，英文/词组走 FTS5 全文索引
-python agentmemhub.py search "登录"                        # 全部 7 个来源
-python agentmemhub.py search "登录" --source zcode         # 只搜某个来源
-python agentmemhub.py search "登录" --role tool            # 只搜工具事件
-python agentmemhub.py search "登录" --role reasoning       # 只搜思维链
-python agentmemhub.py search "登录" --limit 50             # 条数限制（默认 20）
+python -m agentmemhub search "登录"                        # 全部 7 个来源
+python -m agentmemhub search "登录" --source zcode         # 只搜某个来源
+python -m agentmemhub search "登录" --role tool            # 只搜工具事件
+python -m agentmemhub search "登录" --role reasoning       # 只搜思维链
+python -m agentmemhub search "登录" --limit 50             # 条数限制（默认 20）
 
 # ---- 查看单个会话（Markdown，含思维链/工具/补丁渲染）----
-python agentmemhub.py show zcode sess_d8648672-3cc8-4bbc-8e4f-3e50afc6b032
-python agentmemhub.py show opencode ses_0b10aad95ffe70V5
+python -m agentmemhub show zcode sess_d8648672-3cc8-4bbc-8e4f-3e50afc6b032
+python -m agentmemhub show opencode ses_0b10aad95ffe70V5
 
 # ---- 列出会话 ----
-python agentmemhub.py list                        # 全部来源
-python agentmemhub.py list --source hermes        # 只列某个来源
+python -m agentmemhub list                        # 全部来源
+python -m agentmemhub list --source hermes        # 只列某个来源
 ```
 
 ## 导出示例
 
 ```bash
 # 导出为 JSONL：每个会话一个 <source>__<session_id>.jsonl，每行一个事件
-python agentmemhub.py export --format jsonl --out exports/
+python -m agentmemhub export --format jsonl --out exports/
 # → exports/zcode__sess_d86486....jsonl, exports/opencode__ses_0b10....jsonl, ...
 
 # 导出为 Markdown：人类可读，含 👤用户/💭思考/🔧工具/📝修改 渲染
-python agentmemhub.py export --format markdown --out exports_md/
+python -m agentmemhub export --format markdown --out exports_md/
 # → exports_md/zcode__sess_d86486....md, ...
 
 # 只导出某个来源、指定输出目录
-python agentmemhub.py export --format markdown --source zcode --out exports_zcode/
+python -m agentmemhub export --format markdown --source zcode --out exports_zcode/
 
 # 导出后导入 MemOS（先启动 MemOS Local Plugin）
-python agentmemhub.py memos --out exports/memos_bundle.json              # 生成 bundle
-python agentmemhub.py memos --push http://127.0.0.1:18800              # 或直接推送
+python -m agentmemhub memos --out exports/memos_bundle.json              # 生成 bundle
+python -m agentmemhub memos --push http://127.0.0.1:18800              # 或直接推送
 ```
 
 导出的 JSONL 每行就是一个标准事件：
@@ -107,7 +107,7 @@ python agentmemhub.py memos --push http://127.0.0.1:18800              # 或直�
 核心存储层可直接编程调用：
 
 ```python
-from store import Store
+from agentmemhub.store import Store
 
 store = Store()                                  # 默认 ~/.agentmemhub/agentmemhub.db
 convs = store.list_conversations("zcode")        # 列出 zcode 的会话
@@ -159,7 +159,7 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 本项目**本地运行、不上传任何数据**。推送到公开仓库的部分严格脱敏：
 
 - 代码用 `Path.home()` / 环境变量在运行时发现路径，**不硬编码真实用户名或绝对路径**
-- 敏感配置用示例文件给出：`.env.example`（环境变量占位）、`sources.example.json`（数据源示例）
+- 敏感配置用示例文件给出：`.env.example`（环境变量占位）、`scripts/sensitive_scan.py`（敏感扫描）
 - 真实会话导出默认为 `exports/`（已在 `.gitignore`，勿强制推送）
 - 详细规则见 [SECURITY.md](./SECURITY.md)
 

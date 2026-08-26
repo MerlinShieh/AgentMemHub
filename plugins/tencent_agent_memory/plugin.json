@@ -1,6 +1,0 @@
-{
-  "id": "tencent-agent-memory",
-  "module": "plugin",
-  "class": "TencentAgentMemoryPlugin",
-  "enabled_by_default": false
-}

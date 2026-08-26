@@ -34,8 +34,12 @@ def main() -> int:
     }
 
     skip_ext = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".tgz", ".woff", ".woff2"}
+    # 扫描器自身包含规则关键词（mulin/路径模式），排除避免自指误报
+    self_file = Path(__file__).resolve()
     found_any = False
     for fp in files:
+        if fp.resolve() == self_file:
+            continue
         if fp.suffix.lower() in skip_ext:
             continue
         try:
