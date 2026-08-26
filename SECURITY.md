@@ -15,7 +15,7 @@ AgentMemHub 是一个**本地运行**的工具，会被推送到公开仓库的�
 | 内容 | 处理方式 |
 |---|---|
 | 真实用户名 / 主机名 | 不写入；代码用 `Path.home()` / 环境变量动态获取 |
-| 真实私有路径（`C:\Users\…`、`D:\data\…`） | 不写入；用占位符 `~` / `<USER_HOME>` |
+| 真实私有路径（如 `<USER_HOME>\a\b`、`<DATA_DIR>\c\d`） | 不写入；用占位符 `~` / `<USER_HOME>` |
 | API Key / token（含示例运行中抓到的） | 不写入；配置文件用 `<YOUR_API_KEY>` 占位 |
 | 用户真实对话 / 会话内容 | 不写入；导出到 `exports/`（已 gitignore） |
 | 真实设备配置 | 用 `*.example` 或 README 说明替代 |
@@ -24,7 +24,7 @@ AgentMemHub 是一个**本地运行**的工具，会被推送到公开仓库的�
 
 - 运行所需的敏感配置一律用**示例文件**给出，真实值从本地环境变量或 `Path.home()` 探索得到，不落盘到仓库：
   - `.env.example` —— 环境变量占位说明
-  - `sources.example.json` —— 数据源配置示例（路径留空）
+  - `.env.example` —— 数据源配置示例（路径留空）
 - 例如 `~/.zcode/cli/db/db.sqlite` 这类路径由 adapter 的 `candidate_paths()` 在**运行时**通过 `Path.home()` 计算，代码里不硬编码真实用户名或绝对路径。
 
 ## 安全注意事项（使用者）

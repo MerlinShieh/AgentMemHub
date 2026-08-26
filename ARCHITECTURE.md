@@ -1,4 +1,4 @@
-# AgentMemHub 架构
+﻿# AgentMemHub 架构
 
 ## 定位
 
@@ -7,7 +7,7 @@ AgentMemHub 从所有 Agent Harness（ZCode / OpenCode / Hermes / WorkBuddy / Qw
 → 存入本地 SQLite（可搜索）→ 导出（JSONL / Markdown）→ 桥接 MemOS 生成记忆。
 
 ```
-各 Agent 原始数据                          AgentMemHub
+各 Agent 原始数据                          AgentMemHub (agentmemhub/ 包)
 ┌──────────────────┐     ┌──────────────────────────────┐     ┌─────────────┐
 │ ZCode db.sqlite  │     │  adapters/  (统一接口)         │     │ store.py     │
 │ OpenCode state.db│───> │  ├ zcode / opencode (SQLite)  │───> │ SQLite       │
@@ -16,37 +16,45 @@ AgentMemHub 从所有 Agent Harness（ZCode / OpenCode / Hermes / WorkBuddy / Qw
 │ Qwen chats/*.jsonl│    │  └ dsh    (zstd JSONL)        │     │ events_fts   │
 │ QoderCN *.jsonl  │     └──────────────────────────────┘     └──────┬──────┘
 │ DSH *.zstd       │           统一事件流                            │
-└──────────────────┘     event_model.py                              │
+└──────────────────┘     models.py                                   │
                                                                      ├─> export.py   → JSONL / Markdown
-                                                                     └─> memos_bridge.py → MemOS bundle
+                                                                     └─> memos.py    → MemOS bundle
 ```
 
 ## 目录结构
 
 ```
 AgentMemHub/
-├── event_model.py          # 统一事件模型：Event 数据类 + 归一化/渲染工具
-├── store_schema.sql        # SQLite schema：conversations / events / events_fts (FTS5)
-├── store.py                # 存储层：读写 / 增量重建 / FTS 检索（CJK LIKE 兜底）
-├── adapters/               # 各 Agent 适配器（统一接口 AgentAdapter）
-│   ├── base.py             #   抽象基类：candidate_paths / locate / load
-│   ├── sqlite_conversation.py  #   通用 SQLite 适配器（ZCode/OpenCode 共享）
-│   ├── zcode.py / opencode.py  #   session/message/part 结构
-│   ├── hermes.py           #   state.db sessions/messages
-│   ├── qwen.py             #   chats/*.jsonl
-│   ├── qodercn.py          #   JSONL
-│   ├── workbuddy.py        #   sessions 元数据 + audit-log(Shell)
-│   ├── dsh.py              #   zstd 解压 JSONL
-│   └── __init__.py         #   adapter 注册表 + load_all
-├── export.py               # JSONL / Markdown 导出
-├── memos_bridge.py         # 生成 MemOS 导入 bundle + push
-├── agentmemhub.py          # CLI 入口
-└── static/ server.py etc   # 源自 ai-conversation-hub（预留 Web UI 扩展）
+├── agentmemhub/                # Python 包（整合封装）
+│   ├── __init__.py             # 公共 API（Event / Store / load_all）
+│   ├── __main__.py             # python -m agentmemhub 入口
+│   ├── models.py               # 统一事件模型：Event 数据类 + 归一化/渲染工具
+│   ├── schema.sql              # SQLite schema：conversations / events / events_fts (FTS5)
+│   ├── store.py                # 存储层：读写 / 增量重建 / FTS 检索（CJK LIKE 兜底）
+│   ├── export.py               # JSONL / Markdown 导出
+│   ├── memos.py                # 生成 MemOS 导入 bundle + push
+│   ├── cli.py                  # CLI 命令实现（ingest/list/show/search/export/memos/stats/adapters）
+│   └── adapters/               # 各 Agent 适配器（统一接口 AgentAdapter）
+│       ├── base.py             #   抽象基类：candidate_paths / locate / load
+│       ├── sqlite_conversation.py  #   通用 SQLite 适配器（ZCode/OpenCode 共享）
+│       ├── zcode.py / opencode.py  #   session/message/part 结构
+│       ├── hermes.py           #   state.db sessions/messages
+│       ├── qwen.py             #   chats/*.jsonl
+│       ├── qodercn.py          #   JSONL
+│       ├── workbuddy.py        #   sessions 元数据 + audit-log(Shell)
+│       ├── dsh.py              #   zstd 解压 JSONL
+│       └── __init__.py         #   adapter 注册表 + load_all
+├── docs/                       # IMPLEMENTATION_REVIEW 等
+├── scripts/sensitive_scan.py   # 推送前敏感信息扫描
+├── exports/                    # 导出输出（gitignore）
+├── README.md / LICENSE / SECURITY.md / ARCHITECTURE.md / .env.example
 ```
+
+使用入口：`python -m agentmemhub <command>`（等价 `python -m agentmemhub.cli`）。
 
 ## 核心设计
 
-### 1. 统一事件模型（event_model.py）
+### 1. 统一事件模型（models.py）
 
 每个会话 = 元数据 + 有序事件流。事件类型：
 
@@ -61,7 +69,7 @@ AgentMemHub/
 
 每个事件保存 `raw_json`（各 Agent 原始事件 JSON）实现**无损保底**——即使字段无法映射，原始数据也不丢失。
 
-### 2. SQLite 存储（store.py）
+### 2. SQLite 存储（store.py · schema.sql）
 
 - `conversations`：会话元数据 + `roles_json` + `signature`（增量指纹）
 - `events`：全量事件流，PK `(source, conversation_id, seq)`，含 `raw_json`
@@ -77,9 +85,9 @@ def load(self, path) -> list[dict]        # 返回统一会话列表
 ```
 约定输出：`{source, id, title, cwd, created_at, updated_at, model, meta, events: [Event]}`。
 - ZCode / OpenCode 共享 `SqliteConversationAdapter`（同 schema，自动适配 sequence 列差异）
-- 新增一个 Agent 只需实现一个 adapter 类并注册进 `adapters/__init__.py`
+- 新增一个 Agent 只需实现一个 adapter 类并注册进 `agentmemhub/adapters/__init__.py`
 
-### 4. MemOS 桥接（memos_bridge.py）
+### 4. MemOS 桥接（memos.py）
 
 粒度：每个会话 → 1 episode；每条 user 消息（含后续 assistant/tool/reasoning）→ 1 trace。
 TraceDTO：`{id, episodeId, sessionId, ts, userText, agentText, summary, toolCalls, agentThinking}`。
@@ -88,9 +96,9 @@ TraceDTO：`{id, episodeId, sessionId, ts, userText, agentText, summary, toolCal
 ## 使用
 
 ```bash
-python agentmemhub.py ingest            # 提取全部 adapter 并入库
-python agentmemhub.py search "登录"     # 搜索
-python agentmemhub.py show zcode <id>   # 查看会话 (Markdown)
-python agentmemhub.py export --format jsonl --out exports/   # 全量导出
-python agentmemhub.py memos --out bundle.json --push http://127.0.0.1:18800  # MemOS 导入
+python -m agentmemhub ingest            # 提取全部 adapter 并入库
+python -m agentmemhub search "登录"     # 搜索
+python -m agentmemhub show zcode <id>   # 查看会话 (Markdown)
+python -m agentmemhub export --format jsonl --out exports/   # 全量导出
+python -m agentmemhub memos --out bundle.json --push http://127.0.0.1:18800  # MemOS 导入
 ```
