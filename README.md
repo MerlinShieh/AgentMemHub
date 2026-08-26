@@ -39,6 +39,82 @@ python agentmemhub.py memos --out exports/memos_bundle.json
 python agentmemhub.py memos --push http://127.0.0.1:18800
 ```
 
+## 查询示例
+
+```bash
+# ---- 关键词搜索 ----
+# 中文自动走 LIKE 子串匹配，英文/词组走 FTS5 全文索引
+python agentmemhub.py search "登录"                        # 全部 7 个来源
+python agentmemhub.py search "登录" --source zcode         # 只搜某个来源
+python agentmemhub.py search "登录" --role tool            # 只搜工具事件
+python agentmemhub.py search "登录" --role reasoning       # 只搜思维链
+python agentmemhub.py search "登录" --limit 50             # 条数限制（默认 20）
+
+# ---- 查看单个会话（Markdown，含思维链/工具/补丁渲染）----
+python agentmemhub.py show zcode sess_d8648672-3cc8-4bbc-8e4f-3e50afc6b032
+python agentmemhub.py show opencode ses_0b10aad95ffe70V5
+
+# ---- 列出会话 ----
+python agentmemhub.py list                        # 全部来源
+python agentmemhub.py list --source hermes        # 只列某个来源
+```
+
+## 导出示例
+
+```bash
+# 导出为 JSONL：每个会话一个 <source>__<session_id>.jsonl，每行一个事件
+python agentmemhub.py export --format jsonl --out exports/
+# → exports/zcode__sess_d86486....jsonl, exports/opencode__ses_0b10....jsonl, ...
+
+# 导出为 Markdown：人类可读，含 👤用户/💭思考/🔧工具/📝修改 渲染
+python agentmemhub.py export --format markdown --out exports_md/
+# → exports_md/zcode__sess_d86486....md, ...
+
+# 只导出某个来源、指定输出目录
+python agentmemhub.py export --format markdown --source zcode --out exports_zcode/
+
+# 导出后导入 MemOS（先启动 MemOS Local Plugin）
+python agentmemhub.py memos --out exports/memos_bundle.json              # 生成 bundle
+python agentmemhub.py memos --push http://127.0.0.1:18800              # 或直接推送
+```
+
+导出的 JSONL 每行就是一个标准事件：
+
+```jsonc
+{"role":"user","content":"帮我修复登录页面","time":1750000001}
+{"role":"reasoning","content":"登录按钮没反应，先看代码","time":1750000002}
+{"role":"tool","tool_name":"Bash","tool_input":{"command":"npm test"},"tool_output":"FAIL src/login.ts","tool_status":"completed","time":1750000003}
+```
+
+## 数据与文件存放位置
+
+| 内容 | 默认位置 | 覆盖方式 |
+|---|---|---|
+| SQLite 数据库 | `~/.agentmemhub/agentmemhub.db` | 环境变量 `AGENTMEMHUB_DB` 或 `AGENTMEM_HUB_DATA_DIR` |
+| 导出目录 | 项目下 `exports/` | `--out` 参数 |
+| MemOS bundle | `exports/memos_bundle.json` | `--out` 参数 |
+
+数据库三张核心表：
+
+- `conversations` — 会话元数据（source / id / title / cwd / model / 时间）
+- `events` — 全量事件流（role / content / tool / reasoning / patch / shell，含 `raw_json` 原始保底）
+- `events_fts` — FTS5 全文索引（英文检索）
+
+> `exports/` 已加入 `.gitignore`，含真实对话的导出不会进入仓库。
+
+## 编程访问（Python）
+
+核心存储层可直接编程调用：
+
+```python
+from store import Store
+
+store = Store()                                  # 默认 ~/.agentmemhub/agentmemhub.db
+convs = store.list_conversations("zcode")        # 列出 zcode 的会话
+events = store.get_events("zcode", "<session-id>")  # 读取某会话事件流
+hits = store.search("登录", role="tool")          # 搜索工具事件
+```
+
 ## 统一事件流（全量保留）
 
 不丢弃工具链、思维链、Shell 执行、代码补丁——每行一个 JSON 事件：
