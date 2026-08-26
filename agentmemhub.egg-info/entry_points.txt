@@ -1,0 +1,2 @@
+[console_scripts]
+agentmemhub = agentmemhub.cli:main

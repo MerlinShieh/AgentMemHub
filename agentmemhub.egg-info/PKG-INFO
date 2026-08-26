@@ -1,4 +1,17 @@
-﻿# AgentMemHub
+Metadata-Version: 2.4
+Name: agentmemhub
+Version: 0.1.0
+Summary: 统一提取多 Agent Harness 会话为全量事件流（含工具链/思维链/Shell/补丁）→ SQLite 检索 → 桥接 MemOS 生成记忆
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: zstandard>=0.23
+Provides-Extra: test
+Requires-Dist: pytest>=8; extra == "test"
+Dynamic: license-file
+
+# AgentMemHub
 
 统一提取你电脑上所有 AI Agent Harness 的对话历史 → 归一为**全量事件流**（含工具链、思维链、Shell 执行、代码补丁）→ 本地 SQLite 存储可搜索 → 导出 JSONL / Markdown → 桥接 [MemOS Local Plugin](https://github.com/MemTensor/MemOS) 生成记忆。
 
@@ -138,11 +151,8 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 | `show <source> <id>` | 查看会话（Markdown）|
 | `search <q> [--source] [--role] [--limit]` | 全文搜索事件正文 |
 | `export --format jsonl\|markdown [--source] [--out dir]` | 导出 |
-| `folders [--source] [--limit]` | 按文件夹统计各 Agent 会话数 |
 | `memos [--source] [--out] [--push url]` | 生成/推送 MemOS bundle |
 | `stats` / `adapters` | 统计 / adapter 状态 |
-
-> 更完整的代码与 SQL 示例（按 Agent 查询、按文件夹跨 Agent 统计、会话角色分布、直连数据库等）见 **[docs/EXAMPLES.md](./docs/EXAMPLES.md)**。
 
 ## 数据模型
 
@@ -175,4 +185,3 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 - [ ] Web UI（复用 ai-conversation-hub 前端外壳，增强 tool/reasoning 展示）
 - [ ] 更多 Agent（Claude Code / Cursor / Gemini CLI / CodeBuddy）
 - [ ] 记忆清洗规则（去注入元数据、压缩折叠会话）
-

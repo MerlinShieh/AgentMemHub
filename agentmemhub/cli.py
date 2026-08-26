@@ -111,6 +111,30 @@ def cmd_stats(args) -> None:
     store.close()
 
 
+def cmd_folders(args) -> None:
+    """按文件夹（cwd 最后一段）统计各 Agent 的会话数。"""
+    from collections import defaultdict
+    store = Store()
+    convs = store.list_conversations(args.source)
+    groups: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for c in convs:
+        cwd = c["cwd"] or "(unknown)"
+        ws = cwd.rstrip("\\/").rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+        groups[ws][c["source"]] += 1
+
+    rows = sorted(groups.items(), key=lambda x: -sum(x[1].values()))
+    if not rows:
+        _stdout("（空）")
+        store.close()
+        return
+    _stdout(f"按文件夹统计的各 Agent 会话数（共 {len(rows)} 个文件夹）:\n")
+    for ws, srcs in rows[: args.limit]:
+        total = sum(srcs.values())
+        detail = ", ".join(f"{s}={n}" for s, n in sorted(srcs.items()))
+        _stdout(f"{total:4d} 会话 | {ws[:44]:44s} | {detail}")
+    store.close()
+
+
 def cmd_adapters(args) -> None:
     for a in adapters.all_adapters():
         d = a.describe()
@@ -162,6 +186,10 @@ def build_parser() -> argparse.ArgumentParser:
     pst = sub.add_parser("stats", help="统计")
     pa = sub.add_parser("adapters", help="列出 adapter 状态")
 
+    pf = sub.add_parser("folders", help="按文件夹统计各 Agent 会话数")
+    pf.add_argument("--source", default="")
+    pf.add_argument("--limit", type=int, default=20)
+
     pm = sub.add_parser("memos", help="生成/推送 MemOS 导入 bundle")
     pm.add_argument("--source", default="")
     pm.add_argument("--out", default="exports/memos_bundle.json")
@@ -174,7 +202,7 @@ def main() -> None:
     handlers = {
         "ingest": cmd_ingest, "list": cmd_list, "show": cmd_show,
         "search": cmd_search, "export": cmd_export, "stats": cmd_stats,
-        "adapters": cmd_adapters, "memos": cmd_memos,
+        "adapters": cmd_adapters, "memos": cmd_memos, "folders": cmd_folders,
     }
     fn = handlers.get(args.command)
     if fn is None:
