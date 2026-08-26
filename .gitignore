@@ -36,3 +36,8 @@ HANDOFF.md
 # Python 虚拟环境 (uv)（uv.lock 应提交以复现构建）
 .venv/
 .uv/
+
+# Python 构建产物 (editable install)
+*.egg-info/
+build/
+dist/
