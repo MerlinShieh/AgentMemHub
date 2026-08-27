@@ -100,6 +100,8 @@ python -m agentmemhub memos --push http://127.0.0.1:18800              # 或直�
 - `events` — 全量事件流（role / content / tool / reasoning / patch / shell，含 `raw_json` 原始保底）
 - `events_fts` — FTS5 全文索引（英文检索）
 
+![本地 SQLite 数据库结构 — conversations / events / events_fts 三张核心表](./docs/images/local-database.png)
+
 > `exports/` 已加入 `.gitignore`，含真实对话的导出不会进入仓库。
 
 ## 编程访问（Python）
@@ -172,6 +174,10 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 
 功能：Agent/工作空间多选筛选 · 服务端分页列表 · 全文搜索（FTS5+LIKE）· 统计卡与图表 ·
 会话详情抽屉（用户消息/思维链/工具调用/代码补丁 全渲染）· 标题编辑与会话删除（真实写库）。
+
+![AgentMemHub 主看板 — 筛选栏、统计卡、趋势/占比图与会话列表](./docs/images/dashboard.png)
+
+![会话详情抽屉 — 按时间顺序展示事件流，支持多选角色筛选（用户输入/Agent Output/System）](./docs/images/detail.png)
 
 设计要点：
 
