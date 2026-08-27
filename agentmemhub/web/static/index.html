@@ -414,14 +414,20 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   const esc = s=> (s==null?'':String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'));
   const fmtTime = ts=>{ if(!ts) return '—'; const d=new Date(ts*1000); const p=n=>String(n).padStart(2,'0'); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
   const relTime = ts=>{ if(!ts) return '—'; const diff=Date.now()/1000-ts; if(diff<60)return Math.max(1,Math.round(diff))+'秒前'; if(diff<3600)return Math.round(diff/60)+'分钟前'; if(diff<86400)return Math.round(diff/3600)+'小时前'; if(diff<2592000)return Math.round(diff/86400)+'天前'; return fmtTime(ts).slice(0,10); };
-  // 检测系统注入消息（某些 Agent 把系统指令存为 role='user'，需区别渲染）
+  // 检测系统注入消息（某些 Agent 把系统指令存为 role='user'/'assistant'，需区别渲染）
+  // DSH: "Current runtime context..." / "Current DSH file policy:" / "Any available operation enforced by the DSH file sandbox"
+  // ZCode: "The TodoWrite tool..."
+  // Hermes/OpenClaw 等: 各种 system prompt 注入
   function isSystemMessage(text){
     if(!text) return false;
     const t=text.trim();
     return /^The TodoWrite tool/.test(t) || /^Current runtime context/.test(t) ||
+           /Current DSH file policy\s*:/.test(t) || /Any available operation enforced by the DSH file sandbox/.test(t) ||
            /^System\s*:/i.test(t) || /^\[System\s*:/i.test(t) || /^<system>/.test(t) ||
            /^You are an AI assistant/i.test(t) || /^Available tools/i.test(t) ||
-           /^The following tools/i.test(t) || /^<\|.*\|>/.test(t) || /^System\b/.test(t);
+           /^The following tools/i.test(t) || /^<\|.*\|>/.test(t) || /^System\b/.test(t) ||
+           /^\{\s*"type"\s*:\s*"session\//.test(t) || /^<antml:/.test(t) ||
+           /environment_context|runtime.context|file.policy|approval.policy/i.test(t);
   }
   function reicons(){ if(window.lucide) lucide.createIcons(); }
 
