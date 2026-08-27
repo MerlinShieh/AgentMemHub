@@ -44,13 +44,31 @@ AgentMemHub/
 │       ├── workbuddy.py        #   sessions 元数据 + audit-log(Shell)
 │       ├── dsh.py              #   zstd 解压 JSONL
 │       └── __init__.py         #   adapter 注册表 + load_all
-├── docs/                       # IMPLEMENTATION_REVIEW 等
-├── scripts/sensitive_scan.py   # 推送前敏感信息扫描
+├── docs/                       # IMPLEMENTATION_REVIEW、EXAMPLES
+├── scripts/                    # sensitive_scan / web_verify / js_check
+├── agentmemhub/web/            # 可选 Web 子模块（feat/web-ui 分支）
+│   ├── app.py                  #   FastAPI 路由：stats·facets·conversations(分页)·events·folders + DELETE/PATCH，绑定 127.0.0.1
+│   ├── aggregates.py           #   统计聚合（SQL GROUP BY 下推）+ 进程内 TTL 缓存
+│   └── static/
+│       ├── index.html          #   仪表盘（WebsiteDesign 原型 API 化改造）
+│       └── vendor/             #   tailwind browser / lucide / chart.js 本地化（离线可用）
+├── tests/test_web_server.py    # Web API 冒烟测试（TestClient + 临时库）
 ├── exports/                    # 导出输出（gitignore）
-├── README.md / LICENSE / SECURITY.md / ARCHITECTURE.md / .env.example
+├── README.md / LICENSE / SECURITY.md / ARCHITECTURE.md / .env.example / pyproject.toml
 ```
 
-使用入口：`python -m agentmemhub <command>`（等价 `python -m agentmemhub.cli`）。
+使用入口：`python -m agentmemhub <command>`（等价 `python -m agentmemhub.cli`）；Web 页面：`python -m agentmemhub serve`。
+
+## Web 子模块设计要点
+
+- **可选启用**：核心 CLI 不依赖 fastapi；仅 `serve` 子命令需要 `uv pip install -e ".[web]"`
+- **性能模型（大库友好）**：
+  - 引导数据 `/api/bootstrap` 只含会话元数据（不含事件流）；事件在打开详情抽屉时按需查询（命中主键索引），超长会话截断（前 88 + 后 12 条）并标注
+  - 列表筛选/搜索下推后端（FTS5 + LIKE 兜底），服务端排序分页；conversations 元数据全量一次下发（行级轻量）
+  - 统计聚合 SQL GROUP BY + 进程内 TTL 缓存（60s），删除/改标题即时失效
+- **API**：GET stats · bootstrap · facets · folders · conversations（多值 sources/workspace、days 时间窗、q 搜索、all=1）· conversations/{src}/{id}/events；DELETE conversations/{src}/{id}（级联删事件+FTS）；PATCH …/title
+- **前端**：原生 JS 单页（无构建链），静态快照原型改造——取数点从内联 JSON 改为 fetch API；vendor 离线可用；编辑/删除走真实 API（二次确认）
+- **安全**：只绑 127.0.0.1；删除为显式接口；无外发通道
 
 ## 核心设计
 

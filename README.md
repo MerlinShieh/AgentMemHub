@@ -157,6 +157,30 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 - Python 3.10+
 - `pip install zstandard`（仅 DSH 需要）
 
+## Web 页面（可选）
+
+不想敲命令行？启动本地 Web 仪表盘，在浏览器里浏览/搜索/管理所有 Agent 会话：
+
+```bash
+# 首次：安装 web 可选依赖（fastapi + uvicorn）
+uv pip install -e ".[web]"
+
+# 启动（默认 http://127.0.0.1:8086，--open 自动打开浏览器）
+uv run python -m agentmemhub serve
+uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentmemhub.db
+```
+
+功能：Agent/工作空间多选筛选 · 服务端分页列表 · 全文搜索（FTS5+LIKE）· 统计卡与图表 ·
+会话详情抽屉（用户消息/思维链/工具调用/代码补丁 全渲染）· 标题编辑与会话删除（真实写库）。
+
+设计要点：
+
+- **大库友好**：事件流不预载——只有点开某条会话的抽屉时才从后端按需加载该会话的事件；
+  超长会话自动截断（前 88 + 后 12 条）并标注；统计聚合下推 SQL 且带 TTL 缓存
+- **离线可用**：Tailwind / lucide / Chart.js 已本地化到 `agentmemhub/web/static/vendor/`
+- **只绑定 127.0.0.1**，不上传任何数据；Swagger 文档在 `/api/docs`
+- 前端由 `WebsiteDesign` 设计稿改造而来，接口契约见 `docs/` 与 `/api/docs`
+
 ## 隐私与脱敏
 
 本项目**本地运行、不上传任何数据**。推送到公开仓库的部分严格脱敏：
@@ -172,7 +196,7 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 - [x] 7 个 Agent Adapter
 - [x] 全量检索 + JSONL/Markdown 导出
 - [x] MemOS bundle 桥接
-- [ ] Web UI（复用 ai-conversation-hub 前端外壳，增强 tool/reasoning 展示）
+- [x] Web 仪表盘（FastAPI + 原生 JS，服务端分页、事件按需加载、真删改）
 - [ ] 更多 Agent（Claude Code / Cursor / Gemini CLI / CodeBuddy）
 - [ ] 记忆清洗规则（去注入元数据、压缩折叠会话）
 
