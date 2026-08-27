@@ -1,0 +1,11 @@
+{
+  "name": "agentmemhub-e2e",
+  "private": true,
+  "description": "AgentMemHub Web 看板浏览器端到端测试（Edge/Chrome, Playwright）",
+  "scripts": {
+    "e2e": "node e2e.js"
+  },
+  "dependencies": {
+    "playwright": "^1.62.0"
+  }
+}

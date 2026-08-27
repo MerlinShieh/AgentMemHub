@@ -41,3 +41,6 @@ HANDOFF.md
 *.egg-info/
 build/
 dist/
+
+# Node (scripts/e2e)
+node_modules/
