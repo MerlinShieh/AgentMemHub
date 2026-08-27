@@ -44,3 +44,6 @@ dist/
 
 # Node (scripts/e2e)
 node_modules/
+
+# E2E 临时测试库
+_e2e_tmp/
