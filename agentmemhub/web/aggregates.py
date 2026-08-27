@@ -152,6 +152,25 @@ class Aggregates:
             out.setdefault(r["s"], {})[r["r"]] = r["c"]
         return self._store("source_role", out)
 
+    def conv_models(self) -> dict[tuple[str, str], str]:
+        """从 events 反查每个会话的模型（取出现最多者），用于补全 conversations.model 缺失。
+
+        覆盖率约 95%（zcode/opencode/qwen 可全补；dsh/qodercn 上游事件本身不带 model）。
+        """
+        hit = self._cached("conv_models")
+        if hit is not None:
+            return hit
+        from collections import Counter
+        per: dict[tuple[str, str], Counter] = {}
+        for r in self.store.conn.execute(
+            "SELECT source, conversation_id, model FROM events "
+            "WHERE model IS NOT NULL AND model != ''"
+        ).fetchall():
+            key = (r["source"], r["conversation_id"])
+            per.setdefault(key, Counter())[r["model"]] += 1
+        out = {k: cnt.most_common(1)[0][0] for k, cnt in per.items()}
+        return self._store("conv_models", out)
+
     def workspaces_raw(self) -> list[str]:
         """去重后的工作空间名（cwd 最后一段）——与 conversations.workspace 口径一致。"""
         rows = self.store.conn.execute("SELECT DISTINCT cwd FROM conversations").fetchall()

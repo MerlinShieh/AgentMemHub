@@ -149,9 +149,12 @@ def create_app(db_path: Path | None = None):
             bundle = agg.stats_bundle()
             source_colors = {s["source"]: s["color"] for s in bundle["stats"]["sources"]}
             role_colors = {r["role"]: r["color"] for r in bundle["stats"]["roles"]}
+            models_map = agg.conv_models()   # P2: 从 events 反查补全缺失的 model
             convs = []
             for i, c in enumerate(store.list_conversations()):
                 d = _conv_to_dict(c)
+                if not d["model"]:
+                    d["model"] = models_map.get((d["source"], d["id"]), "") or ""
                 d["idx"] = i
                 d["searchText"] = ""     # 服务端搜索接管；保留字段兼容前端
                 convs.append(d)
@@ -193,7 +196,13 @@ def create_app(db_path: Path | None = None):
         ws_filter = [w.strip() for w in (workspace or "").split(",") if w.strip()]
         with _LOCK:
             convs = store.list_conversations(src_filter[0] if len(src_filter) == 1 else None)
-        items = [_conv_to_dict(c) for c in convs]
+            models_map = agg.conv_models()   # P2: 从 events 反查补全缺失的 model
+        items = []
+        for c in convs:
+            d = _conv_to_dict(c)
+            if not d["model"]:
+                d["model"] = models_map.get((d["source"], d["id"]), "") or ""
+            items.append(d)
 
         if len(src_filter) > 1:
             items = [i for i in items if i["source"] in src_filter]

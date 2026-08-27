@@ -48,6 +48,12 @@ check("sourceColors 是 map", isinstance(d["sourceColors"], dict) and len(d["sou
 check("roleColors 是 map", "user" in d["roleColors"])
 check("eventsByConv 为空(事件按需)", d["eventsByConv"] == {})
 
+print("== 2.5 模型列回填覆盖 ==")
+filled = sum(1 for c in d["conversations"] if c["model"])
+ratio = filled / max(1, len(d["conversations"]))
+check("model 覆盖率 >= 90%（P2 反查合并）", ratio >= 0.9,
+      f"{filled}/{len(d['conversations'])} = {ratio:.0%}")
+
 print("== 3. 筛选查询链路 ==")
 ws = d["stats"]["cwds"]
 if ws:

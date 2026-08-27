@@ -176,7 +176,10 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         <div id="agentFilterPanel" class="absolute left-0 top-full z-40 mt-1 hidden w-60 rounded-lg border border-border bg-popover p-2 shadow-lg">
           <div class="mb-1.5 flex items-center justify-between px-1">
             <span class="text-[11px] font-medium text-muted-foreground">选择 Agent 来源</span>
-            <button class="text-[11px] text-primary hover:underline" data-act="agent-all">全选</button>
+            <span class="space-x-2 text-[11px]">
+              <button class="text-primary hover:underline" data-act="agent-all">全选</button>
+              <button class="text-muted-foreground hover:text-foreground" data-act="agent-none">全不选</button>
+            </span>
           </div>
           <div id="agentOptions" class="max-h-64 space-y-0.5 overflow-y-auto scroll-thin"></div>
         </div>
@@ -190,7 +193,10 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         <div id="wsFilterPanel" class="absolute left-0 top-full z-40 mt-1 hidden w-72 rounded-lg border border-border bg-popover p-2 shadow-lg">
           <div class="mb-1.5 flex items-center justify-between px-1">
             <span class="text-[11px] font-medium text-muted-foreground">选择工作目录</span>
-            <button class="text-[11px] text-primary hover:underline" data-act="ws-all">全选</button>
+            <span class="space-x-2 text-[11px]">
+              <button class="text-primary hover:underline" data-act="ws-all">全选</button>
+              <button class="text-muted-foreground hover:text-foreground" data-act="ws-none">全不选</button>
+            </span>
           </div>
           <div id="wsOptions" class="max-h-64 space-y-0.5 overflow-y-auto scroll-thin"></div>
         </div>
@@ -206,10 +212,19 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         <option value="7">近 7 天</option>
         <option value="30">近 30 天</option>
       </select>
+      <button id="applyBtn" class="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:opacity-90 transition-opacity">
+        <i data-lucide="search-check" class="h-3.5 w-3.5"></i>应用筛选
+      </button>
       <button id="resetBtn" class="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors">
         <i data-lucide="rotate-ccw" class="h-3.5 w-3.5"></i>重置
       </button>
       <span class="ml-auto text-[11px] text-muted-foreground tnum" id="resultCount">—</span>
+    </div>
+    <!-- 当前筛选摘要条 -->
+    <div id="filterSummary" class="hidden items-center gap-2 border-t border-border/60 bg-card/40 px-5 py-1.5 text-[11px] text-muted-foreground">
+      <i data-lucide="eye" class="h-3 w-3 shrink-0"></i>
+      <span class="shrink-0 font-medium text-foreground">当前查看：</span>
+      <span id="summaryChips" class="flex flex-wrap items-center gap-1"></span>
     </div>
   </header>
 
@@ -422,6 +437,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     updateStatsHead(D.meta);
     bindStaticEvents();
     renderStats(); renderCharts(); renderTable();
+    updateSummary();
     reicons();
     return true;
   }
@@ -455,13 +471,21 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   $('#wsFilterBtn').onclick=e=>{e.stopPropagation();togglePanel(e.currentTarget,$('#wsFilterPanel'));};
   document.addEventListener('click',e=>{ if(!e.target.closest('#agentFilterWrap')) $('#agentFilterPanel').classList.add('hidden'); if(!e.target.closest('#wsFilterWrap')) $('#wsFilterPanel').classList.add('hidden'); });
 
-  // ---- filters → server query ----
+  // ---- filters → server query（统一应用式：所有条件由 applyFilters 触发）----
   async function loadFiltered(){
     const mySeq=++reqSeq;
     const allSrc=D.stats.sources.map(s=>s.source);
     const incSrc=allSrc.filter(s=>!F.sources.has(s));
     const allWs=D.stats.cwds;
     const incWs=allWs.filter(w=>!F.cwds.has(w));
+    // 全不选语义 = 空结果（所见即所选）
+    if((allSrc.length && incSrc.length===0) || (allWs.length && incWs.length===0)){
+      filtered=[]; page=1;
+      renderStats(); renderCharts(); renderTable();
+      updateSummary();
+      $('#emptyMsg').textContent='当前未选择任何 Agent / 工作空间';
+      return;
+    }
     const params=new URLSearchParams();
     params.set('sources', incSrc.join(','));
     if(incWs.length && incWs.length<allWs.length) params.set('workspaces', incWs.join(','));
@@ -476,27 +500,67 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       filtered = d.items;
       page = 1;
       renderStats(); renderCharts(); renderTable();
+      updateSummary();
     }catch(e){
       if(mySeq===reqSeq) toast('查询失败：'+e.message);
     }
   }
-  function applyFilters(){ loadFiltered(); }
+  function applyFilters(){ loadFiltered().catch(e=>toast('查询异常：'+e.message)); }
 
+  // ---- 待应用状态标记 ----
+  let dirty=false;
+  function markDirty(){
+    dirty=true;
+    const b=$('#applyBtn');
+    b.classList.add('ring-2','ring-ring');
+    if(!b.textContent.includes('●')) b.innerHTML='<i data-lucide="search-check" class="h-3.5 w-3.5"></i>应用筛选 ●';
+    reicons();
+  }
+  function clearDirty(){
+    dirty=false;
+    const b=$('#applyBtn');
+    b.classList.remove('ring-2','ring-ring');
+    b.innerHTML='<i data-lucide="search-check" class="h-3.5 w-3.5"></i>应用筛选';
+    reicons();
+  }
   function updateFilterChips(){
     $('#agentCount').textContent = F.sources.size?`-${F.sources.size}`:'全部';
     $('#wsCount').textContent = F.cwds.size?`-${F.cwds.size}`:'全部';
   }
 
+  // ---- 当前查看摘要条 ----
+  function updateSummary(){
+    const box=$('#filterSummary'), chips=$('#summaryChips');
+    const allSrc=D.stats.sources.map(s=>s.source);
+    const incSrc=allSrc.filter(s=>!F.sources.has(s));
+    const parts=[];
+    parts.push(incSrc.length===0||incSrc.length===allSrc.length
+      ? '<span>全部 Agent</span>'
+      : incSrc.map(s=>srcTag(s)).join(' '));
+    const allWs=D.stats.cwds;
+    const incWs=allWs.filter(w=>!F.cwds.has(w));
+    parts.push(`<span>工作空间 ${incWs.length===allWs.length?'全部':incWs.length+' 个'}</span>`);
+    parts.push(`<span>${F.time==='all'?'全部时间':'近 '+F.time+' 天'}</span>`);
+    parts.push(`<span>${F.kw?('关键词 "'+esc(F.kw)+'"'):'无关键词'}</span>`);
+    chips.innerHTML=parts.join('<span class="opacity-40">·</span>');
+    box.classList.remove('hidden'); box.classList.add('flex');
+    reicons();
+  }
+
   function bindStaticEvents(){
-    $('#agentOptions').addEventListener('change',e=>{ if(e.target.classList.contains('src-chk')){ const v=e.target.value; if(e.target.checked)F.sources.delete(v); else F.sources.add(v); updateFilterChips(); applyFilters(); } });
-    $('#wsOptions').addEventListener('change',e=>{ if(e.target.classList.contains('ws-chk')){ const v=e.target.value; if(e.target.checked)F.cwds.delete(v); else F.cwds.add(v); updateFilterChips(); applyFilters(); } });
-    $('[data-act="agent-all"]').onclick=()=>{ $$('.src-chk').forEach(c=>{c.checked=true;F.sources.delete(c.value);});updateFilterChips();applyFilters(); };
-    $('[data-act="ws-all"]').onclick=()=>{ $$('.ws-chk').forEach(c=>{c.checked=true;F.cwds.delete(c.value);});updateFilterChips();applyFilters(); };
+    $('#agentOptions').addEventListener('change',e=>{ if(e.target.classList.contains('src-chk')){ const v=e.target.value; if(e.target.checked)F.sources.delete(v); else F.sources.add(v); updateFilterChips(); markDirty(); } });
+    $('#wsOptions').addEventListener('change',e=>{ if(e.target.classList.contains('ws-chk')){ const v=e.target.value; if(e.target.checked)F.cwds.delete(v); else F.cwds.add(v); updateFilterChips(); markDirty(); } });
+    $('[data-act="agent-all"]').onclick=()=>{ $$('.src-chk').forEach(c=>{c.checked=true;});F.sources.clear();updateFilterChips();markDirty(); };
+    $('[data-act="agent-none"]').onclick=()=>{ $$('.src-chk').forEach(c=>{c.checked=false;});D.stats.sources.forEach(s=>F.sources.add(s.source));updateFilterChips();markDirty(); };
+    $('[data-act="ws-all"]').onclick=()=>{ $$('.ws-chk').forEach(c=>{c.checked=true;});F.cwds.clear();updateFilterChips();markDirty(); };
+    $('[data-act="ws-none"]').onclick=()=>{ $$('.ws-chk').forEach(c=>{c.checked=false;});D.stats.cwds.forEach(w=>F.cwds.add(w));updateFilterChips();markDirty(); };
+    $('#applyBtn').onclick=()=>{ clearDirty(); applyFilters(); };
     let kwT;
-    $('#kwInput').addEventListener('input',e=>{ clearTimeout(kwT); const v=e.target.value; $('#kwClear').classList.toggle('hidden',!v); kwT=setTimeout(()=>{F.kw=v.trim();applyFilters();},350); });
-    $('#kwClear').onclick=()=>{ $('#kwInput').value=''; F.kw=''; $('#kwClear').classList.add('hidden'); applyFilters(); };
-    $('#timeRange').onchange=e=>{F.time=e.target.value;applyFilters();};
-    $('#resetBtn').onclick=()=>{ F.sources.clear();F.cwds.clear();F.kw='';F.time='all';F.models.clear(); $('#kwInput').value='';$('#kwClear').classList.add('hidden');$('#timeRange').value='all'; $$('.src-chk').forEach(c=>c.checked=true); $$('.ws-chk').forEach(c=>c.checked=true); updateFilterChips(); applyFilters(); toast('已重置筛选条件'); };
+    $('#kwInput').addEventListener('input',e=>{ clearTimeout(kwT); const v=e.target.value; $('#kwClear').classList.toggle('hidden',!v); kwT=setTimeout(()=>{F.kw=v.trim();markDirty();},200); });
+    $('#kwInput').addEventListener('keydown',e=>{ if(e.key==='Enter'){ clearTimeout(kwT); F.kw=e.target.value.trim(); clearDirty(); applyFilters(); } });
+    $('#kwClear').onclick=()=>{ $('#kwInput').value=''; F.kw=''; $('#kwClear').classList.add('hidden'); clearDirty(); applyFilters(); };
+    $('#timeRange').onchange=e=>{F.time=e.target.value;markDirty();};
+    $('#resetBtn').onclick=()=>{ F.sources.clear();F.cwds.clear();F.kw='';F.time='all';F.models.clear(); $('#kwInput').value='';$('#kwClear').classList.add('hidden');$('#timeRange').value='all'; $$('.src-chk').forEach(c=>c.checked=true); $$('.ws-chk').forEach(c=>c.checked=true); updateFilterChips(); clearDirty(); applyFilters(); toast('已重置筛选条件'); };
     $$('[data-sort]').forEach(th=>th.onclick=()=>{ const k=th.dataset.sort; if(sortKey===k)sortDir*=-1; else{sortKey=k;sortDir=k==='title'||k==='source'||k==='model'?1:-1;} renderTable(); });
     $('#selectAll').onchange=e=>{ $$('.row-chk').forEach(c=>{c.checked=e.target.checked; const i=+c.dataset.idx; e.target.checked?selectedIdxs.add(i):selectedIdxs.delete(i);}); updateBatchBtn(); };
     $('#selectPage').onchange=e=>{ $('#selectAll').checked=e.target.checked; $('#selectAll').dispatchEvent(new Event('change')); };
@@ -504,6 +568,8 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     $('#prevPage').onclick=()=>{if(page>1){page--;renderTable();}};
     $('#nextPage').onclick=()=>{if(page*pageSize<filtered.length){page++;renderTable();}};
   }
+  // P1 修复：原改写时遗漏此定义，导致勾选/删除触发 "updateBatchBtn is not defined"
+  function updateBatchBtn(){ const n=selectedIdxs.size; const b=$('#batchDelBtn'); b.classList.toggle('hidden',n===0); b.classList.toggle('inline-flex',n>0); }
 
   // ---- stats over in-memory filtered set ----
   function renderStats(){
