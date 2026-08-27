@@ -337,16 +337,18 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   <!-- 抽屉内事件分页栏 -->
   <div id="drawerPager" class="hidden items-center justify-between border-t border-border px-5 py-2 text-[11px] text-muted-foreground">
     <span id="drawerPageInfo">—</span>
-    <div class="flex items-center gap-2">
-      <select id="drawerPageSize" class="rounded border border-border bg-card px-1.5 py-0.5 text-[11px] focus:outline-none">
+    <div class="flex items-center gap-1">
+      <button id="drawerFirstPage" class="nav-btn inline-flex h-6 items-center gap-0.5 rounded border border-border px-1.5 hover:bg-muted disabled:opacity-40" title="首页（最早）"><i data-lucide="chevrons-left" class="h-3.5 w-3.5"></i>首页</button>
+      <button id="drawerPrevPage" class="nav-btn inline-flex h-6 w-6 items-center justify-center rounded border border-border hover:bg-muted disabled:opacity-40" title="上一页（更早）"><i data-lucide="chevron-left" class="h-3.5 w-3.5"></i></button>
+      <span id="drawerPageNav" class="tnum px-1">1 / 1</span>
+      <button id="drawerNextPage" class="nav-btn inline-flex h-6 w-6 items-center justify-center rounded border border-border hover:bg-muted disabled:opacity-40" title="下一页（更新）"><i data-lucide="chevron-right" class="h-3.5 w-3.5"></i></button>
+      <button id="drawerLastPage" class="nav-btn inline-flex h-6 items-center gap-0.5 rounded border border-border px-1.5 hover:bg-muted disabled:opacity-40" title="尾页（最新）">末页<i data-lucide="chevrons-right" class="h-3.5 w-3.5"></i></button>
+      <select id="drawerPageSize" class="ml-1 rounded border border-border bg-card px-1.5 py-0.5 text-[11px] focus:outline-none">
         <option value="50">50 条/页</option>
         <option value="100" selected>100 条/页</option>
         <option value="200">200 条/页</option>
         <option value="500">500 条/页</option>
       </select>
-      <button id="drawerPrevPage" class="nav-btn inline-flex h-6 w-6 items-center justify-center rounded border border-border hover:bg-muted disabled:opacity-40"><i data-lucide="chevron-left" class="h-3.5 w-3.5"></i></button>
-      <span id="drawerPageNav" class="tnum px-0.5">1 / 1</span>
-      <button id="drawerNextPage" class="nav-btn inline-flex h-6 w-6 items-center justify-center rounded border border-border hover:bg-muted disabled:opacity-40"><i data-lucide="chevron-right" class="h-3.5 w-3.5"></i></button>
     </div>
   </div>
 </aside>
@@ -784,10 +786,14 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     const body=$('#drawerBody');
     body.innerHTML='<div class="py-16 text-center text-sm text-muted-foreground">加载事件中…</div>';
     try{
-      const d=await fetchEventsPage(c.source,c.id,0,100);
-      if(curConv!==c) return;                     // 用户已切换抽屉
-      curTotal=d.total; curEvts=d.events;
-      curPages=Math.max(1,Math.ceil(d.total/100)); curPage=1;
+      // 默认展示尾页（最新内容）；首页 = 最早记录，每页内升序（最早在上）
+      const probe=await fetchEventsPage(c.source,c.id,0,1);
+      if(curConv!==c) return;
+      curTotal=probe.total;
+      curPages=Math.max(1,Math.ceil(curTotal/curLim));
+      const d=await fetchEventsPage(c.source,c.id,(curPages-1)*curLim,curLim);
+      if(curConv!==c) return;
+      curEvts=d.events; curPage=curPages;
       $('#drawerEvtCount').textContent=`共 ${fmtNum(curTotal)} 事件`;
     }catch(e){
       body.innerHTML='<div class="py-16 text-center text-sm text-error">加载失败：'+esc(e.message)+'</div>';
@@ -799,6 +805,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   }
   async function loadDrawerPage(offset){
     if(!curConv) return;
+    offset=Math.max(0,Math.min(offset, (curPages-1)*curLim));
     const body=$('#drawerBody'); body.innerHTML='<div class="py-16 text-center text-sm text-muted-foreground">加载中…</div>';
     try{
       const d=await fetchEventsPage(curConv.source,curConv.id,offset,curLim);
@@ -816,14 +823,18 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   function updateDrawerPager(){
     $('#drawerPageInfo').textContent=`共 ${fmtNum(curTotal)} 条事件 · 第 ${curPage}/${curPages} 页`;
     $('#drawerPageNav').textContent=`${curPage} / ${curPages}`;
+    $('#drawerFirstPage').disabled=curPage<=1;
     $('#drawerPrevPage').disabled=curPage<=1;
     $('#drawerNextPage').disabled=curPage>=curPages;
+    $('#drawerLastPage').disabled=curPage>=curPages;
     const p=$('#drawerPager'); p.classList.remove('hidden'); p.classList.add('flex');
     reicons();
   }
-  $('#drawerPrevPage').onclick=()=>{ if(curPage>1) loadDrawerPage((curPage-2)*curLim); };
-  $('#drawerNextPage').onclick=()=>{ if(curPage<curPages) loadDrawerPage(curPage*curLim); };
-  $('#drawerPageSize').onchange=e=>{ curLim=+e.target.value; curPage=1; loadDrawerPage(0); };
+  $('#drawerFirstPage').onclick=()=>loadDrawerPage(0);
+  $('#drawerPrevPage').onclick=()=>loadDrawerPage((curPage-2)*curLim);
+  $('#drawerNextPage').onclick=()=>loadDrawerPage(curPage*curLim);
+  $('#drawerLastPage').onclick=()=>loadDrawerPage((curPages-1)*curLim);
+  $('#drawerPageSize').onchange=e=>{ curLim=+e.target.value; curPages=Math.max(1,Math.ceil(curTotal/curLim)); loadDrawerPage((curPages-1)*curLim); };
 
   function buildRoleBar(present){
     const rfb=$('#roleFilterBar'); rfb.innerHTML=''; activeRoles.clear();
@@ -835,29 +846,37 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   function setRoleFilter(r){ activeRoles.clear(); if(r!=='all')activeRoles.add(r); $$('#roleFilterBar button').forEach(b=>{ const on=b.dataset.role===r; b.className=`rounded-md border px-2 py-0.5 text-[11px] ${on?'border-primary bg-primary/10 text-primary':'border-border text-muted-foreground hover:bg-muted'}`; }); renderDrawerBody(); }
   function renderDrawerBody(){
     const body=$('#drawerBody'); body.innerHTML='';
-    let list=activeRoles.size?curEvts.filter(e=>activeRoles.has(e.r)):curEvts;
-    list=[...list].reverse();   // 默认倒序：最新事件在最上
+    const list=activeRoles.size?curEvts.filter(e=>activeRoles.has(e.r)):curEvts;
+    // 升序：每页内最早事件在最上、最新在最下（首页=最早，尾页=最新）
     if(list.length===0){ body.appendChild(el('div','py-10 text-center text-sm text-muted-foreground','该筛选下无事件')); return; }
     list.forEach(e=>body.appendChild(renderEvent(e,curConv)));
     reicons();
   }
   function renderEvent(e,c){
-    const role=e.r; const meta=ROLE_META[role]||{label:role,ic:'circle'}; const col=(ROLE_COLOR())[role]||'#64748B';
-    const wrap=el('div','flex gap-3');
+    const role=e.r; const meta=ROLE_META[role]||{label:role,ic:'circle'};
+    const col=(ROLE_COLOR())[role]||'#64748B';
     const t=e.t?relTime(e.t):'#'+e.s;
-    const side=el('div','shrink-0 w-16 pt-0.5 text-right text-[10px] text-muted-foreground tnum',t);
-    const ic=el('div','mt-0.5 shrink-0'); ic.innerHTML=`<span class="grid h-6 w-6 place-items-center rounded-full" style="background:${col}1f;color:${col}"><i data-lucide="${meta.ic}" class="h-3.5 w-3.5"></i></span>`;
+    const isUser=role==='user', isAssistant=role==='assistant';
+    // 头像（加大辨识度：用户主色实心底、助手品牌色；带小图标）
+    const avatar=`<span class="grid h-8 w-8 shrink-0 place-items-center rounded-full ${isUser?'text-white':'text-white'} shadow-sm" style="background:${isUser?'#2563EB':col}"><i data-lucide="${meta.ic}" class="h-4 w-4"></i></span>`;
     let bodyHtml='';
-    if(role==='user'){ bodyHtml=`<div class="ev-bubble ev-user">${md(esc(e.c))}</div>`; }          // Input 常展开
-    else if(role==='assistant'){ bodyHtml=`<div class="ev-bubble ev-assistant">${md(esc(e.c))}</div>`; } // Output 常展开
+    if(isUser){ bodyHtml=`<div class="ev-bubble ev-user ring-1 ring-info/30">${md(esc(e.c))}</div>`; }
+    else if(isAssistant){ bodyHtml=`<div class="ev-bubble ev-assistant ring-1 ring-primary/20">${md(esc(e.c))}</div>`; }
     else if(role==='reasoning'){ bodyHtml=`<details class="ev-bubble ev-reasoning"><summary class="cursor-pointer text-[11px] font-medium select-none">${meta.label}</summary><div class="mt-1">${md(esc(e.rs||e.c))}</div></details>`; }
     else if(role==='tool'){ bodyHtml=renderTool(e); }
     else if(role==='patch'){ bodyHtml=renderPatch(e); }
     else if(role==='shell'){ bodyHtml=renderShell(e); }
     else { bodyHtml=`<div class="ev-meta">${esc(e.c||(e.m?('model: '+esc(e.m)):'meta'))}</div>`; }
-    const content=el('div','min-w-0 flex-1',bodyHtml);
-    wrap.appendChild(side); wrap.appendChild(ic); wrap.appendChild(content);
-    return wrap;
+    const timeEl=`<div class="text-[10px] text-muted-foreground tnum">${t}</div>`;
+    // 用户：头像在右边、整体右对齐；助手：头像在左边、左对齐
+    if(isUser){
+      return el('div','flex items-start gap-2 justify-end', `<div class="min-w-0 max-w-[78%] text-right">${timeEl}<div class="mt-0.5 inline-block text-left">${bodyHtml}</div></div>${avatar}`);
+    }
+    if(isAssistant){
+      return el('div','flex items-start gap-2', `${avatar}<div class="min-w-0 max-w-[78%]">${bodyHtml}<div class="mt-0.5">${timeEl}</div></div>`);
+    }
+    // 其他角色：左对齐，图标在左
+    return el('div','flex items-start gap-2', `${avatar}<div class="min-w-0 flex-1">${bodyHtml}<div class="mt-0.5">${timeEl}</div></div>`);
   }
   function renderTool(e){
     const ok=/^(ok|success|succe?ed|done|complete|completed)/i.test(e.ts||''); const bad=/^(error|fail|denied|exception)/i.test(e.ts||'');
