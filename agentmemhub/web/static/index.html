@@ -414,6 +414,15 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   const esc = s=> (s==null?'':String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'));
   const fmtTime = ts=>{ if(!ts) return '—'; const d=new Date(ts*1000); const p=n=>String(n).padStart(2,'0'); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
   const relTime = ts=>{ if(!ts) return '—'; const diff=Date.now()/1000-ts; if(diff<60)return Math.max(1,Math.round(diff))+'秒前'; if(diff<3600)return Math.round(diff/60)+'分钟前'; if(diff<86400)return Math.round(diff/3600)+'小时前'; if(diff<2592000)return Math.round(diff/86400)+'天前'; return fmtTime(ts).slice(0,10); };
+  // 检测系统注入消息（某些 Agent 把系统指令存为 role='user'，需区别渲染）
+  function isSystemMessage(text){
+    if(!text) return false;
+    const t=text.trim();
+    return /^The TodoWrite tool/.test(t) || /^Current runtime context/.test(t) ||
+           /^System\s*:/i.test(t) || /^\[System\s*:/i.test(t) || /^<system>/.test(t) ||
+           /^You are an AI assistant/i.test(t) || /^Available tools/i.test(t) ||
+           /^The following tools/i.test(t) || /^<\|.*\|>/.test(t) || /^System\b/.test(t);
+  }
   function reicons(){ if(window.lucide) lucide.createIcons(); }
 
   // ---- state ----
@@ -856,12 +865,12 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     const role=e.r; const meta=ROLE_META[role]||{label:role,ic:'circle'};
     const col=(ROLE_COLOR())[role]||'#64748B';
     const t=e.t?relTime(e.t):'#'+e.s;
-    const isUser=role==='user', isAssistant=role==='assistant';
-    // 头像（加大辨识度：用户主色实心底、助手品牌色；带小图标）
-    const avatar=`<span class="grid h-8 w-8 shrink-0 place-items-center rounded-full text-white shadow-sm" style="background:${isUser?'#2563EB':col}"><i data-lucide="${meta.ic}" class="h-4 w-4"></i></span>`;
-    // 修复：content 可能是 JSON 数组字符串（如 OpenCode "[{type:text,text:...}]"），
-    // 需提取纯文本；同时统一用 md() 处理（md 自带转义，不再外层包 esc() 避免双重转义）
     const rawText = extractText(e.c);
+    const isSystem = (role==='user'||role==='assistant') && isSystemMessage(rawText);  // 系统注入消息
+    const isUser=role==='user' && !isSystem;
+    const isAssistant=role==='assistant' && !isSystem;
+    // 头像（加大辨识度：用户主色实心底、助手品牌色；系统消息用弱化灰色）
+    const avatar=`<span class="grid h-8 w-8 shrink-0 place-items-center rounded-full text-white shadow-sm" style="background:${isUser?'#2563EB':isSystem?'#94A3B8':col}"><i data-lucide="${meta.ic}" class="h-4 w-4"></i></span>`;
     let bodyHtml='';
     if(isUser){ bodyHtml=`<div class="ev-bubble ev-user ring-1 ring-info/30">${md(rawText)}</div>`; }
     else if(isAssistant){ bodyHtml=`<div class="ev-bubble ev-assistant ring-1 ring-primary/20">${md(rawText)}</div>`; }
@@ -871,6 +880,15 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     else if(role==='shell'){ bodyHtml=renderShell(e); }
     else { bodyHtml=`<div class="ev-meta">${esc(rawText||(e.m?('model: '+esc(e.m)):'meta'))}</div>`; }
     const timeEl=`<div class="text-[10px] text-muted-foreground tnum">${t}</div>`;
+    // 系统注入消息：居中弱化展示（非用户输入，不应当作用户消息渲染）
+    if(isSystem){
+      return el('div','flex justify-center my-1', `<div class="max-w-[85%] rounded-lg border border-dashed border-border bg-muted/30 px-4 py-2 text-center">
+        <span class="inline-flex h-5 w-5 place-items-center rounded-full bg-muted text-muted-foreground align-middle"><i data-lucide="cpu" class="h-3 w-3"></i></span>
+        <span class="ml-1 align-middle text-[10px] font-medium uppercase tracking-wide text-muted-foreground">System</span>
+        <div class="mt-1 text-left text-[12px] text-muted-foreground">${md(rawText)}</div>
+        <div class="mt-0.5 text-right">${timeEl}</div>
+      </div>`);
+    }
     // 用户：头像在右边、整体右对齐；助手：头像在左边、左对齐
     if(isUser){
       return el('div','flex items-start gap-2 justify-end', `<div class="min-w-0 max-w-[78%] text-right">${timeEl}<div class="mt-0.5 inline-block text-left">${bodyHtml}</div></div>${avatar}`);
