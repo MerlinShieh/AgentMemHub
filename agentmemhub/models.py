@@ -31,6 +31,11 @@ class Event:
     content: Optional[str] = None  # user/assistant/reasoning 的正文
     parent_id: Optional[str] = None
 
+    # 记忆桥接锚（MemOS 导出幂等与轮次分组用）
+    src_id: Optional[str] = None   # 事件在源数据里的稳定定位（re-ingest 不变）
+    turn_key: Optional[str] = None # 所属轮次的锚（= 该轮根 user 消息的 src_id）
+    is_system: Optional[bool] = None  # 源级可识别的系统注入消息（DSH plugin / Qwen system）
+
     # tool
     tool_name: Optional[str] = None
     tool_input: Optional[dict] = None
@@ -170,6 +175,9 @@ def to_event(
     tool_input: Any = None,
     tool_output: Any = None,
     tool_status: Any = None,
+    src_id: Any = None,
+    turn_key: Any = None,
+    is_system: Any = None,
     raw: Any = None,
     **extra: Any,
 ) -> Event:
@@ -183,6 +191,9 @@ def to_event(
         tool_input=tool_input if isinstance(tool_input, dict) else None,
         tool_output=str(tool_output) if tool_output is not None else None,
         tool_status=str(tool_status) if tool_status else None,
+        src_id=str(src_id) if src_id is not None else None,
+        turn_key=str(turn_key) if turn_key is not None else None,
+        is_system=bool(is_system) if is_system is not None else None,
         raw_json=json.dumps(raw, ensure_ascii=False) if raw is not None else None,
         **{k: v for k, v in extra.items() if v is not None},
     )

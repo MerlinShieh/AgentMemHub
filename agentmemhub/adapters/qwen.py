@@ -35,19 +35,23 @@ class QwenAdapter(AgentAdapter):
 
     def load(self, path: Path) -> list[dict[str, Any]]:
         # 收集所有 chats/*.jsonl（按大小排，跳过 usage_record/系统文件）
-        jsonl_files: list[Path] = []
+        # 注意：projects/ 下的文件会被 path.rglob 和 (path/"projects").rglob 双重复收集
+        # ——必须按 resolve() 去重，否则同一会话事件双倍入库
+        seen: set[Path] = set()
         for root in (path / "projects", path):
             if root.is_dir():
-                jsonl_files.extend(root.rglob("*.jsonl"))
+                for fp in root.rglob("*.jsonl"):
+                    seen.add(fp.resolve())
         # 过滤明显的非对话文件
-        jsonl_files = [p for p in jsonl_files
+        jsonl_files = [Path(p) for p in sorted(seen)
                        if p.name not in ("usage_record.jsonl",) and "usage" not in p.name]
 
         sessions_map: dict[str, dict] = {}
         for fp in jsonl_files:
             try:
+                turn_by_uuid: dict[str, str] = {}
                 with open(fp, encoding="utf-8", errors="ignore") as f:
-                    for line in f:
+                    for ln, line in enumerate(f, 1):
                         line = line.strip()
                         if not line:
                             continue
@@ -59,7 +63,18 @@ class QwenAdapter(AgentAdapter):
                             continue
                         typ = o.get("type")
                         sid = o.get("sessionId") or fp.stem
-                        ev = self._line_to_event(o, fp)
+                        # 稳定锚 + 轮次归属：沿 parentUuid 追到根 user 行
+                        uuid = str(o.get("uuid") or f"idx:{ln}")
+                        parent = str(o["parentUuid"]) if o.get("parentUuid") else None
+                        if typ == "user":
+                            turn_key = uuid
+                        else:
+                            turn_key = turn_by_uuid.get(parent) or parent
+                        turn_by_uuid[uuid] = turn_key or uuid
+                        ev = self._line_to_event(
+                            o, fp, src_id=f"line:{uuid}", turn_key=turn_key,
+                            parent_id=parent,
+                        )
                         if ev is None:
                             continue
                         if sid not in sessions_map:
@@ -91,25 +106,32 @@ class QwenAdapter(AgentAdapter):
             sessions.append(s)
         return sessions
 
-    def _line_to_event(self, o: dict, fp: Path):
+    def _line_to_event(self, o: dict, fp: Path, *,
+                       src_id: str | None = None, turn_key: str | None = None,
+                       parent_id: str | None = None):
         typ = o.get("type")
         ts = _to_epoch(o.get("timestamp"))
         msg = o.get("message") or {}
         parts = msg.get("parts") if isinstance(msg, dict) else None
         raw = json.dumps(o, ensure_ascii=False)
+        kw = {"src_id": src_id, "turn_key": turn_key, "parent_id": parent_id,
+              "raw_json": raw}
 
         if typ == "system":
             if o.get("subtype") in _SKIP_SYSTEM_SUBTYPES:
                 return None
-            return Event(role="meta", time=ts, content=json.dumps(o, ensure_ascii=False)[:500],
-                         raw_json=raw)
+            return Event(role="meta", time=ts, is_system=True, **kw)
         if typ == "user":
             text = _parts_text(parts) or (fp.stem if not parts else "")
-            return Event(role="user", time=ts, content=text, raw_json=raw) if text else None
+            return Event(role="user", time=ts, content=text, **kw) if text else None
         if typ == "assistant":
             text = _parts_text(parts)
-            return Event(role="assistant", time=ts, content=text, model=o.get("model") or None,
-                         raw_json=raw) if text else None
+            if not text:
+                return None
+            tool_call_id = _first_function_call_id(parts)
+            return Event(role="assistant", time=ts, content=text,
+                         model=o.get("model") or None,
+                         tool_call_id=tool_call_id, **kw)
         if typ == "tool_result":
             # functionResponse 提取
             name, output = "", ""
@@ -123,10 +145,9 @@ class QwenAdapter(AgentAdapter):
                         output = json.dumps(output, ensure_ascii=False)
             return Event(role="tool", time=ts, tool_name=name or None,
                          tool_output=str(output) if output else None,
-                         tool_status="completed", raw_json=raw)
+                         tool_status="completed", **kw)
         # 其他类型：保底 meta
-        return Event(role="meta", time=ts, content=json.dumps(o, ensure_ascii=False)[:500],
-                     raw_json=raw)
+        return Event(role="meta", time=ts, **kw)
 
 
 def _parts_text(parts: Any) -> str:
@@ -139,8 +160,22 @@ def _parts_text(parts: Any) -> str:
         if isinstance(p, dict):
             if p.get("text"):
                 texts.append(str(p["text"]))
+            elif "functionCall" in p:
+                texts.append(f"[Tool: {p['functionCall'].get('name', '?')}]")
             elif "functionResponse" in p:
                 texts.append("[Tool Result]")
         elif isinstance(p, str):
             texts.append(p)
     return "\n".join(texts).strip()
+
+
+def _first_function_call_id(parts: Any) -> str | None:
+    """assistant parts 里第一个 functionCall 的 id（工具调用关联锚）。"""
+    if not isinstance(parts, list):
+        return None
+    for p in parts:
+        if isinstance(p, dict):
+            fc = p.get("functionCall")
+            if isinstance(fc, dict) and fc.get("id"):
+                return str(fc["id"])
+    return None

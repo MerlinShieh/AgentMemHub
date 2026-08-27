@@ -149,19 +149,43 @@ def cmd_adapters(args) -> None:
 
 
 def cmd_memos(args) -> None:
-    from agentmemhub.memos import build_bundle, write_bundle, push_bundle
+    from agentmemhub.memos import (build_bundle, write_bundle, push_bundle,
+                                   rebuild_embeddings)
     store = Store()
     bundle = build_bundle(store, args.source)
-    store.close()
     _stdout(f"生成 bundle: {len(bundle['traces'])} traces")
     write_bundle(bundle, Path(args.out))
     _stdout(f"已写入 → {args.out}")
     if args.push:
         try:
-            resp = push_bundle(bundle, args.push)
-            _stdout(f"已推送 MemOS: {resp}")
+            # MemOS /api/v1/import 上限 64 MiB——全量 bundle 可能超限（实测 90+MB），
+            # 因此推送时按 source 分批 POST，失败批次继续并汇总
+            if args.source:
+                batches = [args.source]
+            else:
+                batches = [a.source for a in adapters.all_adapters() if a.locate()]
+            total_ok = total_skip = 0
+            for src in batches:
+                b = build_bundle(store, src)
+                if not b["traces"]:
+                    continue
+                try:
+                    resp = push_bundle(b, args.push)
+                    total_ok += resp.get("imported", 0)
+                    total_skip += resp.get("skipped", 0)
+                    _stdout(f"[{src}] 推送 ok: imported={resp.get('imported')} skipped={resp.get('skipped')}")
+                except Exception as e:
+                    _stdout(f"[{src}] 推送失败（继续下一批）: {e}")
+            _stdout(f"MemOS 导入汇总: imported={total_ok}, skipped={total_skip}")
+            if not args.no_rebuild:
+                try:
+                    r = rebuild_embeddings(args.push, mode=args.rebuild_mode)
+                    _stdout(f"已触发 embedding {args.rebuild_mode}: {r}")
+                except Exception as e:
+                    _stdout(f"embedding rebuild 失败（可用 --no-rebuild 跳过）: {e}")
         except Exception as e:
             _stdout(f"推送失败（MemOS 可能在运行?）: {e}")
+    store.close()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -208,6 +232,10 @@ def build_parser() -> argparse.ArgumentParser:
     pm.add_argument("--source", default="")
     pm.add_argument("--out", default="exports/memos_bundle.json")
     pm.add_argument("--push", default="", help="MemOS base URL，例如 http://127.0.0.1:18800；非空则 POST")
+    pm.add_argument("--no-rebuild", action="store_true",
+                    help="push 后不触发 /api/v1/embeddings/rebuild（默认自动补向量）")
+    pm.add_argument("--rebuild-mode", default="repair", choices=("repair", "rebuild"),
+                    help="embedding rebuild 模式：repair=只补缺失向量（默认），rebuild=全部重算")
     return p
 
 
