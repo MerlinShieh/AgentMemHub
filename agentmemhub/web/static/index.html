@@ -858,15 +858,18 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     const t=e.t?relTime(e.t):'#'+e.s;
     const isUser=role==='user', isAssistant=role==='assistant';
     // 头像（加大辨识度：用户主色实心底、助手品牌色；带小图标）
-    const avatar=`<span class="grid h-8 w-8 shrink-0 place-items-center rounded-full ${isUser?'text-white':'text-white'} shadow-sm" style="background:${isUser?'#2563EB':col}"><i data-lucide="${meta.ic}" class="h-4 w-4"></i></span>`;
+    const avatar=`<span class="grid h-8 w-8 shrink-0 place-items-center rounded-full text-white shadow-sm" style="background:${isUser?'#2563EB':col}"><i data-lucide="${meta.ic}" class="h-4 w-4"></i></span>`;
+    // 修复：content 可能是 JSON 数组字符串（如 OpenCode "[{type:text,text:...}]"），
+    // 需提取纯文本；同时统一用 md() 处理（md 自带转义，不再外层包 esc() 避免双重转义）
+    const rawText = extractText(e.c);
     let bodyHtml='';
-    if(isUser){ bodyHtml=`<div class="ev-bubble ev-user ring-1 ring-info/30">${md(esc(e.c))}</div>`; }
-    else if(isAssistant){ bodyHtml=`<div class="ev-bubble ev-assistant ring-1 ring-primary/20">${md(esc(e.c))}</div>`; }
-    else if(role==='reasoning'){ bodyHtml=`<details class="ev-bubble ev-reasoning"><summary class="cursor-pointer text-[11px] font-medium select-none">${meta.label}</summary><div class="mt-1">${md(esc(e.rs||e.c))}</div></details>`; }
+    if(isUser){ bodyHtml=`<div class="ev-bubble ev-user ring-1 ring-info/30">${md(rawText)}</div>`; }
+    else if(isAssistant){ bodyHtml=`<div class="ev-bubble ev-assistant ring-1 ring-primary/20">${md(rawText)}</div>`; }
+    else if(role==='reasoning'){ bodyHtml=`<details class="ev-bubble ev-reasoning"><summary class="cursor-pointer text-[11px] font-medium select-none">${meta.label}</summary><div class="mt-1">${md(extractText(e.rs||e.c))}</div></details>`; }
     else if(role==='tool'){ bodyHtml=renderTool(e); }
     else if(role==='patch'){ bodyHtml=renderPatch(e); }
     else if(role==='shell'){ bodyHtml=renderShell(e); }
-    else { bodyHtml=`<div class="ev-meta">${esc(e.c||(e.m?('model: '+esc(e.m)):'meta'))}</div>`; }
+    else { bodyHtml=`<div class="ev-meta">${esc(rawText||(e.m?('model: '+esc(e.m)):'meta'))}</div>`; }
     const timeEl=`<div class="text-[10px] text-muted-foreground tnum">${t}</div>`;
     // 用户：头像在右边、整体右对齐；助手：头像在左边、左对齐
     if(isUser){
@@ -916,6 +919,30 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     h+=`</details></div>`; return h;
   }
   function prettyJson(s){ try{ return JSON.stringify(JSON.parse(s),null,2); }catch(_){ return s||''; } }
+  // 提取纯文本：某些 Agent 的 content 是 JSON 数组字符串（如 "[{type:text,text:中文}]"），
+  // 需解析并拼接 text 字段；解析失败则原样返回。
+  function extractText(s){
+    if(!s||typeof s!=='string') return s||'';
+    const t=s.trim();
+    if(!(t.startsWith('[')||t.startsWith('{'))) return s;
+    try{
+      const obj=JSON.parse(t);
+      if(Array.isArray(obj)){
+        const parts=[];
+        for(const block of obj){
+          if(block&&typeof block==='object'){
+            if(typeof block.text==='string'&&block.text) parts.push(block.text);
+            else if(typeof block.content==='string'&&block.content) parts.push(block.content);
+          }
+        }
+        if(parts.length) return parts.join('\n');
+      }else if(obj&&typeof obj==='object'){
+        if(typeof obj.text==='string') return obj.text;
+        if(typeof obj.content==='string') return obj.content;
+      }
+    }catch(_){}
+    return s;
+  }
   function md(s){ if(!s)return ''; s=s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     const parts=[]; 
     s=s.replace(/```(\w*)\n?([\s\S]*?)```/g,(m,lang,code)=>{ parts.push('<pre class="codeblk">'+code.replace(/\n$/,'')+'</pre>'); return `\u0000${parts.length-1}\u0000`; });
