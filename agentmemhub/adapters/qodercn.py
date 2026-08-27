@@ -28,9 +28,12 @@ class QoderCnAdapter(AgentAdapter):
         for fp in jsonl_files:
             msgs: list[Event] = []
             mtime = _to_epoch(fp.stat().st_mtime)
+            sid = fp.parent.name
+            # 当前轮锚：最近一条 user 行的 src_id（源无父链，只能按行序分桶）
+            turn_key: str | None = None
             try:
                 with open(fp, encoding="utf-8", errors="ignore") as f:
-                    for line in f:
+                    for ln, line in enumerate(f, 1):
                         line = line.strip()
                         if not line:
                             continue
@@ -45,7 +48,11 @@ class QoderCnAdapter(AgentAdapter):
                         content = message_text(msg_body.get("content") if isinstance(msg_body, dict) else msg_body)
                         if not content:
                             continue
+                        if role == "user":
+                            turn_key = f"line:{sid}#{ln}"
+                        # 行号作为稳定锚（文件重写会漂移，属数据本身重建）
                         msgs.append(Event(role=role, time=mtime, content=content,
+                                          src_id=f"line:{sid}#{ln}", turn_key=turn_key,
                                           raw_json=json.dumps(o, ensure_ascii=False)))
             except Exception:
                 continue
@@ -53,7 +60,6 @@ class QoderCnAdapter(AgentAdapter):
             if not msgs:
                 continue
             # 以上下层目录作为会话 id（对话目录名）
-            sid = fp.parent.name
             if sid not in sessions_map:
                 sessions_map[sid] = {
                     "source": self.source, "id": sid,
