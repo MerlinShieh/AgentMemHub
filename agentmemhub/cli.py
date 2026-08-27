@@ -138,7 +138,7 @@ def cmd_folders(args) -> None:
 def cmd_serve(args) -> None:
     """启动本地 Web 页面加载统一会话库。"""
     from agentmemhub.web import run_server
-    run_server(port=args.port, open_browser=not args.no_open,
+    run_server(port=args.port, open_browser=args.open,
                db=args.db or None)
 
 
@@ -200,7 +200,9 @@ def build_parser() -> argparse.ArgumentParser:
     pv = sub.add_parser("serve", help="启动本地 Web 页面（可选功能）")
     pv.add_argument("--port", type=int, default=8086)
     pv.add_argument("--db", default="", help="数据库路径（默认 ~/.agentmemhub/agentmemhub.db）")
-    pv.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
+    # 成对开关：--open / --no-open（默认自动打开浏览器）
+    pv.add_argument("--open", action=argparse.BooleanOptionalAction, default=True,
+                    help="启动后自动打开浏览器（默认开启；用 --no-open 关闭）")
 
     pm = sub.add_parser("memos", help="生成/推送 MemOS 导入 bundle")
     pm.add_argument("--source", default="")
