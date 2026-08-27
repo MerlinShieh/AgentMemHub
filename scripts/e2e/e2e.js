@@ -47,6 +47,20 @@ const { chromium } = require('playwright');
   check('单页: 上一页 disabled', await page.locator('#drawerPrevPage').isDisabled());
   check('单页: 下一页 disabled', await page.locator('#drawerNextPage').isDisabled());
   check('单页: 末页 disabled', await page.locator('#drawerLastPage').isDisabled());
+  // 多选角色筛选（toggle 叠加）：点 user→1条；加选 assistant→2条；取消 user→仅 assistant 1条；全部→4条
+  const countEvents = ()=> page.locator('#drawerBody > div').count();
+  await page.locator('#roleFilterBar button[data-role="user"]').click();
+  await page.waitForTimeout(300);
+  check('选"用户输入"→展示 1 条', (await countEvents()) === 1);
+  await page.locator('#roleFilterBar button[data-role="assistant"]').click();
+  await page.waitForTimeout(300);
+  check('加选"Agent Output"→叠加展示 2 条', (await countEvents()) === 2);
+  await page.locator('#roleFilterBar button[data-role="user"]').click();
+  await page.waitForTimeout(300);
+  check('取消"用户输入"→仅 assistant 1 条', (await countEvents()) === 1);
+  await page.locator('#roleFilterBar button[data-role="all"]').click();
+  await page.waitForTimeout(300);
+  check('"全部"恢复展示所有事件', (await countEvents()) === 4);
   // 默认折叠：推理/工具/补丁 details 未展开
   const closed = await page.locator('#drawerBody details:not([open])').count();
   check(`推理/工具等默认折叠(details 未展开>=2)`, closed >= 2, `closed=${closed}`);
