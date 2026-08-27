@@ -94,6 +94,26 @@ def test_events_short_keys(client):
     assert patch["pf"] == "src/login.ts"
 
 
+def test_events_pagination(client):
+    """标准 offset/limit 分页：两页不重叠、拼起来等于全量。"""
+    r0 = client.get("/api/conversations/zcode/sess_1/events?offset=0&limit=2").json()
+    r1 = client.get("/api/conversations/zcode/sess_1/events?offset=2&limit=2").json()
+    assert r0["total"] == 5 and len(r0["events"]) == 2
+    ids0 = {e["s"] for e in r0["events"]}
+    ids1 = {e["s"] for e in r1["events"]}
+    assert not (ids0 & ids1) and len(ids0 | ids1) == 4
+    assert r1["capped"] is True          # 还有更多页
+
+
+def test_conversations_date_range(client):
+    """精确时间段筛选（dateFrom/dateTo）。"""
+    ts = 1750000001  # 样例会话 createdAt
+    hit = client.get(f"/api/conversations?dateFrom={ts - 10}&dateTo={ts + 10}&all=1").json()
+    assert hit["total"] == 1
+    miss = client.get(f"/api/conversations?dateFrom={ts + 1000}&all=1").json()
+    assert miss["total"] == 0
+
+
 def test_events_404(client):
     assert client.get("/api/conversations/zcode/no_such/events").status_code == 404
 

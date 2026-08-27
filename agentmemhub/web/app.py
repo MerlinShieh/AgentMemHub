@@ -186,6 +186,8 @@ def create_app(db_path: Path | None = None):
         workspace: Optional[str] = Query(default="", description="逗号分隔多选（文件夹名）"),
         q: Optional[str] = Query(default=""),
         days: int = Query(default=0, ge=0, description="近 N 天（0=不限，按 createdAt）"),
+        dateFrom: Optional[float] = Query(default=None, description="精确起始时间戳（Unix 秒）"),
+        dateTo: Optional[float] = Query(default=None, description="精确截止时间戳（Unix 秒）"),
         all_: bool = Query(default=False, alias="all", description="返回全部匹配项（不分页）"),
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=20, ge=1, le=100),
@@ -208,7 +210,12 @@ def create_app(db_path: Path | None = None):
             items = [i for i in items if i["source"] in src_filter]
         if ws_filter:
             items = [i for i in items if i["workspace"] in ws_filter]
-        if days > 0:
+        # 时间段：精确区间（dateFrom/dateTo）优先；未传时回退近 N 天（days）
+        if dateFrom is not None or dateTo is not None:
+            lo = float(dateFrom) if dateFrom is not None else 0
+            hi = float(dateTo) if dateTo is not None else float("inf")
+            items = [i for i in items if i["createdAt"] and lo <= i["createdAt"] <= hi]
+        elif days > 0:
             import time as _t
             cutoff = _t.time() - days * 86400
             items = [i for i in items if i["createdAt"] and i["createdAt"] >= cutoff]
@@ -249,25 +256,22 @@ def create_app(db_path: Path | None = None):
 
     @app.get("/api/conversations/{source}/{cid}/events")
     def api_events(source: str, cid: str,
+                   offset: int = Query(default=0, ge=0),
                    limit: int = Query(default=_MAX_EVENTS, ge=1, le=500)):
+        """标准分页返回该会话事件流（按 seq 升序；前端倒序显示）。"""
         with _LOCK:
             conv = store.get_conversation(source, cid)
             if conv is None:
                 raise HTTPException(status_code=404, detail="conversation not found")
             events = store.get_events(source, cid)
         total = len(events)
-        capped = total > limit
-        head = events[:_HEAD_EVENTS] if capped else events[:limit]
-        tail: list = []
-        if capped:
-            tail = events[-(limit - _HEAD_EVENTS):]
-        shown = [_event_to_short(e) for e in head] + ([{"gap": True}] if capped else []) \
-            + [_event_to_short(e) for e in tail]
+        page_events = events[offset:offset + limit]
+        shown = [_event_to_short(e) for e in page_events]
         return JSONResponse({
             "total": total,
-            "capped": capped,
-            "capNote": f"已截断显示 {len(shown)-1 if capped else total}/{total} 条事件"
-            if capped else "",
+            "offset": offset,
+            "limit": limit,
+            "capped": total > offset + limit,
             "events": shown,
         })
 
