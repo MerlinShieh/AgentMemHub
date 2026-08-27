@@ -36,9 +36,11 @@ def default_db_path() -> Path:
 class Store:
     """会话与事件存储。"""
 
-    def __init__(self, db_path: Optional[Path] = None):
+    def __init__(self, db_path: Optional[Path] = None, *,
+                 check_same_thread: bool = True):
         self.db_path = Path(db_path) if db_path else default_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._check_same_thread = check_same_thread
         self._conn: Optional[sqlite3.Connection] = None
 
     # ------------------------------------------------------------------
@@ -48,7 +50,8 @@ class Store:
     @property
     def conn(self) -> sqlite3.Connection:
         if self._conn is None:
-            self._conn = sqlite3.connect(str(self.db_path))
+            self._conn = sqlite3.connect(
+                str(self.db_path), check_same_thread=self._check_same_thread)
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
@@ -156,6 +159,36 @@ class Store:
             conn.execute("DELETE FROM events_fts WHERE source = ?", (source,))
             conn.execute("DELETE FROM events WHERE source = ?", (source,))
             conn.execute("DELETE FROM conversations WHERE source = ?", (source,))
+
+    def delete_conversation(self, source: str, conversation_id: str) -> int:
+        """删除单个会话（事务级联 conversations/events/FTS）。返回删除的事件数。"""
+        conn = self.conn
+        with conn:
+            cur = conn.execute(
+                "DELETE FROM events WHERE source=? AND conversation_id=?",
+                (source, conversation_id),
+            )
+            n_events = cur.rowcount
+            conn.execute(
+                "DELETE FROM events_fts WHERE source=? AND conversation_id=?",
+                (source, conversation_id),
+            )
+            cur2 = conn.execute(
+                "DELETE FROM conversations WHERE source=? AND id=?",
+                (source, conversation_id),
+            )
+            if cur2.rowcount == 0:
+                raise KeyError(f"conversation not found: {source}/{conversation_id}")
+        return n_events
+
+    def update_title(self, source: str, conversation_id: str, title: str) -> bool:
+        """更新会话标题。返回该会话是否存在。"""
+        with self.conn:
+            cur = self.conn.execute(
+                "UPDATE conversations SET title=? WHERE source=? AND id=?",
+                (title.strip(), source, conversation_id),
+            )
+        return cur.rowcount > 0
 
     # ------------------------------------------------------------------
     # 读取

@@ -135,6 +135,13 @@ def cmd_folders(args) -> None:
     store.close()
 
 
+def cmd_serve(args) -> None:
+    """启动本地 Web 页面加载统一会话库。"""
+    from agentmemhub.web import run_server
+    run_server(port=args.port, open_browser=not args.no_open,
+               db=args.db or None)
+
+
 def cmd_adapters(args) -> None:
     for a in adapters.all_adapters():
         d = a.describe()
@@ -190,6 +197,11 @@ def build_parser() -> argparse.ArgumentParser:
     pf.add_argument("--source", default="")
     pf.add_argument("--limit", type=int, default=20)
 
+    pv = sub.add_parser("serve", help="启动本地 Web 页面（可选功能）")
+    pv.add_argument("--port", type=int, default=8086)
+    pv.add_argument("--db", default="", help="数据库路径（默认 ~/.agentmemhub/agentmemhub.db）")
+    pv.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
+
     pm = sub.add_parser("memos", help="生成/推送 MemOS 导入 bundle")
     pm.add_argument("--source", default="")
     pm.add_argument("--out", default="exports/memos_bundle.json")
@@ -203,6 +215,7 @@ def main() -> None:
         "ingest": cmd_ingest, "list": cmd_list, "show": cmd_show,
         "search": cmd_search, "export": cmd_export, "stats": cmd_stats,
         "adapters": cmd_adapters, "memos": cmd_memos, "folders": cmd_folders,
+        "serve": cmd_serve,
     }
     fn = handlers.get(args.command)
     if fn is None:

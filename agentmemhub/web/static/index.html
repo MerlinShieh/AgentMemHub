@@ -1,0 +1,781 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent 会话历史看板 · AgentMemHub</title>
+    <style id="theme-vars">
+/* Agent Session Dashboard — Brand CSS (prefix: as)
+   主色 靛蓝 #4F46E5 | 浅色主题为主 + 深色切换 */
+
+:root {
+  --as-primary: #4F46E5;
+  --as-primary-foreground: #FFFFFF;
+  --as-primary-50:  #EEF2FF;
+  --as-primary-100: #E0E7FF;
+  --as-primary-200: #C7D2FE;
+  --as-primary-600: #4338CA;
+  --as-primary-700: #3730A3;
+
+  --as-background:        #F8FAFC;
+  --as-foreground:        #0F172A;
+  --as-card:              #FFFFFF;
+  --as-card-foreground:   #1E293B;
+  --as-popover:           #FFFFFF;
+  --as-popover-foreground:#0F172A;
+  --as-muted:             #F1F5F9;
+  --as-muted-foreground:  #64748B;
+  --as-border:            #E2E8F0;
+  --as-input:             #E2E8F0;
+  --as-ring:              #4F46E5;
+
+  --state-success: #10B981;
+  --state-warning: #F59E0B;
+  --state-error:   #EF4444;
+  --state-info:    #0EA5E9;
+
+  --as-radius-sm: 4px;
+  --as-radius-md: 8px;
+  --as-radius-lg: 12px;
+  --as-radius-full: 9999px;
+
+  --as-font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", "Hiragino Sans GB", "Noto Sans CJK SC", system-ui, sans-serif;
+  --as-font-mono: "JetBrains Mono", "Fira Code", "SFMono-Regular", Consolas,
+    "Liberation Mono", Menlo, monospace;
+
+  --as-shadow-sm:  0 1px 2px 0 rgba(15, 23, 42, 0.04);
+  --as-shadow-md:  0 4px 12px -2px rgba(15, 23, 42, 0.08), 0 2px 4px -1px rgba(15, 23, 42, 0.04);
+  --as-shadow-lg:  0 12px 32px -4px rgba(15, 23, 42, 0.16), 0 4px 8px -2px rgba(15, 23, 42, 0.08);
+}
+
+.dark {
+  --as-background:        #0B1120;
+  --as-foreground:        #E2E8F0;
+  --as-card:              #1E293B;
+  --as-card-foreground:   #E2E8F0;
+  --as-popover:           #1E293B;
+  --as-popover-foreground:#F1F5F9;
+  --as-muted:             #334155;
+  --as-muted-foreground:  #94A3B8;
+  --as-border:            #334155;
+  --as-input:             #334155;
+  --as-ring:              #6366F1;
+
+  --as-primary: #6366F1;
+  --as-primary-foreground: #FFFFFF;
+  --as-primary-50:  #1E1B4B;
+  --as-primary-100: #312E81;
+  --as-primary-200: #3730A3;
+
+  --state-success: #34D399;
+  --state-warning: #FBBF24;
+  --state-error:   #F87171;
+  --state-info:    #38BDF8;
+
+  --as-shadow-sm:  0 1px 2px 0 rgba(0, 0, 0, 0.30);
+  --as-shadow-md:  0 4px 12px -2px rgba(0, 0, 0, 0.45), 0 2px 4px -1px rgba(0, 0, 0, 0.30);
+  --as-shadow-lg:  0 12px 32px -4px rgba(0, 0, 0, 0.60), 0 4px 8px -2px rgba(0, 0, 0, 0.40);
+}
+
+@theme inline {
+  --color-background: var(--as-background);
+  --color-foreground: var(--as-foreground);
+  --color-card: var(--as-card);
+  --color-card-foreground: var(--as-card-foreground);
+  --color-popover: var(--as-popover);
+  --color-popover-foreground: var(--as-popover-foreground);
+  --color-primary: var(--as-primary);
+  --color-primary-foreground: var(--as-primary-foreground);
+  --color-muted: var(--as-muted);
+  --color-muted-foreground: var(--as-muted-foreground);
+  --color-border: var(--as-border);
+  --color-input: var(--as-input);
+  --color-ring: var(--as-ring);
+  --radius-sm: var(--as-radius-sm);
+  --radius-md: var(--as-radius-md);
+  --radius-lg: var(--as-radius-lg);
+}
+
+html { font-family: var(--as-font-sans); }
+body { font-feature-settings: "cv11", "ss01"; -webkit-font-smoothing: antialiased; }
+code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
+.tnum { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+.scroll-thin { scrollbar-width: thin; }
+.scroll-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+.scroll-thin::-webkit-scrollbar-thumb { background: var(--as-border); border-radius: 8px; }
+.scroll-thin::-webkit-scrollbar-track { background: transparent; }
+.zebra tbody tr:nth-child(odd) { background: color-mix(in srgb, var(--as-muted) 45%, transparent); }
+.zebra tbody tr:hover { background: color-mix(in srgb, var(--as-primary) 8%, var(--as-card)); }
+    </style>
+
+    <!-- 本地 vendor（离线可用；W2 修复：原型最终页丢失 chart.js 导致首屏崩溃） -->
+    <script src="/vendor/tailwind.browser.js"></script>
+    <script src="/vendor/lucide.min.js"></script>
+    <script src="/vendor/chart.umd.js"></script>
+
+    <style type="text/tailwindcss">
+  @theme inline {
+    --color-background: var(--as-background);
+    --color-foreground: var(--as-foreground);
+    --color-card: var(--as-card);
+    --color-card-foreground: var(--as-card-foreground);
+    --color-popover: var(--as-popover);
+    --color-popover-foreground: var(--as-popover-foreground);
+    --color-primary: var(--as-primary);
+    --color-primary-foreground: var(--as-primary-foreground);
+    --color-muted: var(--as-muted);
+    --color-muted-foreground: var(--as-muted-foreground);
+    --color-border: var(--as-border);
+    --color-input: var(--as-input);
+    --color-ring: var(--as-ring);
+    --radius-sm: var(--as-radius-sm);
+    --radius-md: var(--as-radius-md);
+    --radius-lg: var(--as-radius-lg);
+  }
+  @layer base {
+    body { background: var(--as-background); color: var(--as-foreground); }
+    td, th { @apply break-words; word-break: break-all; word-break: auto-phrase; }
+    th { @apply whitespace-nowrap; }
+  }
+    </style>
+</head>
+<body class="min-h-screen font-sans antialiased">
+
+<!-- ============ MAIN CONTENT ============ -->
+<div id="app" class="min-h-screen flex flex-col">
+  <!-- Top bar -->
+  <header class="sticky top-0 z-30 border-b border-border bg-card/80 backdrop-blur supports-[backdrop-filter]:bg-card/60">
+    <div class="flex items-center gap-3 px-5 py-3">
+      <div class="flex items-center gap-2.5">
+        <div class="grid h-9 w-9 place-items-center rounded-lg bg-primary text-primary-foreground shadow-sm">
+          <i data-lucide="history" class="h-5 w-5"></i>
+        </div>
+        <div class="leading-tight">
+          <h1 class="text-[15px] font-semibold text-foreground">Agent 会话历史看板</h1>
+          <p class="text-[11px] text-muted-foreground" id="srcLabel">正在连接本地数据库…</p>
+        </div>
+      </div>
+      <div class="ml-auto flex items-center gap-2">
+        <button id="exportBtn" class="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted transition-colors">
+          <i data-lucide="download" class="h-3.5 w-3.5"></i>导出
+        </button>
+        <button id="themeBtn" class="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted transition-colors">
+          <i data-lucide="sun-moon" class="h-3.5 w-3.5" id="themeIcon"></i><span id="themeLabel">深色</span>
+        </button>
+      </div>
+    </div>
+    <!-- Filter bar -->
+    <div class="flex flex-wrap items-center gap-2 border-t border-border bg-card/60 px-5 py-2.5">
+      <div class="relative" id="agentFilterWrap">
+        <button id="agentFilterBtn" class="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs text-foreground hover:bg-muted">
+          <i data-lucide="bot" class="h-3.5 w-3.5 text-primary"></i>Agent
+          <span class="ml-1 rounded bg-primary/10 px-1.5 text-[10px] font-semibold text-primary" id="agentCount">全部</span>
+          <i data-lucide="chevron-down" class="h-3 w-3 opacity-60"></i>
+        </button>
+        <div id="agentFilterPanel" class="absolute left-0 top-full z-40 mt-1 hidden w-60 rounded-lg border border-border bg-popover p-2 shadow-lg">
+          <div class="mb-1.5 flex items-center justify-between px-1">
+            <span class="text-[11px] font-medium text-muted-foreground">选择 Agent 来源</span>
+            <button class="text-[11px] text-primary hover:underline" data-act="agent-all">全选</button>
+          </div>
+          <div id="agentOptions" class="max-h-64 space-y-0.5 overflow-y-auto scroll-thin"></div>
+        </div>
+      </div>
+      <div class="relative" id="wsFilterWrap">
+        <button id="wsFilterBtn" class="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs text-foreground hover:bg-muted">
+          <i data-lucide="folder" class="h-3.5 w-3.5 text-primary"></i>工作空间
+          <span class="ml-1 rounded bg-primary/10 px-1.5 text-[10px] font-semibold text-primary" id="wsCount">全部</span>
+          <i data-lucide="chevron-down" class="h-3 w-3 opacity-60"></i>
+        </button>
+        <div id="wsFilterPanel" class="absolute left-0 top-full z-40 mt-1 hidden w-72 rounded-lg border border-border bg-popover p-2 shadow-lg">
+          <div class="mb-1.5 flex items-center justify-between px-1">
+            <span class="text-[11px] font-medium text-muted-foreground">选择工作目录</span>
+            <button class="text-[11px] text-primary hover:underline" data-act="ws-all">全选</button>
+          </div>
+          <div id="wsOptions" class="max-h-64 space-y-0.5 overflow-y-auto scroll-thin"></div>
+        </div>
+      </div>
+      <div class="relative flex-1 min-w-[200px]">
+        <i data-lucide="search" class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"></i>
+        <input id="kwInput" type="text" placeholder="关键字搜索（标题 / 事件正文，走后端检索）" class="w-full rounded-md border border-input bg-card py-1.5 pl-8 pr-8 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring">
+        <button id="kwClear" class="absolute right-2 top-1/2 hidden -translate-y-1/2 text-muted-foreground hover:text-foreground"><i data-lucide="x" class="h-3.5 w-3.5"></i></button>
+      </div>
+      <select id="timeRange" class="rounded-md border border-border bg-card px-2.5 py-1.5 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring">
+        <option value="all">全部时间</option>
+        <option value="1">今天</option>
+        <option value="7">近 7 天</option>
+        <option value="30">近 30 天</option>
+      </select>
+      <button id="resetBtn" class="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors">
+        <i data-lucide="rotate-ccw" class="h-3.5 w-3.5"></i>重置
+      </button>
+      <span class="ml-auto text-[11px] text-muted-foreground tnum" id="resultCount">—</span>
+    </div>
+  </header>
+
+  <!-- Stat cards -->
+  <section class="grid grid-cols-2 gap-3 px-5 py-4 lg:grid-cols-5">
+    <div class="rounded-xl border border-border bg-card p-3.5 shadow-sm">
+      <div class="flex items-center justify-between"><span class="text-[11px] font-medium text-muted-foreground">会话总数</span><i data-lucide="messages-square" class="h-4 w-4 text-primary"></i></div>
+      <div class="mt-1 text-2xl font-semibold tnum text-foreground" id="statConv">—</div>
+    </div>
+    <div class="rounded-xl border border-border bg-card p-3.5 shadow-sm">
+      <div class="flex items-center justify-between"><span class="text-[11px] font-medium text-muted-foreground">事件总数</span><i data-lucide="list-tree" class="h-4 w-4 text-primary"></i></div>
+      <div class="mt-1 text-2xl font-semibold tnum text-foreground" id="statEvt">—</div>
+    </div>
+    <div class="rounded-xl border border-border bg-card p-3.5 shadow-sm">
+      <div class="flex items-center justify-between"><span class="text-[11px] font-medium text-muted-foreground">工具调用数</span><i data-lucide="wrench" class="h-4 w-4 text-primary"></i></div>
+      <div class="mt-1 text-2xl font-semibold tnum text-foreground" id="statTool">—</div>
+    </div>
+    <div class="rounded-xl border border-border bg-card p-3.5 shadow-sm">
+      <div class="flex items-center justify-between"><span class="text-[11px] font-medium text-muted-foreground">涉及模型</span><i data-lucide="cpu" class="h-4 w-4 text-primary"></i></div>
+      <div class="mt-1 text-2xl font-semibold tnum text-foreground" id="statModel">—</div>
+    </div>
+    <div class="rounded-xl border border-border bg-card p-3.5 shadow-sm">
+      <div class="flex items-center justify-between"><span class="text-[11px] font-medium text-muted-foreground">活跃工作区</span><i data-lucide="folder-tree" class="h-4 w-4 text-primary"></i></div>
+      <div class="mt-1 text-2xl font-semibold tnum text-foreground" id="statWs">—</div>
+    </div>
+  </section>
+
+  <!-- Charts -->
+  <section class="grid grid-cols-1 gap-3 px-5 pb-4 lg:grid-cols-3">
+    <div class="rounded-xl border border-border bg-card p-3.5 shadow-sm lg:col-span-2">
+      <div class="mb-2 flex items-center gap-2"><i data-lucide="trending-up" class="h-4 w-4 text-primary"></i><span class="text-xs font-medium text-foreground">每日会话创建趋势</span></div>
+      <div class="h-48"><canvas id="trendChart"></canvas></div>
+    </div>
+    <div class="rounded-xl border border-border bg-card p-3.5 shadow-sm">
+      <div class="mb-2 flex items-center gap-2"><i data-lucide="pie-chart" class="h-4 w-4 text-primary"></i><span class="text-xs font-medium text-foreground">各 Agent 会话占比</span></div>
+      <div class="h-48"><canvas id="pieChart"></canvas></div>
+    </div>
+  </section>
+
+  <!-- Table -->
+  <section class="flex-1 px-5 pb-8">
+    <div class="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+      <div class="flex items-center gap-2 border-b border-border px-4 py-2.5">
+        <i data-lucide="table" class="h-4 w-4 text-primary"></i>
+        <span class="text-xs font-medium text-foreground">会话列表</span>
+        <span class="text-[11px] text-muted-foreground" id="tableHint"></span>
+        <label class="ml-auto flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <input type="checkbox" id="selectPage" class="h-3.5 w-3.5 rounded border-border text-primary focus:ring-ring">本页全选
+        </label>
+        <button id="batchDelBtn" class="hidden inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-error hover:bg-error-soft">
+          <i data-lucide="trash-2" class="h-3 w-3"></i>批量删除
+        </button>
+      </div>
+      <div class="overflow-x-auto scroll-thin">
+        <table class="zebra w-full text-left text-xs">
+          <thead class="border-b border-border bg-muted/50 text-[11px] uppercase tracking-wide text-muted-foreground">
+            <tr>
+              <th class="w-8 px-3 py-2"><input type="checkbox" id="selectAll" class="h-3.5 w-3.5 rounded border-border text-primary focus:ring-ring"></th>
+              <th class="cursor-pointer select-none px-3 py-2 hover:text-foreground" data-sort="source">Agent</th>
+              <th class="cursor-pointer select-none px-3 py-2 hover:text-foreground" data-sort="title">会话标题</th>
+              <th class="cursor-pointer select-none px-3 py-2 hover:text-foreground" data-sort="model">模型</th>
+              <th class="px-3 py-2">工作目录</th>
+              <th class="cursor-pointer select-none px-3 py-2 text-right hover:text-foreground" data-sort="eventCount">事件数</th>
+              <th class="px-3 py-2">角色分布</th>
+              <th class="cursor-pointer select-none px-3 py-2 hover:text-foreground" data-sort="createdAt">创建时间</th>
+              <th class="cursor-pointer select-none px-3 py-2 hover:text-foreground" data-sort="updatedAt">更新时间</th>
+              <th class="px-3 py-2 text-right">操作</th>
+            </tr>
+          </thead>
+          <tbody id="convTbody"></tbody>
+        </table>
+      </div>
+      <div id="emptyState" class="hidden flex-col items-center justify-center gap-2 py-16 text-center">
+        <i data-lucide="inbox" class="h-10 w-10 text-muted-foreground"></i>
+        <p class="text-sm text-muted-foreground" id="emptyMsg">无匹配结果，试试调整筛选条件</p>
+      </div>
+      <div class="flex items-center justify-between border-t border-border px-4 py-2.5 text-[11px] text-muted-foreground">
+        <span id="pageInfo">—</span>
+        <div class="flex items-center gap-1">
+          <button id="prevPage" class="nav-btn inline-flex h-7 w-7 items-center justify-center rounded-md border border-border hover:bg-muted disabled:opacity-40"><i data-lucide="chevron-left" class="h-3.5 w-3.5"></i></button>
+          <span id="pageNav" class="tnum px-1">1 / 1</span>
+          <button id="nextPage" class="nav-btn inline-flex h-7 w-7 items-center justify-center rounded-md border border-border hover:bg-muted disabled:opacity-40"><i data-lucide="chevron-right" class="h-3.5 w-3.5"></i></button>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- Detail Drawer -->
+<aside id="drawer" class="fixed inset-y-0 right-0 z-40 hidden w-full max-w-[60%] flex-col border-l border-border bg-card shadow-lg">
+  <div class="flex items-start gap-3 border-b border-border px-5 py-3">
+    <div class="min-w-0 flex-1">
+      <div class="flex items-center gap-2">
+        <span id="drawerSrc" class="rounded px-1.5 py-0.5 text-[10px] font-semibold text-white"></span>
+        <h2 id="drawerTitle" class="truncate text-sm font-semibold text-foreground"></h2>
+      </div>
+      <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+        <span id="drawerModel" class="inline-flex items-center gap-1"><i data-lucide="cpu" class="h-3 w-3"></i>—</span>
+        <span id="drawerCwd" class="inline-flex items-center gap-1 max-w-[60%] truncate" title=""><i data-lucide="folder" class="h-3 w-3"></i>—</span>
+        <span id="drawerEvtCount" class="tnum"></span>
+      </div>
+    </div>
+    <button id="drawerClose" class="inline-flex h-7 w-7 items-center justify-center rounded-md hover:bg-muted"><i data-lucide="x" class="h-4 w-4"></i></button>
+  </div>
+  <div class="flex flex-wrap items-center gap-1 border-b border-border px-5 py-2" id="roleFilterBar"></div>
+  <div id="drawerBody" class="flex-1 overflow-y-auto scroll-thin px-5 py-4 space-y-3"></div>
+</aside>
+<div id="drawerScrim" class="fixed inset-0 z-30 hidden bg-black/30"></div>
+
+<!-- Modal -->
+<div id="modalRoot" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/40 p-4">
+  <div class="w-full max-w-md rounded-xl border border-border bg-popover p-5 shadow-lg">
+    <div class="flex items-start gap-3">
+      <div id="modalIcon" class="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-error-soft text-error"><i data-lucide="alert-triangle" class="h-5 w-5"></i></div>
+      <div class="min-w-0 flex-1">
+        <h3 id="modalTitle" class="text-sm font-semibold text-foreground">确认操作</h3>
+        <p id="modalMsg" class="mt-1 text-xs text-muted-foreground"></p>
+        <div id="modalBody" class="mt-3"></div>
+      </div>
+    </div>
+    <div class="mt-5 flex justify-end gap-2">
+      <button id="modalCancel" class="rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted">取消</button>
+      <button id="modalConfirm" class="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90">确认</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toast" class="fixed bottom-5 left-1/2 z-50 hidden -translate-x-1/2 items-center gap-2 rounded-lg bg-foreground px-3.5 py-2 text-xs text-background shadow-lg">
+  <i data-lucide="check-circle-2" class="h-4 w-4"></i><span id="toastMsg"></span>
+</div>
+
+<!-- ============ PAGE STYLE ============ -->
+<style>
+  .chip { display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:9999px; font-size:10px; font-weight:600; line-height:1.4; }
+  .ev-bubble { border-radius:12px; padding:10px 12px; font-size:12.5px; line-height:1.6; word-break:break-word; }
+  .ev-user { background: color-mix(in srgb, var(--state-info) 14%, transparent); border-left:3px solid var(--state-info); color:var(--as-foreground); }
+  .ev-assistant { background: color-mix(in srgb, var(--as-muted) 70%, transparent); border-left:3px solid var(--as-border); color:var(--as-foreground); }
+  .ev-reasoning { background: color-mix(in srgb, var(--as-primary) 8%, transparent); border-left:3px solid var(--as-primary); color:var(--as-muted-foreground); font-style:italic; }
+  .ev-meta { color:var(--as-muted-foreground); font-size:11px; }
+  .ev-tool-card { border:1px solid var(--as-border); border-radius:8px; overflow:hidden; }
+  .ev-shell { background:#0b0f17; color:#34d399; border-radius:8px; font-family:var(--as-font-mono); }
+  .diff-add { background: color-mix(in srgb, var(--state-success) 16%, transparent); }
+  .diff-del { background: color-mix(in srgb, var(--state-error) 16%, transparent); }
+  pre.codeblk { background: color-mix(in srgb, var(--as-foreground) 6%, var(--as-card)); border:1px solid var(--as-border); border-radius:6px; padding:8px 10px; overflow-x:auto; font-family:var(--as-font-mono); font-size:11.5px; line-height:1.5; }
+  code.inl { font-family:var(--as-font-mono); font-size:11.5px; background: color-mix(in srgb, var(--as-foreground) 8%, transparent); padding:1px 4px; border-radius:4px; }
+  .row-selected { background: color-mix(in srgb, var(--as-primary) 10%, var(--as-card)) !important; }
+  .sortable-asc::after { content:" ▲"; opacity:.6; }
+  .sortable-desc::after { content:" ▼"; opacity:.6; }
+  .nav-btn:disabled { cursor:not-allowed; }
+  .text-error{color:var(--state-error);} .bg-error-soft{background-color:color-mix(in srgb,var(--state-error) 12%,transparent);} .bg-error-solid{background-color:var(--state-error);color:#fff;}
+  .text-success{color:var(--state-success);} .bg-success-soft{background-color:color-mix(in srgb,var(--state-success) 12%,transparent);}
+  .text-warning{color:var(--state-warning);} .bg-warning-soft{background-color:color-mix(in srgb,var(--state-warning) 14%,transparent);} .border-warning-soft{border-color:color-mix(in srgb,var(--state-warning) 35%,transparent);}
+  .text-info{color:var(--state-info);} .bg-info-soft{background-color:color-mix(in srgb,var(--state-info) 12%,transparent);}
+  .ev-gap { text-align:center; font-size:10.5px; color:var(--as-muted-foreground); display:flex; align-items:center; gap:8px; }
+  .ev-gap::before,.ev-gap::after { content:""; flex:1; height:1px; background:var(--as-border); }
+</style>
+
+<!-- ============ LOGIC（v2: 数据全部来自本机 API，事件按需加载）============ -->
+<script>
+(function(){
+  "use strict";
+  const $ = (s,r=document)=>r.querySelector(s);
+  const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
+  const el = (t,c,html)=>{ const e=document.createElement(t); if(c) e.className=c; if(html!=null) e.innerHTML=html; return e; };
+  const fmtNum = n=> (n||0).toLocaleString('en-US');
+  const esc = s=> (s==null?'':String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'));
+  const fmtTime = ts=>{ if(!ts) return '—'; const d=new Date(ts*1000); const p=n=>String(n).padStart(2,'0'); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
+  const relTime = ts=>{ if(!ts) return '—'; const diff=Date.now()/1000-ts; if(diff<60)return Math.max(1,Math.round(diff))+'秒前'; if(diff<3600)return Math.round(diff/60)+'分钟前'; if(diff<86400)return Math.round(diff/3600)+'小时前'; if(diff<2592000)return Math.round(diff/86400)+'天前'; return fmtTime(ts).slice(0,10); };
+  function reicons(){ if(window.lucide) lucide.createIcons(); }
+
+  // ---- state ----
+  let D=null;
+  let CONVS=[], filtered=[];
+  const F = { sources:new Set(), cwds:new Set(), kw:'', time:'all', models:new Set() };
+  let sortKey='updatedAt', sortDir=-1;
+  let page=1, pageSize=20;
+  let activeRoles=new Set();
+  let selectedIdxs=new Set();
+  let trendChart=null, pieChart=null;
+  let curConv=null, curEvts=[];       // 抽屉当前会话 + 按需加载的事件流
+  let reqSeq=0;                        // 筛选请求竞态保护
+
+  const ROLE_META = {
+    user:{label:'用户',ic:'user'}, assistant:{label:'助手',ic:'sparkles'}, tool:{label:'工具',ic:'wrench'},
+    reasoning:{label:'推理',ic:'brain-circuit'}, patch:{label:'补丁',ic:'file-diff'},
+    shell:{label:'终端',ic:'terminal'}, meta:{label:'元信息',ic:'info'}
+  };
+  const SRC_COLOR = ()=>D.sourceColors||{};
+  const ROLE_COLOR = ()=>D.roleColors||{};
+  const srcTag = s=>{ const c=(SRC_COLOR())[s]||'#64748B'; return `<span class="chip" style="background:${c}1f;color:${c}">${esc(s)}</span>`; };
+
+  // ---- bootstrap from API ----
+  async function boot(){
+    try{
+      const r = await fetch('/api/bootstrap');
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      D = await r.json();
+    }catch(e){
+      $('#srcLabel').textContent='数据加载失败：'+e.message+'（请确认 serve 正在运行）';
+      $('#emptyMsg').textContent='无法连接本机 API';
+      $('#emptyState').classList.remove('hidden'); $('#emptyState').classList.add('flex');
+      return false;
+    }
+    CONVS = D.conversations.slice();
+    filtered = CONVS.slice();
+    $('#srcLabel').textContent = `${D.meta.dbPath || ''}`;
+    document.title = `Agent 会话看板 (${D.meta.totalConversations})`;
+    buildFilters();
+    updateStatsHead(D.meta);
+    bindStaticEvents();
+    renderStats(); renderCharts(); renderTable();
+    reicons();
+    return true;
+  }
+
+  function updateStatsHead(meta){
+    $('#srcLabel').textContent = `${fmtNum(meta.totalConversations)} 会话 · ${fmtNum(meta.totalEvents)} 事件 · 来源 ${D.stats.sources.length} 个 Agent`;
+    $('#statConv').textContent = fmtNum(meta.totalConversations);
+    $('#statEvt').textContent  = fmtNum(meta.totalEvents);
+    $('#statTool').textContent = fmtNum(meta.toolCalls);
+    $('#statModel').textContent= fmtNum(meta.modelsCount);
+    $('#statWs').textContent   = fmtNum(meta.workspacesCount);
+  }
+
+  // ---- filter options ----
+  function buildFilters(){
+    const ao=$('#agentOptions'); ao.innerHTML='';
+    D.stats.sources.forEach(s=>{
+      ao.appendChild(el('label','flex items-center gap-2 rounded px-2 py-1 hover:bg-muted cursor-pointer',
+        `<input type="checkbox" value="${esc(s.source)}" class="src-chk h-3.5 w-3.5 rounded border-border text-primary" checked><span class="chip" style="background:${s.color}1f;color:${s.color}">${esc(s.source)}</span><span class="ml-auto tnum text-[11px] text-muted-foreground">${s.count}</span>`));
+    });
+    const wo=$('#wsOptions'); wo.innerHTML='';
+    D.stats.cwds.forEach(w=>{
+      wo.appendChild(el('label','flex items-center gap-2 rounded px-2 py-1 hover:bg-muted cursor-pointer',
+        `<input type="checkbox" value="${esc(w)}" class="ws-chk h-3.5 w-3.5 rounded border-border text-primary" checked><span class="truncate text-[11px] text-foreground" title="${esc(w)}">${esc(w)}</span>`));
+    });
+  }
+
+  // ---- dropdown toggles ----
+  function togglePanel(btn,panel){ const open=!panel.classList.contains('hidden'); $$('.absolute').forEach(p=>{if(p.id.endsWith('Panel'))p.classList.add('hidden')}); if(!open){panel.classList.remove('hidden');} }
+  $('#agentFilterBtn').onclick=e=>{e.stopPropagation();togglePanel(e.currentTarget,$('#agentFilterPanel'));};
+  $('#wsFilterBtn').onclick=e=>{e.stopPropagation();togglePanel(e.currentTarget,$('#wsFilterPanel'));};
+  document.addEventListener('click',e=>{ if(!e.target.closest('#agentFilterWrap')) $('#agentFilterPanel').classList.add('hidden'); if(!e.target.closest('#wsFilterWrap')) $('#wsFilterPanel').classList.add('hidden'); });
+
+  // ---- filters → server query ----
+  async function loadFiltered(){
+    const mySeq=++reqSeq;
+    const allSrc=D.stats.sources.map(s=>s.source);
+    const incSrc=allSrc.filter(s=>!F.sources.has(s));
+    const allWs=D.stats.cwds;
+    const incWs=allWs.filter(w=>!F.cwds.has(w));
+    const params=new URLSearchParams();
+    params.set('sources', incSrc.join(','));
+    if(incWs.length && incWs.length<allWs.length) params.set('workspaces', incWs.join(','));
+    if(F.time!=='all') params.set('days', F.time);
+    if(F.kw) params.set('q', F.kw);
+    params.set('all','1');
+    try{
+      const r = await fetch('/api/conversations?'+params.toString());
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      const d = await r.json();
+      if(mySeq!==reqSeq) return;               // 过期响应丢弃
+      filtered = d.items;
+      page = 1;
+      renderStats(); renderCharts(); renderTable();
+    }catch(e){
+      if(mySeq===reqSeq) toast('查询失败：'+e.message);
+    }
+  }
+  function applyFilters(){ loadFiltered(); }
+
+  function updateFilterChips(){
+    $('#agentCount').textContent = F.sources.size?`-${F.sources.size}`:'全部';
+    $('#wsCount').textContent = F.cwds.size?`-${F.cwds.size}`:'全部';
+  }
+
+  function bindStaticEvents(){
+    $('#agentOptions').addEventListener('change',e=>{ if(e.target.classList.contains('src-chk')){ const v=e.target.value; if(e.target.checked)F.sources.delete(v); else F.sources.add(v); updateFilterChips(); applyFilters(); } });
+    $('#wsOptions').addEventListener('change',e=>{ if(e.target.classList.contains('ws-chk')){ const v=e.target.value; if(e.target.checked)F.cwds.delete(v); else F.cwds.add(v); updateFilterChips(); applyFilters(); } });
+    $('[data-act="agent-all"]').onclick=()=>{ $$('.src-chk').forEach(c=>{c.checked=true;F.sources.delete(c.value);});updateFilterChips();applyFilters(); };
+    $('[data-act="ws-all"]').onclick=()=>{ $$('.ws-chk').forEach(c=>{c.checked=true;F.cwds.delete(c.value);});updateFilterChips();applyFilters(); };
+    let kwT;
+    $('#kwInput').addEventListener('input',e=>{ clearTimeout(kwT); const v=e.target.value; $('#kwClear').classList.toggle('hidden',!v); kwT=setTimeout(()=>{F.kw=v.trim();applyFilters();},350); });
+    $('#kwClear').onclick=()=>{ $('#kwInput').value=''; F.kw=''; $('#kwClear').classList.add('hidden'); applyFilters(); };
+    $('#timeRange').onchange=e=>{F.time=e.target.value;applyFilters();};
+    $('#resetBtn').onclick=()=>{ F.sources.clear();F.cwds.clear();F.kw='';F.time='all';F.models.clear(); $('#kwInput').value='';$('#kwClear').classList.add('hidden');$('#timeRange').value='all'; $$('.src-chk').forEach(c=>c.checked=true); $$('.ws-chk').forEach(c=>c.checked=true); updateFilterChips(); applyFilters(); toast('已重置筛选条件'); };
+    $$('[data-sort]').forEach(th=>th.onclick=()=>{ const k=th.dataset.sort; if(sortKey===k)sortDir*=-1; else{sortKey=k;sortDir=k==='title'||k==='source'||k==='model'?1:-1;} renderTable(); });
+    $('#selectAll').onchange=e=>{ $$('.row-chk').forEach(c=>{c.checked=e.target.checked; const i=+c.dataset.idx; e.target.checked?selectedIdxs.add(i):selectedIdxs.delete(i);}); updateBatchBtn(); };
+    $('#selectPage').onchange=e=>{ $('#selectAll').checked=e.target.checked; $('#selectAll').dispatchEvent(new Event('change')); };
+    $('#batchDelBtn').onclick=()=>openDelete([...selectedIdxs]);
+    $('#prevPage').onclick=()=>{if(page>1){page--;renderTable();}};
+    $('#nextPage').onclick=()=>{if(page*pageSize<filtered.length){page++;renderTable();}};
+  }
+
+  // ---- stats over in-memory filtered set ----
+  function renderStats(){
+    const evSum=filtered.reduce((a,c)=>a+(c.eventCount||0),0);
+    let toolCnt=0;
+    filtered.forEach(c=>{ const roles=c.roles||[]; toolCnt+=roles.filter(x=>x==='tool').length; });
+    const models=new Set(filtered.map(c=>c.model).filter(Boolean));
+    const wss=new Set(filtered.map(c=>c.workspace).filter(Boolean));
+    $('#statConv').textContent=fmtNum(filtered.length);
+    $('#statEvt').textContent=fmtNum(evSum);
+    $('#statTool').textContent=fmtNum(toolCnt);
+    $('#statModel').textContent=fmtNum(models.size);
+    $('#statWs').textContent=fmtNum(wss.size);
+    $('#resultCount').textContent=`匹配 ${fmtNum(filtered.length)} 条会话`;
+  }
+
+  // ---- charts ----
+  function renderCharts(){
+    const trend={};
+    filtered.forEach(c=>{ if(!c.createdAt)return; const d=new Date(c.createdAt*1000); const k=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; trend[k]=(trend[k]||0)+1; });
+    const last14=Object.entries(trend).sort((a,b)=>a[0].localeCompare(b[0])).slice(-14);
+    const labels=last14.map(x=>x[0].slice(5)); const data=last14.map(x=>x[1]);
+    const pieMap={}; filtered.forEach(c=>{pieMap[c.source]=(pieMap[c.source]||0)+1;});
+    const pieLabels=Object.keys(pieMap); const pieData=Object.values(pieMap); const pieColors=pieLabels.map(s=>(SRC_COLOR())[s]||'#64748B');
+    const grid='rgba(148,163,184,0.18)'; const tick='#94A3B8';
+    if(trendChart){trendChart.data.labels=labels;trendChart.data.datasets[0].data=data;trendChart.update();}
+    else{ trendChart=new Chart($('#trendChart'),{type:'line',data:{labels,datasets:[{data,borderColor:'#4F46E5',backgroundColor:'rgba(79,70,229,0.12)',fill:true,tension:0.35,pointRadius:3,pointBackgroundColor:'#4F46E5',borderWidth:2}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{grid:{color:grid},ticks:{color:tick,maxRotation:0,autoSkipPadding:12}},y:{grid:{color:grid},ticks:{color:tick,precision:0},beginAtZero:true}}}}); }
+    if(pieChart){pieChart.data.labels=pieLabels;pieChart.data.datasets[0].data=pieData;pieChart.data.datasets[0].backgroundColor=pieColors;pieChart.update();}
+    else{ pieChart=new Chart($('#pieChart'),{type:'doughnut',data:{labels:pieLabels,datasets:[{data:pieData,backgroundColor:pieColors,borderWidth:2,borderColor:getComputedStyle(document.documentElement).getPropertyValue('--as-card')}]},options:{responsive:true,maintainAspectRatio:false,cutout:'58%',plugins:{legend:{position:'right',labels:{boxWidth:10,font:{size:10},color:tick}}}}}); }
+  }
+
+  // ---- table ----
+  function sortFiltered(){
+    const k=sortKey, dir=sortDir;
+    filtered.sort((a,b)=>{
+      let va=a[k], vb=b[k];
+      if(k==='title'||k==='source'||k==='model'){ va=(va||'').toString(); vb=(vb||'').toString(); return va<vb?-dir:va>vb?dir:0; }
+      va=va||0; vb=vb||0; return (va-vb)*dir;
+    });
+  }
+  function byIdx(idx){ return CONVS.find(x=>x.idx===idx); }
+  function renderTable(){
+    sortFiltered();
+    const tb=$('#convTbody'); tb.innerHTML='';
+    const totalPages=Math.max(1,Math.ceil(filtered.length/pageSize));
+    if(page>totalPages)page=totalPages;
+    const start=(page-1)*pageSize; const rows=filtered.slice(start,start+pageSize);
+    $('#emptyState').classList.toggle('hidden', filtered.length>0);
+    $('#emptyState').classList.toggle('flex', filtered.length===0);
+    rows.forEach(c=>{
+      const tr=el('tr','cursor-pointer border-b border-border/60 hover:bg-muted/40');
+      tr.dataset.idx=c.idx;
+      tr.innerHTML=`
+        <td class="px-3 py-2.5"><input type="checkbox" class="row-chk h-3.5 w-3.5 rounded border-border text-primary" data-idx="${c.idx}"></td>
+        <td class="px-3 py-2.5">${srcTag(c.source)}</td>
+        <td class="px-3 py-2.5 max-w-[280px]"><div class="truncate font-medium text-foreground" title="${esc(c.title)}">${esc(c.title)}</div></td>
+        <td class="px-3 py-2.5">${c.model?`<span class="chip" style="background:var(--as-muted);color:var(--as-muted-foreground)">${esc(c.model)}</span>`:'—'}</td>
+        <td class="px-3 py-2.5 max-w-[180px]"><div class="truncate text-muted-foreground" title="${esc(c.cwd||'')}">${esc(c.cwd||'—')}</div></td>
+        <td class="px-3 py-2.5 text-right tnum font-medium text-foreground">${fmtNum(c.eventCount)}</td>
+        <td class="px-3 py-2.5">${rolesMini(c.roles)}</td>
+        <td class="px-3 py-2.5 text-muted-foreground whitespace-nowrap">${fmtTime(c.createdAt)}</td>
+        <td class="px-3 py-2.5 text-muted-foreground whitespace-nowrap" title="${fmtTime(c.updatedAt)}">${relTime(c.updatedAt)}</td>
+        <td class="px-3 py-2.5 text-right whitespace-nowrap">
+          <button class="edit-btn inline-grid h-6 w-6 place-items-center rounded hover:bg-muted" data-idx="${c.idx}" title="编辑"><i data-lucide="pencil" class="h-3.5 w-3.5"></i></button>
+          <button class="del-btn inline-grid h-6 w-6 place-items-center rounded hover:bg-error-soft text-error" data-idx="${c.idx}" title="删除"><i data-lucide="trash-2" class="h-3.5 w-3.5"></i></button>
+        </td>`;
+      tr.onclick=e=>{ if(e.target.closest('input,.edit-btn,.del-btn'))return; openDrawer(byIdx(c.idx)); };
+      tb.appendChild(tr);
+    });
+    $$('.edit-btn').forEach(b=>b.onclick=e=>{e.stopPropagation();openEdit(+b.dataset.idx);});
+    $$('.del-btn').forEach(b=>b.onclick=e=>{e.stopPropagation();openDelete([+b.dataset.idx]);});
+    $$('.row-chk').forEach(c=>c.onchange=()=>{ const i=+c.dataset.idx; c.checked?selectedIdxs.add(i):selectedIdxs.delete(i); updateBatchBtn(); });
+    $('#pageInfo').textContent=`第 ${start+1}–${Math.min(start+pageSize,filtered.length)} 条 / 共 ${fmtNum(filtered.length)} 条`;
+    $('#pageNav').textContent=`${page} / ${totalPages}`;
+    $('#prevPage').disabled=page<=1; $('#nextPage').disabled=page>=totalPages;
+    $('#tableHint').textContent=`· ${filtered.length} 条`;
+    $$('[data-sort]').forEach(th=>{ th.classList.remove('sortable-asc','sortable-desc'); if(th.dataset.sort===sortKey) th.classList.add(sortDir>0?'sortable-asc':'sortable-desc'); });
+    reicons();
+  }
+  function rolesMini(roles){
+    const cnt={}; (roles||[]).forEach(r=>cnt[r]=(cnt[r]||0)+1);
+    return Object.entries(cnt).map(([r,n])=>{ const c=(ROLE_COLOR())[r]||'#64748B'; return `<span class="chip" style="background:${c}1f;color:${c}" title="${esc(ROLE_META[r]?.label||r)}">${esc(ROLE_META[r]?.label||r)} ${n}</span>`; }).join(' ');
+  }
+
+  // ---- drawer（事件按需加载）----
+  async function openDrawer(c){
+    if(!c) return;
+    curConv=c; curEvts=[];
+    const col=(SRC_COLOR())[c.source]||'#64748B';
+    $('#drawerSrc').style.background=col; $('#drawerSrc').textContent=c.source;
+    $('#drawerTitle').textContent=c.title;
+    $('#drawerModel').innerHTML=`<i data-lucide="cpu" class="h-3 w-3"></i>${esc(c.model||'—')}`;
+    const cwdEl=$('#drawerCwd'); cwdEl.title=c.cwd||''; cwdEl.innerHTML=`<i data-lucide="folder" class="h-3 w-3"></i>${esc(c.cwd||'—')}`;
+    $('#drawerEvtCount').textContent=`${fmtNum(c.eventCount)} 事件`;
+    $('#drawer').classList.remove('hidden'); $('#drawer').classList.add('flex');
+    $('#drawerScrim').classList.remove('hidden');
+    reicons();
+    // loading 态，然后按需拉取该会话的事件流（大库友好：不预载全部事件）
+    $('#roleFilterBar').innerHTML='';
+    const body=$('#drawerBody');
+    body.innerHTML='<div class="py-16 text-center text-sm text-muted-foreground">加载事件中…</div>';
+    try{
+      const r = await fetch(`/api/conversations/${encodeURIComponent(c.source)}/${encodeURIComponent(c.id)}/events`);
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      const d = await r.json();
+      if(curConv!==c) return;                     // 用户已切换抽屉
+      curConv = {...c, capped:d.capped, capNote:d.capNote, eventCount:d.total};
+      curEvts = d.events;
+    }catch(e){
+      body.innerHTML='<div class="py-16 text-center text-sm text-error">加载失败：'+esc(e.message)+'</div>';
+      return;
+    }
+    buildRoleBar(curEvts.map(e=>e.r));
+    renderDrawerBody();
+  }
+  function buildRoleBar(present){
+    const rfb=$('#roleFilterBar'); rfb.innerHTML=''; activeRoles.clear();
+    const uniq=[...new Set(present)];
+    const allBtn=el('button','rounded-md border border-primary bg-primary/10 px-2 py-0.5 text-[11px] text-primary','全部');
+    allBtn.dataset.role='all'; allBtn.onclick=()=>setRoleFilter('all'); rfb.appendChild(allBtn);
+    ['user','assistant','tool','reasoning','patch','shell','meta'].forEach(r=>{ if(!uniq.includes(r))return; const b=el('button','rounded-md border border-border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted',ROLE_META[r]?.label||r); b.dataset.role=r; b.onclick=()=>setRoleFilter(r); rfb.appendChild(b); });
+  }
+  function setRoleFilter(r){ activeRoles.clear(); if(r!=='all')activeRoles.add(r); $$('#roleFilterBar button').forEach(b=>{ const on=b.dataset.role===r; b.className=`rounded-md border px-2 py-0.5 text-[11px] ${on?'border-primary bg-primary/10 text-primary':'border-border text-muted-foreground hover:bg-muted'}`; }); renderDrawerBody(); }
+  function renderDrawerBody(){
+    const body=$('#drawerBody'); body.innerHTML='';
+    const list=activeRoles.size?curEvts.filter(e=>activeRoles.has(e.r)):curEvts;
+    if(curConv && curConv.capped){ body.appendChild(el('div','mb-2 rounded-md border border-warning-soft bg-warning-soft px-3 py-1.5 text-[11px] text-warning',`⚠ ${esc(curConv.capNote||'已截断展示')}`)); }
+    if(list.length===0){ body.appendChild(el('div','py-10 text-center text-sm text-muted-foreground','该筛选下无事件')); return; }
+    list.forEach(e=>{
+      if(e.gap){ body.appendChild(el('div','ev-gap','中间部分事件已折叠')); return; }
+      body.appendChild(renderEvent(e,curConv));
+    });
+    reicons();
+  }
+  function renderEvent(e,c){
+    const role=e.r; const meta=ROLE_META[role]||{label:role,ic:'circle'}; const col=(ROLE_COLOR())[role]||'#64748B';
+    const wrap=el('div','flex gap-3');
+    const t=e.t?relTime(e.t):'#'+e.s;
+    const side=el('div','shrink-0 w-16 pt-0.5 text-right text-[10px] text-muted-foreground tnum',t);
+    const ic=el('div','mt-0.5 shrink-0'); ic.innerHTML=`<span class="grid h-6 w-6 place-items-center rounded-full" style="background:${col}1f;color:${col}"><i data-lucide="${meta.ic}" class="h-3.5 w-3.5"></i></span>`;
+    let bodyHtml='';
+    if(role==='user'){ bodyHtml=`<div class="ev-bubble ev-user">${md(esc(e.c))}</div>`; }
+    else if(role==='assistant'){ bodyHtml=`<div class="ev-bubble ev-assistant">${md(esc(e.c))}</div>`; }
+    else if(role==='reasoning'){ bodyHtml=`<details class="ev-bubble ev-reasoning"${role==='reasoning'?' open':''}><summary class="cursor-pointer text-[11px] font-medium select-none">${meta.label}</summary><div class="mt-1">${md(esc(e.rs||e.c))}</div></details>`; }
+    else if(role==='tool'){ bodyHtml=renderTool(e); }
+    else if(role==='patch'){ bodyHtml=renderPatch(e); }
+    else if(role==='shell'){ bodyHtml=renderShell(e); }
+    else { bodyHtml=`<div class="ev-meta">${esc(e.c||(e.m?('model: '+esc(e.m)):'meta'))}</div>`; }
+    const content=el('div','min-w-0 flex-1',bodyHtml);
+    wrap.appendChild(side); wrap.appendChild(ic); wrap.appendChild(content);
+    return wrap;
+  }
+  function renderTool(e){
+    const ok=/^(ok|success|succe?ed|done|complete|completed)/i.test(e.ts||''); const bad=/^(error|fail|denied|exception)/i.test(e.ts||'');
+    const stCol=ok?'var(--state-success)':bad?'var(--state-error)':'var(--state-warning)';
+    let h=`<div class="ev-tool-card">
+      <div class="flex items-center gap-2 border-b border-border bg-muted/40 px-3 py-1.5">
+        <i data-lucide="wrench" class="h-3.5 w-3.5" style="color:var(--state-info)"></i>
+        <span class="mono text-[11.5px] font-semibold text-foreground">${esc(e.tn||'tool')}</span>
+        ${e.ts?`<span class="chip" style="background:${stCol}1f;color:${stCol}">${esc(e.ts)}</span>`:''}
+      </div>`;
+    if(e.ti){ h+=`<details class="border-b border-border"><summary class="cursor-pointer px-3 py-1.5 text-[11px] text-muted-foreground hover:bg-muted">输入参数</summary><pre class="codeblk mx-3 my-1.5">${esc(prettyJson(e.ti))}</pre></details>`; }
+    if(e.to){ h+=`<details class="border-b border-border"><summary class="cursor-pointer px-3 py-1.5 text-[11px] text-muted-foreground hover:bg-muted">输出结果</summary><div class="px-3 pb-2 pt-1"><pre class="codeblk">${esc(e.to)}</pre></div></details>`; }
+    h+=`</div>`; return h;
+  }
+  function renderPatch(e){
+    let h=`<div class="rounded-lg border border-border overflow-hidden">`;
+    if(e.pf){h+=`<div class="border-b border-border bg-muted/40 px-3 py-1.5 text-[11px] mono text-foreground"><i data-lucide="file-diff" class="inline h-3.5 w-3.5 mr-1 text-success"></i>${esc(e.pf)}</div>`;}
+    if(e.pd){ const lines=(e.pd||'').split('\n'); h+=`<pre class="codeblk !rounded-none m-0">`; lines.slice(0,200).forEach(l=>{ const cls=l.startsWith('+')?'diff-add':l.startsWith('-')?'diff-del':''; h+=`<div class="${cls}">${esc(l)||' '}</div>`; }); h+=`</pre>`; }
+    h+=`</div>`; return h;
+  }
+  function renderShell(e){
+    let h=`<div class="ev-shell">`;
+    if(e.sc){h+=`<div class="px-3 py-1.5 border-b border-white/5 text-sky-300">$ ${esc(e.sc)}</div>`;}
+    if(e.so){h+=`<pre class="px-3 py-2 overflow-x-auto text-[11.5px] leading-relaxed">${esc(e.so)}</pre>`;}
+    h+=`</div>`; return h;
+  }
+  function prettyJson(s){ try{ return JSON.stringify(JSON.parse(s),null,2); }catch(_){ return s||''; } }
+  function md(s){ if(!s)return ''; s=s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const parts=[]; 
+    s=s.replace(/```(\w*)\n?([\s\S]*?)```/g,(m,lang,code)=>{ parts.push('<pre class="codeblk">'+code.replace(/\n$/,'')+'</pre>'); return `\u0000${parts.length-1}\u0000`; });
+    s=s.replace(/`([^`]+)`/g,(m,c)=>'<code class="inl">'+c+'</code>');
+    s=s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+    s=s.replace(/\n/g,'<br>');
+    s=s.replace(/\u0000(\d+)\u0000/g,(m,i)=>parts[+i]);
+    return s;
+  }
+  $('#drawerClose').onclick=closeDrawer;
+  $('#drawerScrim').onclick=closeDrawer;
+  function closeDrawer(){ $('#drawer').classList.add('hidden'); $('#drawer').classList.remove('flex'); $('#drawerScrim').classList.add('hidden'); curConv=null; curEvts=[]; }
+
+  // ---- modal ----
+  let modalCb=null;
+  function showModal({title,msg,icon='alert-triangle',iconColor='error',body='',confirmText='确认',confirmClass='bg-primary',onConfirm}){
+    $('#modalTitle').textContent=title; $('#modalMsg').innerHTML=msg; $('#modalBody').innerHTML=body;
+    const ic=$('#modalIcon'); const map={error:['alert-triangle','var(--state-error)'],info:['info','var(--state-info)'],edit:['pencil','var(--as-primary)'],export:['download','var(--state-info)']};
+    const [icn,col]=map[iconColor]||map.error;
+    ic.style.background=`color-mix(in srgb, ${col} 12%, transparent)`; ic.style.color=col; ic.innerHTML=`<i data-lucide="${icn}" class="h-5 w-5"></i>`;
+    const cb=$('#modalConfirm'); cb.textContent=confirmText; cb.className=`rounded-md px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 ${confirmClass}`;
+    modalCb=onConfirm; $('#modalRoot').classList.remove('hidden'); $('#modalRoot').classList.add('flex'); reicons();
+  }
+  function closeModal(){ $('#modalRoot').classList.add('hidden'); $('#modalRoot').classList.remove('flex'); modalCb=null; }
+  $('#modalCancel').onclick=closeModal;
+  $('#modalConfirm').onclick=()=>{ const cb=modalCb; closeModal(); if(cb)cb(); };
+
+  // ---- edit（真实写库）----
+  function openEdit(idx){
+    const c=byIdx(idx); if(!c)return;
+    showModal({title:'编辑会话',iconColor:'edit',msg:`修改会话标题`,body:`<label class="block text-[11px] text-muted-foreground mb-1">会话标题</label><input id="editTitle" class="w-full rounded-md border border-input bg-card px-2.5 py-1.5 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring" value="${esc(c.title)}">`,confirmText:'保存修改',onConfirm:async()=>{
+      const v=$('#editTitle').value.trim(); if(!v)return;
+      try{
+        const r=await fetch(`/api/conversations/${encodeURIComponent(c.source)}/${encodeURIComponent(c.id)}/title`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:v})});
+        if(!r.ok) throw new Error('HTTP '+r.status);
+        c.title=v; const row=$(`tr[data-idx="${idx}"] .font-medium`); if(row)row.textContent=v;
+        toast('标题已保存到数据库');
+      }catch(e){ toast('保存失败：'+e.message); }
+    }});
+  }
+  // ---- delete（真实写库，事务级联删除事件）----
+  async function doDeleteOne(c){
+    const r=await fetch(`/api/conversations/${encodeURIComponent(c.source)}/${encodeURIComponent(c.id)}`,{method:'DELETE'});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return (await r.json()).eventsRemoved||0;
+  }
+  function removeLocal(idxs){
+    const set=new Set(idxs); CONVS=CONVS.filter(c=>!set.has(c.idx));
+    selectedIdxs.clear(); updateBatchBtn();
+  }
+  function openDelete(idxs){
+    if(!idxs.length)return;
+    const evts=idxs.reduce((a,i)=>{const c=byIdx(i);return a+(c?c.eventCount:0);},0);
+    showModal({title:idxs.length>1?'批量删除会话':'删除会话',iconColor:'error',msg:`确认删除选中的 <b>${idxs.length}</b> 条会话？关联的 <b>${fmtNum(evts)}</b> 条事件将从数据库<b>永久删除</b>，此操作不可撤销。`,confirmText:'确认删除',confirmClass:'bg-error-solid',onConfirm:async()=>{
+      try{
+        let removed=0;
+        for(const i of idxs){ const c=byIdx(i); if(c) removed+=await doDeleteOne(c); }
+        removeLocal(idxs);
+        applyFilters();
+        toast(`已从数据库删除 ${idxs.length} 条会话（含 ${fmtNum(removed)} 条事件）`);
+      }catch(e){ toast('删除失败：'+e.message); applyFilters(); }
+    }});
+  }
+
+  // ---- export（导出当前筛选结果的元数据）----
+  $('#exportBtn').onclick=()=>{
+    showModal({title:'导出会话数据',iconColor:'export',msg:`即将导出当前筛选结果 <b>${fmtNum(filtered.length)}</b> 条会话（元数据）。完整事件流请用 CLI：<code>python -m agentmemhub export</code>`,body:`
+      <label class="block text-[11px] text-muted-foreground mb-1">导出格式</label>
+      <select id="expFmt" class="w-full rounded-md border border-input bg-card px-2.5 py-1.5 text-xs text-foreground">
+        <option value="csv">CSV</option><option value="json">JSON</option><option value="xlsx">Excel (.xls)</option>
+      </select>`,confirmText:'确认导出',onConfirm:()=>{ doExport($('#expFmt').value); }});
+  };
+  function doExport(fmt){
+    const rows=filtered.map(c=>({source:c.source,id:c.id,title:c.title,model:c.model,cwd:c.cwd,eventCount:c.eventCount,createdAt:c.createdAt?fmtTime(c.createdAt):'',updatedAt:c.updatedAt?fmtTime(c.updatedAt):''}));
+    if(fmt==='json'){ download('conversations.json','application/json',JSON.stringify(rows,null,2)); }
+    else if(fmt==='csv'){ const head=Object.keys(rows[0]||{}); const lines=[head.join(',')].concat(rows.map(r=>head.map(h=>`"${String(r[h]??'').replace(/"/g,'""')}"`).join(','))); download('conversations.csv','text/csv','\ufeff'+lines.join('\n')); }
+    else { const head=Object.keys(rows[0]||{}); let t=`<table border="1"><tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr>`; rows.forEach(r=>{t+=`<tr>${head.map(h=>`<td>${esc(String(r[h]??''))}</td>`).join('')}</tr>`;}); t+='</table>'; download('conversations.xls','application/vnd.ms-excel',t); }
+    toast(`已导出 ${rows.length} 条记录（${fmt.toUpperCase()}）`);
+  }
+  function download(name,type,content){ const blob=new Blob([content],{type}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000); }
+
+  // ---- toast ----
+  let toastT;
+  function toast(msg){ $('#toastMsg').textContent=msg; $('#toast').classList.remove('hidden'); $('#toast').classList.add('flex'); reicons(); clearTimeout(toastT); toastT=setTimeout(()=>{ $('#toast').classList.add('hidden'); $('#toast').classList.remove('flex'); },2600); }
+
+  // ---- theme ----
+  function applyTheme(dark){ document.documentElement.classList.toggle('dark',dark); $('#themeLabel').textContent=dark?'浅色':'深色'; $('#themeIcon').setAttribute('data-lucide',dark?'sun':'moon'); try{localStorage.setItem('as-theme',dark?'dark':'light');}catch(e){} reicons(); }
+  $('#themeBtn').onclick=()=>applyTheme(!document.documentElement.classList.contains('dark'));
+  let savedTheme='light'; try{ savedTheme=localStorage.getItem('as-theme')||'light'; }catch(e){}
+  applyTheme(savedTheme==='dark');
+
+  // ---- boot ----
+  boot();
+})();
+</script>
+</body>
+</html>
