@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN" class="light">
 <head>
     <meta charset="UTF-8">
@@ -429,6 +429,8 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
            /^\{\s*"type"\s*:\s*"session\//.test(t) || /^<antml:/.test(t) ||
            /environment_context|runtime.context|file.policy|approval.policy/i.test(t);
   }
+  // 事件的"显示角色"：系统注入消息归为 system，其余保持原 role（用于筛选）
+  function displayRole(e){ return (e.r==='user'||e.r==='assistant') && isSystemMessage(extractText(e.c||'')) ? 'system' : e.r; }
   function reicons(){ if(window.lucide) lucide.createIcons(); }
 
   // ---- state ----
@@ -438,7 +440,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
               dateFrom:null, dateTo:null };   // custom 区间（Unix 秒）
   let sortKey='updatedAt', sortDir=-1;
   let page=1, pageSize=20;
-  let activeRoles=new Set();
+  let activeRoles=new Set(['__all__']);  // 多选角色筛选：'__all__'=全选；空集也=全选
   let selectedKeys=new Set();          // 勾选集：key = source + '\u241F' + id（数据库主键）
   let trendChart=null, pieChart=null;
   let curConv=null, curEvts=[], curTotal=0, curPage=1, curPages=1, curLim=100;  // 抽屉分页状态
@@ -815,7 +817,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       return;
     }
     updateDrawerPager();
-    buildRoleBar(curEvts.map(e=>e.r));
+    buildRoleBar(curEvts);
     renderDrawerBody();
   }
   async function loadDrawerPage(offset){
@@ -832,7 +834,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       return;
     }
     updateDrawerPager();
-    buildRoleBar(curEvts.map(e=>e.r));
+    buildRoleBar(curEvts);
     renderDrawerBody();
   }
   function updateDrawerPager(){
@@ -852,16 +854,45 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   $('#drawerPageSize').onchange=e=>{ curLim=+e.target.value; curPages=Math.max(1,Math.ceil(curTotal/curLim)); loadDrawerPage((curPages-1)*curLim); };
 
   function buildRoleBar(present){
-    const rfb=$('#roleFilterBar'); rfb.innerHTML=''; activeRoles.clear();
-    const uniq=[...new Set(present)];
-    const allBtn=el('button','rounded-md border border-primary bg-primary/10 px-2 py-0.5 text-[11px] text-primary','全部');
-    allBtn.dataset.role='all'; allBtn.onclick=()=>setRoleFilter('all'); rfb.appendChild(allBtn);
-    ['user','assistant','tool','reasoning','patch','shell','meta'].forEach(r=>{ if(!uniq.includes(r))return; const b=el('button','rounded-md border border-border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted',ROLE_META[r]?.label||r); b.dataset.role=r; b.onclick=()=>setRoleFilter(r); rfb.appendChild(b); });
+    const rfb=$('#roleFilterBar'); rfb.innerHTML='';
+    // 基于"显示角色"统计（系统注入消息归为 system，不再混入 user）
+    const uniq=[...new Set(present.map(e=>displayRole(e)))];
+    // 多选：默认全选（空集=全部）；"全部"按钮用于全选/清除
+    const roleLabel = r=>({user:'用户输入',assistant:'Agent Output',system:'System',tool:'工具',reasoning:'推理',patch:'补丁',shell:'终端',meta:'元信息'}[r]||r);
+    const mkBtn=(r,label,isAll=false)=>{
+      const b=el('button','rounded-md border px-2 py-0.5 text-[11px] transition-colors',label);
+      b.dataset.role=r; b.style.userSelect='none';
+      b.onclick=()=>toggleRoleFilter(r);
+      rfb.appendChild(b); return b;
+    };
+    mkBtn('all','全部',true);
+    ['user','assistant','system','tool','reasoning','patch','shell','meta'].forEach(r=>{ if(!uniq.includes(r))return; mkBtn(r,roleLabel(r)); });
+    // 初始全选
+    syncRoleFilterUI();
   }
-  function setRoleFilter(r){ activeRoles.clear(); if(r!=='all')activeRoles.add(r); $$('#roleFilterBar button').forEach(b=>{ const on=b.dataset.role===r; b.className=`rounded-md border px-2 py-0.5 text-[11px] ${on?'border-primary bg-primary/10 text-primary':'border-border text-muted-foreground hover:bg-muted'}`; }); renderDrawerBody(); }
+  // 多选切换：点击切换该角色的选中状态；"全部"=全选
+  function toggleRoleFilter(r){
+    if(r==='all'){ activeRoles.clear(); activeRoles.add('__all__'); }
+    else{
+      if(activeRoles.has('__all__')) activeRoles.clear();   // 从"全选"切换到具体选择时清空
+      if(activeRoles.has(r)) activeRoles.delete(r); else activeRoles.add(r);
+      if(activeRoles.size===0) activeRoles.add('__all__');  // 至少保留一个，空=全选
+    }
+    syncRoleFilterUI(); renderDrawerBody();
+  }
+  function syncRoleFilterUI(){
+    const hasAll=activeRoles.has('__all__');
+    $$('#roleFilterBar button').forEach(b=>{
+      const r=b.dataset.role;
+      const on = hasAll || activeRoles.has(r);
+      b.className=`rounded-md border px-2 py-0.5 text-[11px] transition-colors ${on?'border-primary bg-primary/10 text-primary':'border-border text-muted-foreground hover:bg-muted'}`;
+    });
+  }
   function renderDrawerBody(){
     const body=$('#drawerBody'); body.innerHTML='';
-    const list=activeRoles.size?curEvts.filter(e=>activeRoles.has(e.r)):curEvts;
+    const hasAll=activeRoles.has('__all__');
+    // 多选筛选：选中"全部"或空集=展示所有；否则展示显示角色匹配任一选中角色的事件
+    const list=(!hasAll&&activeRoles.size)?curEvts.filter(e=>activeRoles.has(displayRole(e))):curEvts;
     // 升序：每页内最早事件在最上、最新在最下（首页=最早，尾页=最新）
     if(list.length===0){ body.appendChild(el('div','py-10 text-center text-sm text-muted-foreground','该筛选下无事件')); return; }
     list.forEach(e=>body.appendChild(renderEvent(e,curConv)));
