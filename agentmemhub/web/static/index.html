@@ -212,7 +212,9 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         <option value="1">今天</option>
         <option value="7">近 7 天</option>
         <option value="30">近 30 天</option>
+        <option value="custom">自定义区间</option>
       </select>
+      <span id="customRangeHint" class="hidden text-[11px] font-semibold text-primary whitespace-nowrap"></span>
       <button id="applyBtn" class="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:opacity-90 transition-opacity">
         <i data-lucide="search-check" class="h-3.5 w-3.5"></i>应用筛选
       </button>
@@ -221,10 +223,10 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       </button>
       <span class="ml-auto text-[11px] text-muted-foreground tnum" id="resultCount">—</span>
     </div>
-    <!-- 当前筛选摘要条 -->
-    <div id="filterSummary" class="hidden items-center gap-2 border-t border-border/60 bg-card/40 px-5 py-1.5 text-[11px] text-muted-foreground">
-      <i data-lucide="eye" class="h-3 w-3 shrink-0"></i>
-      <span class="shrink-0 font-medium text-foreground">当前查看：</span>
+    <!-- 当前筛选摘要条（高对比，第一时间可见） -->
+    <div id="filterSummary" class="hidden items-center gap-2 border-y border-primary/30 bg-primary/5 px-5 py-2 text-[11px] text-foreground">
+      <i data-lucide="eye" class="h-3.5 w-3.5 shrink-0 text-primary"></i>
+      <span class="shrink-0 font-semibold text-primary">当前查看：</span>
       <span id="summaryChips" class="flex flex-wrap items-center gap-1"></span>
     </div>
   </header>
@@ -256,8 +258,8 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   <!-- Charts -->
   <section class="grid grid-cols-1 gap-3 px-5 pb-4 lg:grid-cols-3">
     <div class="rounded-xl border border-border bg-card p-3.5 shadow-sm lg:col-span-2">
-      <div class="mb-2 flex items-center gap-2"><i data-lucide="trending-up" class="h-4 w-4 text-primary"></i><span class="text-xs font-medium text-foreground">每日会话创建趋势</span></div>
-      <div class="h-48"><canvas id="trendChart"></canvas></div>
+      <div class="mb-2 flex items-center gap-2"><i data-lucide="trending-up" class="h-4 w-4 text-primary"></i><span class="text-xs font-medium text-foreground">每日会话创建趋势</span><span class="ml-auto text-[10px] text-muted-foreground">拖拽框选日期区间以筛选</span></div>
+      <div class="relative h-48" id="trendBox"><canvas id="trendChart"></canvas><div id="dragRect" class="pointer-events-none absolute hidden border border-primary/60 bg-primary/15" style="top:0;bottom:0"></div></div>
     </div>
     <div class="rounded-xl border border-border bg-card p-3.5 shadow-sm">
       <div class="mb-2 flex items-center gap-2"><i data-lucide="pie-chart" class="h-4 w-4 text-primary"></i><span class="text-xs font-medium text-foreground">各 Agent 会话占比</span></div>
@@ -332,6 +334,21 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   </div>
   <div class="flex flex-wrap items-center gap-1 border-b border-border px-5 py-2" id="roleFilterBar"></div>
   <div id="drawerBody" class="flex-1 overflow-y-auto scroll-thin px-5 py-4 space-y-3"></div>
+  <!-- 抽屉内事件分页栏 -->
+  <div id="drawerPager" class="hidden items-center justify-between border-t border-border px-5 py-2 text-[11px] text-muted-foreground">
+    <span id="drawerPageInfo">—</span>
+    <div class="flex items-center gap-2">
+      <select id="drawerPageSize" class="rounded border border-border bg-card px-1.5 py-0.5 text-[11px] focus:outline-none">
+        <option value="50">50 条/页</option>
+        <option value="100" selected>100 条/页</option>
+        <option value="200">200 条/页</option>
+        <option value="500">500 条/页</option>
+      </select>
+      <button id="drawerPrevPage" class="nav-btn inline-flex h-6 w-6 items-center justify-center rounded border border-border hover:bg-muted disabled:opacity-40"><i data-lucide="chevron-left" class="h-3.5 w-3.5"></i></button>
+      <span id="drawerPageNav" class="tnum px-0.5">1 / 1</span>
+      <button id="drawerNextPage" class="nav-btn inline-flex h-6 w-6 items-center justify-center rounded border border-border hover:bg-muted disabled:opacity-40"><i data-lucide="chevron-right" class="h-3.5 w-3.5"></i></button>
+    </div>
+  </div>
 </aside>
 <div id="drawerScrim" class="fixed inset-0 z-30 hidden bg-black/30"></div>
 
@@ -400,13 +417,14 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   // ---- state ----
   let D=null;
   let CONVS=[], filtered=[];
-  const F = { sources:new Set(), cwds:new Set(), kw:'', time:'all', models:new Set() };
+  const F = { sources:new Set(), cwds:new Set(), kw:'', time:'all', models:new Set(),
+              dateFrom:null, dateTo:null };   // custom 区间（Unix 秒）
   let sortKey='updatedAt', sortDir=-1;
   let page=1, pageSize=20;
   let activeRoles=new Set();
   let selectedKeys=new Set();          // 勾选集：key = source + '\u241F' + id（数据库主键）
   let trendChart=null, pieChart=null;
-  let curConv=null, curEvts=[];       // 抽屉当前会话 + 按需加载的事件流
+  let curConv=null, curEvts=[], curTotal=0, curPage=1, curPages=1, curLim=100;  // 抽屉分页状态
   let reqSeq=0;                        // 筛选请求竞态保护
 
   const keyOf=(source,id)=>source+'\u241F'+id;   // ␟ 分隔符不可见于常规内容
@@ -440,6 +458,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     updateStatsHead(D.meta);
     bindStaticEvents();
     renderStats(); renderCharts(); renderTable();
+    bindTrendDrag();
     updateSummary();
     reicons();
     return true;
@@ -492,7 +511,11 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     const params=new URLSearchParams();
     params.set('sources', incSrc.join(','));
     if(incWs.length && incWs.length<allWs.length) params.set('workspaces', incWs.join(','));
-    if(F.time!=='all') params.set('days', F.time);
+    // 时间段：自定义精确区间优先；否则近 N 天
+    if(F.time==='custom' && F.dateFrom!=null){
+      params.set('dateFrom', Math.floor(F.dateFrom));
+      if(F.dateTo!=null) params.set('dateTo', Math.floor(F.dateTo));
+    } else if(F.time!=='all') params.set('days', F.time);
     if(F.kw) params.set('q', F.kw);
     params.set('all','1');
     try{
@@ -527,9 +550,23 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     reicons();
   }
   function updateFilterChips(){
-    $('#agentCount').textContent = F.sources.size?`-${F.sources.size}`:'全部';
-    $('#wsCount').textContent = F.cwds.size?`-${F.cwds.size}`:'全部';
+    const sa=F.sources.size, ws=F.cwds.size;
+    $('#agentCount').textContent = sa?`-${sa}`:'全部';
+    $('#wsCount').textContent = ws?`-${ws}`:'全部';
+    // 视觉突出：有生效条件时入口按钮高亮（第一时间可见）
+    $('#agentFilterBtn').classList.toggle('border-primary', sa>0);
+    $('#agentFilterBtn').querySelector('span:not(.ml-1)');
+    $('#agentFilterBtn').classList.toggle('text-primary', sa>0);
+    $('#wsFilterBtn').classList.toggle('border-primary', ws>0);
+    $('#wsFilterBtn').classList.toggle('text-primary', ws>0);
+    const btn=$('#applyBtn');
+    const hasActive=sa>0||ws>0||F.time!=='all'||!!F.kw;
+    btn.classList.toggle('ring-2', hasActive && !dirty);
+    btn.classList.toggle('ring-ring', hasActive && !dirty);
   }
+  // 勾选复选框与当前排除集合同步（饼图点击等外部触发筛选后同步 UI）
+  function syncSourceChecks(){ $$('.src-chk').forEach(ch=>{ ch.checked=!F.sources.has(ch.value); }); }
+  function syncWsChecks(){ $$('.ws-chk').forEach(ch=>{ ch.checked=!F.cwds.has(ch.value); }); }
 
   // ---- 当前查看摘要条 ----
   function updateSummary(){
@@ -538,17 +575,22 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     const incSrc=allSrc.filter(s=>!F.sources.has(s));
     const parts=[];
     parts.push(incSrc.length===0||incSrc.length===allSrc.length
-      ? '<span>全部 Agent</span>'
-      : incSrc.map(s=>srcTag(s)).join(' '));
+      ? '<span class="text-muted-foreground">全部 Agent</span>'
+      : incSrc.map(s=>`<span class="chip" style="background:${(SRC_COLOR())[s]||'#64748B'}1f;color:${(SRC_COLOR())[s]||'#64748B'}">${esc(s)}</span>`).join(' '));
     const allWs=D.stats.cwds;
     const incWs=allWs.filter(w=>!F.cwds.has(w));
-    parts.push(`<span>工作空间 ${incWs.length===allWs.length?'全部':incWs.length+' 个'}</span>`);
-    parts.push(`<span>${F.time==='all'?'全部时间':'近 '+F.time+' 天'}</span>`);
+    parts.push(`<span>工作空间 <b class="tnum text-foreground">${incWs.length===allWs.length?'全部':incWs.length+' 个'}</b></span>`);
+    if(F.time==='custom' && F.dateFrom!=null){
+      parts.push(`<span>区间 <b class="text-foreground">${fmtDate(F.dateFrom)} ~ ${fmtDate(F.dateTo||F.dateFrom)}</b></span>`);
+    } else {
+      parts.push(`<span>${F.time==='all'?'全部时间':'近 '+F.time+' 天'}</span>`);
+    }
     parts.push(`<span>${F.kw?('关键词 "'+esc(F.kw)+'"'):'无关键词'}</span>`);
     chips.innerHTML=parts.join('<span class="opacity-40">·</span>');
     box.classList.remove('hidden'); box.classList.add('flex');
     reicons();
   }
+  function fmtDate(ts){ const d=new Date(ts*1000); const p=n=>String(n).padStart(2,'0'); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`; }
 
   function bindStaticEvents(){
     $('#agentOptions').addEventListener('change',e=>{ if(e.target.classList.contains('src-chk')){ const v=e.target.value; if(e.target.checked)F.sources.delete(v); else F.sources.add(v); updateFilterChips(); markDirty(); } });
@@ -563,7 +605,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     $('#kwInput').addEventListener('keydown',e=>{ if(e.key==='Enter'){ clearTimeout(kwT); F.kw=e.target.value.trim(); clearDirty(); applyFilters(); } });
     $('#kwClear').onclick=()=>{ $('#kwInput').value=''; F.kw=''; $('#kwClear').classList.add('hidden'); clearDirty(); applyFilters(); };
     $('#timeRange').onchange=e=>{F.time=e.target.value;markDirty();};
-    $('#resetBtn').onclick=()=>{ F.sources.clear();F.cwds.clear();F.kw='';F.time='all';F.models.clear(); $('#kwInput').value='';$('#kwClear').classList.add('hidden');$('#timeRange').value='all'; $$('.src-chk').forEach(c=>c.checked=true); $$('.ws-chk').forEach(c=>c.checked=true); updateFilterChips(); clearDirty(); applyFilters(); toast('已重置筛选条件'); };
+    $('#resetBtn').onclick=()=>{ F.sources.clear();F.cwds.clear();F.kw='';F.time='all';F.models.clear();F.dateFrom=null;F.dateTo=null; $('#kwInput').value='';$('#kwClear').classList.add('hidden');$('#timeRange').value='all'; $('#customRangeHint').classList.add('hidden'); $$('.src-chk').forEach(c=>c.checked=true); $$('.ws-chk').forEach(c=>c.checked=true); updateFilterChips(); clearDirty(); applyFilters(); toast('已重置筛选条件'); };
     $$('[data-sort]').forEach(th=>th.onclick=()=>{ const k=th.dataset.sort; if(sortKey===k)sortDir*=-1; else{sortKey=k;sortDir=k==='title'||k==='source'||k==='model'?1:-1;} renderTable(); });
     $('#selectAll').onchange=e=>{ $$('.row-chk').forEach(ch=>{ ch.checked=e.target.checked; const k=keyOf(ch.dataset.source,ch.dataset.cid); e.target.checked?selectedKeys.add(k):selectedKeys.delete(k); }); updateBatchBtn(); };
     $('#selectPage').onchange=e=>{ $('#selectAll').checked=e.target.checked; $('#selectAll').dispatchEvent(new Event('change')); };
@@ -599,14 +641,65 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     const trend={};
     filtered.forEach(c=>{ if(!c.createdAt)return; const d=new Date(c.createdAt*1000); const k=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; trend[k]=(trend[k]||0)+1; });
     const last14=Object.entries(trend).sort((a,b)=>a[0].localeCompare(b[0])).slice(-14);
-    const labels=last14.map(x=>x[0].slice(5)); const data=last14.map(x=>x[1]);
+    const dates=last14.map(x=>x[0]);                       // 完整 'YYYY-MM-DD'（拖拽反查用）
+    const labels=dates.map(d=>d.slice(5));                 // 显示 'MM-DD'
+    const data=last14.map(x=>x[1]);
     const pieMap={}; filtered.forEach(c=>{pieMap[c.source]=(pieMap[c.source]||0)+1;});
     const pieLabels=Object.keys(pieMap); const pieData=Object.values(pieMap); const pieColors=pieLabels.map(s=>(SRC_COLOR())[s]||'#64748B');
     const grid='rgba(148,163,184,0.18)'; const tick='#94A3B8';
-    if(trendChart){trendChart.data.labels=labels;trendChart.data.datasets[0].data=data;trendChart.update();}
-    else{ trendChart=new Chart($('#trendChart'),{type:'line',data:{labels,datasets:[{data,borderColor:'#4F46E5',backgroundColor:'rgba(79,70,229,0.12)',fill:true,tension:0.35,pointRadius:3,pointBackgroundColor:'#4F46E5',borderWidth:2}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{grid:{color:grid},ticks:{color:tick,maxRotation:0,autoSkipPadding:12}},y:{grid:{color:grid},ticks:{color:tick,precision:0},beginAtZero:true}}}}); }
-    if(pieChart){pieChart.data.labels=pieLabels;pieChart.data.datasets[0].data=pieData;pieChart.data.datasets[0].backgroundColor=pieColors;pieChart.update();}
-    else{ pieChart=new Chart($('#pieChart'),{type:'doughnut',data:{labels:pieLabels,datasets:[{data:pieData,backgroundColor:pieColors,borderWidth:2,borderColor:getComputedStyle(document.documentElement).getPropertyValue('--as-card')}]},options:{responsive:true,maintainAspectRatio:false,cutout:'58%',plugins:{legend:{position:'right',labels:{boxWidth:10,font:{size:10},color:tick}}}}}); }
+    if(trendChart){ trendChart.data.labels=dates; trendChart.data.datasets[0].data=data; trendChart.__dates=dates; trendChart.update(); }
+    else{
+      trendChart=new Chart($('#trendChart'),{type:'line',data:{labels:dates,datasets:[{data,borderColor:'#4F46E5',backgroundColor:'rgba(79,70,229,0.12)',fill:true,tension:0.35,pointRadius:3,pointBackgroundColor:'#4F46E5',borderWidth:2}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{title:items=>items[0]?.label||''}}},scales:{x:{grid:{color:grid},ticks:{color:tick,maxRotation:0,autoSkipPadding:12,callback:(v,i)=>labels[i]}},y:{grid:{color:grid},ticks:{color:tick,precision:0},beginAtZero:true}}}});
+      trendChart.__dates=dates;
+    }
+    if(pieChart){ pieChart.data.labels=pieLabels; pieChart.data.datasets[0].data=pieData; pieChart.data.datasets[0].backgroundColor=pieColors; pieChart.update(); }
+    else{
+      pieChart=new Chart($('#pieChart'),{type:'doughnut',data:{labels:pieLabels,datasets:[{data:pieData,backgroundColor:pieColors,borderWidth:2,borderColor:getComputedStyle(document.documentElement).getPropertyValue('--as-card')}]},options:{responsive:true,maintainAspectRatio:false,cutout:'58%',onClick:onPieClick,plugins:{legend:{position:'right',labels:{boxWidth:10,font:{size:10},color:tick,filter:()=>true}},tooltip:{callbacks:{label:c=>` ${c.label}: ${c.parsed} 会话（点击筛选）`}}}}});
+    }
+  }
+  // 饼图点击 → 自动筛选该 Agent（仅保留它）
+  function onPieClick(evt, els){
+    if(!els || !els.length || !pieChart) return;
+    const src=pieChart.data.labels[els[0].index];
+    if(!src) return;
+    const all=D.stats.sources.map(s=>s.source);
+    F.sources.clear();
+    all.forEach(s=>{ if(s!==src) F.sources.add(s); });
+    syncSourceChecks(); updateFilterChips(); clearDirty(); applyFilters();
+    toast(`已筛选 Agent：${src}（点重置或「应用筛选」恢复）`);
+  }
+  // 趋势图拖拽框选日期区间 → 触发自定义时间段筛选
+  function bindTrendDrag(){
+    const box=$('#trendBox'), rect=$('#dragRect');
+    let start=null, cur=null;
+    box.addEventListener('pointerdown',e=>{ if(!trendChart||!trendChart.scales.x) return; start=e.clientX; cur=e.clientX; box.setPointerCapture&&box.setPointerCapture(e.pointerId); });
+    box.addEventListener('pointermove',e=>{ if(start==null) return; cur=e.clientX;
+      const b=box.getBoundingClientRect();
+      const x0=Math.min(start,cur)-b.left, x1=Math.max(start,cur)-b.left;
+      if(x1-x0<5){ rect.classList.add('hidden'); return; }
+      rect.classList.remove('hidden'); rect.style.left=x0+'px'; rect.style.width=(x1-x0)+'px';
+    });
+    ['pointerup','pointercancel'].forEach(evt=>box.addEventListener(evt,()=>{
+      if(start==null) return;
+      const b=box.getBoundingClientRect();
+      const x0=Math.min(start,cur)-b.left, x1=Math.max(start,cur)-b.left;
+      rect.classList.add('hidden'); start=null; cur=null;
+      if(x1-x0<6 || !trendChart.__dates) return;
+      const s=trendChart.scales.x;
+      const i0=Math.max(0,Math.min(trendChart.__dates.length-1,Math.floor(s.getValueForPixel(x0))));
+      const i1=Math.max(0,Math.min(trendChart.__dates.length-1,Math.ceil(s.getValueForPixel(x1))));
+      const d0=trendChart.__dates[Math.min(i0,i1)];
+      const d1=trendChart.__dates[Math.max(i0,i1)];
+      if(!d0 || !d1 || d0===d1) return;
+      F.dateFrom=Math.floor(new Date(d0+'T00:00:00').getTime()/1000);
+      F.dateTo=Math.floor(new Date(d1+'T23:59:59').getTime()/1000);
+      F.time='custom';
+      $('#timeRange').value='custom';
+      $('#customRangeHint').classList.remove('hidden');
+      $('#customRangeHint').textContent=`${d0} ~ ${d1}`;
+      clearDirty(); applyFilters();
+      toast(`已按日期区间筛选：${d0} ~ ${d1}`);
+    }));
   }
 
   // ---- table ----
@@ -667,37 +760,71 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     return Object.entries(cnt).map(([r,n])=>{ const c=(ROLE_COLOR())[r]||'#64748B'; return `<span class="chip" style="background:${c}1f;color:${c}" title="${esc(ROLE_META[r]?.label||r)}">${esc(ROLE_META[r]?.label||r)} ${n}</span>`; }).join(' ');
   }
 
-  // ---- drawer（事件按需加载）----
+  // ---- drawer（按需分页加载，默认倒序展示）----
+  async function fetchEventsPage(source,id,offset,limit){
+    const r=await fetch(`/api/conversations/${encodeURIComponent(source)}/${encodeURIComponent(id)}/events?offset=${offset}&limit=${limit}`);
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return r.json();
+  }
   async function openDrawer(c){
     if(!c) return;
-    curConv=c; curEvts=[];
+    curConv=c; curEvts=[]; curTotal=c.eventCount||0; curPage=1; curPages=1; curLim=100;
     const col=(SRC_COLOR())[c.source]||'#64748B';
     $('#drawerSrc').style.background=col; $('#drawerSrc').textContent=c.source;
     $('#drawerTitle').textContent=c.title;
     $('#drawerModel').innerHTML=`<i data-lucide="cpu" class="h-3 w-3"></i>${esc(c.model||'—')}`;
     const cwdEl=$('#drawerCwd'); cwdEl.title=c.cwd||''; cwdEl.innerHTML=`<i data-lucide="folder" class="h-3 w-3"></i>${esc(c.cwd||'—')}`;
-    $('#drawerEvtCount').textContent=`${fmtNum(c.eventCount)} 事件`;
+    $('#drawerEvtCount').textContent=`共 ${fmtNum(curTotal)} 事件`;
+    $('#drawerPageSize').value='100';
+    $('#drawerPager').classList.add('hidden'); $('#drawerPager').classList.remove('flex');
     $('#drawer').classList.remove('hidden'); $('#drawer').classList.add('flex');
     $('#drawerScrim').classList.remove('hidden');
     reicons();
-    // loading 态，然后按需拉取该会话的事件流（大库友好：不预载全部事件）
     $('#roleFilterBar').innerHTML='';
     const body=$('#drawerBody');
     body.innerHTML='<div class="py-16 text-center text-sm text-muted-foreground">加载事件中…</div>';
     try{
-      const r = await fetch(`/api/conversations/${encodeURIComponent(c.source)}/${encodeURIComponent(c.id)}/events`);
-      if(!r.ok) throw new Error('HTTP '+r.status);
-      const d = await r.json();
+      const d=await fetchEventsPage(c.source,c.id,0,100);
       if(curConv!==c) return;                     // 用户已切换抽屉
-      curConv = {...c, capped:d.capped, capNote:d.capNote, eventCount:d.total};
-      curEvts = d.events;
+      curTotal=d.total; curEvts=d.events;
+      curPages=Math.max(1,Math.ceil(d.total/100)); curPage=1;
+      $('#drawerEvtCount').textContent=`共 ${fmtNum(curTotal)} 事件`;
     }catch(e){
       body.innerHTML='<div class="py-16 text-center text-sm text-error">加载失败：'+esc(e.message)+'</div>';
       return;
     }
+    updateDrawerPager();
     buildRoleBar(curEvts.map(e=>e.r));
     renderDrawerBody();
   }
+  async function loadDrawerPage(offset){
+    if(!curConv) return;
+    const body=$('#drawerBody'); body.innerHTML='<div class="py-16 text-center text-sm text-muted-foreground">加载中…</div>';
+    try{
+      const d=await fetchEventsPage(curConv.source,curConv.id,offset,curLim);
+      curEvts=d.events; curTotal=d.total;
+      curPages=Math.max(1,Math.ceil(d.total/curLim));
+      curPage=Math.floor(offset/curLim)+1;
+    }catch(e){
+      body.innerHTML='<div class="py-16 text-center text-sm text-error">加载失败：'+esc(e.message)+'</div>';
+      return;
+    }
+    updateDrawerPager();
+    buildRoleBar(curEvts.map(e=>e.r));
+    renderDrawerBody();
+  }
+  function updateDrawerPager(){
+    $('#drawerPageInfo').textContent=`共 ${fmtNum(curTotal)} 条事件 · 第 ${curPage}/${curPages} 页`;
+    $('#drawerPageNav').textContent=`${curPage} / ${curPages}`;
+    $('#drawerPrevPage').disabled=curPage<=1;
+    $('#drawerNextPage').disabled=curPage>=curPages;
+    const p=$('#drawerPager'); p.classList.remove('hidden'); p.classList.add('flex');
+    reicons();
+  }
+  $('#drawerPrevPage').onclick=()=>{ if(curPage>1) loadDrawerPage((curPage-2)*curLim); };
+  $('#drawerNextPage').onclick=()=>{ if(curPage<curPages) loadDrawerPage(curPage*curLim); };
+  $('#drawerPageSize').onchange=e=>{ curLim=+e.target.value; curPage=1; loadDrawerPage(0); };
+
   function buildRoleBar(present){
     const rfb=$('#roleFilterBar'); rfb.innerHTML=''; activeRoles.clear();
     const uniq=[...new Set(present)];
@@ -708,13 +835,10 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   function setRoleFilter(r){ activeRoles.clear(); if(r!=='all')activeRoles.add(r); $$('#roleFilterBar button').forEach(b=>{ const on=b.dataset.role===r; b.className=`rounded-md border px-2 py-0.5 text-[11px] ${on?'border-primary bg-primary/10 text-primary':'border-border text-muted-foreground hover:bg-muted'}`; }); renderDrawerBody(); }
   function renderDrawerBody(){
     const body=$('#drawerBody'); body.innerHTML='';
-    const list=activeRoles.size?curEvts.filter(e=>activeRoles.has(e.r)):curEvts;
-    if(curConv && curConv.capped){ body.appendChild(el('div','mb-2 rounded-md border border-warning-soft bg-warning-soft px-3 py-1.5 text-[11px] text-warning',`⚠ ${esc(curConv.capNote||'已截断展示')}`)); }
+    let list=activeRoles.size?curEvts.filter(e=>activeRoles.has(e.r)):curEvts;
+    list=[...list].reverse();   // 默认倒序：最新事件在最上
     if(list.length===0){ body.appendChild(el('div','py-10 text-center text-sm text-muted-foreground','该筛选下无事件')); return; }
-    list.forEach(e=>{
-      if(e.gap){ body.appendChild(el('div','ev-gap','中间部分事件已折叠')); return; }
-      body.appendChild(renderEvent(e,curConv));
-    });
+    list.forEach(e=>body.appendChild(renderEvent(e,curConv)));
     reicons();
   }
   function renderEvent(e,c){
@@ -724,9 +848,9 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     const side=el('div','shrink-0 w-16 pt-0.5 text-right text-[10px] text-muted-foreground tnum',t);
     const ic=el('div','mt-0.5 shrink-0'); ic.innerHTML=`<span class="grid h-6 w-6 place-items-center rounded-full" style="background:${col}1f;color:${col}"><i data-lucide="${meta.ic}" class="h-3.5 w-3.5"></i></span>`;
     let bodyHtml='';
-    if(role==='user'){ bodyHtml=`<div class="ev-bubble ev-user">${md(esc(e.c))}</div>`; }
-    else if(role==='assistant'){ bodyHtml=`<div class="ev-bubble ev-assistant">${md(esc(e.c))}</div>`; }
-    else if(role==='reasoning'){ bodyHtml=`<details class="ev-bubble ev-reasoning"${role==='reasoning'?' open':''}><summary class="cursor-pointer text-[11px] font-medium select-none">${meta.label}</summary><div class="mt-1">${md(esc(e.rs||e.c))}</div></details>`; }
+    if(role==='user'){ bodyHtml=`<div class="ev-bubble ev-user">${md(esc(e.c))}</div>`; }          // Input 常展开
+    else if(role==='assistant'){ bodyHtml=`<div class="ev-bubble ev-assistant">${md(esc(e.c))}</div>`; } // Output 常展开
+    else if(role==='reasoning'){ bodyHtml=`<details class="ev-bubble ev-reasoning"><summary class="cursor-pointer text-[11px] font-medium select-none">${meta.label}</summary><div class="mt-1">${md(esc(e.rs||e.c))}</div></details>`; }
     else if(role==='tool'){ bodyHtml=renderTool(e); }
     else if(role==='patch'){ bodyHtml=renderPatch(e); }
     else if(role==='shell'){ bodyHtml=renderShell(e); }
@@ -738,27 +862,39 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   function renderTool(e){
     const ok=/^(ok|success|succe?ed|done|complete|completed)/i.test(e.ts||''); const bad=/^(error|fail|denied|exception)/i.test(e.ts||'');
     const stCol=ok?'var(--state-success)':bad?'var(--state-error)':'var(--state-warning)';
+    // 默认折叠：仅显示名称与状态；输入/输出可手动展开
     let h=`<div class="ev-tool-card">
-      <div class="flex items-center gap-2 border-b border-border bg-muted/40 px-3 py-1.5">
+      <details>
+      <summary class="flex items-center gap-2 border-b border-border bg-muted/40 px-3 py-1.5 cursor-pointer hover:bg-muted/60">
         <i data-lucide="wrench" class="h-3.5 w-3.5" style="color:var(--state-info)"></i>
         <span class="mono text-[11.5px] font-semibold text-foreground">${esc(e.tn||'tool')}</span>
         ${e.ts?`<span class="chip" style="background:${stCol}1f;color:${stCol}">${esc(e.ts)}</span>`:''}
-      </div>`;
-    if(e.ti){ h+=`<details class="border-b border-border"><summary class="cursor-pointer px-3 py-1.5 text-[11px] text-muted-foreground hover:bg-muted">输入参数</summary><pre class="codeblk mx-3 my-1.5">${esc(prettyJson(e.ti))}</pre></details>`; }
-    if(e.to){ h+=`<details class="border-b border-border"><summary class="cursor-pointer px-3 py-1.5 text-[11px] text-muted-foreground hover:bg-muted">输出结果</summary><div class="px-3 pb-2 pt-1"><pre class="codeblk">${esc(e.to)}</pre></div></details>`; }
-    h+=`</div>`; return h;
+      </summary>
+      <div class="px-3 py-2 space-y-2">`;
+    if(e.ti){ h+=`<details class="border border-border rounded-md"><summary class="cursor-pointer px-3 py-1 text-[11px] text-muted-foreground hover:bg-muted">输入参数</summary><pre class="codeblk mx-2 my-1.5">${esc(prettyJson(e.ti))}</pre></details>`; }
+    if(e.to){ h+=`<details class="border border-border rounded-md"><summary class="cursor-pointer px-3 py-1 text-[11px] text-muted-foreground hover:bg-muted">输出结果</summary><div class="px-3 pb-2 pt-1"><pre class="codeblk">${esc(e.to)}</pre></div></details>`; }
+    h+=`</div></details></div>`; return h;
   }
   function renderPatch(e){
-    let h=`<div class="rounded-lg border border-border overflow-hidden">`;
-    if(e.pf){h+=`<div class="border-b border-border bg-muted/40 px-3 py-1.5 text-[11px] mono text-foreground"><i data-lucide="file-diff" class="inline h-3.5 w-3.5 mr-1 text-success"></i>${esc(e.pf)}</div>`;}
-    if(e.pd){ const lines=(e.pd||'').split('\n'); h+=`<pre class="codeblk !rounded-none m-0">`; lines.slice(0,200).forEach(l=>{ const cls=l.startsWith('+')?'diff-add':l.startsWith('-')?'diff-del':''; h+=`<div class="${cls}">${esc(l)||' '}</div>`; }); h+=`</pre>`; }
-    h+=`</div>`; return h;
+    // 默认折叠：summary 显示文件名，diff 可展开
+    let h=`<div class="rounded-lg border border-border overflow-hidden">
+      <details>
+      <summary class="flex items-center gap-2 border-b border-border bg-muted/40 px-3 py-1.5 text-[11px] mono text-foreground cursor-pointer hover:bg-muted/60">
+        <i data-lucide="file-diff" class="h-3.5 w-3.5 text-success"></i>${esc(e.pf||'代码修改')}
+      </summary>`;
+    if(e.pd){ const lines=(e.pd||'').split('\n'); h+=`<pre class="codeblk !rounded-none m-0">`; lines.slice(0,300).forEach(l=>{ const cls=l.startsWith('+')?'diff-add':l.startsWith('-')?'diff-del':''; h+=`<div class="${cls}">${esc(l)||' '}</div>`; }); h+=`</pre>`; }
+    h+=`</details></div>`; return h;
   }
   function renderShell(e){
-    let h=`<div class="ev-shell">`;
-    if(e.sc){h+=`<div class="px-3 py-1.5 border-b border-white/5 text-sky-300">$ ${esc(e.sc)}</div>`;}
+    // 默认折叠：summary 显示命令，输出可展开
+    let h=`<div class="ev-shell">
+      <details>
+      <summary class="flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-white/5">
+        <i data-lucide="terminal" class="h-3.5 w-3.5 text-sky-300"></i>
+        <span class="truncate text-sky-300 mono">$ ${esc(e.sc||'shell')}</span>
+      </summary>`;
     if(e.so){h+=`<pre class="px-3 py-2 overflow-x-auto text-[11.5px] leading-relaxed">${esc(e.so)}</pre>`;}
-    h+=`</div>`; return h;
+    h+=`</details></div>`; return h;
   }
   function prettyJson(s){ try{ return JSON.stringify(JSON.parse(s),null,2); }catch(_){ return s||''; } }
   function md(s){ if(!s)return ''; s=s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');

@@ -31,6 +31,18 @@ const { chromium } = require('playwright');
   const bodyText = await page.locator('#drawerBody').innerText();
   check('抽屉加载出事件内容(含 E2E)', bodyText.includes('E2E'), bodyText.slice(0, 40));
   check('抽屉渲染了思维链/工具类型', /思考|推理|工具/.test(bodyText));
+  check('抽屉分页栏可见', await page.locator('#drawerPager').isVisible());
+  const pageInfo = await page.locator('#drawerPageInfo').innerText();
+  check('分页信息显示总条数', pageInfo.includes('4'), pageInfo);
+  // 默认倒序：最新(助手回复)在最上，最早(用户提问)在最下
+  const evTexts = await page.locator('#drawerBody .ev-bubble').allInnerTexts();
+  const firstTxt = (evTexts[0] || '');
+  const lastTxt = (evTexts[evTexts.length - 1] || '');
+  check('倒序: 首条为最新助手回复', firstTxt.includes('E2E 回复'), firstTxt.slice(0, 30));
+  check('倒序: 末条为最早用户提问', lastTxt.includes('的用户提问'), lastTxt.slice(0, 30));
+  // 默认折叠：推理/工具/补丁 details 未展开
+  const closed = await page.locator('#drawerBody details:not([open])').count();
+  check(`推理/工具等默认折叠(details 未展开>=2)`, closed >= 2, `closed=${closed}`);
   await page.locator('#drawerClose').click();
   await page.waitForTimeout(300);
   check('抽屉可关闭', !(await page.locator('#drawer').isVisible()));
