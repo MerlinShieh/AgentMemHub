@@ -34,12 +34,19 @@ const { chromium } = require('playwright');
   check('抽屉分页栏可见', await page.locator('#drawerPager').isVisible());
   const pageInfo = await page.locator('#drawerPageInfo').innerText();
   check('分页信息显示总条数', pageInfo.includes('4'), pageInfo);
-  // 默认倒序：最新(助手回复)在最上，最早(用户提问)在最下
+  // 默认展示尾页（最新内容），页内升序：最早在上、最新在下
   const evTexts = await page.locator('#drawerBody .ev-bubble').allInnerTexts();
   const firstTxt = (evTexts[0] || '');
   const lastTxt = (evTexts[evTexts.length - 1] || '');
-  check('倒序: 首条为最新助手回复', firstTxt.includes('E2E 回复'), firstTxt.slice(0, 30));
-  check('倒序: 末条为最早用户提问', lastTxt.includes('的用户提问'), lastTxt.slice(0, 30));
+  check('尾页升序: 首条为最早用户提问', firstTxt.includes('的用户提问'), firstTxt.slice(0, 30));
+  check('尾页升序: 末条为最新助手回复', lastTxt.includes('E2E 回复'), lastTxt.slice(0, 30));
+  // 单页边界态：4 事件/页容 100 = 1 页 → 所有翻页按钮应 disabled（正确行为）
+  const nav = await page.locator('#drawerPageNav').innerText();
+  check('单页显示 1 / 1', nav.includes('1 / 1'), nav);
+  check('单页: 首页 disabled', await page.locator('#drawerFirstPage').isDisabled());
+  check('单页: 上一页 disabled', await page.locator('#drawerPrevPage').isDisabled());
+  check('单页: 下一页 disabled', await page.locator('#drawerNextPage').isDisabled());
+  check('单页: 末页 disabled', await page.locator('#drawerLastPage').isDisabled());
   // 默认折叠：推理/工具/补丁 details 未展开
   const closed = await page.locator('#drawerBody details:not([open])').count();
   check(`推理/工具等默认折叠(details 未展开>=2)`, closed >= 2, `closed=${closed}`);
