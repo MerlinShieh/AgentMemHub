@@ -376,7 +376,7 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 - [x] 交互式控制台入口（start.bat / 无参数菜单）
 - [x] 记忆引擎一体化管理（MemOS 平移进项目 + 启停/巡检/看板记忆板块）
 - [x] 统一配置体系（agentmemhub.yaml：全路径可配置）
+- [x] MCP 记忆网关（stdio / Streamable HTTP 双传输，供 ZCode/OpenCode 等 harness 检索/写入记忆）
 - [ ] 更多 Agent（Claude Code / Cursor / Gemini CLI / CodeBuddy）
-- [ ] 记忆加载网关（MCP 封装，供 ZCode/OpenCode 等 harness 检索记忆）
 - [ ] 记忆清洗规则（去注入元数据、压缩折叠会话）
 
