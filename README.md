@@ -16,6 +16,62 @@
 | **QoderCN** | `~/.qoder-cn/.../*.jsonl` | JSONL |
 | **DSH** | `~/.dsh/sessions/*/session.jsonl.zstd` | zstd JSONL |
 
+## 项目架构
+
+```
+   ┌───────────────────────────── AgentMemHub（本项目） ─────────────────────────────┐
+   │                                                                                 │
+   │  采集层                        存储层                 消费层                     │
+   │  ┌──────────────┐           ┌────────────┐     ┌────────────────────┐          │
+   │  │ adapters/    │  ingest   │ SQLite 会话库│    │ CLI（7+ 子命令）      │          │
+   │  │ 7 个数据源     │ ────────▶│ (store.py) │     │ 控制台（start.bat）    │          │
+   │  │ (sqlite/jsonl)│           │ events+fts │     │ Web 看板（/api/*）    │          │
+   │  └──────────────┘           └─────┬──────┘     └────────┬───────────┘          │
+   │                                  │                      │                      │
+   │   记忆层   ┌──────────────────────┼──────────────────────┘                      │
+   │            ▼                      ▼                                             │
+   │      统一事件流         bundle 生成（memos.py，幂等/价值启发式）                    │
+   │            │                      │                                             │
+   │            │                      ▼                                             │
+   │            │             ┌────────────────┐    ┌─────────────────┐              │
+   │            │             │ 引擎托管        │    │ 上游引擎 MemOS    │              │
+   │            └────────────▶│ memos_daemon.py│──▶│ (项目内 memOS/)   │              │
+   │          （检索/看板/导出）│ 启停/状态/密码/开关│    │ 记忆库+进化链      │              │
+   │                          └────────────────┘    └─────────────────┘              │
+   │                                                                                 │
+   │   配置层：agentmemhub.yaml（全路径可配置）＋ 环境变量覆盖                           │
+   └─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**目录结构**
+
+```
+AgentMemHub/
+├── agentmemhub/                  # 核心包
+│   ├── cli.py                    # 命令行入口（无参数进控制台）
+│   ├── console.py                # 交互式控制台（环境检测/提取/检索/看板/记忆推送）
+│   ├── config.py                 # 统一配置体系（YAML + 环境变量 + 默认）
+│   ├── store.py + schema.sql     # SQLite 会话库（conversations/events/events_fts）
+│   ├── memos.py                  # MemOS bundle 桥接（幂等导入/价值/rebuild）
+│   ├── memos_daemon.py           # 记忆引擎托管（启停/状态/密码自动登录/轻量开关）
+│   ├── adapters/                 # 7 个 Agent 数据源适配器（src_id/turn_key/注入识别）
+│   └── web/                      # FastAPI 看板 + 前端 + /api/memos 记忆网关
+├── memOS/                        # 上游记忆引擎（已平移进项目，gitignore）
+│   ├── apps/memos-local-plugin/  #   引擎程序 + npm 依赖 + 本地嵌入模型
+│   └── home/                     #   引擎数据：记忆库 memos.db / viewer 密码 / 引擎配置
+├── agentmemhub.yaml(.example)    # 统一配置文件（复制 example 按需修改）
+├── exports/                      # 导出产物（gitignore）
+├── scripts/                      # 验证/安全检查/E2E 脚本
+├── tests/                        # pytest（22 项）
+└── start.bat                     # Windows 一键入口（双击进控制台）
+```
+
+**数据流（三阶段闭环）**
+
+1. **采集**：`ingest` 从各 Agent 的官方数据位置读取会话（路径可经 `agents.*` 配置覆盖），归一为全量事件流（含工具链/思维链/Shell/补丁，每事件带 `src_id`/`turn_key` 稳定锚与系统注入标记）写入本地 SQLite
+2. **消费**：CLI/控制台/Web 看板检索、浏览、导出、管理会话——全部读本地库，不上传任何数据
+3. **记忆**：`memos` 把事件流转成 MemOS bundle（幂等、按轮分组、带价值信号）→ 经引擎托管通道导入项目内 `memOS/`，之后对话时可被语义检索命中
+
 ## 快速开始
 
 **方式 A — 控制台（推荐，新用户入口）**
