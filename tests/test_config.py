@@ -16,9 +16,8 @@ def test_defaults():
     # MemOS repo 默认 = 项目根/memOS
     assert c.memos_repo_dir == C.PROJECT_ROOT / "memOS"
     assert c.memos_base_url == "http://127.0.0.1:18800"
-    # repo 未平移（memOS/ 不存在）→ 推导路径存在性为 False（find_plugin_dir 会回退探测）
+    # 默认推导路径正确（memOS/ 是否已平移由环境决定，存在性不在此断言）
     assert c.memos_plugin_dir == C.PROJECT_ROOT / "memOS" / "apps" / "memos-local-plugin"
-    assert not c.memos_plugin_dir.exists()
     assert c.memos_password == ""
     assert c.memos_lightweight is None
 
