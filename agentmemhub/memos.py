@@ -173,19 +173,30 @@ def push_bundle(bundle: dict[str, Any], base_url: str = "http://127.0.0.1:18800"
 
 def rebuild_embeddings(base_url: str = "http://127.0.0.1:18800",
                        mode: str = "repair",
-                       limit: Optional[int] = None) -> dict:
+                       limit: int = 500,
+                       max_rounds: int = 200) -> dict:
     """POST /api/v1/embeddings/rebuild 补齐缺失向量（导入的 trace 无 embedding，无法语义检索）。
 
+    服务端每批只处理 limit 条并返回 done/nextOffset——此处分页循环直到全部补齐。
     mode: repair=只补 null 向量（默认，快）；rebuild=全部重算。
+    返回汇总：{rounds, processed, updated, failed, done, statsAfter}。
     """
-    body: dict[str, Any] = {"mode": mode}
-    if limit:
-        body["limit"] = limit
     url = base_url.rstrip("/") + "/api/v1/embeddings/rebuild"
-    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=600) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    total = {"rounds": 0, "processed": 0, "updated": 0, "failed": 0,
+             "done": False, "statsAfter": None}
+    for _ in range(max_rounds):
+        body = json.dumps({"mode": mode, "limit": limit}, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            d = json.loads(resp.read().decode("utf-8"))
+        total["rounds"] += 1
+        for k in ("processed", "updated", "failed"):
+            total[k] += d.get(k, 0)
+        total["done"] = bool(d.get("done"))
+        total["statsAfter"] = d.get("statsAfter")
+        if total["done"]:
+            break
+    return total
 
 
 def _now_ms() -> int:

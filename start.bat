@@ -1,6 +1,6 @@
 @echo off
-rem AgentMemHub 控制台入口（Windows；后续系统可对照做 start.sh）
-rem 无绝对路径依赖：%~dp0 = 本脚本所在目录，自动定位项目根
+rem AgentMemHub console entry (Windows). See start.sh later for other OS.
+rem %~dp0 = directory of this script, so no absolute path is hardcoded.
 setlocal
 chcp 65001 >nul
 cd /d "%~dp0"
