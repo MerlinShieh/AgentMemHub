@@ -267,6 +267,44 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     </div>
   </section>
 
+  <!-- 记忆引擎（MemOS）：未配置且离线时整体隐藏 -->
+  <section id="memosPanel" class="hidden px-5 pb-4">
+    <div class="rounded-xl border border-border bg-card p-4 shadow-sm">
+      <div class="flex flex-wrap items-center gap-2">
+        <i data-lucide="brain" class="h-4 w-4 text-primary"></i>
+        <h2 class="text-sm font-semibold text-foreground">记忆引擎</h2>
+        <span id="memosDot" class="h-2 w-2 rounded-full bg-muted-foreground"></span>
+        <span id="memosState" class="text-xs text-muted-foreground">检测中…</span>
+        <span id="memosMeta" class="tnum text-[11px] text-muted-foreground"></span>
+        <a id="memosOpenBtn" href="http://127.0.0.1:18800" target="_blank" rel="noopener"
+           class="ml-auto hidden items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted transition-colors">
+          <i data-lucide="external-link" class="h-3.5 w-3.5"></i>打开引擎页面
+        </a>
+        <button id="memosStopBtn" class="hidden items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-error hover:bg-error-soft transition-colors">
+          <i data-lucide="square" class="h-3 w-3"></i>停止引擎
+        </button>
+        <button id="memosToggleBtn" class="hidden items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:opacity-90 transition-colors">
+          <i data-lucide="play" class="h-3.5 w-3.5"></i><span id="memosToggleLabel">启动引擎</span>
+        </button>
+      </div>
+      <div id="memosHint" class="mt-2 hidden text-[11px] text-muted-foreground"></div>
+      <div id="memosOnline" class="mt-3 hidden grid gap-4 lg:grid-cols-2">
+        <div>
+          <div class="relative">
+            <i data-lucide="search" class="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"></i>
+            <input id="memosKw" type="text" placeholder="语义检索历史记忆（例：部署、依赖修复…），回车触发"
+                   class="w-full rounded-md border border-input bg-background py-1.5 pl-8 pr-3 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring">
+          </div>
+          <div id="memosHits" class="mt-2 max-h-56 space-y-1.5 overflow-y-auto scroll-thin"></div>
+        </div>
+        <div>
+          <div class="text-[11px] font-medium text-muted-foreground">最近记忆</div>
+          <div id="memosRecent" class="mt-1.5 max-h-64 space-y-1 overflow-y-auto scroll-thin"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- Table -->
   <section class="flex-1 px-5 pb-8">
     <div class="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
@@ -479,8 +517,158 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     renderStats(); renderCharts(); renderTable();
     bindTrendDrag();
     updateSummary();
+    initMemosPanel();
     reicons();
     return true;
+  }
+
+  // ---- 记忆引擎（MemOS）板块 ----
+  const TIER_META = {
+    1: {label:'技能', color:'#A855F7'}, 2: {label:'记忆', color:'#3B82F6'},
+    3: {label:'知识', color:'#06B6D4'},
+  };
+  async function initMemosPanel(){
+    const panel = $('#memosPanel');
+    let s;
+    try{
+      const r = await fetch('/api/memos/status');
+      if(!r.ok) throw 0;
+      s = await r.json();
+    }catch(e){ return; }                    // 后端不支持或异常：保持隐藏
+    if(!s.online && !s.plugin_dir){ return; } // 未安装 MemOS：整体隐藏
+    panel.classList.remove('hidden');
+    renderMemosStatus(s);
+    if(s.online){
+      $('#memosOnline').classList.remove('hidden');
+      loadMemosRecent();
+    }
+    reicons();
+  }
+  function renderMemosStatus(s){
+    const dot = $('#memosDot'), state = $('#memosState'),
+          meta = $('#memosMeta'), btn = $('#memosToggleBtn'), hint = $('#memosHint');
+    const openBtn = $('#memosOpenBtn'), stopBtn = $('#memosStopBtn');
+    const summ = s.summary || {};
+    if(s.online){
+      dot.className = 'h-2 w-2 rounded-full bg-emerald-500';
+      state.textContent = s.managed ? '运行中（本工具托管）' : '运行中（外部进程）';
+      meta.textContent = `${summ.traces ?? '—'} 条记忆 · ${summ.episodes ?? '—'} 个任务`
+        + (summ.embedding_ready ? ' · 向量就绪' : '');
+      btn.classList.add('hidden'); btn.classList.remove('inline-flex');
+      stopBtn.classList.toggle('hidden', !s.managed);      // 仅托管实例可停
+      stopBtn.classList.toggle('inline-flex', !!s.managed);
+      openBtn.classList.remove('hidden'); openBtn.classList.add('inline-flex');
+      if(s.auth_required){
+        hint.textContent = '引擎已设密码，网关无法读取数据：运行 agentmemhub memos-daemon --set-password <密码> 后刷新';
+        hint.classList.remove('hidden');
+      }else{
+        hint.classList.add('hidden');
+      }
+    }else{
+      dot.className = 'h-2 w-2 rounded-full bg-muted-foreground';
+      state.textContent = '已停止';
+      meta.textContent = '';
+      stopBtn.classList.add('hidden'); stopBtn.classList.remove('inline-flex');
+      openBtn.classList.add('hidden'); openBtn.classList.remove('inline-flex');
+      if(s.plugin_dir){
+        btn.classList.remove('hidden'); btn.classList.add('inline-flex');
+        $('#memosToggleLabel').textContent = '启动引擎';
+        hint.classList.add('hidden');
+      }else{
+        btn.classList.add('hidden'); btn.classList.remove('inline-flex');
+        hint.textContent = '未找到 MemOS 插件目录：设置环境变量 MEMOS_PLUGIN_DIR 后刷新即可启用';
+        hint.classList.remove('hidden');
+      }
+    }
+  }
+  async function loadMemosRecent(){
+    const box = $('#memosRecent');
+    try{
+      const r = await fetch('/api/memos/traces?limit=8');
+      if(!r.ok) throw 0;
+      const d = await r.json();
+      if(!(d.traces||[]).length){ box.innerHTML = '<div class="py-3 text-center text-[11px] text-muted-foreground">暂无记忆</div>'; return; }
+      box.innerHTML = d.traces.map(t=>{
+        const v = (typeof t.value==='number') ? t.value : null;
+        const vChip = v===null ? '' : `<span class="ml-auto rounded px-1 text-[10px] font-semibold ${v>0?'bg-emerald-500/10 text-emerald-500':(v<0?'bg-error-soft text-error':'bg-muted text-muted-foreground')}">${v>0?'+':''}${v.toFixed(1)}</span>`;
+        const ts = t.ts ? new Date(t.ts).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '';
+        const u = esc((t.userText||'（无用户输入）').slice(0,90));
+        return `<div class="rounded-md border border-border bg-background px-2.5 py-1.5 text-xs">
+          <div class="flex items-center gap-2"><span class="tnum text-[10px] text-muted-foreground">${ts}</span>${vChip}</div>
+          <div class="mt-0.5 truncate text-foreground" title="${esc(t.userText||'')}">${u}</div>
+        </div>`;
+      }).join('');
+    }catch(e){
+      box.innerHTML = '<div class="py-3 text-center text-[11px] text-muted-foreground">记忆列表加载失败</div>';
+    }
+  }
+  async function memosSearch(q){
+    const box = $('#memosHits');
+    box.innerHTML = '<div class="py-2 text-center text-[11px] text-muted-foreground">检索中…</div>';
+    try{
+      const r = await fetch('/api/memos/search?q='+encodeURIComponent(q));
+      if(r.status===503) throw new Error('引擎离线');
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      const d = await r.json();
+      const hits = d.hits||[];
+      if(!hits.length){ box.innerHTML = '<div class="py-2 text-center text-[11px] text-muted-foreground">无命中</div>'; return; }
+      box.innerHTML = hits.map(h=>{
+        const tm = TIER_META[h.tier] || {label:'记忆', color:'#64748B'};
+        const sn = esc((h.snippet||'').slice(0,160));
+        const score = (typeof h.score==='number') ? h.score.toFixed(2) : '';
+        return `<div class="rounded-md border border-border bg-background px-2.5 py-1.5 text-xs">
+          <div class="flex items-center gap-1.5">
+            <span class="rounded px-1 text-[10px] font-semibold" style="background:${tm.color}1f;color:${tm.color}">${tm.label}</span>
+            <span class="text-[10px] text-muted-foreground">${esc(h.refKind||'')}</span>
+            <span class="ml-auto tnum text-[10px] text-muted-foreground">${score}</span>
+          </div>
+          <div class="mt-0.5 leading-relaxed text-foreground">${sn}</div>
+        </div>`;
+      }).join('');
+    }catch(e){
+      box.innerHTML = `<div class="py-2 text-center text-[11px] text-error">检索失败：${esc(e.message||e)}</div>`;
+    }
+  }
+  async function memosToggle(){
+    const btn = $('#memosToggleBtn'), label = $('#memosToggleLabel');
+    btn.disabled = true; label.textContent = '启动中…';
+    try{
+      const r = await fetch('/api/memos/start', {method:'POST'});
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok){
+        toast((d.detail && (typeof d.detail==='string' ? d.detail : (d.detail.error||'启动失败'))) || '启动失败');
+        label.textContent = '启动引擎'; btn.disabled = false; return;
+      }
+      toast('记忆引擎已启动');
+      const s = await (await fetch('/api/memos/status')).json();
+      renderMemosStatus(s);
+      if(s.online && !s.auth_required){ $('#memosOnline').classList.remove('hidden'); loadMemosRecent(); }
+    }catch(e){
+      toast('启动失败：'+(e.message||e));
+    }
+    btn.disabled = false; label.textContent = '启动引擎';
+    reicons();
+  }
+  async function memosStop(){
+    const btn = $('#memosStopBtn');
+    btn.disabled = true;
+    try{
+      const r = await fetch('/api/memos/stop', {method:'POST'});
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok){
+        const det = d.detail;
+        toast(typeof det==='string' ? det : (det && det.reason) || '停止失败');
+      }else{
+        toast('记忆引擎已停止');
+      }
+      const s = await (await fetch('/api/memos/status')).json();
+      renderMemosStatus(s);
+      $('#memosOnline').classList.add('hidden');
+    }catch(e){
+      toast('停止失败：'+(e.message||e));
+    }
+    btn.disabled = false;
+    reicons();
   }
 
   function updateStatsHead(meta){
@@ -636,6 +824,15 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     };
     $('#prevPage').onclick=()=>{if(page>1){page--;renderTable();}};
     $('#nextPage').onclick=()=>{if(page*pageSize<filtered.length){page++;renderTable();}};
+    // 记忆引擎板块
+    $('#memosKw').addEventListener('keydown',e=>{ if(e.key==='Enter'){ const q=e.target.value.trim(); if(q) memosSearch(q); } });
+    $('#memosToggleBtn').onclick=()=>memosToggle();
+    $('#memosStopBtn').onclick=()=>{
+      showModal({
+        title:'停止记忆引擎', msg:'停止后看板的记忆检索与引擎页面将不可用，随时可重新启动。',
+        confirmText:'停止', confirmClass:'bg-error-solid', onConfirm:()=>memosStop(),
+      });
+    };
   }
   // P1 修复：原改写时遗漏此定义，导致勾选/删除触发 "updateBatchBtn is not defined"
   function updateBatchBtn(){ const n=selectedKeys.size; const b=$('#batchDelBtn'); b.classList.toggle('hidden',n===0); b.classList.toggle('inline-flex',n>0); }

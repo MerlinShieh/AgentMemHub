@@ -1,0 +1,64 @@
+# AgentMemHub 配置文件模板
+#
+# 用法：复制本文件为 agentmemhub.yaml（项目根），按需修改；不复制则全部用
+# 官方默认路径，功能与现状一致。
+#
+# 优先级：环境变量（AGENTMEMHUB_* / MEMOS_*） > 本文件 > 内置默认。
+# 相对路径相对项目根；~ 展开为用户目录。所有非必填项留空 = 官方默认。
+
+# ---------------------------------------------------------------------------
+# AgentMemHub 自身数据
+# ---------------------------------------------------------------------------
+# data_dir: 本地数据库 / 日志 / 托管状态的目录（默认 ~/.agentmemhub）
+# db_path:  统一会话库 SQLite 文件（默认 <data_dir>/agentmemhub.db）
+data_dir: "~/.agentmemhub"
+db_path: ""
+
+# ---------------------------------------------------------------------------
+# 各 Agent Harness 的会话数据位置（默认官方路径，自动发现）
+# 需要覆盖时给出目录/文件路径（见 adapters 的 candidate_paths 语义）
+# ---------------------------------------------------------------------------
+agents:
+  # zcode:  "~/.zcode/cli/db/db.sqlite"
+  # opencode: "~/.local/share/opencode/opencode.db"
+  # hermes: "~/AppData/Local/hermes/state.db"   # Windows 示例（系统盘非 C: 时很有用）
+  # qwen:   "~/.qwen"
+  # qodercn: "~/.qoder-cn"
+  # workbuddy: "~/.workbuddy"
+  # dsh:    "~/.dsh"
+  zcode: ""
+  opencode: ""
+  hermes: ""
+  qwen: ""
+  qodercn: ""
+  workbuddy: ""
+  dsh: ""
+
+# ---------------------------------------------------------------------------
+# Web 看板
+# ---------------------------------------------------------------------------
+web:
+  port: 8086
+
+# ---------------------------------------------------------------------------
+# MemOS 记忆引擎（上游，AgentMemHub 只调接口 / 托管进程，不改其源码）
+# ---------------------------------------------------------------------------
+memos:
+  # 引擎地址
+  base_url: "http://127.0.0.1:18800"
+  # repo_dir: MemOS 项目根（完整 repo，含 apps/memos-local-plugin）。
+  #   默认 <项目根>/memOS —— 使用 AgentMemHub 内建目录时无需配置；
+  #   想放其他位置（如 D:\tools\MemOS-Local-Plugin）时在此指定。
+  repo_dir: ""
+  # plugin_dir: MemOS repo 的 apps/memos-local-plugin。
+  #   留空 = 从 repo_dir 自动推导（<repo_dir>/apps/memos-local-plugin）。
+  plugin_dir: ""
+  # home: 引擎 home（记忆库 / .auth.json / config.yaml 所在）。
+  #   留空时：MemOS 在项目内 → 默认 <repo_dir>/home；
+  #   否则用引擎官方默认位置（Windows hermes: %LOCALAPPDATA%\hermes\memos-plugin）。
+  home: ""
+  # password: 引擎 viewer 密码（网关遇 401 自动登录用；留空则不尝试登录）
+  password: ""
+  # lightweight: true=轻量模式（写入记忆不进化）；false=完整进化链；
+  #   留空 = 交给引擎自身的 config.yaml 配置（可用 memos-daemon --lightweight 控制）
+  lightweight: ""
