@@ -163,6 +163,34 @@ def cmd_adapters(args) -> None:
         _stdout(f"[{d['source']}] {d['label']}: {'✓ ' + (d['path'] or '') if d['located'] else '✗ 未找到'}")
 
 
+def cmd_memos_daemon(args) -> None:
+    """MemOS 记忆引擎 daemon 管理（启动/停止/巡检/日志/配置）。"""
+    import json as _json
+    from agentmemhub import memos_daemon
+    if args.set_dir:
+        try:
+            p = memos_daemon.save_plugin_dir(args.set_dir)
+            _stdout(f"已保存 MemOS 插件目录 → {p}")
+        except Exception as e:
+            _stdout(f"保存失败: {e}")
+        return
+    if args.action == "start":
+        r = memos_daemon.daemon_start(agent=args.agent, plugin_dir=args.plugin_dir or None)
+    elif args.action == "stop":
+        r = memos_daemon.daemon_stop()
+    elif args.action == "logs":
+        lf = memos_daemon._log_file()
+        if not lf.exists():
+            _stdout("（暂无日志）")
+            return
+        text = lf.read_text(encoding="utf-8", errors="replace")
+        _stdout("\n".join(text.splitlines()[-int(args.lines):]))
+        return
+    else:  # status
+        r = memos_daemon.daemon_status()
+    _stdout(_json.dumps(r, ensure_ascii=False, indent=1))
+
+
 def run_memos(*, source: str = "", out: str = "exports/memos_bundle.json",
               push: str = "", no_rebuild: bool = False,
               rebuild_mode: str = "repair") -> None:
@@ -259,6 +287,16 @@ def build_parser() -> argparse.ArgumentParser:
                     help="push 后不触发 /api/v1/embeddings/rebuild（默认自动补向量）")
     pm.add_argument("--rebuild-mode", default="repair", choices=("repair", "rebuild"),
                     help="embedding rebuild 模式：repair=只补缺失向量（默认），rebuild=全部重算")
+
+    pmd = sub.add_parser("memos-daemon", help="MemOS 记忆引擎管理（start/stop/status/logs）")
+    pmd.add_argument("action", nargs="?", default="status",
+                     choices=("start", "stop", "status", "logs"))
+    pmd.add_argument("--agent", default="hermes", help="daemon 的 agent 标识（决定端口/home）")
+    pmd.add_argument("--plugin-dir", default="",
+                     help="MemOS 插件目录（默认走 MEMOS_PLUGIN_DIR 或常见位置探测）")
+    pmd.add_argument("--set-dir", default="",
+                     help="持久化 MemOS 插件目录到 ~/.agentmemhub/config.json 后退出")
+    pmd.add_argument("--lines", type=int, default=40, help="logs 动作显示的行数")
     return p
 
 
@@ -273,7 +311,7 @@ def main() -> None:
         "ingest": cmd_ingest, "list": cmd_list, "show": cmd_show,
         "search": cmd_search, "export": cmd_export, "stats": cmd_stats,
         "adapters": cmd_adapters, "memos": cmd_memos, "folders": cmd_folders,
-        "serve": cmd_serve,
+        "serve": cmd_serve, "memos-daemon": cmd_memos_daemon,
     }
     fn = handlers.get(args.command)
     if fn is None:

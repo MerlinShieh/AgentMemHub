@@ -64,12 +64,14 @@ def _store_stats_safe() -> Optional[dict]:
 
 
 def env_snapshot() -> dict:
-    """环境快照：各 Agent 数据源状态 + 本地库规模 + MemOS 在线状态。"""
+    """环境快照：各 Agent 数据源状态 + 本地库规模 + MemOS 引擎状态。"""
+    from agentmemhub import memos_daemon
     return {
         "adapters": [a.describe() for a in adapters.all_adapters()],
         "stats": _store_stats_safe(),
         "memos": memos_probe() is not None,
         "memos_url": memos_base_url(),
+        "engine": memos_daemon.daemon_status(),
     }
 
 
@@ -85,7 +87,16 @@ def _render_snapshot(s: dict) -> str:
         lines.append(f"  本地库: {st['conversations']} 会话 / {st['events']} 事件")
     else:
         lines.append("  本地库: （空 —— 建议先执行 [1] 提取入库）")
-    lines.append(f"  MemOS: {'在线 ✓' if s['memos'] else '离线 ✗'}（{s['memos_url']}）")
+    eng = s.get("engine") or {}
+    if eng.get("online"):
+        managed = "，本工具托管" if eng.get("managed") else ""
+        pid = f" PID {eng['pid']}" if eng.get("pid") else ""
+        summ = eng.get("summary") or {}
+        traces = summ.get("traces")
+        extra = f"，{traces} 条记忆" if traces is not None else ""
+        lines.append(f"  记忆引擎: 运行中{pid}{managed}{extra}（{s['memos_url']}）")
+    else:
+        lines.append(f"  记忆引擎: 已停止（[6] 启动；{s['memos_url']}）")
     return "\n".join(lines)
 
 
@@ -100,7 +111,9 @@ MENU = """
   [2] 检索关键字（跨 Agent 全文搜索）
   [3] 启动网页看板（后台运行，菜单不阻塞）
   [4] 推送记忆到 MemOS（生成 bundle + 分批导入 + 补 embedding）
-  [5] 状态总览（数据源 / 本地库 / MemOS）
+  [5] 状态总览（数据源 / 本地库 / 记忆引擎）
+  [6] 启动记忆引擎（MemOS daemon，首次会提示插件目录）
+  [7] 停止记忆引擎（仅限本工具启动的实例）
   [0] 退出
 """
 
@@ -159,7 +172,7 @@ def action_memos() -> None:
     base = _ask(f"  MemOS 地址（回车 = {memos_base_url()}）> ", memos_base_url())
     probe = memos_probe(base)
     if probe is None:
-        if not _confirm("  ⚠ MemOS 未响应，仍要生成 bundle 并尝试推送吗？"):
+        if not _confirm("  ⚠ 记忆引擎未在线（可用 [6] 启动）。仍要生成 bundle 并尝试推送吗？"):
             _out("  （已取消）")
             return
     else:
@@ -172,12 +185,52 @@ def action_status() -> None:
     _out(_render_snapshot(env_snapshot()))
 
 
+def action_engine_start() -> None:
+    from agentmemhub import memos_daemon
+    if memos_daemon.find_plugin_dir() is None:
+        _out("  未找到 MemOS 插件目录（MemOS repo 的 apps/memos-local-plugin）。")
+        raw = input("  输入路径（回车取消）> ").strip()
+        if not raw:
+            _out("  （已取消）")
+            return
+        try:
+            p = memos_daemon.save_plugin_dir(raw)
+            _out(f"  已记住插件目录: {p}")
+        except Exception as e:
+            _out(f"  ✗ 保存失败: {e}")
+            return
+    _out("  启动记忆引擎中（最多等 30 秒）…")
+    r = memos_daemon.daemon_start()
+    if r.get("online") or r.get("started"):
+        st = r.get("summary") or {}
+        _out(f"  ✓ 记忆引擎在线（PID {r.get('pid')}，{st.get('traces')} 条记忆）")
+    else:
+        _out(f"  ✗ 启动失败: {r.get('reason')}")
+        if r.get("hint"):
+            _out(f"    提示: {r['hint']}")
+        if r.get("log"):
+            _out(f"    日志: {r['log']}")
+
+
+def action_engine_stop() -> None:
+    from agentmemhub import memos_daemon
+    r = memos_daemon.daemon_stop()
+    if r.get("stopped"):
+        _out(f"  ✓ 记忆引擎已停止（PID {r.get('pid')}）")
+    else:
+        _out(f"  - 未停止: {r.get('reason')}")
+        if r.get("hint"):
+            _out(f"    提示: {r['hint']}")
+
+
 ACTIONS = {
     "1": ("提取会话入库", action_ingest),
     "2": ("检索关键字", action_search),
     "3": ("启动网页看板", action_dashboard),
     "4": ("推送记忆到 MemOS", action_memos),
     "5": ("状态总览", action_status),
+    "6": ("启动记忆引擎", action_engine_start),
+    "7": ("停止记忆引擎", action_engine_stop),
 }
 
 
