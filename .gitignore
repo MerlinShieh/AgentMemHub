@@ -31,7 +31,9 @@ instance.json
 
 # 交接文档（仅供二次检查，不入库）
 HANDOFF.md
-"exports/"  
+
+# 导出产物（含真实对话的 bundle / markdown，严禁入库）
+exports/
 
 # Python 虚拟环境 (uv)（uv.lock 应提交以复现构建）
 .venv/
