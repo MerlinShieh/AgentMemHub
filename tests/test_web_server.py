@@ -141,3 +141,32 @@ def test_folders_endpoint(client):
     folders = r.json()["folders"]
     entry = next(f for f in folders if f["workspace"] == "LoginApp")
     assert entry["bySource"] == {"zcode": 1}
+
+
+def test_memos_status_shape(client):
+    """记忆引擎状态端点：形状契约（online 是 bool；不要求引擎真的在线）。"""
+    r = client.get("/api/memos/status")
+    assert r.status_code == 200
+    d = r.json()
+    assert isinstance(d["online"], bool)
+    assert "base_url" in d
+    assert "plugin_dir" in d or d["plugin_dir"] is None
+
+
+def test_memos_search_online_or_offline(client):
+    """检索端点：引擎在线→200+hits；离线→503。两种环境都应可预期。"""
+    r = client.get("/api/memos/search", params={"q": "登录"})
+    assert r.status_code in (200, 503)
+    if r.status_code == 200:
+        d = r.json()
+        assert isinstance(d["hits"], list)
+        for h in d["hits"]:
+            assert {"tier", "refKind", "snippet"} <= set(h)
+
+
+def test_memos_traces_online_or_offline(client):
+    r = client.get("/api/memos/traces", params={"limit": 5})
+    assert r.status_code in (200, 503)
+    if r.status_code == 200:
+        d = r.json()
+        assert "total" in d and isinstance(d["traces"], list)
