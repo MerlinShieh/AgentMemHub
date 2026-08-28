@@ -210,9 +210,53 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 | `folders [--source] [--limit]` | 按文件夹统计各 Agent 会话数 |
 | `memos [--source] [--out] [--push url] [--no-rebuild]` | 生成/推送 MemOS bundle（push 自动分批 + 补向量）|
 | `memos-daemon start\|stop\|status\|logs` | 记忆引擎托管（见下文「记忆引擎管理」）|
+| `mcp [--http] [--bind H] [--port P]` | MCP 记忆网关：默认 stdio（Agent 拉起）；`--http` 常驻为 Streamable HTTP 供团队共享 |
 | `stats` / `adapters` | 统计 / adapter 状态 |
 
 > 更完整的代码与 SQL 示例（按 Agent 查询、按文件夹跨 Agent 统计、会话角色分布、直连数据库等）见 **[docs/EXAMPLES.md](./docs/EXAMPLES.md)**。
+
+## MCP 记忆网关（实时记忆读写）
+
+把本地记忆引擎（MemOS）的语义检索/写入包装成 **MCP server**，挂在 ZCode / OpenCode /
+Claude Code 等支持 MCP 的 Agent harness 上——模型在会话进行中即可检索历史记忆、
+主动保存值得长期保留的结论。与离线链路（统一提取 → bundle → 导入）互补：
+
+| 工具 | 说明 |
+|---|---|
+| `memory_search(query, topK)` | 语义检索历史记忆（转发引擎 `/api/v1/memory/search`），返回命中条目 + 注入上下文 |
+| `memory_recent(limit)` | 最近写入的记忆时间线，快速了解近期积累 |
+| `memory_stats()` | 引擎在线状态 / 记忆总量 / 语义检索与 LLM 评分可用性 / 记忆模式 |
+| `memory_save(content)` | 写一条记忆（即时入库并补向量），供模型主动保存事实/结论 |
+
+启动与注册（两种传输，模板见 [docs/mcp-register.example.json](./docs/mcp-register.example.json)）：
+
+```bash
+# 0. 先常驻记忆引擎（网关绝不代管引擎生命周期）
+python -m agentmemhub memos-daemon start
+
+# 1）本地个人（stdio，Agent 拉起子进程）：Agent MCP 配置里注册
+#    command 用项目 .venv 的 python 绝对路径占位符：
+#      <项目根>/.venv/Scripts/python.exe  -m agentmemhub mcp
+#    或 `pip install -e .` 后把 .venv/Scripts 加入 PATH，直接用裸命令：agentmemhub-mcp
+#    注意：不要用 `uv run python`——MCP 子进程在项目目录之外启动时会
+#    解析到错误的 python（No module named agentmemhub）
+
+# 2）团队共享（Streamable HTTP）：一台机器/服务器常驻网关
+python -m agentmemhub mcp --http --bind 0.0.0.0 --port 9100
+#    客户端注册 type=http，url=http://<服务器>:9100/mcp（默认只监听 127.0.0.1，
+#    开放局域网需显式 --bind 0.0.0.0 并自行做好访问控制）
+
+# 3. 验证：在 Agent 会话里调用 memory_stats / memory_search
+```
+
+设计要点：
+
+- **引擎由用户常驻控制**（看板 / `memos-daemon`）；网关只转发请求，引擎离线时所有工具
+  返回明确错误与启动指引（isError），不做启停决策
+- **协议层与传输层分离**：stdio 零新依赖；Streamable HTTP 复用 web 依赖
+  （fastapi/uvicorn），`POST /mcp` 单端点（GET 405、DELETE 结束会话），
+  兼容 MCP 2024-11-05 / 2025-06-18
+- 复用引擎网关的自动登录（已保存密码时免密直连）；不写本地库、不改引擎源码
 
 ## 数据模型
 
@@ -332,7 +376,7 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 - [x] 交互式控制台入口（start.bat / 无参数菜单）
 - [x] 记忆引擎一体化管理（MemOS 平移进项目 + 启停/巡检/看板记忆板块）
 - [x] 统一配置体系（agentmemhub.yaml：全路径可配置）
+- [x] MCP 记忆网关（stdio / Streamable HTTP 双传输，供 ZCode/OpenCode 等 harness 检索/写入记忆）
 - [ ] 更多 Agent（Claude Code / Cursor / Gemini CLI / CodeBuddy）
-- [ ] 记忆加载网关（MCP 封装，供 ZCode/OpenCode 等 harness 检索记忆）
 - [ ] 记忆清洗规则（去注入元数据、压缩折叠会话）
 

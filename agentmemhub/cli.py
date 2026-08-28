@@ -250,6 +250,20 @@ def cmd_memos(args) -> None:
               no_rebuild=args.no_rebuild, rebuild_mode=args.rebuild_mode)
 
 
+def cmd_mcp(args) -> None:
+    """启动 MCP 记忆网关。
+
+    stdio 模式由 Agent host（ZCode/OpenCode 等）拉起子进程：stdin/stdout
+    走 MCP 协议，不能向 stdout 打印任何非协议内容。--http 模式常驻为
+    Streamable HTTP 服务（团队共享用，默认只监听本机）。
+    """
+    from agentmemhub.mcp_server import run_http, run_stdio
+    if args.http:
+        run_http(host=args.bind, port=args.port)
+    else:
+        run_stdio()
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="agentmemhub", description="AgentMemHub 统一 Agent 会话提取")
     sub = p.add_subparsers(dest="command")
@@ -312,6 +326,13 @@ def build_parser() -> argparse.ArgumentParser:
     pmd.add_argument("--lightweight", choices=("on", "off"), default=None,
                      help="开关 MemOS 轻量记忆模式（off=完整进化链；写托管配置，重启引擎生效）")
     pmd.add_argument("--lines", type=int, default=40, help="logs 动作显示的行数")
+
+    pmc = sub.add_parser("mcp", help="启动 MCP 记忆网关（stdio 默认；--http 转 Streamable HTTP 常驻）")
+    pmc.add_argument("--http", action="store_true",
+                     help="以 Streamable HTTP 模式常驻（默认 stdio 由 Agent 拉起）")
+    pmc.add_argument("--port", type=int, default=9100, help="HTTP 监听端口（默认 9100）")
+    pmc.add_argument("--bind", default="127.0.0.1",
+                     help="HTTP 监听地址（默认仅本机；团队共享用 0.0.0.0）")
     return p
 
 
@@ -326,7 +347,7 @@ def main() -> None:
         "ingest": cmd_ingest, "list": cmd_list, "show": cmd_show,
         "search": cmd_search, "export": cmd_export, "stats": cmd_stats,
         "adapters": cmd_adapters, "memos": cmd_memos, "folders": cmd_folders,
-        "serve": cmd_serve, "memos-daemon": cmd_memos_daemon,
+        "serve": cmd_serve, "memos-daemon": cmd_memos_daemon, "mcp": cmd_mcp,
     }
     fn = handlers.get(args.command)
     if fn is None:
