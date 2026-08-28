@@ -52,6 +52,95 @@ def base_url() -> str:
     return f"http://127.0.0.1:{_DAEMON_PORT}"
 
 
+# ---------------------------------------------------------------------------
+# 引擎鉴权：viewer 可设密码（.auth.json）；AgentMemHub 保管密码并自动登录
+# ---------------------------------------------------------------------------
+
+class EngineAuthError(Exception):
+    """引擎在线但鉴权失败（未保存密码或密码错误）。"""
+
+
+_COOKIE_CACHE: set[str] = set()   # "name=value" 片段（进程内缓存，401 时重登）
+
+
+def _config_file() -> Path:
+    return _data_dir() / "config.json"
+
+
+def save_password(password: str) -> None:
+    """保存 MemOS viewer 密码到本机 config.json（不进仓库）。"""
+    cfg: dict = {}
+    try:
+        cfg = json.loads(_config_file().read_text(encoding="utf-8")) or {}
+    except Exception:
+        pass
+    cfg["memos_password"] = password
+    _config_file().write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _password() -> str:
+    try:
+        return (json.loads(_config_file().read_text(encoding="utf-8")) or {}).get(
+            "memos_password", "")
+    except Exception:
+        return ""
+
+
+def _login() -> bool:
+    """用保存的密码登录引擎，缓存 session cookie。成功 True。"""
+    pw = _password()
+    if not pw:
+        return False
+    req = urllib.request.Request(
+        base_url() + "/api/v1/auth/login",
+        data=json.dumps({"password": pw}).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            set_cookies = r.headers.get_all("Set-Cookie") or []
+    except urllib.error.HTTPError as e:
+        if e.code in (400, 401):
+            _COOKIE_CACHE.clear()   # 密码被改/失效，清缓存
+            return False
+        raise
+    for sc in set_cookies:
+        first = sc.split(";")[0].strip()
+        if "=" in first:
+            _COOKIE_CACHE.add(first)
+    return bool(_COOKIE_CACHE)
+
+
+def engine_request(method: str, path: str, body: Optional[dict] = None,
+                   timeout: float = 30, retries: int = 1) -> dict:
+    """带自动登录的引擎 HTTP 请求（AgentMemHub 网关统一出口）。"""
+    url = base_url() + path
+    data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
+    headers = {"Content-Type": "application/json"} if data is not None else {}
+    if _COOKIE_CACHE:
+        headers["Cookie"] = "; ".join(sorted(_COOKIE_CACHE))
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            text = r.read().decode("utf-8")
+            return json.loads(text) if text.strip() else {}
+    except urllib.error.HTTPError as e:
+        if e.code == 401 and retries > 0 and _login():
+            return engine_request(method, path, body, timeout, retries - 1)
+        if e.code == 401:
+            raise EngineAuthError(
+                "引擎已设密码：运行 agentmemhub memos-daemon --set-password <密码> 保存后重试")
+        raise
+
+
+def auth_state() -> Optional[dict]:
+    """引擎鉴权状态（/api/v1/auth/status 是公开端点）。离线返回 None。"""
+    try:
+        with urllib.request.urlopen(base_url() + "/api/v1/auth/status", timeout=2.5) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
 def find_plugin_dir(explicit: Optional[str] = None) -> Optional[Path]:
     """定位 MemOS 插件目录：显式参数 > 环境变量 > 数据目录 config.json > 常见位置探测。"""
     for cand in (explicit, os.environ.get("MEMOS_PLUGIN_DIR")):
@@ -89,9 +178,9 @@ def save_plugin_dir(path: str | Path) -> Path:
 
 
 def _overview(timeout: float = 1.5) -> Optional[dict]:
+    """引擎 overview；在线但鉴权不过也返回 None（用 auth_state 区分）。"""
     try:
-        with urllib.request.urlopen(base_url() + "/api/v1/overview", timeout=timeout) as r:
-            return json.loads(r.read().decode("utf-8"))
+        return engine_request("GET", "/api/v1/overview", timeout=timeout)
     except Exception:
         return None
 
@@ -111,9 +200,10 @@ def _pid_alive(pid: int) -> bool:
 
 
 def daemon_status() -> dict[str, Any]:
-    """巡检：在线状态 + 归属（本工具启动 / 外部）+ 引擎摘要。"""
-    ov = _overview()
-    online = ov is not None
+    """巡检：在线状态 + 鉴权状态 + 归属（本工具启动 / 外部）+ 引擎摘要。"""
+    ast = auth_state()
+    online = ast is not None          # 公开端点可达即在线（不依赖鉴权）
+    ov = _overview() if online else None
     pid: Optional[int] = None
     managed = False
     pf = _pid_file()
@@ -130,6 +220,9 @@ def daemon_status() -> dict[str, Any]:
     pdir_resolved = find_plugin_dir()
     result: dict[str, Any] = {
         "online": online,
+        "auth": ast,                 # {enabled, needsSetup, authenticated} | None
+        "auth_required": bool(online and ov is None and ast
+                              and ast.get("enabled") and not ast.get("authenticated")),
         "pid": pid,
         "managed": managed,          # True=由 AgentMemHub 拉起（可 stop）
         "base_url": base_url(),
@@ -151,7 +244,7 @@ def daemon_start(agent: str = "hermes",
                  plugin_dir: Optional[str] = None,
                  wait_s: int = _START_TIMEOUT_S) -> dict[str, Any]:
     """拉起 daemon（已在线则幂等返回）。返回 {started, online, ...}。"""
-    if _overview() is not None:
+    if auth_state() is not None:
         return {"started": False, "reason": "already-online", **daemon_status()}
     d = find_plugin_dir(plugin_dir)
     if d is None:
@@ -176,7 +269,7 @@ def daemon_start(agent: str = "hermes",
 
     deadline = time.time() + wait_s
     while time.time() < deadline:
-        if _overview(timeout=1.0) is not None:
+        if auth_state() is not None:
             return {"started": True, "pid": proc.pid, **daemon_status()}
         if proc.poll() is not None:
             return {"started": False, "reason": "process-exited",
@@ -205,10 +298,10 @@ def daemon_stop() -> dict[str, Any]:
             os.killpg(os.getpgid(pid), signal.SIGTERM)
         except OSError:
             os.kill(pid, signal.SIGTERM)
-    # 等端口下线
+    # 等端口下线（auth/status 是公开端点，可达即视为仍在线）
     deadline = time.time() + 10
     while time.time() < deadline:
-        if _overview(timeout=0.8) is None:
+        if auth_state() is None:
             _pid_file().unlink(missing_ok=True)
             return {"stopped": True, "pid": pid}
         time.sleep(0.5)

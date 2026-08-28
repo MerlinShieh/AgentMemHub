@@ -174,6 +174,11 @@ def cmd_memos_daemon(args) -> None:
         except Exception as e:
             _stdout(f"保存失败: {e}")
         return
+    if args.set_password:
+        memos_daemon.save_password(args.set_password)
+        ok = memos_daemon._login()
+        _stdout("密码已保存" + ("，登录成功 ✓" if ok else "（暂未能验证登录：引擎可能离线或密码不符）"))
+        return
     if args.action == "start":
         r = memos_daemon.daemon_start(agent=args.agent, plugin_dir=args.plugin_dir or None)
     elif args.action == "stop":
@@ -296,6 +301,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="MemOS 插件目录（默认走 MEMOS_PLUGIN_DIR 或常见位置探测）")
     pmd.add_argument("--set-dir", default="",
                      help="持久化 MemOS 插件目录到 ~/.agentmemhub/config.json 后退出")
+    pmd.add_argument("--set-password", default="",
+                     help="保存 MemOS viewer 密码（引擎设了密码时网关自动登录）后退出")
     pmd.add_argument("--lines", type=int, default=40, help="logs 动作显示的行数")
     return p
 

@@ -276,7 +276,14 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         <span id="memosDot" class="h-2 w-2 rounded-full bg-muted-foreground"></span>
         <span id="memosState" class="text-xs text-muted-foreground">检测中…</span>
         <span id="memosMeta" class="tnum text-[11px] text-muted-foreground"></span>
-        <button id="memosToggleBtn" class="ml-auto hidden items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:opacity-90 transition-colors">
+        <a id="memosOpenBtn" href="http://127.0.0.1:18800" target="_blank" rel="noopener"
+           class="ml-auto hidden items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted transition-colors">
+          <i data-lucide="external-link" class="h-3.5 w-3.5"></i>打开引擎页面
+        </a>
+        <button id="memosStopBtn" class="hidden items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-error hover:bg-error-soft transition-colors">
+          <i data-lucide="square" class="h-3 w-3"></i>停止引擎
+        </button>
+        <button id="memosToggleBtn" class="hidden items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:opacity-90 transition-colors">
           <i data-lucide="play" class="h-3.5 w-3.5"></i><span id="memosToggleLabel">启动引擎</span>
         </button>
       </div>
@@ -540,6 +547,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   function renderMemosStatus(s){
     const dot = $('#memosDot'), state = $('#memosState'),
           meta = $('#memosMeta'), btn = $('#memosToggleBtn'), hint = $('#memosHint');
+    const openBtn = $('#memosOpenBtn'), stopBtn = $('#memosStopBtn');
     const summ = s.summary || {};
     if(s.online){
       dot.className = 'h-2 w-2 rounded-full bg-emerald-500';
@@ -547,11 +555,21 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       meta.textContent = `${summ.traces ?? '—'} 条记忆 · ${summ.episodes ?? '—'} 个任务`
         + (summ.embedding_ready ? ' · 向量就绪' : '');
       btn.classList.add('hidden'); btn.classList.remove('inline-flex');
-      hint.classList.add('hidden');
+      stopBtn.classList.toggle('hidden', !s.managed);      // 仅托管实例可停
+      stopBtn.classList.toggle('inline-flex', !!s.managed);
+      openBtn.classList.remove('hidden'); openBtn.classList.add('inline-flex');
+      if(s.auth_required){
+        hint.textContent = '引擎已设密码，网关无法读取数据：运行 agentmemhub memos-daemon --set-password <密码> 后刷新';
+        hint.classList.remove('hidden');
+      }else{
+        hint.classList.add('hidden');
+      }
     }else{
       dot.className = 'h-2 w-2 rounded-full bg-muted-foreground';
       state.textContent = '已停止';
       meta.textContent = '';
+      stopBtn.classList.add('hidden'); stopBtn.classList.remove('inline-flex');
+      openBtn.classList.add('hidden'); openBtn.classList.remove('inline-flex');
       if(s.plugin_dir){
         btn.classList.remove('hidden'); btn.classList.add('inline-flex');
         $('#memosToggleLabel').textContent = '启动引擎';
@@ -624,11 +642,32 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       toast('记忆引擎已启动');
       const s = await (await fetch('/api/memos/status')).json();
       renderMemosStatus(s);
-      if(s.online){ $('#memosOnline').classList.remove('hidden'); loadMemosRecent(); }
+      if(s.online && !s.auth_required){ $('#memosOnline').classList.remove('hidden'); loadMemosRecent(); }
     }catch(e){
       toast('启动失败：'+(e.message||e));
     }
     btn.disabled = false; label.textContent = '启动引擎';
+    reicons();
+  }
+  async function memosStop(){
+    const btn = $('#memosStopBtn');
+    btn.disabled = true;
+    try{
+      const r = await fetch('/api/memos/stop', {method:'POST'});
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok){
+        const det = d.detail;
+        toast(typeof det==='string' ? det : (det && det.reason) || '停止失败');
+      }else{
+        toast('记忆引擎已停止');
+      }
+      const s = await (await fetch('/api/memos/status')).json();
+      renderMemosStatus(s);
+      $('#memosOnline').classList.add('hidden');
+    }catch(e){
+      toast('停止失败：'+(e.message||e));
+    }
+    btn.disabled = false;
     reicons();
   }
 
@@ -788,6 +827,12 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     // 记忆引擎板块
     $('#memosKw').addEventListener('keydown',e=>{ if(e.key==='Enter'){ const q=e.target.value.trim(); if(q) memosSearch(q); } });
     $('#memosToggleBtn').onclick=()=>memosToggle();
+    $('#memosStopBtn').onclick=()=>{
+      showModal({
+        title:'停止记忆引擎', msg:'停止后看板的记忆检索与引擎页面将不可用，随时可重新启动。',
+        confirmText:'停止', confirmClass:'bg-error', onConfirm:()=>memosStop(),
+      });
+    };
   }
   // P1 修复：原改写时遗漏此定义，导致勾选/删除触发 "updateBatchBtn is not defined"
   function updateBatchBtn(){ const n=selectedKeys.size; const b=$('#batchDelBtn'); b.classList.toggle('hidden',n===0); b.classList.toggle('inline-flex',n>0); }

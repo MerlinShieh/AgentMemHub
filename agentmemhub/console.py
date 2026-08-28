@@ -204,6 +204,12 @@ def action_engine_start() -> None:
     if r.get("online") or r.get("started"):
         st = r.get("summary") or {}
         _out(f"  ✓ 记忆引擎在线（PID {r.get('pid')}，{st.get('traces')} 条记忆）")
+        if r.get("auth_required"):
+            raw = input("  引擎已设密码，输入以保存（回车跳过）> ").strip()
+            if raw:
+                memos_daemon.save_password(raw)
+                ok = memos_daemon._login()
+                _out("  ✓ 密码已保存并登录" if ok else "  ⚠ 密码已保存但登录未通过，请核对后重设")
     else:
         _out(f"  ✗ 启动失败: {r.get('reason')}")
         if r.get("hint"):

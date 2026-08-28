@@ -304,12 +304,14 @@ def create_app(db_path: Path | None = None):
         return JSONResponse(memos_daemon.daemon_status())
 
     def _require_engine() -> dict:
-        """引擎在线则返回 overview；离线抛 503（前端据此显示引导）。"""
+        """引擎在线且鉴权可过则返回 overview；否则 503（detail 含原因）。"""
         from agentmemhub import memos_daemon
-        ov = memos_daemon._overview(timeout=2.5)
-        if ov is None:
+        try:
+            return memos_daemon.engine_request("GET", "/api/v1/overview", timeout=15)
+        except memos_daemon.EngineAuthError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        except Exception:
             raise HTTPException(status_code=503, detail="memory engine offline")
-        return ov
 
     @app.post("/api/memos/start")
     def api_memos_start():
@@ -332,17 +334,14 @@ def create_app(db_path: Path | None = None):
                          top: int = Query(default=8, ge=1, le=30)):
         """转发语义检索：返回 hits（tier/refKind/score/snippet）。"""
         import json as _json
-        import urllib.request
         from agentmemhub import memos_daemon
         ov = _require_engine()
-        base = memos_daemon.base_url()
-        payload = _json.dumps({"agent": "hermes", "query": q}).encode("utf-8")
-        req = urllib.request.Request(
-            base + "/api/v1/memory/search", data=payload,
-            headers={"Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                res = _json.loads(r.read().decode("utf-8"))
+            res = memos_daemon.engine_request(
+                "POST", "/api/v1/memory/search",
+                body={"agent": "hermes", "query": q}, timeout=30)
+        except memos_daemon.EngineAuthError as e:
+            raise HTTPException(status_code=503, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"engine query failed: {e}")
         hits = [
@@ -360,15 +359,14 @@ def create_app(db_path: Path | None = None):
     def api_memos_traces(limit: int = Query(default=8, ge=1, le=50),
                          offset: int = Query(default=0, ge=0)):
         """转发最近记忆列表（时间线，纯 SQL 侧）。"""
-        import json as _json
-        import urllib.request
         from agentmemhub import memos_daemon
         _require_engine()
-        url = (memos_daemon.base_url()
-               + f"/api/v1/traces?limit={limit}&offset={offset}&groupByTurn=1")
         try:
-            with urllib.request.urlopen(url, timeout=15) as r:
-                res = _json.loads(r.read().decode("utf-8"))
+            res = memos_daemon.engine_request(
+                "GET", f"/api/v1/traces?limit={limit}&offset={offset}&groupByTurn=1",
+                timeout=15)
+        except memos_daemon.EngineAuthError as e:
+            raise HTTPException(status_code=503, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"engine query failed: {e}")
         traces = [
