@@ -1,0 +1,55 @@
+{
+  "//": "AgentMemHub MCP 记忆网关注册示例（脱敏模板，不含真实路径）。",
+  "//2": "前提：MemOS 记忆引擎需先常驻（agentmemhub memos-daemon start 或看板「记忆引擎→启动」）；网关只转发请求，绝不自动拉起引擎。",
+  "//3": "传输二选一：stdio=本地个人（Agent 拉起子进程）；http=团队共享（一台机器 --http 常驻，多客户端连同一个引擎）。",
+
+  "stdio_local": {
+    "//": "本机单个 Agent 使用：三种 command 写法任选（不要硬编码他人机器的路径）：",
+    "//2": "a) 占位符：把 <项目根> 替换为实际目录（推荐，语义最清晰）",
+    "//3": "b) 相对路径：仅当该配置文件放在项目内且 Agent 在项目目录启动时可用",
+    "//4": "c) 裸命令：pip install -e . 后把项目 .venv/Scripts 加入 PATH，各机配置完全一致",
+    "zcode": {
+      "mcpServers": {
+        "agentmemhub": {
+          "type": "stdio",
+          "command": "<项目根>/.venv/Scripts/python.exe",
+          "args": ["-m", "agentmemhub", "mcp"],
+          "env": {}
+        }
+      }
+    },
+    "opencode": {
+      "mcp": {
+        "agentmemhub": {
+          "type": "stdio",
+          "command": "<项目根>/.venv/Scripts/python.exe",
+          "args": ["-m", "agentmemhub", "mcp"],
+          "enabled": true
+        }
+      }
+    }
+  },
+
+  "http_team": {
+    "//": "团队共享：在一台机器/服务器常驻 Streamable HTTP 网关，客户端填 URL：",
+    "//2": "服务端（引擎同样需常驻）：agentmemhub mcp --http --bind 0.0.0.0 --port 9100",
+    "//3": "注意：--bind 0.0.0.0 会暴露给局域网，请自行做好访问控制；默认只监听 127.0.0.1",
+    "zcode": {
+      "mcpServers": {
+        "agentmemhub": {
+          "type": "http",
+          "url": "http://<服务器IP或hostname>:9100/mcp"
+        }
+      }
+    },
+    "opencode": {
+      "mcp": {
+        "agentmemhub": {
+          "type": "http",
+          "url": "http://<服务器IP或hostname>:9100/mcp",
+          "enabled": true
+        }
+      }
+    }
+  }
+}
