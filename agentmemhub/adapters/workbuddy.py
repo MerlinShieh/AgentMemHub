@@ -120,6 +120,9 @@ class WorkBuddyAdapter(AgentAdapter):
         command = o.get("commandPreview") or o.get("messageKey") or ""
         ts = _to_epoch(o.get("timestamp"))
         raw = json.dumps(o, ensure_ascii=False)
+        # 稳定锚：audit 行 uuid（无则退化为 hash/时间戳组合）
+        anchor = o.get("id") or o.get("hash") or f"{o.get('sessionId')}:{o.get('timestamp')}"
+        kw = {"src_id": f"audit:{anchor}", "turn_key": None, "raw_json": raw}
         # Shell / 工具执行类
         if "command" in str(event_type).lower() or "shell" in str(event_type).lower() or command:
             if command:
@@ -127,12 +130,13 @@ class WorkBuddyAdapter(AgentAdapter):
                              tool_name="shell",
                              tool_input={"command": command},
                              tool_status=str(o.get("decision") or "executed"),
-                             raw_json=raw)
+                             tool_call_id=o.get("toolCallId") or None,
+                             **kw)
         # 其他审计事件：meta 保底
         if event_type:
             return Event(role="meta", time=ts,
                          content=f"[{event_type}] {command}".strip(),
-                         raw_json=raw)
+                         **kw)
         return None
 
     @staticmethod

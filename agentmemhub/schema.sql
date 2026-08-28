@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS conversations (
     roles_json   TEXT,               -- ["user","tool","reasoning",...]
     meta_json    TEXT,               -- 原始元数据保底
     signature    TEXT,               -- 源文件指纹（增量重建依据）
+    session_key  TEXT,               -- 跨会话关联键（同一次任务/项目，可空）
     PRIMARY KEY (source, id)
 );
 
@@ -38,6 +39,9 @@ CREATE TABLE IF NOT EXISTS events (
     time            INTEGER,
     model           TEXT,
     raw_json        TEXT,            -- 原始事件 JSON 无损保底
+    src_id          TEXT,            -- 源数据稳定定位（MemOS 幂等锚，re-ingest 不变）
+    turn_key        TEXT,            -- 所属轮次锚（= 该轮根 user 消息的 src_id）
+    is_system       INTEGER DEFAULT 0, -- 1=源级可识别的系统注入消息
     PRIMARY KEY (source, conversation_id, seq)
 );
 

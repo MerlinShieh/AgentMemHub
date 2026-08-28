@@ -32,9 +32,9 @@ def _stdout(s: str) -> None:
     print(s)
 
 
-def cmd_ingest(args) -> None:
+def run_ingest(sources: list[str], signature: str = "") -> tuple[int, int]:
+    """提取指定 source 列表并入库（CLI 与控制台共用）。返回 (会话数, 事件数)。"""
     store = Store()
-    sources = [args.source] if args.source else [a.source for a in adapters.all_adapters()]
     total_conv = 0
     total_ev = 0
     for src in sources:
@@ -47,11 +47,17 @@ def cmd_ingest(args) -> None:
             _stdout(f"[{src}] 未找到数据源")
             continue
         sessions = a.load(p)
-        n = store.replace_source(src, sessions, signature=args.signature or "")
+        n = store.replace_source(src, sessions, signature=signature or "")
         total_conv += len(sessions)
         total_ev += n
         _stdout(f"[{src}] {len(sessions)} 会话, {n} 事件")
     store.close()
+    return total_conv, total_ev
+
+
+def cmd_ingest(args) -> None:
+    sources = [args.source] if args.source else [a.source for a in adapters.all_adapters()]
+    total_conv, total_ev = run_ingest(sources, signature=args.signature)
     _stdout(f"完成: {total_conv} 会话, {total_ev} 事件")
 
 
@@ -80,14 +86,23 @@ def cmd_show(args) -> None:
     store.close()
 
 
-def cmd_search(args) -> None:
+def run_search_text(query: str, *, source: str = "", role: str = "", limit: int = 20) -> None:
+    """关键字检索并打印结果（CLI 与控制台共用）。"""
     store = Store()
-    hits = store.search(args.query, source=args.source, role=args.role, limit=args.limit)
+    hits = store.search(query, source=source or None, role=role or None, limit=limit)
+    if not hits:
+        _stdout("（无命中）")
+        store.close()
+        return
     _stdout(f"命中 {len(hits)} 条事件:\n")
     for h in hits:
         snippet = h.get("snippet") or h.get("content") or ""
-        _stdout(f"[{h.get('source', args.source)}] {h.get('conversation_id')} | {h.get('role')} | {snippet[:80]}")
+        _stdout(f"[{h.get('source', source)}] {h.get('conversation_id')} | {h.get('role')} | {snippet[:80]}")
     store.close()
+
+
+def cmd_search(args) -> None:
+    run_search_text(args.query, source=args.source, role=args.role, limit=args.limit)
 
 
 def cmd_export(args) -> None:
@@ -148,20 +163,91 @@ def cmd_adapters(args) -> None:
         _stdout(f"[{d['source']}] {d['label']}: {'✓ ' + (d['path'] or '') if d['located'] else '✗ 未找到'}")
 
 
-def cmd_memos(args) -> None:
-    from agentmemhub.memos import build_bundle, write_bundle, push_bundle
-    store = Store()
-    bundle = build_bundle(store, args.source)
-    store.close()
-    _stdout(f"生成 bundle: {len(bundle['traces'])} traces")
-    write_bundle(bundle, Path(args.out))
-    _stdout(f"已写入 → {args.out}")
-    if args.push:
+def cmd_memos_daemon(args) -> None:
+    """MemOS 记忆引擎 daemon 管理（启动/停止/巡检/日志/配置）。"""
+    import json as _json
+    from agentmemhub import memos_daemon
+    if args.set_dir:
         try:
-            resp = push_bundle(bundle, args.push)
-            _stdout(f"已推送 MemOS: {resp}")
+            p = memos_daemon.save_plugin_dir(args.set_dir)
+            _stdout(f"已保存 MemOS 插件目录 → {p}")
+        except Exception as e:
+            _stdout(f"保存失败: {e}")
+        return
+    if args.lightweight is not None:
+        from agentmemhub import memos_daemon as _md
+        p = _md.set_lightweight(args.lightweight == "on")
+        _stdout(f"已写入引擎配置 → {p}（轻量模式={'ON' if args.lightweight=='on' else 'OFF（完整进化链）'}；"
+                f"引擎重启后生效，如引擎在运行请先 [7] 停止再启动）")
+        return
+    if args.set_password:
+        memos_daemon.save_password(args.set_password)
+        ok = memos_daemon._login()
+        _stdout("密码已保存" + ("，登录成功 ✓" if ok else "（暂未能验证登录：引擎可能离线或密码不符）"))
+        return
+    if args.action == "start":
+        r = memos_daemon.daemon_start(agent=args.agent, plugin_dir=args.plugin_dir or None)
+    elif args.action == "stop":
+        r = memos_daemon.daemon_stop()
+    elif args.action == "logs":
+        lf = memos_daemon._log_file()
+        if not lf.exists():
+            _stdout("（暂无日志）")
+            return
+        text = lf.read_text(encoding="utf-8", errors="replace")
+        _stdout("\n".join(text.splitlines()[-int(args.lines):]))
+        return
+    else:  # status
+        r = memos_daemon.daemon_status()
+    _stdout(_json.dumps(r, ensure_ascii=False, indent=1))
+
+
+def run_memos(*, source: str = "", out: str = "exports/memos_bundle.json",
+              push: str = "", no_rebuild: bool = False,
+              rebuild_mode: str = "repair") -> None:
+    """提取记忆 bundle + 可选推送 MemOS（CLI 与控制台共用）。"""
+    from agentmemhub.memos import (build_bundle, write_bundle, push_bundle,
+                                   rebuild_embeddings)
+    store = Store()
+    bundle = build_bundle(store, source)
+    _stdout(f"生成 bundle: {len(bundle['traces'])} traces")
+    write_bundle(bundle, Path(out))
+    _stdout(f"已写入 → {out}")
+    if push:
+        try:
+            # MemOS /api/v1/import 上限 64 MiB——全量 bundle 可能超限（实测 90+MB），
+            # 因此推送时按 source 分批 POST，失败批次继续并汇总
+            if source:
+                batches = [source]
+            else:
+                batches = [a.source for a in adapters.all_adapters() if a.locate()]
+            total_ok = total_skip = 0
+            for src in batches:
+                b = build_bundle(store, src)
+                if not b["traces"]:
+                    continue
+                try:
+                    resp = push_bundle(b, push)
+                    total_ok += resp.get("imported", 0)
+                    total_skip += resp.get("skipped", 0)
+                    _stdout(f"[{src}] 推送 ok: imported={resp.get('imported')} skipped={resp.get('skipped')}")
+                except Exception as e:
+                    _stdout(f"[{src}] 推送失败（继续下一批）: {e}")
+            _stdout(f"MemOS 导入汇总: imported={total_ok}, skipped={total_skip}")
+            if not no_rebuild:
+                try:
+                    r = rebuild_embeddings(push, mode=rebuild_mode)
+                    _stdout(f"已触发 embedding {rebuild_mode}: {r}")
+                except Exception as e:
+                    _stdout(f"embedding rebuild 失败（可用 --no-rebuild 跳过）: {e}")
         except Exception as e:
             _stdout(f"推送失败（MemOS 可能在运行?）: {e}")
+    store.close()
+
+
+def cmd_memos(args) -> None:
+    run_memos(source=args.source, out=args.out, push=args.push,
+              no_rebuild=args.no_rebuild, rebuild_mode=args.rebuild_mode)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -208,16 +294,39 @@ def build_parser() -> argparse.ArgumentParser:
     pm.add_argument("--source", default="")
     pm.add_argument("--out", default="exports/memos_bundle.json")
     pm.add_argument("--push", default="", help="MemOS base URL，例如 http://127.0.0.1:18800；非空则 POST")
+    pm.add_argument("--no-rebuild", action="store_true",
+                    help="push 后不触发 /api/v1/embeddings/rebuild（默认自动补向量）")
+    pm.add_argument("--rebuild-mode", default="repair", choices=("repair", "rebuild"),
+                    help="embedding rebuild 模式：repair=只补缺失向量（默认），rebuild=全部重算")
+
+    pmd = sub.add_parser("memos-daemon", help="MemOS 记忆引擎管理（start/stop/status/logs）")
+    pmd.add_argument("action", nargs="?", default="status",
+                     choices=("start", "stop", "status", "logs"))
+    pmd.add_argument("--agent", default="hermes", help="daemon 的 agent 标识（决定端口/home）")
+    pmd.add_argument("--plugin-dir", default="",
+                     help="MemOS 插件目录（默认走 MEMOS_PLUGIN_DIR 或常见位置探测）")
+    pmd.add_argument("--set-dir", default="",
+                     help="持久化 MemOS 插件目录到 ~/.agentmemhub/config.json 后退出")
+    pmd.add_argument("--set-password", default="",
+                     help="保存 MemOS viewer 密码（引擎设了密码时网关自动登录）后退出")
+    pmd.add_argument("--lightweight", choices=("on", "off"), default=None,
+                     help="开关 MemOS 轻量记忆模式（off=完整进化链；写托管配置，重启引擎生效）")
+    pmd.add_argument("--lines", type=int, default=40, help="logs 动作显示的行数")
     return p
 
 
 def main() -> None:
     args = build_parser().parse_args()
+    if not args.command:
+        # 无参数 = 进入交互式控制台（新用户入口）
+        from agentmemhub.console import run_console
+        run_console()
+        return
     handlers = {
         "ingest": cmd_ingest, "list": cmd_list, "show": cmd_show,
         "search": cmd_search, "export": cmd_export, "stats": cmd_stats,
         "adapters": cmd_adapters, "memos": cmd_memos, "folders": cmd_folders,
-        "serve": cmd_serve,
+        "serve": cmd_serve, "memos-daemon": cmd_memos_daemon,
     }
     fn = handlers.get(args.command)
     if fn is None:

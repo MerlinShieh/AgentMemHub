@@ -19,6 +19,14 @@ from agentmemhub.models import Event, normalize_role, _to_epoch, renumber
 from .base import AgentAdapter
 
 
+def _row_get(row: sqlite3.Row, key: str) -> Any:
+    """sqlite3.Row 按列名取值；列不存在时返回 None（兼容 schema 差异）。"""
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return None
+
+
 class HermesAdapter(AgentAdapter):
     source = "hermes"
     label = "Hermes Agent"
@@ -51,6 +59,8 @@ class HermesAdapter(AgentAdapter):
                     "created_at": _to_epoch(s["started_at"]),
                     "updated_at": _to_epoch(s["last_activity_at"]) or _to_epoch(s["ended_at"]),
                     "model": s["model"] or "",
+                    "session_key": _row_get(s, "chat_id") or _row_get(s, "session_key")
+                                   or _row_get(s, "thread_id"),
                     "meta": {"chat_type": s["chat_type"], "profile": s["profile_name"],
                              "system_prompt_hash": s["system_prompt_hash"]},
                     "events": events,
@@ -69,26 +79,36 @@ class HermesAdapter(AgentAdapter):
             f"SELECT * FROM messages WHERE session_id = ? ORDER BY {order}",
             (session_id,),
         ).fetchall()
+        # 当前轮锚：最近一条 user 消息的 id
+        turn_key: str | None = None
         for m in msgs:
             role = normalize_role(m["role"], default="assistant")
             ts = _to_epoch(m["timestamp"])
             raw = json.dumps(dict(m), ensure_ascii=False, default=str)
+            msg_id = str(m["id"])
+            if role == "user":
+                turn_key = msg_id
+            kw = {"src_id": f"msg:{msg_id}", "turn_key": turn_key, "parent_id": msg_id}
 
             if role == "user":
-                events.append(Event(role="user", time=ts, content=m["content"] or "", raw_json=raw))
+                events.append(Event(role="user", time=ts, content=m["content"] or "",
+                                    raw_json=raw, **kw))
             elif role == "tool":
                 events.append(Event(role="tool", time=ts,
                                     tool_name=m["tool_name"] or "",
                                     tool_output=m["content"] or "",
-                                    tool_status="completed", raw_json=raw))
+                                    tool_status="completed",
+                                    tool_call_id=_row_get(m, "tool_call_id"),
+                                    raw_json=raw, **kw))
             else:  # assistant
                 events.append(Event(role="assistant", time=ts, content=m["content"] or "",
-                                    model=sess["model"] or None, raw_json=raw))
+                                    model=sess["model"] or None, raw_json=raw, **kw))
                 # 思维链
                 if m["reasoning_content"]:
                     events.append(Event(role="reasoning", time=ts,
                                         content=m["reasoning_content"],
-                                        reasoning=m["reasoning_content"], raw_json=raw))
+                                        reasoning=m["reasoning_content"],
+                                        raw_json=raw, **kw))
                 # 工具调用（assistant 发起）
                 for tc in self._tool_calls(m["tool_calls"]):
                     events.append(Event(role="tool", time=ts,
@@ -96,7 +116,7 @@ class HermesAdapter(AgentAdapter):
                                         tool_input=tc.get("arguments"),
                                         tool_status="initiated",
                                         tool_call_id=tc.get("call_id") or tc.get("id"),
-                                        raw_json=raw))
+                                        raw_json=raw, **kw))
         return events
 
     @staticmethod

@@ -21,16 +21,10 @@ from agentmemhub.models import Event
 
 
 def default_db_path() -> Path:
-    """默认数据库位置（可用 AGENTMEMHUB_DB 环境变量覆盖）。"""
-    env = os.environ.get("AGENTMEMHUB_DB")
-    if env:
-        return Path(env)
-    data_dir = Path(os.environ.get(
-        "AGENTMEM_HUB_DATA_DIR",
-        Path.home() / ".agentmemhub",
-    ))
-    data_dir.mkdir(parents=True, exist_ok=True)
-    return data_dir / "agentmemhub.db"
+    """SQLite 位置：统一配置（agentmemhub.yaml / 环境变量）→ 默认 ~/.agentmemhub。"""
+    from agentmemhub import config
+    cfg = config.config()
+    return cfg.db_path
 
 
 class Store:
@@ -61,7 +55,23 @@ class Store:
     def _init_schema(self) -> None:
         schema_path = Path(__file__).resolve().parent / "schema.sql"
         self.conn.executescript(schema_path.read_text(encoding="utf-8"))
+        self._ensure_columns()
         self.conn.commit()
+
+    def _ensure_columns(self) -> None:
+        """老库升级：CREATE TABLE IF NOT EXISTS 不会给已有表补列，探测式 ALTER（幂等）。"""
+        conn = self.conn
+        ev_cols = {r[1] for r in conn.execute("PRAGMA table_info(events)")}
+        for col, ddl in (
+            ("src_id", "ALTER TABLE events ADD COLUMN src_id TEXT"),
+            ("turn_key", "ALTER TABLE events ADD COLUMN turn_key TEXT"),
+            ("is_system", "ALTER TABLE events ADD COLUMN is_system INTEGER DEFAULT 0"),
+        ):
+            if col not in ev_cols:
+                conn.execute(ddl)
+        cv_cols = {r[1] for r in conn.execute("PRAGMA table_info(conversations)")}
+        if "session_key" not in cv_cols:
+            conn.execute("ALTER TABLE conversations ADD COLUMN session_key TEXT")
 
     def close(self) -> None:
         if self._conn:
@@ -107,8 +117,8 @@ class Store:
                 conn.execute(
                     """INSERT OR REPLACE INTO conversations
                        (source, id, title, cwd, model, created_at, updated_at,
-                        event_count, roles_json, meta_json, signature)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                        event_count, roles_json, meta_json, signature, session_key)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         source, cid, sess.get("title", ""), sess.get("cwd", ""),
                         sess.get("model", ""),
@@ -118,6 +128,7 @@ class Store:
                         json.dumps(roles, ensure_ascii=False),
                         json.dumps(sess.get("meta") or {}, ensure_ascii=False),
                         signature,
+                        sess.get("session_key") or None,
                     ),
                 )
 
@@ -130,14 +141,17 @@ class Store:
                            (source, conversation_id, seq, role, content,
                             tool_name, tool_input_json, tool_output, tool_status,
                             reasoning, patch_file, patch_diff, shell_cmd,
-                            shell_output, shell_cwd, parent_id, time, model, raw_json)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            shell_output, shell_cwd, parent_id, time, model, raw_json,
+                            src_id, turn_key, is_system)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (
                             source, cid, e.seq, e.role, e.content,
                             e.tool_name, tok_input, e.tool_output, e.tool_status,
                             e.reasoning, e.patch_file, e.patch_diff, e.shell_cmd,
                             e.shell_output, e.shell_cwd, e.parent_id,
                             int(e.time) if e.time else None, e.model, e.raw_json,
+                            e.src_id, e.turn_key,
+                            (1 if e.is_system else 0) if e.is_system is not None else 0,
                         ),
                     )
                     # FTS 行（role UNINDEXED，正文可搜）
@@ -227,6 +241,8 @@ class Store:
                 patch_file=r["patch_file"], patch_diff=r["patch_diff"],
                 shell_cmd=r["shell_cmd"], shell_output=r["shell_output"],
                 shell_cwd=r["shell_cwd"], model=r["model"], raw_json=r["raw_json"],
+                src_id=r["src_id"], turn_key=r["turn_key"],
+                is_system=bool(r["is_system"]) if r["is_system"] else None,
             )
             events.append(ev)
         return events

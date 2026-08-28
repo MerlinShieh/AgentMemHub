@@ -18,25 +18,36 @@
 
 ## 快速开始
 
+**方式 A — 控制台（推荐，新用户入口）**
+
+```bash
+# Windows 双击 start.bat，或命令行无参数直接进入菜单：
+uv run python -m agentmemhub
+```
+
+菜单涵盖：环境检测（各 Agent 数据源/库规模/记忆引擎在线状态）→ 提取入库 → 检索 → 启动看板 → 推送记忆 → 引擎启停 → 退出。
+
+**方式 B — 命令行**
+
 ```bash
 # 1. 提取所有 Agent 并入库
-python -m agentmemhub ingest
+uv run python -m agentmemhub ingest
 
 # 2. 搜索（FTS5 英文 + 中文子串）
-python -m agentmemhub search "登录"
+uv run python -m agentmemhub search "登录"
 
 # 3. 查看某个会话（Markdown，含思维链+工具）
-python -m agentmemhub show zcode sess_xxxx
+uv run python -m agentmemhub show zcode sess_xxxx
 
 # 4. 导出全量（JSONL 每行一事件 / Markdown 可读）
-python -m agentmemhub export --format jsonl --out exports/
-python -m agentmemhub export --format markdown --out exports_md/
+uv run python -m agentmemhub export --format jsonl --out exports/
+uv run python -m agentmemhub export --format markdown --out exports_md/
 
 # 5. 生成 MemOS 导入 bundle
-python -m agentmemhub memos --out exports/memos_bundle.json
+uv run python -m agentmemhub memos --out exports/memos_bundle.json
 
-# 6. 推送到运行中的 MemOS Local Plugin
-python -m agentmemhub memos --push http://127.0.0.1:18800
+# 6. 推送到运行中的 MemOS 记忆引擎
+uv run python -m agentmemhub memos --push http://127.0.0.1:18800
 ```
 
 ## 查询示例
@@ -141,7 +152,8 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 | `search <q> [--source] [--role] [--limit]` | 全文搜索事件正文 |
 | `export --format jsonl\|markdown [--source] [--out dir]` | 导出 |
 | `folders [--source] [--limit]` | 按文件夹统计各 Agent 会话数 |
-| `memos [--source] [--out] [--push url]` | 生成/推送 MemOS bundle |
+| `memos [--source] [--out] [--push url] [--no-rebuild]` | 生成/推送 MemOS bundle（push 自动分批 + 补向量）|
+| `memos-daemon start\|stop\|status\|logs` | 记忆引擎托管（见下文「记忆引擎管理」）|
 | `stats` / `adapters` | 统计 / adapter 状态 |
 
 > 更完整的代码与 SQL 示例（按 Agent 查询、按文件夹跨 Agent 统计、会话角色分布、直连数据库等）见 **[docs/EXAMPLES.md](./docs/EXAMPLES.md)**。
@@ -153,6 +165,61 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 - **events_fts**：FTS5 全文索引（英文走 FTS，中文子串走 LIKE 兜底）
 
 详见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
+
+## 记忆引擎管理（MemOS 已集成进项目）
+
+本项目把 [MemOS Local Plugin](https://github.com/MemTensor/MemOS) 作为**上游记忆引擎**集成——AgentMemHub 只负责调用其接口与托管其进程，不修改其源码。MemOS 默认平移到项目内 `memOS/` 目录（`repo_dir` 可配置到任意位置）：
+
+```
+AgentMemHub/
+├── agentmemhub/                 ← 本项目代码
+├── memOS/                       ← 上游引擎（已 gitignore，不入库）
+│   ├── apps/memos-local-plugin/ ← 引擎程序（npm 依赖 + 本地嵌入模型随项目）
+│   └── home/                    ← 引擎数据：记忆库 memos.db、viewer 密码、引擎配置
+└── agentmemhub.yaml             ← 可选：统一配置文件（复制自 example）
+```
+
+引擎托管（启动/停止/巡检/日志/配置开关）：
+
+```bash
+uv run python -m agentmemhub memos-daemon start        # 拉起引擎（memOS/home 自动注入）
+uv run python -m agentmemhub memos-daemon stop         # 停止（仅停本工具拉起的实例）
+uv run python -m agentmemhub memos-daemon status       # 巡检：在线/鉴权/路径/记忆规模/轻量模式
+uv run python -m agentmemhub memos-daemon logs         # 查看引擎日志
+uv run python -m agentmemhub memos-daemon --lightweight off   # 完整进化链（新对话自动评分/归纳）
+uv run python -m agentmemhub memos-daemon --lightweight on    # 轻量模式（只写记忆不进化）
+uv run python -m agentmemhub memos-daemon --set-password <密码>  # 引擎 viewer 设了密码时保存（网关自动登录）
+```
+
+要点：
+
+- **密码自动登录**：引擎 viewer 设置了密码（`.auth.json`）后，网关遇 401 会用保存的密码自动登录，看板/检索不受影响
+- **MemOS 页面**：平移后需构建一次 viewer（`cd memOS\apps\memos-local-plugin && npm run build:viewer`）；升级引擎或重装 node_modules 后重跑
+- **完整进化链**：`--lightweight off` 后新对话自动跑 reward 打分 / 经验归纳 / 技能结晶（需要引擎配置了 LLM）；历史导入记忆保持价值 0，仍可被检索
+
+## 统一配置
+
+所有路径/端口默认采用官方默认；需要覆盖时创建 `agentmemhub.yaml`（模板见 `agentmemhub.yaml.example`）。优先级：环境变量 > 配置文件 > 内置默认。
+
+```yaml
+data_dir: "~/.agentmemhub"            # 本地库/日志/托管状态
+db_path: ""                           # 会话库 SQLite（默认 <data_dir>/agentmemhub.db）
+agents:
+  zcode: ""                           # 各 harness 会话位置；留空=官方默认自动发现
+  hermes: ""                          # 例：系统盘不在 C: 时指向 D 盘镜像数据
+  ...
+memos:
+  repo_dir: ""                        # MemOS 项目根（默认 <项目根>/memOS）
+  plugin_dir: ""                      # 留空自动推导 <repo_dir>/apps/memos-local-plugin
+  home: ""                            # 引擎数据目录（默认 <repo_dir>/home）
+  base_url: "http://127.0.0.1:18800"
+  password: ""                        # caller viewer 密码（自动登录用）
+  lightweight: ""                     # true/false 强制；留空=引擎自身配置
+web:
+  port: 8086
+```
+
+相对路径相对项目根解析，`~` 展开为用户目录。
 
 ## 需求
 
@@ -174,6 +241,9 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 
 功能：Agent/工作空间多选筛选 · 服务端分页列表 · 全文搜索（FTS5+LIKE）· 统计卡与图表 ·
 会话详情抽屉（用户消息/思维链/工具调用/代码补丁 全渲染）· 标题编辑与会话删除（真实写库）。
+引擎在线时画面下方有**「记忆引擎」板块**：运行状态（含托管标识/记忆规模/向量就绪）、
+语义检索框（直接搜历史记忆）、最近记忆列表（value 正负标注）、一键启动/停止与
+打开引擎页面链接；MemOS 未安装时板块自动隐藏。
 
 ![AgentMemHub 主看板 — 筛选栏、统计卡、趋势/占比图与会话列表](./docs/images/dashboard.png)
 
@@ -199,10 +269,14 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 ## Roadmap
 
 - [x] 统一事件模型 + SQLite 存储（FTS5）
-- [x] 7 个 Agent Adapter
+- [x] 7 个 Agent Adapter（含 src_id/turn_key 稳定锚与系统注入识别）
 - [x] 全量检索 + JSONL/Markdown 导出
-- [x] MemOS bundle 桥接
+- [x] MemOS bundle 桥接（幂等导入 + 价值启发式 + embedding 自动补齐）
 - [x] Web 仪表盘（FastAPI + 原生 JS，服务端分页、事件按需加载、真删改）
+- [x] 交互式控制台入口（start.bat / 无参数菜单）
+- [x] 记忆引擎一体化管理（MemOS 平移进项目 + 启停/巡检/看板记忆板块）
+- [x] 统一配置体系（agentmemhub.yaml：全路径可配置）
 - [ ] 更多 Agent（Claude Code / Cursor / Gemini CLI / CodeBuddy）
+- [ ] 记忆加载网关（MCP 封装，供 ZCode/OpenCode 等 harness 检索记忆）
 - [ ] 记忆清洗规则（去注入元数据、压缩折叠会话）
 

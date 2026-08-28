@@ -294,6 +294,91 @@ def create_app(db_path: Path | None = None):
             _invalidate()
         return {"updated": True}
 
+    # ------------------------------------------------------------------
+    # 记忆引擎（MemOS）网关：不碰本地库，不持 _LOCK；引擎离线时透明降级
+    # ------------------------------------------------------------------
+
+    @app.get("/api/memos/status")
+    def api_memos_status():
+        from agentmemhub import memos_daemon
+        return JSONResponse(memos_daemon.daemon_status())
+
+    def _require_engine() -> dict:
+        """引擎在线且鉴权可过则返回 overview；否则 503（detail 含原因）。"""
+        from agentmemhub import memos_daemon
+        try:
+            return memos_daemon.engine_request("GET", "/api/v1/overview", timeout=15)
+        except memos_daemon.EngineAuthError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        except Exception:
+            raise HTTPException(status_code=503, detail="memory engine offline")
+
+    @app.post("/api/memos/start")
+    def api_memos_start():
+        from agentmemhub import memos_daemon
+        r = memos_daemon.daemon_start()
+        if not (r.get("started") or r.get("online")):
+            raise HTTPException(status_code=502, detail=r)
+        return JSONResponse(r)
+
+    @app.post("/api/memos/stop")
+    def api_memos_stop():
+        from agentmemhub import memos_daemon
+        r = memos_daemon.daemon_stop()
+        if not r.get("stopped") and r.get("reason") not in ("not-online",):
+            raise HTTPException(status_code=502, detail=r)
+        return JSONResponse(r)
+
+    @app.get("/api/memos/search")
+    def api_memos_search(q: str = Query(default="", min_length=1),
+                         top: int = Query(default=8, ge=1, le=30)):
+        """转发语义检索：返回 hits（tier/refKind/score/snippet）。"""
+        import json as _json
+        from agentmemhub import memos_daemon
+        ov = _require_engine()
+        try:
+            res = memos_daemon.engine_request(
+                "POST", "/api/v1/memory/search",
+                body={"agent": "hermes", "query": q}, timeout=30)
+        except memos_daemon.EngineAuthError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"engine query failed: {e}")
+        hits = [
+            {"tier": h.get("tier"), "refKind": h.get("refKind"),
+             "score": h.get("score"), "snippet": h.get("snippet") or "",
+             "refId": h.get("refId")}
+            for h in (res.get("hits") or [])[:top]
+        ]
+        return JSONResponse({"query": q, "hits": hits,
+                             "injectedContext": res.get("injectedContext") or "",
+                             "episodes": ov.get("episodes"),
+                             "traces": ov.get("traces")})
+
+    @app.get("/api/memos/traces")
+    def api_memos_traces(limit: int = Query(default=8, ge=1, le=50),
+                         offset: int = Query(default=0, ge=0)):
+        """转发最近记忆列表（时间线，纯 SQL 侧）。"""
+        from agentmemhub import memos_daemon
+        _require_engine()
+        try:
+            res = memos_daemon.engine_request(
+                "GET", f"/api/v1/traces?limit={limit}&offset={offset}&groupByTurn=1",
+                timeout=15)
+        except memos_daemon.EngineAuthError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"engine query failed: {e}")
+        traces = [
+            {"id": t.get("id"), "ts": t.get("ts"),
+             "userText": (t.get("userText") or "")[:200],
+             "agentText": (t.get("agentText") or "")[:200],
+             "value": t.get("value"), "episodeId": t.get("episodeId")}
+            for t in (res.get("traces") or [])
+        ]
+        return JSONResponse({"total": res.get("total"), "offset": offset,
+                             "traces": traces})
+
     # ---- 静态页面（index.html 由 StaticFiles html=True 自动兜底 /）----
     static_dir = Path(__file__).resolve().parent / "static"
     if static_dir.is_dir():
