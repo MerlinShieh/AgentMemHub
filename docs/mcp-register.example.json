@@ -1,0 +1,29 @@
+{
+  "//": "AgentMemHub MCP 记忆网关注册示例（脱敏模板，不含真实路径）。",
+  "//2": "前提：MemOS 记忆引擎需先常驻（agentmemhub memos-daemon start 或看板「记忆引擎→启动」）；网关只转发请求，绝不自动拉起引擎。",
+  "//3": "command/args 可按本地环境调整；若 python 不在 PATH，改用绝对路径（如 D:/envs/agentmemhub/Scripts/python.exe 或 uv run 的完整路径）。",
+
+  "zcode": {
+    "//": "ZCode：合并到 ~/.zcode/mcp.json 或项目 .zcode/mcp.json 的 mcpServers 段",
+    "mcpServers": {
+      "agentmemhub": {
+        "type": "stdio",
+        "command": "uv",
+        "args": ["run", "python", "-m", "agentmemhub", "mcp"],
+        "env": {}
+      }
+    }
+  },
+
+  "opencode": {
+    "//": "OpenCode：写入 opencode.json 的 mcp 段（或 global 配置）",
+    "mcp": {
+      "agentmemhub": {
+        "type": "stdio",
+        "command": "uv",
+        "args": ["run", "python", "-m", "agentmemhub", "mcp"],
+        "enabled": true
+      }
+    }
+  }
+}
