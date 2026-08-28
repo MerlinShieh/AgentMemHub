@@ -234,9 +234,11 @@ Claude Code 等支持 MCP 的 Agent harness 上——模型在会话进行中即
 # 1. 先常驻记忆引擎（网关绝不代管引擎生命周期）
 python -m agentmemhub memos-daemon start
 
-# 2. 在 Agent 的 MCP 配置里注册（command 可按本地环境调整）
-#    注册模板见 docs/mcp-register.example.json（ZCode / OpenCode 两段）
-#    command: uv run python -m agentmemhub mcp
+# 2. 在 Agent 的 MCP 配置里注册（模板见 docs/mcp-register.example.json）
+#    command 用项目 .venv 的 python 绝对路径，与启动目录无关：
+#      <项目根>/.venv/Scripts/python.exe  -m agentmemhub mcp
+#    注意：不要用 `uv run python`——MCP 子进程在项目目录之外启动时
+#    会解析到错误的 python（No module named agentmemhub）
 
 # 3. 验证：在 Agent 会话里调用 memory_stats / memory_search
 ```
