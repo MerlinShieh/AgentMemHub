@@ -830,7 +830,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     $('#memosStopBtn').onclick=()=>{
       showModal({
         title:'停止记忆引擎', msg:'停止后看板的记忆检索与引擎页面将不可用，随时可重新启动。',
-        confirmText:'停止', confirmClass:'bg-error', onConfirm:()=>memosStop(),
+        confirmText:'停止', confirmClass:'bg-error-solid', onConfirm:()=>memosStop(),
       });
     };
   }
