@@ -196,7 +196,9 @@ def test_memory_save_online(push_bundle, engine_request, _auth):
     assert engine_request.call_args.kwargs["body"] == {"mode": "repair"}
 
 
-def test_memory_save_requires_content():
+@mock.patch.object(memos_daemon, "auth_state", return_value={})
+def test_memory_save_requires_content(_auth):
+    """参数校验优先：引擎在线时缺 content 报参数错误（离线时统一报引擎未运行）。"""
     h, _ = _handler()
     r = _call(h, _req("tools/call", {"name": "memory_save",
                                      "arguments": {"content": "  "}}))

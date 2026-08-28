@@ -1,6 +1,6 @@
-"""AgentMemHub MCP 记忆网关（stdio 传输）。
+"""AgentMemHub MCP 记忆网关（stdio / Streamable HTTP 双传输）。
 
-把本地记忆引擎（MemOS）的语义检索/读写包装成 MCP tools，挂在
+把本地记忆引擎（MemOS）的语义检索/读写包装成 MCP server，挂在
 ZCode / OpenCode / Claude Code 等支持 MCP 的 Agent harness 上。
 
 设计原则：
@@ -8,10 +8,16 @@ ZCode / OpenCode / Claude Code 等支持 MCP 的 Agent harness 上。
   本网关**只转发请求、从不拉起或停止引擎**，引擎离线时返回明确错误。
 - 业务复用 memos_daemon.engine_request（含自动登录），不写本地库：
   检索/写入全部实时走引擎 HTTP API。
-- 纯 stdio 协议：host 拉起 `python -m agentmemhub mcp` 即可，零新依赖。
+- 协议层（JSON-RPC 处理）与传输层分离，两种传输共用同一份逻辑。
 
-协议：MCP（JSON-RPC 2.0 over stdio，newline-delimited）；回显 client 声明的
-protocolVersion（2024-11-05 / 2025-06-18 均兼容）。
+传输方式：
+- **stdio**（默认）：`python -m agentmemhub mcp`，由 Agent host 拉起子进程
+  使用；本地个人场景。可用 console script `agentmemhub-mcp`（PATH 内）。
+- **Streamable HTTP**（--http）：`python -m agentmemhub mcp --http
+  [--bind 0.0.0.0] [--port 9100]`，单 endpoint `POST /mcp`（JSON-RPC，
+  非流式响应；GET 405、DELETE 结束会话）；一台机器常驻，局域网/团队
+  多个客户端共享同一个记忆引擎。默认只绑 127.0.0.1，团队共享需显式
+  `--bind 0.0.0.0`（按需自设访问控制）。
 
 Tools:
 - memory_search(query, topK)  语义检索历史记忆（转发 /api/v1/memory/search）
@@ -28,6 +34,17 @@ import time
 from typing import Any, Callable, Optional
 
 from agentmemhub import memos_daemon
+
+# ---- Streamable HTTP 软依赖 ----------------------------------------------
+# fastapi 仅 --http 模式需要；stdio 模式不强制安装。顶部 import 是为了让
+# FastAPI 能从模块全局命名空间解析 build_http_app 里的注解（函数内 import
+# 不会注册到模块全局，否则注解会被当成查询参数）。
+try:
+    from fastapi import FastAPI  # noqa: F401
+    from fastapi import Request  # noqa: F401
+    _HAS_FASTAPI = True
+except ImportError:
+    _HAS_FASTAPI = False
 
 SERVER_INFO = {"name": "agentmemhub-mcp", "version": "0.1.0"}
 
@@ -256,6 +273,10 @@ class MCPHandler:
             msg = json.loads(line)
         except json.JSONDecodeError:
             return _err(None, -32700, "Parse error")
+        return self._dispatch_msg(msg)
+
+    def _dispatch_msg(self, msg: Any) -> Optional[dict]:
+        """JSON-RPC 消息 → 响应（stdio 与 Streamable HTTP 共用）。"""
         if not isinstance(msg, dict) or "method" not in msg:
             return _err(msg.get("id") if isinstance(msg, dict) else None,
                         -32600, "Invalid Request")
@@ -310,8 +331,88 @@ class MCPHandler:
         return {"content": [{"type": "text", "text": fn(args)}]}
 
 
-def main() -> None:
+def run_stdio() -> None:
+    """stdio 传输：逐行读 stdin，逐行写响应（Agent host 拉起子进程）。"""
     MCPHandler().run()
+
+
+# ---------------------------------------------------------------------------
+# Streamable HTTP 传输：单 endpoint POST /mcp（非流式 JSON 响应）
+# 依赖 fastapi/uvicorn（属于 [web] extra）；stdio 模式不需要它们
+# ---------------------------------------------------------------------------
+
+def _http_err(mid: Any, code: int, message: str, status: int):
+    from fastapi.responses import JSONResponse
+    return JSONResponse(_err(mid, code, message), status_code=status)
+
+
+def build_http_app():
+    """构造 Streamable HTTP MCP server（POST /mcp；GET 405；DELETE 结束会话）。"""
+    if not _HAS_FASTAPI:
+        raise RuntimeError("--http 需要 web 依赖：uv pip install -e '.[web]'")
+    import uuid
+
+    from fastapi import FastAPI, Request
+    from fastapi.concurrency import run_in_threadpool
+    from fastapi.responses import JSONResponse, Response
+
+    app = FastAPI(title="AgentMemHub MCP (Streamable HTTP)",
+                  version=SERVER_INFO["version"],
+                  docs_url=None, openapi_url=None)
+    handler = MCPHandler()
+    _sessions: set[str] = set()      # 宽松会话簿：记录但不强制校验
+
+    @app.post("/mcp")
+    async def mcp_post(request: Request):
+        ctype = request.headers.get("content-type") or ""
+        if "application/json" not in ctype:
+            return _http_err(None, -32600,
+                             "Content-Type must be application/json", 415)
+        try:
+            msg = json.loads((await request.body()).decode("utf-8"))
+        except Exception:
+            return _http_err(None, -32700, "Parse error", 400)
+        if not isinstance(msg, dict) or "method" not in msg or "jsonrpc" not in msg:
+            return _http_err(msg.get("id") if isinstance(msg, dict) else None,
+                             -32600, "Invalid Request", 400)
+        sid = request.headers.get("mcp-session-id")
+        if msg.get("method") == "initialize":
+            sid = sid or uuid.uuid4().hex
+            _sessions.add(sid)
+        # 工具调用/引擎请求是阻塞 IO，放线程池避免卡事件循环
+        reply = await run_in_threadpool(handler._dispatch_msg, msg)
+        if reply is None:                 # 通知（如 notifications/initialized）
+            return Response(status_code=202)
+        headers = {"Mcp-Session-Id": sid} if sid else {}
+        return JSONResponse(reply, headers=headers)
+
+    @app.get("/mcp")
+    def mcp_get():
+        # 无服务器主动推送：GET SSE 流不支持，明确 405
+        return Response(status_code=405, headers={"Allow": "POST, DELETE"})
+
+    @app.delete("/mcp")
+    def mcp_delete(request: Request):
+        sid = request.headers.get("mcp-session-id")
+        if sid:
+            _sessions.discard(sid)
+        return Response(status_code=204)
+
+    return app
+
+
+def run_http(host: str = "127.0.0.1", port: int = 9100) -> None:
+    """常驻 Streamable HTTP 服务：一台机器共享记忆引擎给多个客户端。"""
+    try:
+        import uvicorn
+    except ImportError:      # pragma: no cover
+        raise SystemExit("--http 需要 web 依赖：uv pip install -e '.[web]'")
+    uvicorn.run(build_http_app(), host=host, port=port, log_level="info")
+
+
+def main() -> None:
+    """stdio 入口（python -m agentmemhub mcp_server / console script）。"""
+    run_stdio()
 
 
 if __name__ == "__main__":
