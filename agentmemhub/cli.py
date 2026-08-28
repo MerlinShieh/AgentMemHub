@@ -174,6 +174,12 @@ def cmd_memos_daemon(args) -> None:
         except Exception as e:
             _stdout(f"保存失败: {e}")
         return
+    if args.lightweight is not None:
+        from agentmemhub import memos_daemon as _md
+        p = _md.set_lightweight(args.lightweight == "on")
+        _stdout(f"已写入引擎配置 → {p}（轻量模式={'ON' if args.lightweight=='on' else 'OFF（完整进化链）'}；"
+                f"引擎重启后生效，如引擎在运行请先 [7] 停止再启动）")
+        return
     if args.set_password:
         memos_daemon.save_password(args.set_password)
         ok = memos_daemon._login()
@@ -303,6 +309,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="持久化 MemOS 插件目录到 ~/.agentmemhub/config.json 后退出")
     pmd.add_argument("--set-password", default="",
                      help="保存 MemOS viewer 密码（引擎设了密码时网关自动登录）后退出")
+    pmd.add_argument("--lightweight", choices=("on", "off"), default=None,
+                     help="开关 MemOS 轻量记忆模式（off=完整进化链；写托管配置，重启引擎生效）")
     pmd.add_argument("--lines", type=int, default=40, help="logs 动作显示的行数")
     return p
 

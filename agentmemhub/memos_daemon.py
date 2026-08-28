@@ -35,9 +35,8 @@ _START_TIMEOUT_S = 30
 
 
 def _data_dir() -> Path:
-    d = Path(os.environ.get("AGENTMEM_HUB_DATA_DIR", Path.home() / ".agentmemhub"))
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    from agentmemhub import config
+    return config.config().data_dir
 
 
 def _pid_file() -> Path:
@@ -49,7 +48,8 @@ def _log_file() -> Path:
 
 
 def base_url() -> str:
-    return f"http://127.0.0.1:{_DAEMON_PORT}"
+    from agentmemhub import config
+    return config.config().memos_base_url
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +78,82 @@ def save_password(password: str) -> None:
     _config_file().write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+# ---------------------------------------------------------------------------
+# 轻量模式管控：统一配置 memos.lightweight 优先；个别配置合并写引擎 config.yaml
+# （引擎本体零改动，config.yaml 是官方运行时配置入口）
+# ---------------------------------------------------------------------------
+
+def engine_home() -> Optional[Path]:
+    """引擎 home（记忆库 / .auth.json / config.yaml 所在）。
+
+    优先统一配置 memos.home（MemOS 平移进项目后指向 <项目根>/memOS/home），
+    否则按 Windows Hermes 官方默认回退探测（含 marker 目录）。
+    """
+    from agentmemhub import config
+    cfg_home = config.config().memos_home
+    if cfg_home and cfg_home.is_dir():
+        return cfg_home
+    if os.name == "nt":
+        local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        for cand in (local / "hermes" / "memos-plugin",
+                     Path.home() / ".hermes" / "memos-plugin"):
+            if cand.is_dir():
+                return cand
+    for cand in (Path.home() / ".hermes" / "memos-plugin",
+                 Path.home() / ".openclaw" / "memos-plugin",
+                 Path.home() / ".dsh" / "memos-plugin"):
+        if cand.is_dir():
+            return cand
+    return None
+
+
+def engine_config_path() -> Optional[Path]:
+    """引擎 config.yaml 路径（home 内）；无 home 返回 None。"""
+    home = engine_home()
+    return (home / "config.yaml") if home else None
+
+
+def set_lightweight(enabled: bool) -> Optional[Path]:
+    """开/关轻量记忆模式：合并写入引擎 config.yaml（保留 viewer 已存的其他配置）。
+
+    false=完整进化链；需重启引擎生效。返回写入的配置文件路径。
+    """
+    import yaml
+    p = engine_config_path()
+    if p is None:
+        raise RuntimeError("未找到引擎 home——先配置 memos.home 或确认引擎默认位置")
+    cfg: dict = {}
+    if p.exists():
+        cfg = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    algo = cfg.setdefault("algorithm", {}) or {}
+    algo.setdefault("lightweightMemory", {})["enabled"] = bool(enabled)
+    p.write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    return p
+
+
+def lightweight_config() -> Optional[bool]:
+    """读取链：统一配置 memos.lightweight > 引擎 config.yaml 的当前值。"""
+    from agentmemhub import config
+    forced = config.config().memos_lightweight
+    if forced is not None:
+        return forced
+    p = engine_config_path()
+    if p and p.exists():
+        try:
+            import yaml
+            return bool((yaml.safe_load(p.read_text(encoding="utf-8")) or {})
+                        .get("algorithm", {}).get("lightweightMemory", {}).get("enabled"))
+        except Exception:
+            return None
+    return None
+
+
 def _password() -> str:
+    """读取链：统一配置(memos.password / MEMOS_PASSWORD) > 本机 config.json（旧）。"""
+    from agentmemhub import config
+    v = config.config().memos_password
+    if v:
+        return v
     try:
         return (json.loads(_config_file().read_text(encoding="utf-8")) or {}).get(
             "memos_password", "")
@@ -142,13 +217,17 @@ def auth_state() -> Optional[dict]:
 
 
 def find_plugin_dir(explicit: Optional[str] = None) -> Optional[Path]:
-    """定位 MemOS 插件目录：显式参数 > 环境变量 > 数据目录 config.json > 常见位置探测。"""
-    for cand in (explicit, os.environ.get("MEMOS_PLUGIN_DIR")):
-        if cand and Path(cand).is_dir():
-            return Path(cand)
-    cfg = _data_dir() / "config.json"
+    """定位 MemOS 插件目录：
+    显式参数 > 统一配置(plugin_dir / repo_dir 推导 / MEMOS_PLUGIN_DIR)
+    > 数据目录 config.json > 常见位置探测。"""
+    from agentmemhub import config
+    cfg = config.config()
+    for cand in (explicit, cfg.memos_plugin_dir):
+        if cand and cand.is_dir():
+            return cand
+    cfg2 = _data_dir() / "config.json"
     try:
-        saved = (json.loads(cfg.read_text(encoding="utf-8")) or {}).get("memos_plugin_dir")
+        saved = (json.loads(cfg2.read_text(encoding="utf-8")) or {}).get("memos_plugin_dir")
         if saved and Path(saved).is_dir():
             return Path(saved)
     except Exception:
@@ -218,6 +297,8 @@ def daemon_status() -> dict[str, Any]:
             pf.unlink(missing_ok=True)   # 陈旧 PID 清理
             pid = None
     pdir_resolved = find_plugin_dir()
+    from agentmemhub import config as _cfg
+    _c = _cfg.config()
     result: dict[str, Any] = {
         "online": online,
         "auth": ast,                 # {enabled, needsSetup, authenticated} | None
@@ -227,6 +308,9 @@ def daemon_status() -> dict[str, Any]:
         "managed": managed,          # True=由 AgentMemHub 拉起（可 stop）
         "base_url": base_url(),
         "plugin_dir": str(pdir_resolved) if pdir_resolved else None,
+        "repo_dir": str(_c.memos_repo_dir),
+        "engine_home": str(engine_home()) if engine_home() else None,
+        "lightweight": lightweight_config(),
     }
     if online and ov:
         emb = ov.get("embedder") or {}
@@ -256,11 +340,17 @@ def daemon_start(agent: str = "hermes",
     if os.name == "nt":
         # 脱离父进程：控制台退出后 daemon 继续存活
         flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+    env = dict(os.environ)
+    # 统一配置指定引擎 home（仅当目录真实存在——平移进项目内后让引擎用新位置）
+    from agentmemhub import config
+    mh = config.config().memos_home
+    if mh and mh.is_dir():
+        env["MEMOS_HOME"] = str(mh)
     try:
         proc = subprocess.Popen(
             [npm, "run", "bridge:daemon", "--", f"--agent={agent}"],
             cwd=str(d), stdout=log, stderr=subprocess.STDOUT,
-            creationflags=flags, close_fds=True,
+            creationflags=flags, close_fds=True, env=env,
         )
     except FileNotFoundError:
         return {"started": False, "reason": "npm-not-found",
@@ -287,7 +377,7 @@ def daemon_stop() -> dict[str, Any]:
         return {"stopped": False, "reason": "not-online"}
     if not st["managed"] or not st["pid"]:
         return {"stopped": False, "reason": "external-process",
-                "hint": f"daemon 非本工具启动，请自行关闭（端口 {_DAEMON_PORT}）"}
+                "hint": f"daemon 非本工具启动，请自行关闭（端口 {base_url()}）"}
     pid = st["pid"]
     if os.name == "nt":
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
