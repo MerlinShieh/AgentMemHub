@@ -17,7 +17,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Optional
 
-from agentmemhub.models import Event, normalize_role, _to_epoch, message_text, renumber
+from agentmemhub.models import (Event, normalize_role, _to_epoch, message_text,
+                                renumber, is_system_inject)
 from .base import AgentAdapter
 
 # part 中无信息量的类型（跳过）
@@ -64,7 +65,7 @@ class SqliteConversationAdapter(AgentAdapter):
                      else "time_created, id")
         part_order = ("sequence, time_created" if self._has_col(conn, "part", "sequence")
                       else "time_created, id")
-        # 当前轮锚：最近一条 user 消息的 id（后续 assistant/tool/reasoning 事件归属它）
+        # 当前轮锚：最近一条真实 user 消息的 id（系统注入的 user 消息不算轮起点）
         turn_key: Optional[str] = None
         for m in conn.execute(
             f"SELECT * FROM message WHERE session_id = ? ORDER BY {msg_order}",
@@ -73,8 +74,6 @@ class SqliteConversationAdapter(AgentAdapter):
             md = self._safe_json(m["data"])
             msg_role = str(md.get("role", "")).lower()
             msg_id = str(m["id"])
-            if msg_role in ("user", "human"):
-                turn_key = msg_id
             msg_time = _to_epoch(md.get("time", {}).get("created") if isinstance(md.get("time"), dict) else md.get("time")) or _to_epoch(m["time_created"])
             model = md.get("modelID") or (md.get("model") or {}).get("modelID")
 
@@ -83,26 +82,43 @@ class SqliteConversationAdapter(AgentAdapter):
                 f"SELECT * FROM part WHERE message_id = ? ORDER BY {part_order}",
                 (m["id"],),
             ).fetchall()
+            # 系统注入检测：user 消息的正文（text part 优先，其次消息级 content）
+            is_sys = False
+            if msg_role in ("user", "human"):
+                probe_parts = []
+                for p in parts:
+                    pd0 = self._safe_json(p["data"])
+                    if str(pd0.get("type") or "").lower() in ("text", "text_stream", "input_text", "output_text"):
+                        probe_parts.append(str(pd0.get("text") or ""))
+                probe = "\n".join(x for x in probe_parts if x) or \
+                    (message_text(md.get("content")) if md.get("content") else "")
+                is_sys = is_system_inject(probe)
+                if not is_sys:
+                    turn_key = msg_id
+
             for p in parts:
                 pd = self._safe_json(p["data"])
                 ev = self._part_to_event(pd, msg_role, msg_time, model,
                                          part_id=str(p["id"]), parent_id=msg_id,
-                                         turn_key=turn_key, raw=p["data"])
+                                         turn_key=turn_key,
+                                         is_system=True if is_sys else None,
+                                         raw=p["data"])
                 if ev is not None:
                     events.append(ev)
             # 若消息没有有效 part，仍保留消息本身正文（避免丢内容）
             if not parts and md.get("content"):
                 ev = Event(role=normalize_role(msg_role, default="assistant"),
                            seq=0, time=msg_time, content=message_text(md["content"]),
-                           parent_id=msg_id, src_id=f"m:{msg_id}",
-                           turn_key=turn_key if msg_role in ("user", "human") else turn_key,
+                           parent_id=msg_id, src_id=f"m:{msg_id}", turn_key=turn_key,
+                           is_system=True if is_sys else None,
                            model=model or None, raw_json=m["data"])
                 events.append(ev)
         return events
 
     def _part_to_event(self, pd: dict, msg_role: str, msg_time: float, model: Any,
                        part_id: str | None = None, parent_id: str | None = None,
-                       turn_key: str | None = None, raw: Any = None) -> Optional[Event]:
+                       turn_key: str | None = None, is_system: bool | None = None,
+                       raw: Any = None) -> Optional[Event]:
         typ = str(pd.get("type") or pd.get("timelineType") or "").lower()
         raw_str = raw if isinstance(raw, str) else json.dumps(pd, ensure_ascii=False)
 
@@ -113,7 +129,9 @@ class SqliteConversationAdapter(AgentAdapter):
             return Event(role=role, seq=0, time=msg_time,
                          parent_id=parent_id,
                          src_id=(f"p:{part_id}" if part_id else None),
-                         turn_key=turn_key, model=model or None, raw_json=raw_str, **kw)
+                         turn_key=turn_key,
+                         is_system=is_system if is_system is not None else None,
+                         model=model or None, raw_json=raw_str, **kw)
 
         # timeline 元信息
         if typ in _META_TIMELINE_TYPES or "timelineType" in pd:

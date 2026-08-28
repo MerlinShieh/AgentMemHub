@@ -13,7 +13,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from agentmemhub.models import Event, _to_epoch, renumber
+from agentmemhub.models import Event, _to_epoch, renumber, is_system_inject, message_text
 from .base import AgentAdapter
 
 # system 类型中无信息量的（遥测/快照）——忽略
@@ -66,8 +66,14 @@ class QwenAdapter(AgentAdapter):
                         # 稳定锚 + 轮次归属：沿 parentUuid 追到根 user 行
                         uuid = str(o.get("uuid") or f"idx:{ln}")
                         parent = str(o["parentUuid"]) if o.get("parentUuid") else None
+                        msg_obj = o.get("message") if isinstance(o.get("message"), dict) else {}
+                        parts = msg_obj.get("parts")
                         if typ == "user":
-                            turn_key = uuid
+                            # 系统注入（task-notification / TodoWrite 提醒等）不算轮起点
+                            if not is_system_inject(_parts_text(parts)):
+                                turn_key = uuid
+                            else:
+                                turn_key = turn_by_uuid.get(parent) or parent
                         else:
                             turn_key = turn_by_uuid.get(parent) or parent
                         turn_by_uuid[uuid] = turn_key or uuid
@@ -123,7 +129,10 @@ class QwenAdapter(AgentAdapter):
             return Event(role="meta", time=ts, is_system=True, **kw)
         if typ == "user":
             text = _parts_text(parts) or (fp.stem if not parts else "")
-            return Event(role="user", time=ts, content=text, **kw) if text else None
+            if not text:
+                return None
+            return Event(role="user", time=ts, content=text,
+                         is_system=True if is_system_inject(text) else None, **kw)
         if typ == "assistant":
             text = _parts_text(parts)
             if not text:

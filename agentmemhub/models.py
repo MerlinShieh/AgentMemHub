@@ -11,10 +11,36 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
 
 EVENT_VERSION = 1
+
+# 系统注入消息识别（伪装成 role=user 的 harness 自动注入）。
+# 与前端 index.html isSystemMessage 同规则，另补 task-notification / system-reminder。
+# adapter 层打 is_system 标记 → MemOS 导出跳过这些轮，Web 渲染归 system。
+_SYSTEM_INJECT_RE = re.compile(
+    r"^The TodoWrite tool"
+    r"|^Current runtime context"
+    r"|Current DSH file policy\s*:"
+    r"|Any available operation enforced by the DSH file sandbox"
+    r"|^System\s*:|^\[System\s*:|^<system>"
+    r"|^You are an AI assistant|^Available tools|^The following tools"
+    r"|^<\|.*\|>|^System\b"
+    r'|^\{\s*"type"\s*:\s*"session/'
+    r"|^<antml:"
+    r"|^<task-notification\b|^<system-reminder\b"
+    r"|environment_context|runtime\.context|file\.policy|approval\.policy",
+    re.IGNORECASE,
+)
+
+
+def is_system_inject(text: Any) -> bool:
+    """检测 user 消息文本是否为 harness 系统注入（TodoWrite 提醒/上下文快照等）。"""
+    if not text:
+        return False
+    return bool(_SYSTEM_INJECT_RE.search(str(text).strip()))
 
 
 # ---------------------------------------------------------------------------
