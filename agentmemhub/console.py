@@ -156,6 +156,10 @@ def action_search() -> None:
 
 def action_dashboard() -> None:
     port = dashboard_port()
+    if _port_listening(port):
+        _out(f"  看板已在运行（端口 {port} 被占用，跳过重复启动）")
+        _out(f"  → 直接在浏览器打开 http://127.0.0.1:{port}/")
+        return
     # 独立子进程跑 serve：菜单不阻塞；同样继承当前解释器（uv venv 生效）
     proc = subprocess.Popen(
         [sys.executable, "-m", "agentmemhub", "serve", "--no-open", "--port", str(port)],
@@ -164,6 +168,13 @@ def action_dashboard() -> None:
     )
     _out(f"  看板启动中（PID {proc.pid}）→ http://127.0.0.1:{port}/")
     _out("  （在浏览器打开上面的地址；停止看板可关闭该进程或按 Ctrl+C 退出控制台）")
+
+
+def _port_listening(port: int) -> bool:
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", port)) == 0
 
 
 def action_memos() -> None:
