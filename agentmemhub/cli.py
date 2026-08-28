@@ -250,6 +250,16 @@ def cmd_memos(args) -> None:
               no_rebuild=args.no_rebuild, rebuild_mode=args.rebuild_mode)
 
 
+def cmd_mcp(args) -> None:
+    """启动 MCP 记忆网关（stdio）。
+
+    由 Agent host（ZCode/OpenCode 等）拉起的子进程：stdin/stdout 走 MCP 协议，
+    不能向 stdout 打印任何非协议内容。
+    """
+    from agentmemhub.mcp_server import main as mcp_main
+    mcp_main()
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="agentmemhub", description="AgentMemHub 统一 Agent 会话提取")
     sub = p.add_subparsers(dest="command")
@@ -312,6 +322,8 @@ def build_parser() -> argparse.ArgumentParser:
     pmd.add_argument("--lightweight", choices=("on", "off"), default=None,
                      help="开关 MemOS 轻量记忆模式（off=完整进化链；写托管配置，重启引擎生效）")
     pmd.add_argument("--lines", type=int, default=40, help="logs 动作显示的行数")
+
+    pmc = sub.add_parser("mcp", help="启动 MCP 记忆网关（stdio；由 Agent host 拉起，勿直接终端运行）")
     return p
 
 
@@ -326,7 +338,7 @@ def main() -> None:
         "ingest": cmd_ingest, "list": cmd_list, "show": cmd_show,
         "search": cmd_search, "export": cmd_export, "stats": cmd_stats,
         "adapters": cmd_adapters, "memos": cmd_memos, "folders": cmd_folders,
-        "serve": cmd_serve, "memos-daemon": cmd_memos_daemon,
+        "serve": cmd_serve, "memos-daemon": cmd_memos_daemon, "mcp": cmd_mcp,
     }
     fn = handlers.get(args.command)
     if fn is None:

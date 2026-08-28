@@ -210,9 +210,43 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 | `folders [--source] [--limit]` | 按文件夹统计各 Agent 会话数 |
 | `memos [--source] [--out] [--push url] [--no-rebuild]` | 生成/推送 MemOS bundle（push 自动分批 + 补向量）|
 | `memos-daemon start\|stop\|status\|logs` | 记忆引擎托管（见下文「记忆引擎管理」）|
+| `mcp` | 启动 MCP 记忆网关（stdio，供 ZCode/OpenCode 等 Agent host 拉起）|
 | `stats` / `adapters` | 统计 / adapter 状态 |
 
 > 更完整的代码与 SQL 示例（按 Agent 查询、按文件夹跨 Agent 统计、会话角色分布、直连数据库等）见 **[docs/EXAMPLES.md](./docs/EXAMPLES.md)**。
+
+## MCP 记忆网关（实时记忆读写）
+
+把本地记忆引擎（MemOS）的语义检索/写入包装成 **MCP server**，挂在 ZCode / OpenCode /
+Claude Code 等支持 MCP 的 Agent harness 上——模型在会话进行中即可检索历史记忆、
+主动保存值得长期保留的结论。与离线链路（统一提取 → bundle → 导入）互补：
+
+| 工具 | 说明 |
+|---|---|
+| `memory_search(query, topK)` | 语义检索历史记忆（转发引擎 `/api/v1/memory/search`），返回命中条目 + 注入上下文 |
+| `memory_recent(limit)` | 最近写入的记忆时间线，快速了解近期积累 |
+| `memory_stats()` | 引擎在线状态 / 记忆总量 / 语义检索与 LLM 评分可用性 / 记忆模式 |
+| `memory_save(content)` | 写一条记忆（即时入库并补向量），供模型主动保存事实/结论 |
+
+启动与注册：
+
+```bash
+# 1. 先常驻记忆引擎（网关绝不代管引擎生命周期）
+python -m agentmemhub memos-daemon start
+
+# 2. 在 Agent 的 MCP 配置里注册（command 可按本地环境调整）
+#    注册模板见 docs/mcp-register.example.json（ZCode / OpenCode 两段）
+#    command: uv run python -m agentmemhub mcp
+
+# 3. 验证：在 Agent 会话里调用 memory_stats / memory_search
+```
+
+设计要点：
+
+- **引擎由用户常驻控制**（看板 / `memos-daemon`）；网关只转发请求，引擎离线时所有工具
+  返回明确错误与启动指引，不做启停决策
+- **纯 stdio**、零新依赖，兼容 MCP 2024-11-05 / 2025-06-18 协议版本
+- 复用引擎网关的自动登录（已保存密码时免密直连）；不写本地库、不改引擎源码
 
 ## 数据模型
 
