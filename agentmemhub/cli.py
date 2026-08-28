@@ -32,9 +32,9 @@ def _stdout(s: str) -> None:
     print(s)
 
 
-def cmd_ingest(args) -> None:
+def run_ingest(sources: list[str], signature: str = "") -> tuple[int, int]:
+    """提取指定 source 列表并入库（CLI 与控制台共用）。返回 (会话数, 事件数)。"""
     store = Store()
-    sources = [args.source] if args.source else [a.source for a in adapters.all_adapters()]
     total_conv = 0
     total_ev = 0
     for src in sources:
@@ -47,11 +47,17 @@ def cmd_ingest(args) -> None:
             _stdout(f"[{src}] 未找到数据源")
             continue
         sessions = a.load(p)
-        n = store.replace_source(src, sessions, signature=args.signature or "")
+        n = store.replace_source(src, sessions, signature=signature or "")
         total_conv += len(sessions)
         total_ev += n
         _stdout(f"[{src}] {len(sessions)} 会话, {n} 事件")
     store.close()
+    return total_conv, total_ev
+
+
+def cmd_ingest(args) -> None:
+    sources = [args.source] if args.source else [a.source for a in adapters.all_adapters()]
+    total_conv, total_ev = run_ingest(sources, signature=args.signature)
     _stdout(f"完成: {total_conv} 会话, {total_ev} 事件")
 
 
@@ -80,14 +86,23 @@ def cmd_show(args) -> None:
     store.close()
 
 
-def cmd_search(args) -> None:
+def run_search_text(query: str, *, source: str = "", role: str = "", limit: int = 20) -> None:
+    """关键字检索并打印结果（CLI 与控制台共用）。"""
     store = Store()
-    hits = store.search(args.query, source=args.source, role=args.role, limit=args.limit)
+    hits = store.search(query, source=source or None, role=role or None, limit=limit)
+    if not hits:
+        _stdout("（无命中）")
+        store.close()
+        return
     _stdout(f"命中 {len(hits)} 条事件:\n")
     for h in hits:
         snippet = h.get("snippet") or h.get("content") or ""
-        _stdout(f"[{h.get('source', args.source)}] {h.get('conversation_id')} | {h.get('role')} | {snippet[:80]}")
+        _stdout(f"[{h.get('source', source)}] {h.get('conversation_id')} | {h.get('role')} | {snippet[:80]}")
     store.close()
+
+
+def cmd_search(args) -> None:
+    run_search_text(args.query, source=args.source, role=args.role, limit=args.limit)
 
 
 def cmd_export(args) -> None:
@@ -148,20 +163,23 @@ def cmd_adapters(args) -> None:
         _stdout(f"[{d['source']}] {d['label']}: {'✓ ' + (d['path'] or '') if d['located'] else '✗ 未找到'}")
 
 
-def cmd_memos(args) -> None:
+def run_memos(*, source: str = "", out: str = "exports/memos_bundle.json",
+              push: str = "", no_rebuild: bool = False,
+              rebuild_mode: str = "repair") -> None:
+    """提取记忆 bundle + 可选推送 MemOS（CLI 与控制台共用）。"""
     from agentmemhub.memos import (build_bundle, write_bundle, push_bundle,
                                    rebuild_embeddings)
     store = Store()
-    bundle = build_bundle(store, args.source)
+    bundle = build_bundle(store, source)
     _stdout(f"生成 bundle: {len(bundle['traces'])} traces")
-    write_bundle(bundle, Path(args.out))
-    _stdout(f"已写入 → {args.out}")
-    if args.push:
+    write_bundle(bundle, Path(out))
+    _stdout(f"已写入 → {out}")
+    if push:
         try:
             # MemOS /api/v1/import 上限 64 MiB——全量 bundle 可能超限（实测 90+MB），
             # 因此推送时按 source 分批 POST，失败批次继续并汇总
-            if args.source:
-                batches = [args.source]
+            if source:
+                batches = [source]
             else:
                 batches = [a.source for a in adapters.all_adapters() if a.locate()]
             total_ok = total_skip = 0
@@ -170,22 +188,27 @@ def cmd_memos(args) -> None:
                 if not b["traces"]:
                     continue
                 try:
-                    resp = push_bundle(b, args.push)
+                    resp = push_bundle(b, push)
                     total_ok += resp.get("imported", 0)
                     total_skip += resp.get("skipped", 0)
                     _stdout(f"[{src}] 推送 ok: imported={resp.get('imported')} skipped={resp.get('skipped')}")
                 except Exception as e:
                     _stdout(f"[{src}] 推送失败（继续下一批）: {e}")
             _stdout(f"MemOS 导入汇总: imported={total_ok}, skipped={total_skip}")
-            if not args.no_rebuild:
+            if not no_rebuild:
                 try:
-                    r = rebuild_embeddings(args.push, mode=args.rebuild_mode)
-                    _stdout(f"已触发 embedding {args.rebuild_mode}: {r}")
+                    r = rebuild_embeddings(push, mode=rebuild_mode)
+                    _stdout(f"已触发 embedding {rebuild_mode}: {r}")
                 except Exception as e:
                     _stdout(f"embedding rebuild 失败（可用 --no-rebuild 跳过）: {e}")
         except Exception as e:
             _stdout(f"推送失败（MemOS 可能在运行?）: {e}")
     store.close()
+
+
+def cmd_memos(args) -> None:
+    run_memos(source=args.source, out=args.out, push=args.push,
+              no_rebuild=args.no_rebuild, rebuild_mode=args.rebuild_mode)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -241,6 +264,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if not args.command:
+        # 无参数 = 进入交互式控制台（新用户入口）
+        from agentmemhub.console import run_console
+        run_console()
+        return
     handlers = {
         "ingest": cmd_ingest, "list": cmd_list, "show": cmd_show,
         "search": cmd_search, "export": cmd_export, "stats": cmd_stats,
