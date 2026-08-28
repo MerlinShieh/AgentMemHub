@@ -21,16 +21,10 @@ from agentmemhub.models import Event
 
 
 def default_db_path() -> Path:
-    """默认数据库位置（可用 AGENTMEMHUB_DB 环境变量覆盖）。"""
-    env = os.environ.get("AGENTMEMHUB_DB")
-    if env:
-        return Path(env)
-    data_dir = Path(os.environ.get(
-        "AGENTMEM_HUB_DATA_DIR",
-        Path.home() / ".agentmemhub",
-    ))
-    data_dir.mkdir(parents=True, exist_ok=True)
-    return data_dir / "agentmemhub.db"
+    """SQLite 位置：统一配置（agentmemhub.yaml / 环境变量）→ 默认 ~/.agentmemhub。"""
+    from agentmemhub import config
+    cfg = config.config()
+    return cfg.db_path
 
 
 class Store:

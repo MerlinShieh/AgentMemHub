@@ -33,7 +33,17 @@ class AgentAdapter(abc.ABC):
         raise NotImplementedError
 
     def locate(self) -> Optional[Path]:
-        """返回第一个存在的数据路径；都找不到返回 None。"""
+        """返回数据路径。
+
+        优先统一配置 agents.<source> 的显式覆盖（未配置/不存在则回退官方默认探测）。
+        """
+        try:
+            from agentmemhub import config
+            override = config.config().agent_path(self.source)
+        except Exception:
+            override = None
+        if override is not None and override.exists():
+            return override
         for p in self.candidate_paths():
             if p.exists():
                 return p

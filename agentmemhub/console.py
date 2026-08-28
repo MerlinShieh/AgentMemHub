@@ -33,14 +33,13 @@ def _out(s: str) -> None:
 
 
 def memos_base_url() -> str:
-    return os.environ.get("MEMOS_BASE_URL", "http://127.0.0.1:18800").rstrip("/")
+    from agentmemhub import config
+    return config.config().memos_base_url
 
 
 def dashboard_port() -> int:
-    try:
-        return int(os.environ.get("AGENTMEMHUB_PORT", "8086"))
-    except ValueError:
-        return 8086
+    from agentmemhub import config
+    return config.config().web_port
 
 
 def memos_probe(base_url: Optional[str] = None, timeout: float = 1.5) -> Optional[dict]:

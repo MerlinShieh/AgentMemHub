@@ -29,7 +29,14 @@ class QwenAdapter(AgentAdapter):
         return [Path.home() / ".qwen"]
 
     def locate(self) -> Path:
-        # chats 目录是主来源；取 .qwen 本身或其 chats 子目录
+        # 统一配置 agents.qwen 可覆盖（默认官方路径 ~/.qwen）
+        try:
+            from agentmemhub import config
+            override = config.config().agent_path(self.source)
+        except Exception:
+            override = None
+        if override is not None and override.exists():
+            return override
         p = Path.home() / ".qwen"
         return p if p.exists() else None
 
