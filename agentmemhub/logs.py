@@ -59,9 +59,27 @@ def record(msg: str, level: str = "info", actor: str = "web",
 
 
 def recent(limit: int = 100) -> list[dict]:
-    """最近 N 条（新 -> 旧）。"""
-    with _LOCK:
-        return list(_RING[-limit:])[::-1]
+    """最近 N 条（新 -> 旧）。
+
+    以 web.log 文件为准（持久化，面板重启后历史仍在）；内存环形缓冲仅兜底
+    极端未落盘情况。
+    """
+    p = _web_file()
+    entries: list[dict] = []
+    if p.exists():
+        try:
+            lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+            for ln in lines[-limit:]:
+                try:
+                    entries.append(json.loads(ln))
+                except Exception:
+                    continue
+        except Exception:
+            pass
+    if not entries:                             # 文件为空/不可读 → 回退内存缓冲
+        with _LOCK:
+            return list(_RING[-limit:])[::-1]
+    return entries[::-1]                        # 新 -> 旧
 
 
 # ---------------------------------------------------------------------------
