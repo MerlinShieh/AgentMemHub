@@ -368,7 +368,8 @@ def cmd_score(args) -> None:
         _stdout(s)
     try:
         r = run_score_all(emit=_emit, base_url=args.push,
-                          limit=args.limit, dry_run=args.dry_run)
+                          limit=args.limit, dry_run=args.dry_run,
+                          workers=args.workers)
         _stdout(f"评分完成: evaluated={r['evaluated']} "
                 f"positive={r['positive']} neutral={r['neutral']} "
                 f"negative={r['negative']} errors={r['errors']}"
@@ -483,6 +484,7 @@ def build_parser() -> argparse.ArgumentParser:
     psc = sub.add_parser("score", help="LLM 批量自动评分历史记忆（三轴评估 → feedback 写入，检索排序生效）")
     psc.add_argument("--limit", type=int, default=0, help="最多评分条数（0=全部）")
     psc.add_argument("--dry-run", action="store_true", help="只评估不写入（预览 verdict 分布）")
+    psc.add_argument("--workers", type=int, default=4, help="并发评估线程数（默认 4；IO 密集建议 4~8）")
     psc.add_argument("--push", default="", help="引擎 base URL（默认 18800，一般不用设）")
     return p
 

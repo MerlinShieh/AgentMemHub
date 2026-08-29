@@ -98,19 +98,60 @@ def _parse_verdict(content: str) -> str:
 def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
                   base_url: str = "", limit: int = 0,
                   dry_run: bool = False,
-                  gen_trace_cb=None) -> dict[str, Any]:
+                  workers: int = 1) -> dict[str, Any]:
     """批量自动评分引擎内全部（或前 N 条）历史记忆。
 
-    emit(line)：进度实时输出（面板任务/CLI）；gen_trace_cb 可选（测试注入）。
+    emit(line)：进度实时输出，行内带 "[已处理/总数]"（面板/CLI 显示进度）；
+    workers：LLM 评估/写入是 IO 密集，>1 用线程池并发（默认 1=串行）。
     返回 {evaluated, positive, neutral, negative, errors, dryRun}。
     """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
     out = emit or (lambda s: None)
     llm_cfg = read_engine_llm()
     root = (base_url or memos_daemon.base_url()).rstrip("/")
     summary = {"evaluated": 0, "positive": 0, "neutral": 0,
                "negative": 0, "errors": 0, "dryRun": bool(dry_run)}
+    lock = threading.Lock()
     offset = 0
     page = 100
+    total: Optional[int] = None
+
+    def work(t: dict) -> None:
+        tid = t.get("id", "")
+        with lock:
+            summary["evaluated"] += 1
+            idx = summary["evaluated"]
+        label = f"[{idx}/{total}]" if total else f"[{idx}]"
+        out(f"{label} 评估 {tid} …")
+        try:
+            verdict = evaluate_trace(t, llm_cfg)
+        except Exception as e:
+            with lock:
+                summary["errors"] += 1
+            out(f"{label} ✗ 评估失败: {e}")
+            return
+        with lock:
+            summary[verdict] += 1
+        if verdict == "neutral":
+            out(f"{label} → neutral（一般，不写入）")
+            return
+        if dry_run:
+            out(f"{label} → {verdict}（dry-run 不写入）")
+            return
+        try:
+            memos_daemon.engine_request(
+                "POST", "/api/v1/feedback",
+                body={"channel": "explicit", "polarity": verdict,
+                      "magnitude": 1.0, "traceId": tid},
+                base=root, timeout=30)
+            out(f"{label} → {verdict} ✓ 已写入")
+        except Exception as e:
+            with lock:
+                summary["errors"] += 1
+            out(f"{label} ✗ 写入失败: {e}")
+
     while True:
         res = memos_daemon.engine_request(
             "GET", f"/api/v1/traces?limit={page}&offset={offset}&groupByTurn=1",
@@ -118,36 +159,19 @@ def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
         traces = res.get("traces") or []
         if not traces:
             break
-        for t in traces:
-            if limit and summary["evaluated"] >= limit:
-                return summary
-            tid = t.get("id", "")
-            out(f"[{summary['evaluated'] + 1}] 评估 {tid} …")
-            try:
-                verdict = evaluate_trace(t, llm_cfg)
-            except Exception as e:
-                summary["errors"] += 1
-                out(f"  ✗ 评估失败: {e}")
-                continue
-            summary[verdict] += 1
-            summary["evaluated"] += 1
-            if verdict == "neutral":
-                out(f"  → neutral（一般，不写入）")
-                continue
-            if dry_run:
-                out(f"  → {verdict}（dry-run 不写入）")
-                continue
-            try:
-                memos_daemon.engine_request(
-                    "POST", "/api/v1/feedback",
-                    body={"channel": "explicit", "polarity": verdict,
-                          "magnitude": 1.0, "traceId": tid},
-                    base=root, timeout=30)
-                out(f"  → {verdict} ✓ 已写入")
-            except Exception as e:
-                summary["errors"] += 1
-                out(f"  ✗ 写入失败: {e}")
-        offset += len(traces)
+        if total is None:
+            total = int(res.get("total") or 0)
+        remain = None if not limit else limit - summary["evaluated"]
+        batch = traces
+        if remain is not None:
+            batch = traces[:remain]
+        if not batch:
+            break
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+            list(ex.map(work, batch))          # map 保持批内顺序（并发执行）
+        offset += len(batch)
+        if limit and summary["evaluated"] >= limit:
+            break
         if offset >= int(res.get("total") or 0):
             break
     return summary
