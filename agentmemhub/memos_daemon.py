@@ -44,8 +44,9 @@ def _pid_file() -> Path:
 
 
 def _log_file() -> Path:
-    # 统一日志目录：数据目录/logs/engine.log（引擎 daemon 输出）
-    return _data_dir() / "logs" / "engine.log"
+    # 统一日志目录：<程序根>/logs/engine.log（引擎 daemon 输出）
+    from agentmemhub import logs
+    return logs.log_dir() / "engine.log"
 
 
 def base_url() -> str:
