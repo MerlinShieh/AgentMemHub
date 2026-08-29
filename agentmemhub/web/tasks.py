@@ -45,6 +45,7 @@ def submit(name: str, fn: Callable[[Callable[[str], None], dict], str]) -> Optio
             "finishedAt": None,
             "output": "",
             "error": None,
+            "progress": None,           # 结构化进度 {done,total,pct,label}（任务可选回填）
         }
         _CURRENT = job
 
@@ -65,6 +66,13 @@ def submit(name: str, fn: Callable[[Callable[[str], None], dict], str]) -> Optio
 
     threading.Thread(target=_run, daemon=True).start()
     return dict(job)
+
+
+def set_progress(job_id: str, progress: dict) -> None:
+    """回填当前运行任务的进度（如 {done,total,pct,label}；前端渲染进度条）。"""
+    with _LOCK:
+        if _CURRENT and _CURRENT.get("id") == job_id and _CURRENT["status"] == "running":
+            _CURRENT["progress"] = progress
 
 
 def status() -> Optional[dict]:

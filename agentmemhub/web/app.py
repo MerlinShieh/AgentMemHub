@@ -120,21 +120,39 @@ def _run_push_fn(cli, source: str):
 
 
 def _run_score_fn(cli, limit: int, dry_run: bool):
-    """看板「自动评分」后台动作：LLM 三轴批量评估历史记忆 → feedback 写入（并发）。
+    """看板「自动评分」后台动作（tasks.submit 的 fn(emit, meta) 契约）。
 
-    emit=print：每条约一行 [N/总数] 进度，经 _DualWriter 实时回显到面板；
-    漏传 emit 会导致进度行全部丢弃（只有结束汇总）。
+    面板不逐条刷评估行（进度条/百分比展示）：逐条进度经 on_progress 结构化
+    写入 job.progress（前端进度条），output 只留结束汇总。
     """
-    from agentmemhub.scoring import run_score_all
+    from contextlib import redirect_stdout
 
-    def _run() -> None:
-        r = run_score_all(base_url="", limit=limit, dry_run=dry_run,
-                          workers=4, emit=lambda s: print(s))
-        print(f"评分完成: evaluated={r['evaluated']} "
-              f"positive={r['positive']} neutral={r['neutral']} "
-              f"negative={r['negative']} errors={r['errors']}"
-              + ("（dry-run，未写入）" if r["dryRun"] else ""))
-    return _emit_task(_run)
+    from agentmemhub.scoring import run_score_all
+    from agentmemhub.web import tasks
+
+    def _do(emit, meta) -> str:
+        w = _DualWriter(emit)
+        last_pct = [0]
+
+        def on_progress(done: int, total: int) -> None:
+            pct = int(done * 100 / total) if total else 0
+            if pct != last_pct[0] or done >= (total or 0):
+                last_pct[0] = pct
+                tasks.set_progress(meta["id"], {
+                    "done": done, "total": total, "pct": pct, "label": "评分"})
+
+        with redirect_stdout(w):
+            r = run_score_all(base_url="", limit=limit, dry_run=dry_run,
+                              workers=4, on_progress=on_progress)
+            tasks.set_progress(meta["id"], {
+                "done": r["evaluated"], "total": r["evaluated"],
+                "pct": 100 if not r["errors"] else 99, "label": "评分"})
+            print(f"评分完成: evaluated={r['evaluated']} skipped={r['skipped']} "
+                  f"positive={r['positive']} neutral={r['neutral']} "
+                  f"negative={r['negative']} errors={r['errors']}"
+                  + ("（dry-run，未写入）" if r["dryRun"] else ""))
+        return w.getvalue()
+    return _do
 
 
 def _run_clean_fn(cli, source: str):

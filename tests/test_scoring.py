@@ -52,15 +52,13 @@ def test_run_score_all_skips_scored(tmp_path, monkeypatch):
               {"id": "t2", "userText": "c", "agentText": "d"}]
     lines: list[str] = []
     def fake_er(method, path, *a, **k):
-        if path.startswith("/api/v1/traces"):
-            return {"total": 2, "traces": traces}
-        if path == "/api/v1/feedback":
-            return {"id": "fb"}
-        raise AssertionError(f"unexpected {method} {path}")
+        assert (method, path) == ("POST", "/api/v1/feedback")
+        return {"id": "fb"}
     with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
          mock.patch("agentmemhub.scoring.evaluate_trace", return_value="positive"), \
          mock.patch("agentmemhub.memos_daemon.engine_request", side_effect=fake_er) as er:
-        r = run_score_all(emit=lines.append, base_url="http://127.0.0.1:1", workers=2)
+        r = run_score_all(emit=lines.append, base_url="http://127.0.0.1:1",
+                          workers=2, traces=traces)
     assert r["evaluated"] == 2 and r["skipped"] == 1      # t1 跳过，t2 评估
     assert r["positive"] == 1
     assert any("已评过，跳过" in l for l in lines)
@@ -75,8 +73,9 @@ def test_run_score_all_dry_run_not_mark(tmp_path, monkeypatch):
     with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
          mock.patch("agentmemhub.scoring.evaluate_trace", return_value="positive"), \
          mock.patch("agentmemhub.memos_daemon.engine_request") as er:
-        er.return_value = {"total": 1, "traces": [{"id": "t1", "userText": "a", "agentText": "b"}]}
-        r = run_score_all(limit=1, dry_run=True)
+        er.return_value = {"id": "fb"}                    # 仅 feedback 写入分支
+        r = run_score_all(limit=1, dry_run=True,
+                          traces=[{"id": "t1", "userText": "a", "agentText": "b"}])
     assert r["dryRun"] is True and r["positive"] == 1
     assert scoring._load_scored() == set()                # 未写入 → 未标记
 
@@ -121,7 +120,7 @@ def test_evaluate_trace_empty_returns_neutral():
 
 
 def test_run_score_all_batch_loop():
-    """批量循环：分页取 traces → LLM 评估 → feedback 写入；neutral 跳过写入；limit 生效。"""
+    """批量：注入 traces → LLM 评估 → feedback 写入；neutral 跳过写入；limit 生效。"""
     traces = [
         {"id": "t1", "userText": "修复登录", "agentText": "监听器问题"},
         {"id": "t2", "userText": "无聊寒暄", "agentText": "嗯嗯"},
@@ -130,20 +129,15 @@ def test_run_score_all_batch_loop():
     llm = {"endpoint": "https://x/chat/completions", "api_key": "k", "model": "m"}
     lines: list[str] = []
     verdicts = iter(["positive", "neutral", "negative"])
-    page_calls = 0
     def fake_er(method, path, *a, **k):
-        nonlocal page_calls
-        if path.startswith("/api/v1/traces"):
-            page_calls += 1
-            return {"total": 3, "traces": traces} if page_calls == 1 else {"total": 3, "traces": []}
-        if path == "/api/v1/feedback":
-            return {"id": "fb"}
-        raise AssertionError(f"unexpected call: {method} {path}")
+        assert (method, path) == ("POST", "/api/v1/feedback")
+        return {"id": "fb"}
     with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
          mock.patch("agentmemhub.scoring.evaluate_trace",
                     side_effect=lambda t, c: next(verdicts)), \
          mock.patch("agentmemhub.memos_daemon.engine_request", side_effect=fake_er) as er:
-        r = run_score_all(emit=lines.append, base_url="http://127.0.0.1:1")
+        r = run_score_all(emit=lines.append, base_url="http://127.0.0.1:1",
+                          traces=traces)
     assert r["evaluated"] == 3 and r["positive"] == 1 and r["neutral"] == 1
     assert r["negative"] == 1 and r["errors"] == 0 and r["dryRun"] is False
     # feedback 只写了 positive 与 negative（neutral 跳过）
@@ -212,20 +206,37 @@ def test_run_score_all_concurrent_workers():
     traces = [{"id": f"t{i}", "userText": f"内容{i}", "agentText": "回复"} for i in range(4)]
     lines: list[str] = []
     def fake_er(method, path, *a, **k):
-        if path.startswith("/api/v1/traces"):
-            return {"total": 4, "traces": traces}
-        if path == "/api/v1/feedback":
-            return {"id": "fb"}
-        raise AssertionError(f"unexpected: {method} {path}")
+        assert (method, path) == ("POST", "/api/v1/feedback")
+        return {"id": "fb"}
     with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
          mock.patch("agentmemhub.scoring.evaluate_trace", return_value="positive"), \
          mock.patch("agentmemhub.memos_daemon.engine_request", side_effect=fake_er) as er:
-        r = run_score_all(emit=lines.append, base_url="http://127.0.0.1:1", workers=4)
+        r = run_score_all(emit=lines.append, base_url="http://127.0.0.1:1",
+                          workers=4, traces=traces)
     assert r["evaluated"] == 4 and r["positive"] == 4 and r["errors"] == 0
     # 进度行带 [N/总数]（并发下总数正确）
     assert any("[1/4]" in l for l in lines) and any("[4/4]" in l for l in lines)
     fb = [c for c in er.call_args_list if c[0][1] == "/api/v1/feedback"]
     assert len(fb) == 4
+
+
+def test_lists_all_traces_from_engine_db(tmp_path):
+    """只读枚举全部 trace（绕开 listTraces 500 窗口）——列名/内容正确。"""
+    import sqlite3
+    from agentmemhub import scoring
+    db = tmp_path / "memos.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE traces (id TEXT PRIMARY KEY, user_text TEXT, "
+                 "agent_text TEXT, ts INTEGER)")
+    conn.executemany("INSERT INTO traces VALUES (?,?,?,?)",
+                     [("t1", "你好", "回复", 1), ("t2", None, "只有助手", 2)])
+    conn.commit()
+    conn.close()
+    with mock.patch("agentmemhub.scoring._engine_db_path", return_value=db):
+        rows = scoring.list_all_traces()
+    assert len(rows) == 2
+    assert rows[0] == {"id": "t1", "userText": "你好", "agentText": "回复"}
+    assert rows[1] == {"id": "t2", "userText": "", "agentText": "只有助手"}   # None → 空串
 
 
 def test_admin_score_offline_503():
@@ -241,17 +252,19 @@ def test_admin_score_job_runs():
     with mock.patch("agentmemhub.memos_daemon.auth_state", return_value={}), \
          mock.patch("agentmemhub.scoring.run_score_all") as rsa:
         def fake_run(*a, **k):
-            emit = k.get("emit")          # 必须接线 emit，否则进度行丢失
-            assert emit is not None and callable(emit)
-            emit("[1/2097] 评估 trac_a …")
-            emit("[2/2097] → positive ✓ 已写入")
-            return {"evaluated": 2, "skipped": 0, "positive": 1, "neutral": 1,
+            prog = k.get("on_progress")    # 面板进度条走结构化 progress
+            assert prog is not None and callable(prog)
+            prog(1, 2115)
+            prog(500, 2115)
+            print("评分完成: evaluated=500 skipped=0 positive=2 neutral=100 negative=0 errors=0")
+            return {"evaluated": 500, "skipped": 0, "positive": 2, "neutral": 100,
                     "negative": 0, "errors": 0, "dryRun": False}
         rsa.side_effect = fake_run
-        r = c.post("/api/admin/score?limit=2")
+        r = c.post("/api/admin/score")
         assert r.status_code == 200
         done = _wait_done(c)
         assert done["status"] == "done"
-        # 进度行经 emit 实时回显
-        assert "[1/2097]" in done["output"] and "[2/2097]" in done["output"]
         assert "评分完成" in done["output"]
+        # 结构进度写入 job（面板进度条依据）
+        assert done["progress"] is not None and done["progress"]["pct"] == 100
+        assert done["progress"]["total"] == 500
