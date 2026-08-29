@@ -63,6 +63,17 @@ def test_admin_ingest_job_lifecycle():
         ri.assert_called_once()
 
 
+def test_admin_ingest_source_param_passthrough():
+    """?source=zcode → run_ingest 只处理该 source（agent 筛选生效）。"""
+    c = _client()
+    with mock.patch("agentmemhub.cli.run_ingest") as ri:
+        r = c.post("/api/admin/ingest?source=zcode")
+        assert r.status_code == 200
+        _wait_done(c)
+        args, kwargs = ri.call_args
+        assert args[0] == ["zcode"] and kwargs == {"signature": ""}
+
+
 def test_admin_ingest_busy_conflict_409():
     c = _client()
     def slow(*a, **k):

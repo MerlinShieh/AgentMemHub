@@ -305,17 +305,23 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       <div class="mt-3 border-t border-border pt-3">
         <div class="flex flex-wrap items-center gap-2">
           <span class="text-[11px] font-medium text-muted-foreground">数据操作</span>
+          <select id="adminSource" title="选择要操作的 Agent（全部=所有已发现的数据源）"
+                  class="rounded-md border border-input bg-background px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring">
+            <option value="">全部 Agent</option>
+          </select>
           <button id="adminIngestBtn"
                   class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
             <i data-lucide="download" class="h-3.5 w-3.5 text-primary"></i>提取会话入库
           </button>
-          <button id="adminPushBtn"
+          <button id="adminPushBtn" title="需要记忆引擎在线"
                   class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
             <i data-lucide="upload" class="h-3.5 w-3.5 text-primary"></i>推送记忆到 MemOS
           </button>
           <span id="adminJobState" class="hidden items-center gap-1.5 text-xs text-muted-foreground">
             <i data-lucide="loader-circle" class="h-3.5 w-3.5 animate-spin"></i><span id="adminJobName">任务运行中…</span>
+            <span id="adminJobClock" class="tnum"></span>
           </span>
+          <span id="adminJobWarn" class="hidden text-[11px] text-warning"></span>
         </div>
         <pre id="adminJobOut" class="mt-2 hidden max-h-40 overflow-y-auto rounded-md bg-muted/40 p-2 text-[10.5px] leading-relaxed text-muted-foreground scroll-thin"></pre>
       </div>
@@ -651,7 +657,8 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     const btn = $('#memosToggleBtn'), label = $('#memosToggleLabel');
     btn.disabled = true; label.textContent = '启动中…';
     try{
-      const r = await fetch('/api/memos/start', {method:'POST'});
+      // daemon_start 内部最多等待 30s → 前端超时给 40s 余量
+      const r = await fetchWithTimeout('/api/memos/start', {method:'POST'}, 40000);
       const d = await r.json().catch(()=>({}));
       if(!r.ok){
         toast((d.detail && (typeof d.detail==='string' ? d.detail : (d.detail.error||'启动失败'))) || '启动失败');
@@ -671,7 +678,8 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     const btn = $('#memosStopBtn');
     btn.disabled = true;
     try{
-      const r = await fetch('/api/memos/stop', {method:'POST'});
+      // daemon_stop 内部最多等 10s → 前端超时给 25s 余量
+      const r = await fetchWithTimeout('/api/memos/stop', {method:'POST'}, 25000);
       const d = await r.json().catch(()=>({}));
       if(!r.ok){
         const det = d.detail;
@@ -679,7 +687,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       }else{
         toast('记忆引擎已停止');
       }
-      const s = await (await fetch('/api/memos/status')).json();
+      const s = await (await fetchWithTimeout('/api/memos/status',{},8000)).json();
       renderMemosStatus(s);
       $('#memosOnline').classList.add('hidden');
     }catch(e){
@@ -690,15 +698,33 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   }
 
   // ---- 数据操作：提取入库 / 推送记忆（后台任务，轮询状态）----
+  async function fetchWithTimeout(url, opts={}, ms=15000){
+    const ctl=new AbortController();
+    const t=setTimeout(()=>ctl.abort(), ms);
+    try{
+      return await fetch(url, {...opts, signal:ctl.signal});
+    }catch(e){
+      if(e && e.name==='AbortError') throw new Error('请求超时（'+(ms/1000)+'s）');
+      throw e;
+    }finally{ clearTimeout(t); }
+  }
+  function fillAdminSource(){
+    const sel=$('#adminSource'); const cur=sel.value;
+    sel.innerHTML='<option value="">全部 Agent</option>'
+      +(D.stats.sources||[]).map(s=>`<option value="${esc(s.source)}">${esc(s.source)}</option>`).join('');
+    sel.value=cur;
+  }
   function adminRender(j){
     const state=$('#adminJobState'), out=$('#adminJobOut');
-    const ing=$('#adminIngestBtn'), push=$('#adminPushBtn');
-    if(!j){ state.classList.add('hidden'); out.classList.add('hidden'); ing.disabled=false; push.disabled=false; return; }
+    const ing=$('#adminIngestBtn'), push=$('#adminPushBtn'), warn=$('#adminJobWarn');
+    if(!j){ state.classList.add('hidden'); warn.classList.add('hidden'); out.classList.add('hidden'); ing.disabled=false; push.disabled=!lastEngineOnline; return; }
     const busy=j.status==='running';
-    ing.disabled=busy; push.disabled=busy;
+    ing.disabled=busy; push.disabled=busy || !lastEngineOnline;   // 任务或引擎离线都不可提交
     if(busy){
+      warn.classList.add('hidden');
       state.classList.remove('hidden'); state.classList.add('inline-flex');
       $('#adminJobName').textContent=j.name||'任务运行中…';
+      $('#adminJobClock').textContent='· 已运行 '+Math.max(0,Math.round(Date.now()/1000-(j.startedAt||Date.now()/1000)))+'s';
       out.classList.add('hidden');
       return;
     }
@@ -709,23 +735,66 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   }
   async function adminPoll(){
     try{
-      const d = await (await fetch('/api/admin/job')).json();
-      adminRender(d.job);
-      if(d.job && d.job.status==='running'){
+      const d = await (await fetchWithTimeout('/api/admin/job',{},8000)).json();
+      const j=d.job;
+      adminRender(j);
+      if(j && j.status==='running'){
+        // 超过 10 分钟仍未完成：提示可能卡住（任务仍在跑，可用 /api/admin/job 查询）
+        const el=Date.now()/1000-(j.startedAt||Date.now()/1000);
+        $('#adminJobWarn').classList.toggle('hidden', el<600);
+        $('#adminJobWarn').textContent='任务耗时较长（'+Math.round(el)+'s）。若长时间无变化，请查看服务日志或重启看板；任务本身仍在后台执行。';
         adminTmr=setTimeout(adminPoll,1200);
+        return;
       }
+      $('#adminJobWarn').classList.add('hidden');
+      adminTmr=null;
+      if(j && (j.name||'').includes('提取') && j.status==='done') refreshData();   // 入库完成 → 自动刷新列表/统计
     }catch(e){ /* 服务重启/窗口短暂异常：下次操作自愈 */ }
   }
   async function adminSubmit(ep){
     clearTimeout(adminTmr);
+    const src=$('#adminSource').value;
+    const url=ep+(src?'?source='+encodeURIComponent(src):'');
     try{
-      const r = await fetch(ep, {method:'POST'});
+      const r = await fetchWithTimeout(url, {method:'POST'}, 10000);
       const d = await r.json().catch(()=>({}));
       if(r.status===409 || r.status===503){ toast(typeof d.detail==='string'?d.detail:'操作被拒绝'); adminPoll(); return; }
       if(!r.ok){ toast('提交失败'); return; }
       toast('任务已提交');
       adminPoll();
     }catch(e){ toast('提交失败：'+(e.message||e)); }
+  }
+  // 引擎状态自动轮询（外部启停/崩溃也能反映到看板）
+  let lastMemosSig='', lastEngineOnline=false;
+  async function memosPollStatus(){
+    try{
+      const r=await fetchWithTimeout('/api/memos/status',{},8000);
+      if(!r.ok) return;
+      const s=await r.json();
+      lastEngineOnline=!!(s.online && !s.auth_required);
+      $('#adminPushBtn').disabled = !lastEngineOnline;     // 引擎离线时推送按钮置灰
+      const sig=JSON.stringify([s.online, s.auth_required, (s.summary||{}).traces]);
+      if(sig===lastMemosSig) return;                       // 无变化不重绘（避免闪烁）
+      lastMemosSig=sig;
+      renderMemosStatus(s);
+      if(s.online && !s.auth_required){ $('#memosOnline').classList.remove('hidden'); loadMemosRecent(); }
+      if(!s.online) $('#memosOnline').classList.add('hidden');
+    }catch(e){}
+  }
+  async function refreshData(){
+    try{
+      const r=await fetchWithTimeout('/api/bootstrap',{},10000);
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      D = await r.json();
+    }catch(e){ toast('刷新数据失败：'+e.message); return; }
+    CONVS = D.conversations.slice();
+    filtered = CONVS.slice();
+    $('#srcLabel').textContent = `${D.meta.dbPath || ''}`;
+    document.title = `Agent 会话看板 (${D.meta.totalConversations})`;
+    updateStatsHead(D.meta); updateSummary();
+    renderStats(); renderCharts(); renderTable();
+    fillAdminSource(); reicons();
+    toast('数据已刷新');
   }
 
   function updateStatsHead(meta){
@@ -893,7 +962,10 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     // 数据操作：提取入库 / 推送记忆（提交后台任务并轮询状态）
     $('#adminIngestBtn').onclick=()=>adminSubmit('/api/admin/ingest');
     $('#adminPushBtn').onclick=()=>adminSubmit('/api/admin/push');
-    adminPoll();   // 页面加载时恢复可能仍在进行中的任务
+    fillAdminSource();                       // Agent 筛选下拉（全部 + 各源）
+    adminPoll();                             // 页面加载时恢复可能仍在进行中的任务
+    memosPollStatus();                       // 立即探一次引擎状态（含推送按钮置灰）
+    setInterval(memosPollStatus, 15000);     // 之后每 15s 自动刷新（外部启停也能反映）
   }
   // P1 修复：原改写时遗漏此定义，导致勾选/删除触发 "updateBatchBtn is not defined"
   function updateBatchBtn(){ const n=selectedKeys.size; const b=$('#batchDelBtn'); b.classList.toggle('hidden',n===0); b.classList.toggle('inline-flex',n>0); }
