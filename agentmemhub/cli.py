@@ -360,6 +360,25 @@ def cmd_clean(args) -> None:
         store.close()
 
 
+def cmd_score(args) -> None:
+    """LLM 批量自动评分历史记忆（三轴评估 → feedback 写入）。"""
+    from agentmemhub.scoring import run_score_all
+
+    def _emit(s: str) -> None:
+        _stdout(s)
+    try:
+        r = run_score_all(emit=_emit, base_url=args.push,
+                          limit=args.limit, dry_run=args.dry_run)
+        _stdout(f"评分完成: evaluated={r['evaluated']} "
+                f"positive={r['positive']} neutral={r['neutral']} "
+                f"negative={r['negative']} errors={r['errors']}"
+                + ("（dry-run，未写入）" if r["dryRun"] else ""))
+        _cli_log(f"score → {r}")
+    except Exception as e:
+        _stdout(f"评分失败：{e}")
+        _cli_log(f"score 失败 → {e}", level="error")
+
+
 def cmd_memos(args) -> None:
     run_memos(source=args.source, out=args.out, push=args.push,
               no_rebuild=args.no_rebuild, rebuild_mode=args.rebuild_mode)
@@ -460,6 +479,11 @@ def build_parser() -> argparse.ArgumentParser:
     pcl.add_argument("--source", default="")
     pcl.add_argument("--apply", action="store_true",
                      help="执行删除（不带此参数仅统计预览；删除会重建 FTS 与会话计数）")
+
+    psc = sub.add_parser("score", help="LLM 批量自动评分历史记忆（三轴评估 → feedback 写入，检索排序生效）")
+    psc.add_argument("--limit", type=int, default=0, help="最多评分条数（0=全部）")
+    psc.add_argument("--dry-run", action="store_true", help="只评估不写入（预览 verdict 分布）")
+    psc.add_argument("--push", default="", help="引擎 base URL（默认 18800，一般不用设）")
     return p
 
 
@@ -475,7 +499,7 @@ def main() -> None:
         "search": cmd_search, "export": cmd_export, "stats": cmd_stats,
         "adapters": cmd_adapters, "memos": cmd_memos, "folders": cmd_folders,
         "serve": cmd_serve, "memos-daemon": cmd_memos_daemon, "mcp": cmd_mcp,
-        "sync": cmd_sync, "clean": cmd_clean,
+        "sync": cmd_sync, "clean": cmd_clean, "score": cmd_score,
     }
     fn = handlers.get(args.command)
     if fn is None:
