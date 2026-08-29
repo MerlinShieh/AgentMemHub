@@ -26,10 +26,11 @@ def _append_output(job: dict, text: str) -> None:
         job["output"] = job["output"][-_OUTPUT_CAP:]
 
 
-def submit(name: str, fn: Callable[[Callable[[str], None]], str]) -> Optional[dict]:
+def submit(name: str, fn: Callable[[Callable[[str], None], dict], str]) -> Optional[dict]:
     """提交一个后台任务（幂等串行：已有 running 任务则拒绝）。
 
-    fn(emit) -> str：emit(line) 逐行实时输出；返回终态文本（追加到 output）。
+    fn(emit, meta) -> str：emit(line) 逐行实时输出；meta={id,name}（完整落盘
+    用 job id 建独立日志文件）；返回终态文本。
     异常 → status=error + error 字段。返回任务快照；被拒绝时返回 None。
     """
     global _CURRENT
@@ -52,7 +53,7 @@ def submit(name: str, fn: Callable[[Callable[[str], None]], str]) -> Optional[di
             with _LOCK:
                 _append_output(job, line.rstrip("\n") + "\n")
         try:
-            fn(emit)            # 输出全部经 emit 实时流入 job（fn 返回值仅供日志/终态复核）
+            fn(emit, {"id": job["id"], "name": name})   # 输出经 emit 实时流入 job
             with _LOCK:
                 job["status"] = "done"
                 job["finishedAt"] = time.time()

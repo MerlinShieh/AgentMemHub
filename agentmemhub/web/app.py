@@ -82,10 +82,10 @@ class _DualWriter:
 
 
 def _emit_task(fn) -> Any:
-    """把同步任务包装成 fn(emit)（tasks.submit 契约）：实时流 + 终态文本。"""
+    """把同步任务包装成 fn(emit, meta)（tasks.submit 契约）：实时流 + 终态文本。"""
     from contextlib import redirect_stdout
 
-    def _do(emit) -> str:
+    def _do(emit, meta) -> str:
         w = _DualWriter(emit)
         with redirect_stdout(w):
             fn()
@@ -124,17 +124,22 @@ def _run_push_fn(cli, source: str):
 
 
 def _logged_task(name: str, fn) -> Any:
-    """任务包装：开始/完成/失败写入统一操作日志（web.logs）。"""
+    """任务包装：开始/完成/失败写统一操作日志（web.log）；完整输出逐行落盘
+    <data_dir>/tasks/<job_id>.log（页面关掉/进程中断也可追溯）。"""
     from agentmemhub.web import logs
 
-    def _do(emit) -> str:
-        logs.record(f"开始：{name}")
+    def _do(emit, meta) -> str:
+        logs.record(f"开始：{name}（id={meta['id']}）")
+        def emit_full(line: str) -> None:
+            emit(line)                                  # 前端实时
+            logs.append_task_line(meta["id"], line)     # 完整落盘
         try:
-            text = fn(emit)
-            logs.record(f"完成：{name}\n" + (text or "").strip()[-600:])
+            text = fn(emit_full, meta)
+            logs.record(f"完成：{name}（id={meta['id']}）\n"
+                        + (text or "").strip()[-600:])
             return text
         except Exception as e:
-            logs.record(f"失败：{name} → {e}", level="error")
+            logs.record(f"失败：{name}（id={meta['id']}）→ {e}", level="error")
             raise
     return _do
 
