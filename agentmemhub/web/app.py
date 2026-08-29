@@ -48,30 +48,65 @@ def _workspace_of(cwd: Optional[str]) -> str:
     return cwd.rstrip("\\/").rsplit("\\", 1)[-1].rsplit("/", 1)[-1] or "(unknown)"
 
 
-def _capture_stdout(fn) -> str:
-    """在后台线程里捕获 CLI 式操作（_stdout=print）的输出文本。"""
-    import io
+class _DualWriter:
+    """同时把输出写入 StringIO（终态文本）与 emit 回调（实时逐行，前端/日志可见）。"""
+
+    def __init__(self, emit):
+        import io
+        self._sink = io.StringIO()
+        self._emit = emit
+        self._buf = ""
+
+    def write(self, s: str) -> int:
+        self._sink.write(s)
+        self._buf += s
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            try:
+                self._emit(line)
+            except Exception:
+                pass
+        return len(s)
+
+    def flush(self) -> None:
+        # 无换行收尾的残留输出也作为一行发出（否则 tasks output 缺尾部）
+        if self._buf:
+            try:
+                self._emit(self._buf.rstrip("\n"))
+            except Exception:
+                pass
+            self._buf = ""
+
+    def getvalue(self) -> str:
+        return self._sink.getvalue()
+
+
+def _emit_task(fn) -> Any:
+    """把同步任务包装成 fn(emit)（tasks.submit 契约）：实时流 + 终态文本。"""
     from contextlib import redirect_stdout
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        fn()
-    return buf.getvalue()
+
+    def _do(emit) -> str:
+        w = _DualWriter(emit)
+        with redirect_stdout(w):
+            fn()
+        return w.getvalue()
+    return _do
 
 
-def _run_ingest_capture(cli, adapters, source: str, signature: str) -> str:
-    """看板「提取入库」后台动作。"""
-    def _do() -> None:
+def _run_ingest_fn(cli, adapters, source: str, signature: str):
+    """看板「提取入库」后台动作：全部/指定 source 提取入库。"""
+    def _run() -> None:
         sources = [source] if source else [a.source for a in adapters.all_adapters()]
         cli.run_ingest(sources, signature=signature)
-    return _capture_stdout(_do)
+    return _emit_task(_run)
 
 
-def _run_push_capture(cli, source: str) -> str:
+def _run_push_fn(cli, source: str):
     """看板「推送记忆」后台动作：按 source 幂等推送 + 补向量（不 ingest）。"""
     from agentmemhub import adapters, memos_daemon
     from agentmemhub.store import Store
 
-    def _do() -> None:
+    def _run() -> None:
         store = Store()
         try:
             batches = ([source] if source
@@ -85,7 +120,23 @@ def _run_push_capture(cli, source: str) -> str:
                 print(f"已补向量(repair): {r['rebuilt']}")
         finally:
             store.close()
-    return _capture_stdout(_do)
+    return _emit_task(_run)
+
+
+def _logged_task(name: str, fn) -> Any:
+    """任务包装：开始/完成/失败写入统一操作日志（web.logs）。"""
+    from agentmemhub.web import logs
+
+    def _do(emit) -> str:
+        logs.record(f"开始：{name}")
+        try:
+            text = fn(emit)
+            logs.record(f"完成：{name}\n" + (text or "").strip()[-600:])
+            return text
+        except Exception as e:
+            logs.record(f"失败：{name} → {e}", level="error")
+            raise
+    return _do
 
 
 def _conv_to_dict(c: Any) -> dict[str, Any]:
@@ -363,17 +414,23 @@ def create_app(db_path: Path | None = None):
     @app.post("/api/memos/start")
     def api_memos_start():
         from agentmemhub import memos_daemon
+        from agentmemhub.web import logs
         r = memos_daemon.daemon_start()
         if not (r.get("started") or r.get("online")):
+            logs.record(f"引擎启动失败：{r.get('reason', r)}", level="error")
             raise HTTPException(status_code=502, detail=r)
+        logs.record(f"引擎启动成功（{'托管' if r.get('managed') else '外部'}）")
         return JSONResponse(r)
 
     @app.post("/api/memos/stop")
     def api_memos_stop():
         from agentmemhub import memos_daemon
+        from agentmemhub.web import logs
         r = memos_daemon.daemon_stop()
         if not r.get("stopped") and r.get("reason") not in ("not-online",):
+            logs.record(f"引擎停止失败：{r.get('reason', r)}", level="error")
             raise HTTPException(status_code=502, detail=r)
+        logs.record("引擎已停止")
         return JSONResponse(r)
 
     @app.get("/api/memos/search")
@@ -435,31 +492,38 @@ def create_app(db_path: Path | None = None):
     def api_admin_ingest(source: str = Query(default=""),
                          signature: str = Query(default="")):
         from agentmemhub import adapters, cli
-        from agentmemhub.web import tasks
-        job = tasks.submit(
-            f"提取会话入库{'（' + source + '）' if source else ''}",
-            lambda: _run_ingest_capture(cli, adapters, source, signature))
+        from agentmemhub.web import logs, tasks
+        name = f"提取会话入库{'（' + source + '）' if source else ''}"
+        job = tasks.submit(name, _logged_task(
+            name, _run_ingest_fn(cli, adapters, source, signature)))
         if job is None:
             raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
+        logs.record(f"提交任务：{name}（id={job['id']}）")
         return JSONResponse({"job": job})
 
     @app.post("/api/admin/push")
     def api_admin_push(source: str = Query(default="")):
         from agentmemhub import cli, memos_daemon
-        from agentmemhub.web import tasks
+        from agentmemhub.web import logs, tasks
         if memos_daemon.auth_state() is None:
             raise HTTPException(status_code=503, detail="记忆引擎未运行，无法推送")
-        job = tasks.submit(
-            f"推送记忆到 MemOS{'（' + source + '）' if source else ''}",
-            lambda: _run_push_capture(cli, source))
+        name = f"推送记忆到 MemOS{'（' + source + '）' if source else ''}"
+        job = tasks.submit(name, _logged_task(name, _run_push_fn(cli, source)))
         if job is None:
             raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
+        logs.record(f"提交任务：{name}（id={job['id']}）")
         return JSONResponse({"job": job})
 
     @app.get("/api/admin/job")
     def api_admin_job():
         from agentmemhub.web import tasks
         return JSONResponse({"job": tasks.status()})
+
+    @app.get("/api/logs")
+    def api_logs(limit: int = Query(default=100, ge=1, le=500)):
+        """统一操作日志（面板控制/任务执行的最近记录，内存 + JSONL 留痕）。"""
+        from agentmemhub.web import logs
+        return JSONResponse({"logs": logs.recent(limit)})
 
     # ---- 静态页面（index.html 由 StaticFiles html=True 自动兜底 /）----
     static_dir = Path(__file__).resolve().parent / "static"

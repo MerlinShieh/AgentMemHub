@@ -163,12 +163,14 @@ def write_bundle(bundle: dict[str, Any], out_path: Path) -> None:
 
 
 def push_bundle(bundle: dict[str, Any], base_url: str = "http://127.0.0.1:18800") -> dict:
-    """POST bundle 到 MemOS /api/v1/import。返回响应 JSON。"""
-    url = base_url.rstrip("/") + "/api/v1/import"
-    data = json.dumps(bundle, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    """POST bundle 到 MemOS /api/v1/import（走网关统一出口，自动登录带 cookie）。
+
+    引擎 viewer 设了密码时 urllib 直连会 401——统一走 engine_request
+    （登录缓存 cookie、401 自动重登），CLI/看板/MCP memory_save 全部受益。
+    """
+    from agentmemhub import memos_daemon
+    return memos_daemon.engine_request("POST", "/api/v1/import",
+                                       body=bundle, timeout=60, base=base_url)
 
 
 def rebuild_embeddings(base_url: str = "http://127.0.0.1:18800",
