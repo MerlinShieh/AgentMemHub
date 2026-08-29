@@ -44,7 +44,9 @@ def _pid_file() -> Path:
 
 
 def _log_file() -> Path:
-    return _data_dir() / "memos_daemon.log"
+    # 统一日志目录：<程序根>/logs/engine.log（引擎 daemon 输出）
+    from agentmemhub import logs
+    return logs.log_dir() / "engine.log"
 
 
 def base_url() -> str:
@@ -161,13 +163,14 @@ def _password() -> str:
         return ""
 
 
-def _login() -> bool:
-    """用保存的密码登录引擎，缓存 session cookie。成功 True。"""
+def _login(base: Optional[str] = None) -> bool:
+    """用保存的密码登录引擎（base=None 用统一配置地址），缓存 session cookie。"""
     pw = _password()
     if not pw:
         return False
+    root = (base or base_url()).rstrip("/")
     req = urllib.request.Request(
-        base_url() + "/api/v1/auth/login",
+        root + "/api/v1/auth/login",
         data=json.dumps({"password": pw}).encode("utf-8"),
         headers={"Content-Type": "application/json"}, method="POST")
     try:
@@ -186,9 +189,14 @@ def _login() -> bool:
 
 
 def engine_request(method: str, path: str, body: Optional[dict] = None,
-                   timeout: float = 30, retries: int = 1) -> dict:
-    """带自动登录的引擎 HTTP 请求（AgentMemHub 网关统一出口）。"""
-    url = base_url() + path
+                   timeout: float = 30, retries: int = 1,
+                   base: Optional[str] = None) -> dict:
+    """带自动登录的引擎 HTTP 请求（AgentMemHub 网关统一出口）。
+
+    base=None 用统一配置地址；传入显式地址时登录/请求都指向该地址。
+    """
+    root = (base or base_url()).rstrip("/")
+    url = root + path
     data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
     headers = {"Content-Type": "application/json"} if data is not None else {}
     if _COOKIE_CACHE:
@@ -199,8 +207,8 @@ def engine_request(method: str, path: str, body: Optional[dict] = None,
             text = r.read().decode("utf-8")
             return json.loads(text) if text.strip() else {}
     except urllib.error.HTTPError as e:
-        if e.code == 401 and retries > 0 and _login():
-            return engine_request(method, path, body, timeout, retries - 1)
+        if e.code == 401 and retries > 0 and _login(base):
+            return engine_request(method, path, body, timeout, retries - 1, base)
         if e.code == 401:
             raise EngineAuthError(
                 "引擎已设密码：运行 agentmemhub memos-daemon --set-password <密码> 保存后重试")

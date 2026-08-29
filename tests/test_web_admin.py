@@ -1,0 +1,279 @@
+"""看板数据操作后台任务（/api/admin/*）测试：job 生命周期/并发/离线。"""
+from __future__ import annotations
+
+import tempfile
+import time
+from pathlib import Path
+from unittest import mock
+
+import pytest
+from fastapi.testclient import TestClient
+
+from agentmemhub.web import tasks
+from agentmemhub.models import Event, renumber
+from agentmemhub.store import Store
+
+
+@pytest.fixture(autouse=True)
+def _reset_tasks():
+    tasks.reset()
+    yield
+    tasks.reset()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_logs(tmp_path, monkeypatch):
+    """防测试污染真实数据目录（日志与已评清单都指到临时目录）。"""
+    monkeypatch.setattr("agentmemhub.logs.log_dir", lambda: tmp_path)
+    monkeypatch.setattr("agentmemhub.scoring._cache_path",
+                        lambda: tmp_path / "scored_traces.json")
+
+
+def _client() -> TestClient:
+    tmp = Path(tempfile.mkdtemp()) / "admin.db"
+    s = Store(tmp)
+    evs = renumber([Event(role="user", content="hi", time=1)])
+    s.replace_source("zcode", [{
+        "source": "zcode", "id": "s1", "title": "t", "cwd": "w",
+        "created_at": 1, "updated_at": 1, "model": "m", "meta": {},
+        "events": evs,
+    }], signature="t")
+    s.close()
+    from agentmemhub.web.app import create_app
+    return TestClient(create_app(tmp))
+
+
+def _wait_done(client: TestClient, timeout: float = 5.0) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        j = client.get("/api/admin/job").json()["job"]
+        if j and j["status"] != "running":
+            return j
+        time.sleep(0.05)
+    raise AssertionError("job 未在超时内完成")
+
+
+def test_admin_job_empty():
+    c = _client()
+    assert c.get("/api/admin/job").json()["job"] is None
+
+
+def test_admin_ingest_job_lifecycle():
+    c = _client()
+    with mock.patch("agentmemhub.cli.run_ingest") as ri, \
+         mock.patch("agentmemhub.adapters.all_adapters", return_value=[]):
+        r = c.post("/api/admin/ingest")
+        assert r.status_code == 200
+        job = r.json()["job"]
+        assert job["id"] and job["name"]          # 任务已提交（mock 极快，可能已 done）
+        done = _wait_done(c)
+        assert done["status"] == "done" and done["id"] == job["id"]
+        ri.assert_called_once()
+
+
+def test_admin_ingest_source_param_passthrough():
+    """?source=zcode → run_ingest 只处理该 source（agent 筛选生效）。"""
+    c = _client()
+    with mock.patch("agentmemhub.cli.run_ingest") as ri:
+        r = c.post("/api/admin/ingest?source=zcode")
+        assert r.status_code == 200
+        _wait_done(c)
+        args, kwargs = ri.call_args
+        assert args[0] == ["zcode"] and kwargs == {"signature": ""}
+
+
+def test_admin_ingest_busy_conflict_409():
+    c = _client()
+    def slow(*a, **k):
+        time.sleep(0.4)
+    with mock.patch("agentmemhub.cli.run_ingest", side_effect=slow), \
+         mock.patch("agentmemhub.adapters.all_adapters", return_value=[]):
+        assert c.post("/api/admin/ingest").status_code == 200
+        r2 = c.post("/api/admin/ingest")
+        assert r2.status_code == 409           # 串行保护：并发提交被拒
+        _wait_done(c)
+
+
+def test_admin_push_offline_503():
+    c = _client()
+    with mock.patch("agentmemhub.memos_daemon.auth_state", return_value=None):
+        r = c.post("/api/admin/push")
+    assert r.status_code == 503
+    assert "记忆引擎未运行" in r.json()["detail"]
+    assert c.get("/api/admin/job").json()["job"] is None     # 未提交任务
+
+
+def test_admin_push_online_job():
+    c = _client()
+    fake = {"imported": 3, "skipped": 5,
+            "lines": ["[zcode] 推送 ok: imported=3 skipped=5"],
+            "rebuilt": {"done": True}}
+    def fake_push(store, **kw):
+        (kw.get("stdout") or print)("[zcode] 推送 ok: imported=3 skipped=5")
+        (kw.get("stdout") or print)("正在补向量（embedding repair，本地计算可能耗时数分钟）…")
+        (kw.get("stdout") or print)("MemOS 导入汇总: imported=3, skipped=5")
+        return fake
+    with mock.patch("agentmemhub.memos_daemon.auth_state", return_value={}), \
+         mock.patch("agentmemhub.cli.push_to_memos", side_effect=fake_push), \
+         mock.patch("agentmemhub.adapters.all_adapters", return_value=[]):
+        r = c.post("/api/admin/push")
+        assert r.status_code == 200
+        done = _wait_done(c)
+        assert done["status"] == "done"
+        assert "imported=3" in done["output"]
+        assert "正在补向量" in done["output"]      # rebuild 进度实时可见
+
+
+def test_admin_task_error_reported():
+    c = _client()
+    with mock.patch("agentmemhub.cli.run_ingest", side_effect=RuntimeError("boom")), \
+         mock.patch("agentmemhub.adapters.all_adapters", return_value=[]):
+        c.post("/api/admin/ingest")
+        done = _wait_done(c)
+        assert done["status"] == "error"
+        assert "boom" in done["error"]
+
+
+def test_task_live_output_during_running():
+    """emit 实时流：任务运行中 job.output 即可见部分输出（前端 loading 期显示进展）。"""
+    tasks.reset()
+    def fn(emit, meta):
+        emit("第一批完成")
+        time.sleep(0.15)
+        emit("第二批完成")
+    job = tasks.submit("实时任务", fn)
+    assert job["status"] == "running"
+    time.sleep(0.05)
+    mid = tasks.status()
+    assert mid["status"] == "running" and "第一批完成" in mid["output"]
+    deadline = time.time() + 3
+    while time.time() < deadline and tasks.status()["status"] == "running":
+        time.sleep(0.02)
+    done = tasks.status()
+    assert done["status"] == "done"
+    assert "第二批完成" in done["output"]
+
+
+def test_logs_record_recent_and_endpoint(tmp_path, monkeypatch):
+    """统一日志：record/recent + /api/logs 端点（文件写 tmp，防污染真实数据目录）。"""
+    from agentmemhub import logs
+    monkeypatch.setattr("agentmemhub.logs.log_dir", lambda: tmp_path)
+    logs.reset()
+    logs.record("提取任务完成")
+    logs.record("引擎启动失败", level="error")
+    c = _client()
+    d = c.get("/api/logs?limit=10").json()
+    entries = d["logs"]
+    assert entries[0]["msg"] == "引擎启动失败" and entries[0]["level"] == "error"
+    assert entries[1]["msg"] == "提取任务完成"
+    assert (tmp_path / "web.log").exists()           # JSONL 留痕
+
+
+def test_admin_ingest_records_log(tmp_path, monkeypatch):
+    """提交任务写入统一日志（可追溯面板操作）。"""
+    from agentmemhub import logs
+    monkeypatch.setattr("agentmemhub.logs.log_dir", lambda: tmp_path)
+    logs.reset()
+    c = _client()
+    with mock.patch("agentmemhub.cli.run_ingest") as ri, \
+         mock.patch("agentmemhub.adapters.all_adapters", return_value=[]):
+        c.post("/api/admin/ingest")
+        _wait_done(c)
+    msgs = [l["msg"] for l in logs.recent()]
+    assert any("提交任务" in m for m in msgs)
+    assert any("开始" in m for m in msgs) and any("完成" in m for m in msgs)
+
+
+def test_task_full_log_persisted_to_file(tmp_path, monkeypatch):
+    """推送任务完整输出逐行落盘到 logs/tasks/<job_id>.log，页面关掉也可追溯。"""
+    from agentmemhub import logs
+    monkeypatch.setattr("agentmemhub.logs.task_log_dir", lambda: tmp_path / "tasks")
+    c = _client()
+    fake = {"imported": 3, "skipped": 5,
+            "lines": ["[zcode] 推送 ok: imported=3 skipped=5"], "rebuilt": None}
+    def fake_push(store, **kw):
+        (kw.get("stdout") or print)("[zcode] 推送 ok: imported=3 skipped=5")
+        return fake
+    with mock.patch("agentmemhub.memos_daemon.auth_state", return_value={}), \
+         mock.patch("agentmemhub.cli.push_to_memos", side_effect=fake_push), \
+         mock.patch("agentmemhub.adapters.all_adapters", return_value=[]):
+        c.post("/api/admin/push")
+        done = _wait_done(c)
+    p = tmp_path / "tasks" / f"{done['id']}.log"
+    assert p.exists()
+    text = p.read_text(encoding="utf-8")
+    assert "推送 ok: imported=3" in text
+    assert logs.task_log_tail(done["id"]) == text.strip()
+
+
+def test_memos_feedback_forwards_to_engine():
+    """记忆打分：转发引擎 /api/v1/feedback 带 traceId（即时重算 value）；离线 503。"""
+    c = _client()
+    with mock.patch("agentmemhub.memos_daemon.engine_request") as er:
+        er.return_value = {"id": "fb-1", "polarity": "positive", "ts": 1}
+        r = c.post("/api/memos/feedback?traceId=trac_abc&polarity=positive")
+        assert r.status_code == 200
+        assert r.json()["traceId"] == "trac_abc"
+        args, kwargs = er.call_args
+        assert args == ("POST", "/api/v1/feedback")
+        assert kwargs["body"]["polarity"] == "positive"
+        assert kwargs["body"]["traceId"] == "trac_abc"
+    # 非法极性被拒绝
+    r = c.post("/api/memos/feedback?traceId=x&polarity=maybe")
+    assert r.status_code == 422
+    # 引擎离线（auth/连接挂）→ 502
+    with mock.patch("agentmemhub.memos_daemon.engine_request",
+                    side_effect=RuntimeError("conn reset")):
+        r2 = c.post("/api/memos/feedback?traceId=x&polarity=negative")
+        assert r2.status_code == 502
+
+
+def test_admin_clean_job_runs(tmp_path, monkeypatch):
+    """清洗：后台任务调 run_clean(apply=True)，done 输出含删除结果。"""
+    c = _client()
+    with mock.patch("agentmemhub.cli.run_clean") as rc:
+        def fake_clean(store, *, source=None, apply=False, stdout=None):
+            out = stdout or print
+            out("[zcode] 659 条（46 个会话）")
+            out("已删除 659 条注入事件")
+        rc.side_effect = fake_clean
+        r = c.post("/api/admin/clean")
+        assert r.status_code == 200
+        done = _wait_done(c)
+        assert done["status"] == "done"
+        assert "659" in done["output"] and "已删除" in done["output"]
+        assert rc.call_args.kwargs.get("apply") is True
+
+
+def test_admin_rebuild_offline_503():
+    c = _client()
+    with mock.patch("agentmemhub.memos_daemon.auth_state", return_value=None):
+        r = c.post("/api/admin/rebuild")
+    assert r.status_code == 503
+    assert "记忆引擎未运行" in r.json()["detail"]
+
+
+def test_admin_rebuild_job_runs():
+    c = _client()
+    with mock.patch("agentmemhub.memos_daemon.auth_state", return_value={}), \
+         mock.patch("agentmemhub.memos.rebuild_embeddings") as re_:
+        re_.return_value = {"done": True, "rounds": 2, "processed": 500, "failed": 0}
+        def fake_rebuild(*a, **k):
+            k.get("on_progress")("embedding repair: 第 1 轮 processed=500")
+            return re_.return_value
+        re_.side_effect = fake_rebuild
+        r = c.post("/api/admin/rebuild?mode=repair")
+        assert r.status_code == 200
+        done = _wait_done(c)
+        assert done["status"] == "done" and "processed=500" in done["output"]
+
+
+def test_task_log_single_line_append(tmp_path, monkeypatch):
+    """append_task_line 单行追加 + tail 读取。"""
+    from agentmemhub import logs
+    monkeypatch.setattr("agentmemhub.logs.task_log_dir", lambda: tmp_path / "tasks")
+    logs.append_task_line("t1", "第一行")
+    logs.append_task_line("t1", "第二行")
+    text = logs.task_log_tail("t1")
+    assert "第一行" in text and "第二行" in text
+    assert logs.task_log_tail("no_such_job") == ""

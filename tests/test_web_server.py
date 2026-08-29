@@ -17,7 +17,8 @@ def store():
     tmp = Path(tempfile.mkdtemp()) / "test_web.db"
     s = Store(tmp)
     events = renumber([
-        Event(role="user", content="帮我修复登录页面", time=1750000001),
+        Event(role="user", content="帮我修复登录页面", time=1750000001,
+              src_id="p:1", turn_key="p:1"),
         Event(role="reasoning", content="先看代码", time=1750000002),
         Event(role="tool", tool_name="Bash", tool_input={"command": "npm test"},
               tool_output="FAIL src/login", tool_status="completed", time=1750000003),
@@ -92,6 +93,10 @@ def test_events_short_keys(client):
     assert tool["tn"] == "Bash" and "npm" in tool["ti"]
     patch = next(e for e in evs if e["r"] == "patch")
     assert patch["pf"] == "src/login.ts"
+    # 记忆锚字段：turn_key/src_id 透传（前端轮次分组用）；无注入事件不带 sys
+    user = next(e for e in evs if e["r"] == "user")
+    assert user["tk"] == "p:1" and user["si"] == "p:1"
+    assert all("sys" not in e for e in evs)
 
 
 def test_events_pagination(client):
