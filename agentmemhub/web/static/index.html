@@ -788,15 +788,19 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       }else{
         $('#adminJobBar').style.width='0%'; $('#adminJobPct').textContent='';
       }
-      // 实时进展：任务输出逐行流入，loading 期间即可看到（进度行 [N/总数]）
-      if(j.output){ out.textContent=j.output; out.classList.remove('hidden'); out.scrollTop=out.scrollHeight; }
-      else out.classList.add('hidden');
+      // 实时进展：任务输出逐行流入（只渲染最近 300 行，避免巨文本每 1.2s
+      // 全量重排拖死主线程导致打字卡顿；内容无变化不重复写）
+      if(j.output){
+        const tail=j.output.split('\n').slice(-300).join('\n');
+        if(out.textContent!==tail){ out.textContent=tail; }
+        out.classList.remove('hidden'); out.scrollTop=out.scrollHeight;
+      }else out.classList.add('hidden');
       return;
     }
     $('#adminJobBar').style.width='0%'; $('#adminJobPct').textContent='';
     state.classList.add('hidden');
     if(j.error){ out.textContent='任务失败：'+j.error; out.classList.remove('hidden'); }
-    else if(j.output!==undefined && j.output!==''){ out.textContent=j.output.trim(); out.classList.remove('hidden'); }
+    else if(j.output!==undefined && j.output!==''){ out.textContent=j.output.split('\n').slice(-300).join('\n'); out.classList.remove('hidden'); }
     else out.classList.add('hidden');
   }
   // 数据操作轮询：自愈循环——任何请求异常都不中断轮询（避免 UI 冻结在
