@@ -176,12 +176,14 @@ def push_bundle(bundle: dict[str, Any], base_url: str = "http://127.0.0.1:18800"
 def rebuild_embeddings(base_url: str = "http://127.0.0.1:18800",
                        mode: str = "repair",
                        limit: int = 500,
-                       max_rounds: int = 200) -> dict:
+                       max_rounds: int = 200,
+                       on_progress=None) -> dict:
     """POST /api/v1/embeddings/rebuild 补齐缺失向量（导入的 trace 无 embedding，无法语义检索）。
 
     走网关统一出口（自动登录带 cookie，引擎设密码后不再 401）。
     服务端每批只处理 limit 条并返回 done/nextOffset——此处分页循环直到全部补齐。
     mode: repair=只补 null 向量（默认，快）；rebuild=全部重算。
+    on_progress: 可选回调，每轮调用一次（on_progress(str)），供实时进度展示。
     返回汇总：{rounds, processed, updated, failed, done, statsAfter}。
     """
     from agentmemhub import memos_daemon
@@ -196,6 +198,10 @@ def rebuild_embeddings(base_url: str = "http://127.0.0.1:18800",
             total[k] += d.get(k, 0)
         total["done"] = bool(d.get("done"))
         total["statsAfter"] = d.get("statsAfter")
+        if on_progress is not None:
+            on_progress(f"embedding {mode}: 第 {total['rounds']} 轮 "
+                        f"processed={total['processed']} updated={total['updated']} "
+                        f"failed={total['failed']}")
         if total["done"]:
             break
     return total

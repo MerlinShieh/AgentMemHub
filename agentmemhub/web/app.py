@@ -111,13 +111,9 @@ def _run_push_fn(cli, source: str):
         try:
             batches = ([source] if source
                        else [a.source for a in adapters.all_adapters() if a.locate()])
-            r = cli.push_to_memos(store, sources=batches,
-                                  base_url=memos_daemon.base_url())
-            for line in r["lines"]:
-                print(line)
-            print(f"MemOS 导入汇总: imported={r['imported']}, skipped={r['skipped']}")
-            if r["rebuilt"]:
-                print(f"已补向量(repair): {r['rebuilt']}")
+            # stdout=print：_DualWriter 实时捕获每行（推送批/rebuild 进度）→ 面板逐行显示
+            cli.push_to_memos(store, sources=batches,
+                              base_url=memos_daemon.base_url(), stdout=print)
         finally:
             store.close()
     return _emit_task(_run)
