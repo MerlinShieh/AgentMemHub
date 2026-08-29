@@ -550,7 +550,6 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     1: {label:'技能', color:'#A855F7'}, 2: {label:'记忆', color:'#3B82F6'},
     3: {label:'知识', color:'#06B6D4'},
   };
-  let adminTmr = null;            // 数据操作（ingest/push）轮询定时器
   async function initMemosPanel(){
     const panel = $('#memosPanel');
     let s;
@@ -733,26 +732,42 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     else if(j.output!==undefined && j.output!==''){ out.textContent=j.output.trim(); out.classList.remove('hidden'); }
     else out.classList.add('hidden');
   }
+  // 数据操作轮询：自愈循环——任何请求异常都不中断轮询（避免 UI 冻结在
+  // running 快照）；pollSeq 作竞态保护，新提交/重进时旧轮询链作废
+  let pollSeq=0;
   async function adminPoll(){
-    try{
-      const d = await (await fetchWithTimeout('/api/admin/job',{},8000)).json();
-      const j=d.job;
+    const seq=++pollSeq;
+    const wait=()=>new Promise(r=>setTimeout(r,1200));
+    for(;;){
+      if(seq!==pollSeq) return;        // 已被新轮询链取代
+      let j=null, err='';
+      try{
+        const d = await (await fetchWithTimeout('/api/admin/job',{},8000)).json();
+        j=d.job;
+      }catch(e){ err=e.message||'网络异常'; }
+      if(seq!==pollSeq) return;
       adminRender(j);
-      if(j && j.status==='running'){
-        // 超过 10 分钟仍未完成：提示可能卡住（任务仍在跑，可用 /api/admin/job 查询）
-        const el=Date.now()/1000-(j.startedAt||Date.now()/1000);
-        $('#adminJobWarn').classList.toggle('hidden', el<600);
-        $('#adminJobWarn').textContent='任务耗时较长（'+Math.round(el)+'s）。若长时间无变化，请查看服务日志或重启看板；任务本身仍在后台执行。';
-        adminTmr=setTimeout(adminPoll,1200);
+      if(!j || j.status!=='running'){  // 无任务或已到终态（done/error）
+        if(!err) $('#adminJobWarn').classList.add('hidden');
+        if(j && (j.name||'').includes('提取') && j.status==='done'){
+          refreshData().catch(()=>{}); // 入库完成 → 自动刷新列表/统计（失败不阻塞）
+        }
         return;
       }
-      $('#adminJobWarn').classList.add('hidden');
-      adminTmr=null;
-      if(j && (j.name||'').includes('提取') && j.status==='done') refreshData();   // 入库完成 → 自动刷新列表/统计
-    }catch(e){ /* 服务重启/窗口短暂异常：下次操作自愈 */ }
+      // 运行中：显示已运行时长；超 10 分钟提醒可能卡住；请求异常提示重试中
+      const el=Date.now()/1000-(j.startedAt||Date.now()/1000);
+      if(err){
+        $('#adminJobWarn').classList.remove('hidden');
+        $('#adminJobWarn').textContent='状态查询短暂失败（'+err+'），自动重试中…';
+      }else{
+        $('#adminJobWarn').classList.toggle('hidden', el<600);
+        $('#adminJobWarn').textContent='任务耗时较长（'+Math.round(el)+'s）。若长时间无变化，请查看服务日志或重启看板；任务本身仍在后台执行。';
+      }
+      await wait();
+    }
   }
   async function adminSubmit(ep){
-    clearTimeout(adminTmr);
+    pollSeq++;                          // 作废旧轮询链
     const src=$('#adminSource').value;
     const url=ep+(src?'?source='+encodeURIComponent(src):'');
     try{
