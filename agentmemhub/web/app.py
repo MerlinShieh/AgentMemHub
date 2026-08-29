@@ -132,6 +132,32 @@ def _run_score_fn(cli, limit: int, dry_run: bool):
     return _emit_task(_run)
 
 
+def _run_clean_fn(cli, source: str):
+    """看板「清洗数据」后台动作：先打印各源统计再执行删除（重建 FTS/计数）。"""
+    from agentmemhub.store import Store
+
+    def _run() -> None:
+        store = Store()
+        try:
+            cli.run_clean(store, source=source or None, apply=True)
+        finally:
+            store.close()
+    return _emit_task(_run)
+
+
+def _run_rebuild_fn(mode: str):
+    """看板「补向量」后台动作：引擎 embedding rebuild（逐轮进度）。"""
+    from agentmemhub import memos_daemon
+    from agentmemhub.memos import rebuild_embeddings
+
+    def _run() -> None:
+        r = rebuild_embeddings(base_url=memos_daemon.base_url(),
+                               mode=mode,
+                               on_progress=lambda s: print(s))
+        print(f"补向量完成({mode}): {r}")
+    return _emit_task(_run)
+
+
 def _logged_task(name: str, fn) -> Any:
     """任务包装：开始/完成/失败写统一操作日志（web.log）；完整输出逐行落盘
     <data_dir>/tasks/<job_id>.log（页面关掉/进程中断也可追溯）。"""
@@ -577,6 +603,35 @@ def create_app(db_path: Path | None = None):
         name = f"自动评分历史记忆{'（上限 ' + str(limit) + ' 条）' if limit else ''}"
         job = tasks.submit(name, _logged_task(
             name, _run_score_fn(cli, limit, dryRun)))
+        if job is None:
+            raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
+        logs.record(f"提交任务：{name}（id={job['id']}）")
+        return JSONResponse({"job": job})
+
+    @app.post("/api/admin/clean")
+    def api_admin_clean(source: str = Query(default="")):
+        """清洗数据：删除系统注入事件（后台任务，先打印统计再执行）。"""
+        from agentmemhub import cli
+        from agentmemhub import logs
+        from agentmemhub.web import tasks
+        name = f"清洗注入数据{'（' + source + '）' if source else ''}"
+        job = tasks.submit(name, _logged_task(
+            name, _run_clean_fn(cli, source)))
+        if job is None:
+            raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
+        logs.record(f"提交任务：{name}（id={job['id']}）")
+        return JSONResponse({"job": job})
+
+    @app.post("/api/admin/rebuild")
+    def api_admin_rebuild(mode: str = Query(default="repair",
+                                            pattern="^(repair|rebuild)$")):
+        """补向量：触发引擎 embedding rebuild（后台任务，逐轮进度）。需引擎在线。"""
+        from agentmemhub import logs, memos_daemon
+        from agentmemhub.web import tasks
+        if memos_daemon.auth_state() is None:
+            raise HTTPException(status_code=503, detail="记忆引擎未运行，无法补向量")
+        name = f"补向量（{mode}）"
+        job = tasks.submit(name, _logged_task(name, _run_rebuild_fn(mode)))
         if job is None:
             raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
         logs.record(f"提交任务：{name}（id={job['id']}）")

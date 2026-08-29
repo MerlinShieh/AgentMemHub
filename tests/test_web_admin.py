@@ -228,6 +228,46 @@ def test_memos_feedback_forwards_to_engine():
         assert r2.status_code == 502
 
 
+def test_admin_clean_job_runs(tmp_path, monkeypatch):
+    """清洗：后台任务调 run_clean(apply=True)，done 输出含删除结果。"""
+    c = _client()
+    with mock.patch("agentmemhub.cli.run_clean") as rc:
+        def fake_clean(store, *, source=None, apply=False, stdout=None):
+            out = stdout or print
+            out("[zcode] 659 条（46 个会话）")
+            out("已删除 659 条注入事件")
+        rc.side_effect = fake_clean
+        r = c.post("/api/admin/clean")
+        assert r.status_code == 200
+        done = _wait_done(c)
+        assert done["status"] == "done"
+        assert "659" in done["output"] and "已删除" in done["output"]
+        assert rc.call_args.kwargs.get("apply") is True
+
+
+def test_admin_rebuild_offline_503():
+    c = _client()
+    with mock.patch("agentmemhub.memos_daemon.auth_state", return_value=None):
+        r = c.post("/api/admin/rebuild")
+    assert r.status_code == 503
+    assert "记忆引擎未运行" in r.json()["detail"]
+
+
+def test_admin_rebuild_job_runs():
+    c = _client()
+    with mock.patch("agentmemhub.memos_daemon.auth_state", return_value={}), \
+         mock.patch("agentmemhub.memos.rebuild_embeddings") as re_:
+        re_.return_value = {"done": True, "rounds": 2, "processed": 500, "failed": 0}
+        def fake_rebuild(*a, **k):
+            k.get("on_progress")("embedding repair: 第 1 轮 processed=500")
+            return re_.return_value
+        re_.side_effect = fake_rebuild
+        r = c.post("/api/admin/rebuild?mode=repair")
+        assert r.status_code == 200
+        done = _wait_done(c)
+        assert done["status"] == "done" and "processed=500" in done["output"]
+
+
 def test_task_log_single_line_append(tmp_path, monkeypatch):
     """append_task_line 单行追加 + tail 读取。"""
     from agentmemhub import logs

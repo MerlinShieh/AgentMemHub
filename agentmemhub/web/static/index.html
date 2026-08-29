@@ -324,6 +324,14 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
                   class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
             <i data-lucide="star" class="h-3.5 w-3.5 text-primary"></i>自动评分
           </button>
+          <button id="adminCleanBtn" title="删除系统注入事件（预览后执行，重建 FTS 与计数）"
+                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
+            <i data-lucide="eraser" class="h-3.5 w-3.5 text-primary"></i>清洗数据
+          </button>
+          <button id="adminRebuildBtn" title="触发引擎 embedding rebuild（repair=只补缺失向量；需要引擎在线）"
+                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
+            <i data-lucide="wand-2" class="h-3.5 w-3.5 text-primary"></i>补向量
+          </button>
           <span id="adminJobState" class="hidden items-center gap-1.5 text-xs text-muted-foreground">
             <i data-lucide="loader-circle" class="h-3.5 w-3.5 animate-spin"></i><span id="adminJobName">任务运行中…</span>
             <span id="adminJobClock" class="tnum"></span>
@@ -754,10 +762,14 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   }
   function adminRender(j){
     const state=$('#adminJobState'), out=$('#adminJobOut');
-    const ing=$('#adminIngestBtn'), push=$('#adminPushBtn'), score=$('#adminScoreBtn'), warn=$('#adminJobWarn');
-    if(!j){ state.classList.add('hidden'); warn.classList.add('hidden'); out.classList.add('hidden'); ing.disabled=false; push.disabled=!lastEngineOnline; score.disabled=!lastEngineOnline; return; }
+    const ing=$('#adminIngestBtn'), push=$('#adminPushBtn'), score=$('#adminScoreBtn'),
+          clean=$('#adminCleanBtn'), rebuild=$('#adminRebuildBtn'), warn=$('#adminJobWarn');
+    if(!j){ state.classList.add('hidden'); warn.classList.add('hidden'); out.classList.add('hidden');
+      ing.disabled=false; push.disabled=!lastEngineOnline; score.disabled=!lastEngineOnline;
+      clean.disabled=false; rebuild.disabled=!lastEngineOnline; return; }
     const busy=j.status==='running';
-    ing.disabled=busy; push.disabled=busy || !lastEngineOnline; score.disabled=busy || !lastEngineOnline;   // 任务或引擎离线都不可提交
+    ing.disabled=busy; push.disabled=busy || !lastEngineOnline; score.disabled=busy || !lastEngineOnline;
+    clean.disabled=busy; rebuild.disabled=busy || !lastEngineOnline;   // 任务期间全部禁用
     if(busy){
       warn.classList.add('hidden');
       state.classList.remove('hidden'); state.classList.add('inline-flex');
@@ -1043,6 +1055,15 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     $('#adminIngestBtn').onclick=()=>adminSubmit('/api/admin/ingest');
     $('#adminPushBtn').onclick=()=>adminSubmit('/api/admin/push');
     $('#adminScoreBtn').onclick=()=>adminSubmit('/api/admin/score');   // LLM 批量自动评分
+    $('#adminRebuildBtn').onclick=()=>adminSubmit('/api/admin/rebuild'); // 补向量
+    // 清洗数据：破坏性操作，先弹确认
+    $('#adminCleanBtn').onclick=()=>{
+      showModal({
+        title:'清洗注入数据', iconColor:'error',
+        msg:'将删除数据库中的<b>系统注入事件</b>（TodoWrite / system-reminder 等），并重建 FTS 索引与会话计数。<br>删除后不可恢复，注入记忆不会进入 MemOS。确认执行？',
+        confirmText:'确认清洗', confirmClass:'bg-error-solid', onConfirm:()=>adminSubmit('/api/admin/clean'),
+      });
+    };
     fillAdminSource();                       // Agent 筛选下拉（全部 + 各源）
     adminPoll();                             // 页面加载时恢复可能仍在进行中的任务
     memosPollStatus();                       // 立即探一次引擎状态（含推送按钮置灰）
