@@ -134,11 +134,18 @@ def _session_events_to_traces(source: str, conv: Any,
     return traces
 
 
-def build_bundle(store: Store, source: Optional[str] = None) -> dict[str, Any]:
-    """从 store 构建 MemOS bundle。"""
+def build_bundle(store: Store, source: Optional[str] = None,
+                 since_ts: Optional[float] = None) -> dict[str, Any]:
+    """从 store 构建 MemOS bundle。
+
+    since_ts：增量模式，只包含 updated_at >= since_ts 的会话（按源最新
+    更新时间推进锚，避免每次全量构建/推送；无锚时全量幂等兜底）。
+    """
     convs = store.list_conversations(source)
     traces: list[dict] = []
     for c in convs:
+        if since_ts is not None and (c["updated_at"] or 0) < since_ts:
+            continue
         events = store.get_events(c["source"], c["id"])
         if not events:
             continue

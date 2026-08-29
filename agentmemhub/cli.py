@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from agentmemhub.store import Store
@@ -214,11 +215,14 @@ def cmd_memos_daemon(args) -> None:
 
 def push_to_memos(store: Store, *, sources: list[str], base_url: str,
                   no_rebuild: bool = False, rebuild_mode: str = "repair",
-                  stdout: Any = None) -> dict[str, Any]:
+                  stdout: Any = None,
+                  since_ts: Optional[float] = None) -> dict[str, Any]:
     """构建并幂等推送 MemOS bundle（按 source 分批，失败批次继续），可选补向量。
 
     MemOS /api/v1/import 上限 64 MiB——全量 bundle 可能超限（实测 90+MB），
     因此按 source 分批 POST。trace id 由 src_id 派生 → 幂等（重复=skipped）。
+    since_ts：增量——只构建 updated_at >= since_ts 的会话（避免全量重复
+    提取/构建/传输；无锚时由调用方传 None 走全量）。
     每批推送与 rebuild 进度**实时**经 stdout 输出（web 任务据此实时回显，
     避免"导入汇总已完成"后看起来卡住）；lines 同时收集终态文本供日志。
     返回 {imported, skipped, lines, rebuilt}；rebuilt 失败/跳过时为 None。
@@ -235,8 +239,9 @@ def push_to_memos(store: Store, *, sources: list[str], base_url: str,
             pass
 
     total_ok = total_skip = 0
+    failed = 0                                # 失败批次计数（决定增量锚是否可推进）
     for src in sources:
-        b = build_bundle(store, src)
+        b = build_bundle(store, src, since_ts=since_ts)
         if not b["traces"]:
             continue
         try:
@@ -246,6 +251,7 @@ def push_to_memos(store: Store, *, sources: list[str], base_url: str,
             emit(f"[{src}] 推送 ok: imported={resp.get('imported')} "
                  f"skipped={resp.get('skipped')}")
         except Exception as e:
+            failed += 1
             emit(f"[{src}] 推送失败（继续下一批）: {e}")
     rebuilt = None
     if total_ok and not no_rebuild:
@@ -258,9 +264,10 @@ def push_to_memos(store: Store, *, sources: list[str], base_url: str,
             emit(f"已补向量({rebuild_mode}): {rebuilt}")
         except Exception as e:
             emit(f"embedding rebuild 失败（可用 --no-rebuild 跳过）: {e}")
-    emit(f"MemOS 导入汇总: imported={total_ok}, skipped={total_skip}")
+    emit(f"MemOS 导入汇总: imported={total_ok}, skipped={total_skip}"
+         + (f"，{failed} 个批次失败" if failed else ""))
     return {"imported": total_ok, "skipped": total_skip,
-            "lines": lines, "rebuilt": rebuilt}
+            "lines": lines, "rebuilt": rebuilt, "failed": failed}
 
 
 def run_memos(*, source: str = "", out: str = "exports/memos_bundle.json",
@@ -291,14 +298,36 @@ def run_memos(*, source: str = "", out: str = "exports/memos_bundle.json",
     _cli_log(f"memos bundle 生成 → {out}（{len(bundle['traces'])} traces）")
 
 
-def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
-             rebuild_mode: str = "repair") -> None:
-    """增量同步：ingest（幂等重跑）→ 按 source 幂等 push → 补向量。
+def _sync_anchor_path() -> Path:
+    from agentmemhub import config
+    return config.config().data_dir / "last_sync.json"
 
-    replace_source 与 MemOS import 都幂等（trace id 由 src_id 派生），所以
-    sync 可随时重跑——新增的轮 imported、旧轮 skipped。引擎离线时 ingest
-    照常完成、推送跳过（启动引擎后重跑即可补推）。不做会话结束钩子：
-    漏掉的同步靠幂等锚在下次启动补上（无耦合，不碰 harness）。
+
+def _read_sync_anchor() -> Optional[float]:
+    """上次成功推送的时间锚（None=从未同步 → 首次全量）。"""
+    try:
+        import json as _j
+        return float(_j.loads(_sync_anchor_path().read_text(encoding="utf-8"))["ts"])
+    except Exception:
+        return None
+
+
+def _save_sync_anchor(ts: Optional[float] = None) -> None:
+    import json as _j
+    _sync_anchor_path().write_text(
+        _j.dumps({"ts": ts or time.time()}, ensure_ascii=False), encoding="utf-8")
+
+
+def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
+             rebuild_mode: str = "repair", full: bool = False) -> None:
+    """增量同步：ingest（幂等重跑）→ 只推送【自上次同步以来新增的会话】→ 补向量。
+
+    增量锚：<data_dir>/last_sync.json 记录上次成功推送的时间；本次只构建
+    updated_at 在锚之后的会话（默认带 5 分钟缓冲防边界漏），无新增则跳过
+    推送——避免全量提取/构建/传输的重复损耗。首次同步或 --full 时全量。
+    replace_source 与 MemOS import 幂等兜底，随时可重跑。引擎离线时 ingest
+    照常完成、推送跳过（不推进锚，下次补推）。不做会话结束钩子：漏掉的
+    同步靠幂等锚在下次启动补上（无耦合，不碰 harness）。
     """
     from agentmemhub import adapters, memos_daemon
 
@@ -307,26 +336,50 @@ def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
     if not push:
         return
     if memos_daemon.auth_state() is None:
-        _stdout("记忆引擎未运行——ingest 已完成，跳过推送。"
-                "启动引擎后重跑 `agentmemhub sync` 即可幂等补推。")
+        _stdout("记忆引擎未运行——ingest 已完成，跳过推送（不推进增量锚）。"
+                "启动引擎后重跑 `agentmemhub sync` 即可增量补推。")
         _cli_log("sync 跳过推送（引擎离线）", level="warn")
         return
+    anchor = _read_sync_anchor()
+    since = None
+    if full or anchor is None:
+        _stdout("全量同步（首次或 --full）…")
+    else:
+        since = anchor - 300         # 5 分钟缓冲，防边界会话漏推
+        _stdout(f"增量同步（上次 {time.strftime('%m-%d %H:%M', time.localtime(anchor))} 之后的新会话）…")
     store = Store()
     try:
         batches = ([source] if source
                    else [a.source for a in adapters.all_adapters() if a.locate()])
+        if since is not None:
+            # 统计新增会话：没有就跳过（避免空跑）
+            new_convs = 0
+            for src in batches:
+                new_convs += sum(1 for c in store.list_conversations(src)
+                                 if (c["updated_at"] or 0) >= since)
+            if new_convs == 0:
+                _stdout("增量：无新增会话，跳过推送（--full 强制全量）")
+                return
+            _stdout(f"增量：{new_convs} 个新会话，仅推送这些…")
         # 进展实时输出（stdout=_stdout），无需再循环打印 lines
         r = push_to_memos(store, sources=batches, base_url=push,
                           no_rebuild=no_rebuild, rebuild_mode=rebuild_mode,
-                          stdout=_stdout)
-        _cli_log(f"sync → imported={r['imported']}, skipped={r['skipped']}")
+                          stdout=_stdout, since_ts=since)
+        # 锚只在【无失败】时推进；有失败保留旧锚 → 下次增量窗口仍含失败会话，可重试
+        if r.get("failed", 0) == 0:
+            _save_sync_anchor()
+        else:
+            _stdout("存在推送失败——未推进增量锚，下次 sync 会重试失败批次")
+        _cli_log(f"sync → imported={r['imported']}, skipped={r['skipped']}, "
+                 f"failed={r.get('failed', 0)}")
     finally:
         store.close()
 
 
 def cmd_sync(args) -> None:
     run_sync(source=args.source, push=args.push,
-             no_rebuild=args.no_rebuild, rebuild_mode=args.rebuild_mode)
+             no_rebuild=args.no_rebuild, rebuild_mode=args.rebuild_mode,
+             full=args.full)
 
 
 def run_clean(store, *, source: str = "", apply: bool = False,
@@ -492,6 +545,8 @@ def build_parser() -> argparse.ArgumentParser:
     psy.add_argument("--no-rebuild", action="store_true",
                      help="push 后不触发 embedding rebuild（默认自动补向量）")
     psy.add_argument("--rebuild-mode", default="repair", choices=("repair", "rebuild"))
+    psy.add_argument("--full", action="store_true",
+                     help="强制全量同步（默认只推送上次同步后的新增会话）")
 
     pcl = sub.add_parser("clean", help="记忆清洗：删除系统注入事件（is_system；默认预览，--apply 执行）")
     pcl.add_argument("--source", default="")
