@@ -316,21 +316,21 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
                   class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
             <i data-lucide="download" class="h-3.5 w-3.5 text-primary"></i>提取会话入库
           </button>
-          <button id="adminPushBtn" title="需要记忆引擎在线"
-                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
-            <i data-lucide="upload" class="h-3.5 w-3.5 text-primary"></i>推送记忆到 MemOS
-          </button>
-          <button id="adminScoreBtn" title="LLM 三轴批量评估历史记忆并写入价值分（需要引擎在线且已配置 LLM）"
-                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
-            <i data-lucide="star" class="h-3.5 w-3.5 text-primary"></i>自动评分
-          </button>
           <button id="adminCleanBtn" title="删除系统注入事件（预览后执行，重建 FTS 与计数）"
                   class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
             <i data-lucide="eraser" class="h-3.5 w-3.5 text-primary"></i>清洗数据
           </button>
+          <button id="adminPushBtn" title="需要记忆引擎在线"
+                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
+            <i data-lucide="upload" class="h-3.5 w-3.5 text-primary"></i>推送记忆到 MemOS
+          </button>
           <button id="adminRebuildBtn" title="触发引擎 embedding rebuild（repair=只补缺失向量；需要引擎在线）"
                   class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
             <i data-lucide="wand-2" class="h-3.5 w-3.5 text-primary"></i>补向量
+          </button>
+          <button id="adminScoreBtn" title="LLM 三轴批量评估历史记忆并写入价值分（需要引擎在线且已配置 LLM）"
+                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
+            <i data-lucide="star" class="h-3.5 w-3.5 text-primary"></i>自动评分
           </button>
           <span id="adminJobState" class="hidden items-center gap-1.5 text-xs text-muted-foreground">
             <i data-lucide="loader-circle" class="h-3.5 w-3.5 animate-spin"></i><span id="adminJobName">任务运行中…</span>
