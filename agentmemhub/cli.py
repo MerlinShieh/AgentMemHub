@@ -360,6 +360,23 @@ def cmd_clean(args) -> None:
         store.close()
 
 
+def cmd_rebuild(args) -> None:
+    """补向量：触发引擎 embedding rebuild（默认 repair 只补缺失向量）。"""
+    from agentmemhub import memos_daemon
+    from agentmemhub.memos import rebuild_embeddings
+    if memos_daemon.auth_state() is None:
+        _stdout("记忆引擎未运行（启动后重试）")
+        return
+
+    def _emit(s: str) -> None:
+        _stdout(f"  {s}")
+    _stdout(f"补向量（{args.mode}，本地计算可能耗时数分钟）…")
+    r = rebuild_embeddings(base_url=memos_daemon.base_url(),
+                           mode=args.mode, on_progress=_emit)
+    _stdout(f"完成: {r}")
+    _cli_log(f"rebuild({args.mode}) → {r}")
+
+
 def cmd_score(args) -> None:
     """LLM 批量自动评分历史记忆（三轴评估 → feedback 写入）。"""
     from agentmemhub.scoring import run_score_all
@@ -486,6 +503,9 @@ def build_parser() -> argparse.ArgumentParser:
     psc.add_argument("--dry-run", action="store_true", help="只评估不写入（预览 verdict 分布）")
     psc.add_argument("--workers", type=int, default=4, help="并发评估线程数（默认 4；IO 密集建议 4~8）")
     psc.add_argument("--push", default="", help="引擎 base URL（默认 18800，一般不用设）")
+
+    prb = sub.add_parser("rebuild", help="补向量：触发引擎 embedding rebuild（repair=只补缺失，rebuild=全部重算）")
+    prb.add_argument("--mode", default="repair", choices=("repair", "rebuild"))
     return p
 
 
@@ -501,7 +521,7 @@ def main() -> None:
         "search": cmd_search, "export": cmd_export, "stats": cmd_stats,
         "adapters": cmd_adapters, "memos": cmd_memos, "folders": cmd_folders,
         "serve": cmd_serve, "memos-daemon": cmd_memos_daemon, "mcp": cmd_mcp,
-        "sync": cmd_sync, "clean": cmd_clean, "score": cmd_score,
+        "sync": cmd_sync, "clean": cmd_clean, "score": cmd_score, "rebuild": cmd_rebuild,
     }
     fn = handlers.get(args.command)
     if fn is None:

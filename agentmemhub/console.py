@@ -114,6 +114,8 @@ MENU = """
   [6] 启动记忆引擎（MemOS daemon，首次会提示插件目录）
   [7] 停止记忆引擎（仅限本工具启动的实例）
   [8] 停止网页看板（结束占用看板端口的服务进程）
+  [9] 清洗数据（删除系统注入事件，先预览后确认）
+  [10] 补向量（embedding rebuild，导入记忆后修复语义检索）
   [0] 退出
 """
 
@@ -226,6 +228,51 @@ def action_dashboard_stop() -> None:
     _out(f"  ⚠ 端口 {port} 仍在占用（进程可能未完全退出）")
 
 
+def action_clean() -> None:
+    """清洗数据：预览系统注入事件 → 确认后删除（重建 FTS 与计数）。"""
+    from agentmemhub.store import Store
+    store = Store()
+    try:
+        rows = store.system_event_counts()
+        if not rows:
+            _out("  （无系统注入事件——库已经干净）")
+            return
+        total = sum(r["n"] for r in rows)
+        _out(f"  系统注入事件共 {total} 条：")
+        for r in rows:
+            _out(f"    [{r['source']}] {r['n']} 条（{r['convs']} 个会话）")
+        if not _confirm(f"  删除后将重建 FTS 索引与会话计数，确认执行？"):
+            _out("  （已取消）")
+            return
+        deleted, convs = store.delete_system_events()
+        _out(f"  ✓ 已删除 {deleted} 条注入事件（{convs} 个会话受影响）")
+        from agentmemhub.cli import _cli_log
+        _cli_log(f"clean（控制台）→ 删除 {deleted} 条")
+    finally:
+        store.close()
+
+
+def action_rebuild() -> None:
+    """补向量：触发引擎 embedding rebuild（默认 repair，实时进度）。"""
+    from agentmemhub import memos_daemon
+    from agentmemhub.memos import rebuild_embeddings
+    if memos_daemon.auth_state() is None:
+        _out("  ⚠ 记忆引擎未在线（可用 [6] 启动）")
+        if not _confirm("  仍要尝试补向量？"):
+            _out("  （已取消）")
+            return
+    mode = _ask("  模式（repair=只补缺失向量[默认] / rebuild=全部重算）> ", "repair")
+    mode = mode.strip().lower()
+    if mode not in ("repair", "rebuild"):
+        mode = "repair"
+    _out(f"  补向量中（{mode}，本地计算可能耗时数分钟）…")
+    r = rebuild_embeddings(base_url=memos_daemon.base_url(), mode=mode,
+                           on_progress=lambda s: _out(f"    {s}"))
+    _out(f"  ✓ 完成: {r}")
+    from agentmemhub.cli import _cli_log
+    _cli_log(f"rebuild（控制台，{mode}）→ {r}")
+
+
 def action_memos() -> None:
     from agentmemhub.cli import run_memos
     base = _ask(f"  MemOS 地址（回车 = {memos_base_url()}）> ", memos_base_url())
@@ -297,6 +344,8 @@ ACTIONS = {
     "6": ("启动记忆引擎", action_engine_start),
     "7": ("停止记忆引擎", action_engine_stop),
     "8": ("停止网页看板", action_dashboard_stop),
+    "9": ("清洗数据", action_clean),
+    "10": ("补向量", action_rebuild),
 }
 
 
