@@ -44,7 +44,8 @@ def _pid_file() -> Path:
 
 
 def _log_file() -> Path:
-    return _data_dir() / "memos_daemon.log"
+    # 统一日志目录：数据目录/logs/engine.log（引擎 daemon 输出）
+    return _data_dir() / "logs" / "engine.log"
 
 
 def base_url() -> str:

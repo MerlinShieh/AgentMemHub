@@ -1,7 +1,11 @@
-"""看板统一操作日志：内存环形缓冲 + JSONL 持久化（数据目录 web.log）。
+"""AgentMemHub 统一日志（<data_dir>/logs/，按程序/接口分文件）。
 
-记录面板控制/点击触发的后端动作（引擎启停、提取/推送任务提交与结果）、
-任务实时输出等；前端「操作日志」面板轮询读取。文件留痕便于跨会话追溯。
+结构：
+    logs/
+    ├── web.log        看板操作/接口（引擎启停、任务提交/结果摘要；内存环形缓冲供面板）
+    ├── cli.log        CLI / 控制台操作记录（终端命令与结果摘要）
+    ├── engine.log     MemOS 引擎 daemon 输出（memos_daemon 日志）
+    └── tasks/<id>.log 看板后台任务完整输出（逐行、带时间戳）
 """
 from __future__ import annotations
 
@@ -18,19 +22,35 @@ _LOCK = threading.Lock()
 _RING: list[dict] = []
 
 
-def _path() -> Path:
-    return config.config().data_dir / "web.log"
+def log_dir() -> Path:
+    """统一日志根目录（数据目录/logs）。"""
+    return config.config().data_dir / "logs"
 
 
-def record(msg: str, level: str = "info", actor: str = "web") -> dict:
-    """写一条日志（内存 + JSONL 文件）。返回条目。"""
+def _web_file() -> Path:
+    return log_dir() / "web.log"
+
+
+def record(msg: str, level: str = "info", actor: str = "web",
+           dest: str = "web") -> dict:
+    """写一条日志。
+
+    dest=web：进内存环形缓冲（面板可读）+ logs/web.log（接口操作）；
+    dest=cli：只写 logs/cli.log（终端/控制台操作，不进面板）。
+    返回条目。
+    """
     entry = {"ts": time.time(), "level": level, "actor": actor, "msg": msg}
-    with _LOCK:
-        _RING.append(entry)
-        if len(_RING) > _MAX_RING:
-            del _RING[:-_MAX_RING]
+    if dest == "web":
+        with _LOCK:
+            _RING.append(entry)
+            if len(_RING) > _MAX_RING:
+                del _RING[:-_MAX_RING]
+        target = _web_file()
+    else:
+        target = log_dir() / "cli.log"
     try:
-        with open(_path(), "a", encoding="utf-8") as f:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
         pass
@@ -44,11 +64,11 @@ def recent(limit: int = 100) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# 任务完整输出落盘：<data_dir>/tasks/<job_id>.log（页面关掉/进程中断也可追溯）
+# 任务完整输出落盘：logs/tasks/<job_id>.log（页面关掉/进程中断也可追溯）
 # ---------------------------------------------------------------------------
 
 def task_log_dir() -> Path:
-    return config.config().data_dir / "tasks"
+    return log_dir() / "tasks"
 
 
 def task_log_path(job_id: str) -> Path:

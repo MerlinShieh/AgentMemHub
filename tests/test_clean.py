@@ -5,9 +5,17 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 from agentmemhub import cli
 from agentmemhub.models import Event, renumber
 from agentmemhub.store import Store
+
+
+@pytest.fixture(autouse=True)
+def _isolate_logs(tmp_path, monkeypatch):
+    """防 CLI 日志落盘污染真实数据目录（log_dir 指到临时目录）。"""
+    monkeypatch.setattr("agentmemhub.logs.log_dir", lambda: tmp_path)
 
 
 def _store() -> Store:

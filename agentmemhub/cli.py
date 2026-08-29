@@ -32,6 +32,15 @@ def _stdout(s: str) -> None:
     print(s)
 
 
+def _cli_log(msg: str, level: str = "info") -> None:
+    """CLI/控制台操作落盘（logs/cli.log），不干扰终端输出。"""
+    try:
+        from agentmemhub import logs
+        logs.record(msg, level=level, actor="cli", dest="cli")
+    except Exception:
+        pass
+
+
 def run_ingest(sources: list[str], signature: str = "") -> tuple[int, int]:
     """提取指定 source 列表并入库（CLI 与控制台共用）。返回 (会话数, 事件数)。"""
     store = Store()
@@ -52,6 +61,7 @@ def run_ingest(sources: list[str], signature: str = "") -> tuple[int, int]:
         total_ev += n
         _stdout(f"[{src}] {len(sessions)} 会话, {n} 事件")
     store.close()
+    _cli_log(f"ingest sources={sources} → {total_conv} 会话, {total_ev} 事件")
     return total_conv, total_ev
 
 
@@ -257,11 +267,14 @@ def run_memos(*, source: str = "", out: str = "exports/memos_bundle.json",
             for line in r["lines"]:
                 _stdout(line)
             _stdout(f"MemOS 导入汇总: imported={r['imported']}, skipped={r['skipped']}")
+            _cli_log(f"memos push → imported={r['imported']}, skipped={r['skipped']}")
             if r["rebuilt"]:
                 _stdout(f"已触发 embedding {rebuild_mode}: {r['rebuilt']}")
         except Exception as e:
             _stdout(f"推送失败（MemOS 可能在运行?）: {e}")
+            _cli_log(f"memos push 失败 → {e}", level="error")
     store.close()
+    _cli_log(f"memos bundle 生成 → {out}（{len(bundle['traces'])} traces）")
 
 
 def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
@@ -282,6 +295,7 @@ def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
     if memos_daemon.auth_state() is None:
         _stdout("记忆引擎未运行——ingest 已完成，跳过推送。"
                 "启动引擎后重跑 `agentmemhub sync` 即可幂等补推。")
+        _cli_log("sync 跳过推送（引擎离线）", level="warn")
         return
     store = Store()
     try:
@@ -292,6 +306,7 @@ def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
         for line in r["lines"]:
             _stdout(line)
         _stdout(f"同步汇总: imported={r['imported']}, skipped={r['skipped']}")
+        _cli_log(f"sync → imported={r['imported']}, skipped={r['skipped']}")
         if r["rebuilt"]:
             _stdout(f"已补向量({rebuild_mode}): {r['rebuilt']}")
     finally:
@@ -323,6 +338,7 @@ def run_clean(store, *, source: str = "", apply: bool = False,
         return
     deleted, convs = store.delete_system_events(source or None)
     out(f"已删除 {deleted} 条注入事件（{convs} 个会话受影响，FTS/计数已重建）")
+    _cli_log(f"clean(source={source or 'all'}) → 删除 {deleted} 条注入事件")
 
 
 def cmd_clean(args) -> None:

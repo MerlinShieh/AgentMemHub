@@ -126,7 +126,7 @@ def _run_push_fn(cli, source: str):
 def _logged_task(name: str, fn) -> Any:
     """任务包装：开始/完成/失败写统一操作日志（web.log）；完整输出逐行落盘
     <data_dir>/tasks/<job_id>.log（页面关掉/进程中断也可追溯）。"""
-    from agentmemhub.web import logs
+    from agentmemhub import logs
 
     def _do(emit, meta) -> str:
         logs.record(f"开始：{name}（id={meta['id']}）")
@@ -419,7 +419,7 @@ def create_app(db_path: Path | None = None):
     @app.post("/api/memos/start")
     def api_memos_start():
         from agentmemhub import memos_daemon
-        from agentmemhub.web import logs
+        from agentmemhub import logs
         r = memos_daemon.daemon_start()
         if not (r.get("started") or r.get("online")):
             logs.record(f"引擎启动失败：{r.get('reason', r)}", level="error")
@@ -430,7 +430,7 @@ def create_app(db_path: Path | None = None):
     @app.post("/api/memos/stop")
     def api_memos_stop():
         from agentmemhub import memos_daemon
-        from agentmemhub.web import logs
+        from agentmemhub import logs
         r = memos_daemon.daemon_stop()
         if not r.get("stopped") and r.get("reason") not in ("not-online",):
             logs.record(f"引擎停止失败：{r.get('reason', r)}", level="error")
@@ -497,7 +497,8 @@ def create_app(db_path: Path | None = None):
     def api_admin_ingest(source: str = Query(default=""),
                          signature: str = Query(default="")):
         from agentmemhub import adapters, cli
-        from agentmemhub.web import logs, tasks
+        from agentmemhub import logs
+        from agentmemhub.web import tasks
         name = f"提取会话入库{'（' + source + '）' if source else ''}"
         job = tasks.submit(name, _logged_task(
             name, _run_ingest_fn(cli, adapters, source, signature)))
@@ -509,7 +510,8 @@ def create_app(db_path: Path | None = None):
     @app.post("/api/admin/push")
     def api_admin_push(source: str = Query(default="")):
         from agentmemhub import cli, memos_daemon
-        from agentmemhub.web import logs, tasks
+        from agentmemhub import logs
+        from agentmemhub.web import tasks
         if memos_daemon.auth_state() is None:
             raise HTTPException(status_code=503, detail="记忆引擎未运行，无法推送")
         name = f"推送记忆到 MemOS{'（' + source + '）' if source else ''}"
@@ -527,7 +529,7 @@ def create_app(db_path: Path | None = None):
     @app.get("/api/logs")
     def api_logs(limit: int = Query(default=100, ge=1, le=500)):
         """统一操作日志（面板控制/任务执行的最近记录，内存 + JSONL 留痕）。"""
-        from agentmemhub.web import logs
+        from agentmemhub import logs
         return JSONResponse({"logs": logs.recent(limit)})
 
     # ---- 静态页面（index.html 由 StaticFiles html=True 自动兜底 /）----

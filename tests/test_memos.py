@@ -146,3 +146,17 @@ def test_push_bundle_goes_through_authenticated_gateway():
     assert args == ("POST", "/api/v1/import")
     assert kwargs["body"] == {"version": 1, "traces": []}
     assert kwargs["base"] == "http://127.0.0.1:18999"
+
+
+def test_rebuild_embeddings_goes_through_authenticated_gateway():
+    """embedding rebuild 同样走自动登录网关——修复设密码后的 401。"""
+    from agentmemhub.memos import rebuild_embeddings
+    with mock.patch("agentmemhub.memos_daemon.engine_request") as er:
+        er.return_value = {"processed": 10, "updated": 8, "failed": 0,
+                           "done": True, "statsAfter": None}
+        r = rebuild_embeddings("http://127.0.0.1:18999", mode="rebuild")
+    assert r["done"] is True and r["processed"] == 10
+    args, kwargs = er.call_args
+    assert args == ("POST", "/api/v1/embeddings/rebuild")
+    assert kwargs["body"] == {"mode": "rebuild", "limit": 500}
+    assert kwargs["base"] == "http://127.0.0.1:18999"
