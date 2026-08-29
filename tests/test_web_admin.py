@@ -21,6 +21,12 @@ def _reset_tasks():
     tasks.reset()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_logs(tmp_path, monkeypatch):
+    """防测试污染真实数据目录日志（log_dir 指到临时目录）。"""
+    monkeypatch.setattr("agentmemhub.logs.log_dir", lambda: tmp_path)
+
+
 def _client() -> TestClient:
     tmp = Path(tempfile.mkdtemp()) / "admin.db"
     s = Store(tmp)
@@ -143,8 +149,8 @@ def test_task_live_output_during_running():
 
 def test_logs_record_recent_and_endpoint(tmp_path, monkeypatch):
     """统一日志：record/recent + /api/logs 端点（文件写 tmp，防污染真实数据目录）。"""
-    from agentmemhub.web import logs
-    monkeypatch.setattr("agentmemhub.web.logs._path", lambda: tmp_path / "web.log")
+    from agentmemhub import logs
+    monkeypatch.setattr("agentmemhub.logs.log_dir", lambda: tmp_path)
     logs.reset()
     logs.record("提取任务完成")
     logs.record("引擎启动失败", level="error")
@@ -158,8 +164,8 @@ def test_logs_record_recent_and_endpoint(tmp_path, monkeypatch):
 
 def test_admin_ingest_records_log(tmp_path, monkeypatch):
     """提交任务写入统一日志（可追溯面板操作）。"""
-    from agentmemhub.web import logs
-    monkeypatch.setattr("agentmemhub.web.logs._path", lambda: tmp_path / "web.log")
+    from agentmemhub import logs
+    monkeypatch.setattr("agentmemhub.logs.log_dir", lambda: tmp_path)
     logs.reset()
     c = _client()
     with mock.patch("agentmemhub.cli.run_ingest") as ri, \
@@ -172,9 +178,9 @@ def test_admin_ingest_records_log(tmp_path, monkeypatch):
 
 
 def test_task_full_log_persisted_to_file(tmp_path, monkeypatch):
-    """推送任务完整输出逐行落盘到 <data_dir>/tasks/<job_id>.log，页面关掉也可追溯。"""
-    from agentmemhub.web import logs
-    monkeypatch.setattr("agentmemhub.web.logs.task_log_dir", lambda: tmp_path / "tasks")
+    """推送任务完整输出逐行落盘到 logs/tasks/<job_id>.log，页面关掉也可追溯。"""
+    from agentmemhub import logs
+    monkeypatch.setattr("agentmemhub.logs.task_log_dir", lambda: tmp_path / "tasks")
     c = _client()
     fake = {"imported": 3, "skipped": 5,
             "lines": ["[zcode] 推送 ok: imported=3 skipped=5"], "rebuilt": None}
@@ -192,8 +198,8 @@ def test_task_full_log_persisted_to_file(tmp_path, monkeypatch):
 
 def test_task_log_single_line_append(tmp_path, monkeypatch):
     """append_task_line 单行追加 + tail 读取。"""
-    from agentmemhub.web import logs
-    monkeypatch.setattr("agentmemhub.web.logs.task_log_dir", lambda: tmp_path / "tasks")
+    from agentmemhub import logs
+    monkeypatch.setattr("agentmemhub.logs.task_log_dir", lambda: tmp_path / "tasks")
     logs.append_task_line("t1", "第一行")
     logs.append_task_line("t1", "第二行")
     text = logs.task_log_tail("t1")
