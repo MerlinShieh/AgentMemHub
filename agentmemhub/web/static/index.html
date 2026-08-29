@@ -320,6 +320,10 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
                   class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
             <i data-lucide="upload" class="h-3.5 w-3.5 text-primary"></i>推送记忆到 MemOS
           </button>
+          <button id="adminScoreBtn" title="LLM 三轴批量评估历史记忆并写入价值分（需要引擎在线且已配置 LLM）"
+                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
+            <i data-lucide="star" class="h-3.5 w-3.5 text-primary"></i>自动评分
+          </button>
           <span id="adminJobState" class="hidden items-center gap-1.5 text-xs text-muted-foreground">
             <i data-lucide="loader-circle" class="h-3.5 w-3.5 animate-spin"></i><span id="adminJobName">任务运行中…</span>
             <span id="adminJobClock" class="tnum"></span>
@@ -651,6 +655,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     }
   }
   async function scoreMemos(traceId, polarity){
+    if(!lastEngineOnline){ toast('记忆引擎未运行，无法打分'); return; }
     try{
       const r=await fetchWithTimeout(`/api/memos/feedback?traceId=${encodeURIComponent(traceId)}&polarity=${polarity}`,{method:'POST'},10000);
       const d=await r.json().catch(()=>({}));
@@ -749,10 +754,10 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   }
   function adminRender(j){
     const state=$('#adminJobState'), out=$('#adminJobOut');
-    const ing=$('#adminIngestBtn'), push=$('#adminPushBtn'), warn=$('#adminJobWarn');
-    if(!j){ state.classList.add('hidden'); warn.classList.add('hidden'); out.classList.add('hidden'); ing.disabled=false; push.disabled=!lastEngineOnline; return; }
+    const ing=$('#adminIngestBtn'), push=$('#adminPushBtn'), score=$('#adminScoreBtn'), warn=$('#adminJobWarn');
+    if(!j){ state.classList.add('hidden'); warn.classList.add('hidden'); out.classList.add('hidden'); ing.disabled=false; push.disabled=!lastEngineOnline; score.disabled=!lastEngineOnline; return; }
     const busy=j.status==='running';
-    ing.disabled=busy; push.disabled=busy || !lastEngineOnline;   // 任务或引擎离线都不可提交
+    ing.disabled=busy; push.disabled=busy || !lastEngineOnline; score.disabled=busy || !lastEngineOnline;   // 任务或引擎离线都不可提交
     if(busy){
       warn.classList.add('hidden');
       state.classList.remove('hidden'); state.classList.add('inline-flex');
@@ -823,7 +828,8 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       if(!r.ok) return;
       const s=await r.json();
       lastEngineOnline=!!(s.online && !s.auth_required);
-      $('#adminPushBtn').disabled = !lastEngineOnline;     // 引擎离线时推送按钮置灰
+      $('#adminPushBtn').disabled = !lastEngineOnline;     // 引擎离线时推送/评分按钮置灰
+      $('#adminScoreBtn').disabled = !lastEngineOnline;
       const sig=JSON.stringify([s.online, s.auth_required, (s.summary||{}).traces]);
       if(sig===lastMemosSig) return;                       // 无变化不重绘（避免闪烁）
       lastMemosSig=sig;
@@ -1036,6 +1042,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     // 数据操作：提取入库 / 推送记忆（提交后台任务并轮询状态）
     $('#adminIngestBtn').onclick=()=>adminSubmit('/api/admin/ingest');
     $('#adminPushBtn').onclick=()=>adminSubmit('/api/admin/push');
+    $('#adminScoreBtn').onclick=()=>adminSubmit('/api/admin/score');   // LLM 批量自动评分
     fillAdminSource();                       // Agent 筛选下拉（全部 + 各源）
     adminPoll();                             // 页面加载时恢复可能仍在进行中的任务
     memosPollStatus();                       // 立即探一次引擎状态（含推送按钮置灰）

@@ -119,6 +119,19 @@ def _run_push_fn(cli, source: str):
     return _emit_task(_run)
 
 
+def _run_score_fn(cli, limit: int, dry_run: bool):
+    """看板「自动评分」后台动作：LLM 三轴批量评估历史记忆 → feedback 写入。"""
+    from agentmemhub.scoring import run_score_all
+
+    def _run() -> None:
+        r = run_score_all(base_url="", limit=limit, dry_run=dry_run)
+        print(f"评分完成: evaluated={r['evaluated']} "
+              f"positive={r['positive']} neutral={r['neutral']} "
+              f"negative={r['negative']} errors={r['errors']}"
+              + ("（dry-run，未写入）" if r["dryRun"] else ""))
+    return _emit_task(_run)
+
+
 def _logged_task(name: str, fn) -> Any:
     """任务包装：开始/完成/失败写统一操作日志（web.log）；完整输出逐行落盘
     <data_dir>/tasks/<job_id>.log（页面关掉/进程中断也可追溯）。"""
@@ -546,6 +559,22 @@ def create_app(db_path: Path | None = None):
     def api_admin_job():
         from agentmemhub.web import tasks
         return JSONResponse({"job": tasks.status()})
+
+    @app.post("/api/admin/score")
+    def api_admin_score(limit: int = Query(default=0, ge=0),
+                        dryRun: bool = Query(default=False)):
+        """LLM 批量自动评分历史记忆（后台任务，实时进度）。需引擎在线且已配置 LLM。"""
+        from agentmemhub import cli, logs, memos_daemon
+        from agentmemhub.web import tasks
+        if memos_daemon.auth_state() is None:
+            raise HTTPException(status_code=503, detail="记忆引擎未运行，无法评分")
+        name = f"自动评分历史记忆{'（上限 ' + str(limit) + ' 条）' if limit else ''}"
+        job = tasks.submit(name, _logged_task(
+            name, _run_score_fn(cli, limit, dryRun)))
+        if job is None:
+            raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
+        logs.record(f"提交任务：{name}（id={job['id']}）")
+        return JSONResponse({"job": job})
 
     @app.get("/api/logs")
     def api_logs(limit: int = Query(default=100, ge=1, le=500)):
