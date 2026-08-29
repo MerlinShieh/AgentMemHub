@@ -342,6 +342,7 @@ uv run python -m agentmemhub memos-daemon --set-password <密码>  # 引擎 view
 
 - **密码自动登录**：引擎 viewer 设置了密码（`.auth.json`）后，网关遇 401 会用保存的密码自动登录，看板/检索不受影响
 - **MemOS 页面**：平移后需构建一次 viewer（`cd memOS\apps\memos-local-plugin && npm run build:viewer`）；升级引擎或重装 node_modules 后重跑
+- **本地嵌入模型（`npm install` 会清掉）**：引擎的本地嵌入模型文件在 `memOS/apps/memos-local-plugin/node_modules/@huggingface/transformers/models/Xenova/bge-small-zh-v1.5/`，**不属于 npm 依赖**——重装依赖会被删除，嵌入会失效；重装后执行 `uv run python scripts/download_embedding_model.py` 恢复（断点续传 + 大小校验，默认回填本项目的 bge-small-zh-v1.5；换模型用 `--model Xenova/…`，镜像源用 `--base https://hf-mirror.com`）
 - **完整进化链**：`--lightweight off` 后新对话自动跑 reward 打分 / 经验归纳 / 技能结晶（需要引擎配置了 LLM）；历史导入记忆保持价值 0，仍可被检索
 
 ## 统一配置
