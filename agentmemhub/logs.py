@@ -19,6 +19,7 @@ from agentmemhub import config
 
 _MAX_RING = 500
 _LOCK = threading.Lock()
+_FILE_LOCK = threading.Lock()      # 文件读写串行（多线程 append 竞态防护）
 _RING: list[dict] = []
 
 
@@ -50,9 +51,10 @@ def record(msg: str, level: str = "info", actor: str = "web",
     else:
         target = log_dir() / "cli.log"
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with open(target, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        with _FILE_LOCK:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with open(target, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
         pass
     return entry
@@ -68,7 +70,8 @@ def recent(limit: int = 100) -> list[dict]:
     entries: list[dict] = []
     if p.exists():
         try:
-            lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+            with _FILE_LOCK:
+                lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
             for ln in lines[-limit:]:
                 try:
                     entries.append(json.loads(ln))
