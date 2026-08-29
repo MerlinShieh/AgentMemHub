@@ -632,17 +632,32 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       if(!(d.traces||[]).length){ box.innerHTML = '<div class="py-3 text-center text-[11px] text-muted-foreground">暂无记忆</div>'; return; }
       box.innerHTML = d.traces.map(t=>{
         const v = (typeof t.value==='number') ? t.value : null;
-        const vChip = v===null ? '' : `<span class="ml-auto rounded px-1 text-[10px] font-semibold ${v>0?'bg-emerald-500/10 text-emerald-500':(v<0?'bg-error-soft text-error':'bg-muted text-muted-foreground')}">${v>0?'+':''}${v.toFixed(1)}</span>`;
+        const vChip = v===null ? '' : `<span class="rounded px-1 text-[10px] font-semibold ${v>0?'bg-emerald-500/10 text-emerald-500':(v<0?'bg-error-soft text-error':'bg-muted text-muted-foreground')}">${v>0?'+':''}${v.toFixed(1)}</span>`;
         const ts = t.ts ? new Date(t.ts).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '';
         const u = esc((t.userText||'（无用户输入）').slice(0,90));
+        // 打分（正/负反馈）：引擎立即重算该条价值分
+        const scoreBtns = `<span class="ml-auto flex items-center gap-0.5">${vChip}
+          <button class="rounded p-0.5 text-muted-foreground hover:text-emerald-500 transition-colors" title="标记有用（正向评分）" data-score="positive" data-trace="${esc(t.id)}"><i data-lucide="thumbs-up" class="h-3 w-3"></i></button>
+          <button class="rounded p-0.5 text-muted-foreground hover:text-error transition-colors" title="标记无用（负向评分）" data-score="negative" data-trace="${esc(t.id)}"><i data-lucide="thumbs-down" class="h-3 w-3"></i></button>
+        </span>`;
         return `<div class="rounded-md border border-border bg-background px-2.5 py-1.5 text-xs">
-          <div class="flex items-center gap-2"><span class="tnum text-[10px] text-muted-foreground">${ts}</span>${vChip}</div>
+          <div class="flex items-center gap-2"><span class="tnum text-[10px] text-muted-foreground">${ts}</span>${scoreBtns}</div>
           <div class="mt-0.5 truncate text-foreground" title="${esc(t.userText||'')}">${u}</div>
         </div>`;
       }).join('');
+      reicons();
     }catch(e){
       box.innerHTML = '<div class="py-3 text-center text-[11px] text-muted-foreground">记忆列表加载失败</div>';
     }
+  }
+  async function scoreMemos(traceId, polarity){
+    try{
+      const r=await fetchWithTimeout(`/api/memos/feedback?traceId=${encodeURIComponent(traceId)}&polarity=${polarity}`,{method:'POST'},10000);
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok){ toast(typeof d.detail==='string'?d.detail:'打分失败'); return; }
+      toast(polarity==='positive'?'已标记为有用':'已标记为无用');
+      loadMemosRecent();                          // 刷新列表（价值分已重算）
+    }catch(e){ toast('打分失败：'+(e.message||e)); }
   }
   async function memosSearch(q){
     const box = $('#memosHits');
@@ -1027,6 +1042,12 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     setInterval(memosPollStatus, 15000);     // 之后每 15s 自动刷新（外部启停也能反映）
     $('#logsToggleBtn').onclick=toggleLogs;  // 操作日志面板
     $('#logsRefreshBtn').onclick=loadLogs;
+    // 记忆评分（正/负反馈）：事件委托（内联 onclick 无法访问 IIFE 内函数）
+    $('#memosRecent').addEventListener('click', e=>{
+      const btn=e.target.closest('button[data-score]');
+      if(!btn) return;
+      scoreMemos(btn.dataset.trace, btn.dataset.score);
+    });
   }
   // P1 修复：原改写时遗漏此定义，导致勾选/删除触发 "updateBatchBtn is not defined"
   function updateBatchBtn(){ const n=selectedKeys.size; const b=$('#batchDelBtn'); b.classList.toggle('hidden',n===0); b.classList.toggle('inline-flex',n>0); }

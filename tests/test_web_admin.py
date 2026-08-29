@@ -204,6 +204,28 @@ def test_task_full_log_persisted_to_file(tmp_path, monkeypatch):
     assert logs.task_log_tail(done["id"]) == text.strip()
 
 
+def test_memos_feedback_forwards_to_engine():
+    """记忆打分：转发引擎 /api/v1/feedback 带 traceId（即时重算 value）；离线 503。"""
+    c = _client()
+    with mock.patch("agentmemhub.memos_daemon.engine_request") as er:
+        er.return_value = {"id": "fb-1", "polarity": "positive", "ts": 1}
+        r = c.post("/api/memos/feedback?traceId=trac_abc&polarity=positive")
+        assert r.status_code == 200
+        assert r.json()["traceId"] == "trac_abc"
+        args, kwargs = er.call_args
+        assert args == ("POST", "/api/v1/feedback")
+        assert kwargs["body"]["polarity"] == "positive"
+        assert kwargs["body"]["traceId"] == "trac_abc"
+    # 非法极性被拒绝
+    r = c.post("/api/memos/feedback?traceId=x&polarity=maybe")
+    assert r.status_code == 422
+    # 引擎离线（auth/连接挂）→ 502
+    with mock.patch("agentmemhub.memos_daemon.engine_request",
+                    side_effect=RuntimeError("conn reset")):
+        r2 = c.post("/api/memos/feedback?traceId=x&polarity=negative")
+        assert r2.status_code == 502
+
+
 def test_task_log_single_line_append(tmp_path, monkeypatch):
     """append_task_line 单行追加 + tail 读取。"""
     from agentmemhub import logs
