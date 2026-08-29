@@ -1092,15 +1092,32 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     const list=(!hasAll&&activeRoles.size)?curEvts.filter(e=>activeRoles.has(displayRole(e))):curEvts;
     // 升序：每页内最早事件在最上、最新在最下（首页=最早，尾页=最新）
     if(list.length===0){ body.appendChild(el('div','py-10 text-center text-sm text-muted-foreground','该筛选下无事件')); return; }
-    list.forEach(e=>body.appendChild(renderEvent(e,curConv)));
+    // 按记忆轮锚（turn_key）分组：组头为细分割线 + 轮次标签；无锚事件不单独成组
+    let lastTurn=null, turnIdx=0;
+    list.forEach(e=>{
+      const tk=e.tk||'';
+      if(tk && tk!==lastTurn){ turnIdx++; body.appendChild(renderTurnHeader(tk,turnIdx,e)); lastTurn=tk; }
+      body.appendChild(renderEvent(e,curConv));
+    });
     reicons();
+  }
+  function renderTurnHeader(tk, idx, firstEv){
+    const t=firstEv.t?relTime(firstEv.t):'';
+    const head=idx===1?'会话开始':'轮次 '+idx;
+    return el('div','flex items-center gap-2 px-2 my-1 select-none', `
+      <div class="h-px flex-1 bg-border"></div>
+      <span class="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">${head}</span>
+      <span class="text-[10px] text-muted-foreground tnum">${t}</span>
+      <span class="text-[10px] mono text-muted-foreground/60">${tk.slice(-8)}</span>
+      <div class="h-px flex-1 bg-border"></div>`);
   }
   function renderEvent(e,c){
     const role=e.r; const meta=ROLE_META[role]||{label:role,ic:'circle'};
     const col=(ROLE_COLOR())[role]||'#64748B';
     const t=e.t?relTime(e.t):'#'+e.s;
     const rawText = extractText(e.c);
-    const isSystem = (role==='user'||role==='assistant') && isSystemMessage(rawText);  // 系统注入消息
+    // 注入判定：优先用库内 is_system 标记（adapter 层精确识别），回退前端正则
+    const isSystem = e.sys===true || ((role==='user'||role==='assistant') && isSystemMessage(rawText));
     const isUser=role==='user' && !isSystem;
     const isAssistant=role==='assistant' && !isSystem;
     // 头像（加大辨识度：用户主色实心底、助手品牌色；系统消息用弱化灰色）

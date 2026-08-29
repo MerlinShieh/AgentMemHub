@@ -105,6 +105,13 @@ def _event_to_short(e: Any) -> dict[str, Any]:
         d["so"] = _clip(e.shell_output, _CAP_OUTPUT)
     if e.parent_id:
         d["pid"] = e.parent_id
+    # 记忆锚（前端轮次分组 / 注入标记 / 稳定 id）
+    if getattr(e, "turn_key", None):
+        d["tk"] = e.turn_key
+    if getattr(e, "src_id", None):
+        d["si"] = e.src_id
+    if getattr(e, "is_system", None):
+        d["sys"] = True
     return d
 
 
