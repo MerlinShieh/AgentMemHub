@@ -196,11 +196,13 @@ def rebuild_embeddings(base_url: str = "http://127.0.0.1:18800",
     from agentmemhub import memos_daemon
     total = {"rounds": 0, "processed": 0, "updated": 0, "failed": 0,
              "done": False, "statsAfter": None}
+    offset = 0
     for _ in range(max_rounds):
         d = memos_daemon.engine_request(
             "POST", "/api/v1/embeddings/rebuild",
-            body={"mode": mode, "limit": limit}, timeout=600, base=base_url)
+            body={"mode": mode, "limit": limit, "offset": offset}, timeout=600, base=base_url)
         total["rounds"] += 1
+        offset = int(d.get("nextOffset", offset))
         for k in ("processed", "updated", "failed"):
             total[k] += d.get(k, 0)
         total["done"] = bool(d.get("done"))
