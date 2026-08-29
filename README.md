@@ -232,26 +232,68 @@ Claude Code 等支持 MCP 的 Agent harness 上——模型在会话进行中即
 | `memory_stats()` | 引擎在线状态 / 记忆总量 / 语义检索与 LLM 评分可用性 / 记忆模式 |
 | `memory_save(content)` | 写一条记忆（即时入库并补向量），供模型主动保存事实/结论 |
 
-启动与注册（两种传输，模板见 [docs/mcp-register.example.json](./docs/mcp-register.example.json)）：
-
-```bash
-# 0. 先常驻记忆引擎（网关绝不代管引擎生命周期）
+# 0. 先常驻记忆引擎（网关绝不代管其生命周期）：
 python -m agentmemhub memos-daemon start
 
-# 1）本地个人（stdio，Agent 拉起子进程）：Agent MCP 配置里注册
-#    command 用项目 .venv 的 python 绝对路径占位符：
-#      <项目根>/.venv/Scripts/python.exe  -m agentmemhub mcp
-#    或 `pip install -e .` 后把 .venv/Scripts 加入 PATH，直接用裸命令：agentmemhub-mcp
-#    注意：不要用 `uv run python`——MCP 子进程在项目目录之外启动时会
-#    解析到错误的 python（No module named agentmemhub）
-
-# 2）团队共享（Streamable HTTP）：一台机器/服务器常驻网关
+# 用法一：本地个人（stdio，Agent 拉起子进程）——见下方「注册配置」
+# 用法二：团队共享（Streamable HTTP，一台机器常驻网关）：
 python -m agentmemhub mcp --http --bind 0.0.0.0 --port 9100
-#    客户端注册 type=http，url=http://<服务器>:9100/mcp（默认只监听 127.0.0.1，
-#    开放局域网需显式 --bind 0.0.0.0 并自行做好访问控制）
 
-# 3. 验证：在 Agent 会话里调用 memory_stats / memory_search
+# 验证：在 Agent 会话里调用 memory_stats / memory_search
 ```
+
+### 注册配置（两种传输的 MCP 配置直接贴这里）
+
+> ⚠️ **记得把下方 `<项目根>` 替换为你机器上的实际路径**（例如 `D:/path/to/AgentMemHub`）。
+> 不要用 `uv run python`——MCP 子进程在项目目录之外启动时会解析到错误的 python（No module named agentmemhub）。
+> ZCode 写在 `mcp.json` 的 `mcpServers` 段；OpenCode 写在 `opencode.json` 的 `mcp` 段（模板另见 [docs/mcp-register.example.json](./docs/mcp-register.example.json)）。
+
+**A. 本地个人（stdio）**
+
+```json
+{
+  "mcpServers": {
+    "agentmemhub": {
+      "type": "stdio",
+      "command": "<项目根>/.venv/Scripts/python.exe",
+      "args": ["-m", "agentmemhub", "mcp"],
+      "env": {}
+    }
+  }
+}
+```
+
+OpenCode 对应写法（含裸命令备选：`pip install -e .` 后把 `.venv/Scripts` 加入 PATH，command 直接用 `agentmemhub-mcp`）：
+
+```json
+{
+  "mcp": {
+    "agentmemhub": {
+      "type": "stdio",
+      "command": "<项目根>/.venv/Scripts/python.exe",
+      "args": ["-m", "agentmemhub", "mcp"],
+      "enabled": true
+    }
+  }
+}
+```
+
+**B. 团队共享（Streamable HTTP）**
+
+服务端先常驻：`python -m agentmemhub mcp --http --bind 0.0.0.0 --port 9100`（默认只监听 127.0.0.1，开放局域网需显式 `--bind 0.0.0.0` 并自行做好访问控制）。客户端注册：
+
+```json
+{
+  "mcpServers": {
+    "agentmemhub": {
+      "type": "http",
+      "url": "http://<服务器IP或hostname>:9100/mcp"
+    }
+  }
+}
+```
+
+> 两种传输的工具完全一致（`memory_search` / `memory_recent` / `memory_stats` / `memory_save`），按场景选一种即可。
 
 设计要点：
 
