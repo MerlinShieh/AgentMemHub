@@ -120,11 +120,16 @@ def _run_push_fn(cli, source: str):
 
 
 def _run_score_fn(cli, limit: int, dry_run: bool):
-    """看板「自动评分」后台动作：LLM 三轴批量评估历史记忆 → feedback 写入（并发）。"""
+    """看板「自动评分」后台动作：LLM 三轴批量评估历史记忆 → feedback 写入（并发）。
+
+    emit=print：每条约一行 [N/总数] 进度，经 _DualWriter 实时回显到面板；
+    漏传 emit 会导致进度行全部丢弃（只有结束汇总）。
+    """
     from agentmemhub.scoring import run_score_all
 
     def _run() -> None:
-        r = run_score_all(base_url="", limit=limit, dry_run=dry_run, workers=4)
+        r = run_score_all(base_url="", limit=limit, dry_run=dry_run,
+                          workers=4, emit=lambda s: print(s))
         print(f"评分完成: evaluated={r['evaluated']} "
               f"positive={r['positive']} neutral={r['neutral']} "
               f"negative={r['negative']} errors={r['errors']}"

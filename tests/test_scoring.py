@@ -239,11 +239,19 @@ def test_admin_score_offline_503():
 def test_admin_score_job_runs():
     c = _client()
     with mock.patch("agentmemhub.memos_daemon.auth_state", return_value={}), \
-         mock.patch("agentmemhub.scoring.run_score_all", return_value={
-             "evaluated": 2, "positive": 1, "neutral": 1, "negative": 0,
-             "errors": 0, "dryRun": False}):
+         mock.patch("agentmemhub.scoring.run_score_all") as rsa:
+        def fake_run(*a, **k):
+            emit = k.get("emit")          # 必须接线 emit，否则进度行丢失
+            assert emit is not None and callable(emit)
+            emit("[1/2097] 评估 trac_a …")
+            emit("[2/2097] → positive ✓ 已写入")
+            return {"evaluated": 2, "skipped": 0, "positive": 1, "neutral": 1,
+                    "negative": 0, "errors": 0, "dryRun": False}
+        rsa.side_effect = fake_run
         r = c.post("/api/admin/score?limit=2")
         assert r.status_code == 200
         done = _wait_done(c)
         assert done["status"] == "done"
-        assert "评分完成" in done["output"] and "positive=1" in done["output"]
+        # 进度行经 emit 实时回显
+        assert "[1/2097]" in done["output"] and "[2/2097]" in done["output"]
+        assert "评分完成" in done["output"]
