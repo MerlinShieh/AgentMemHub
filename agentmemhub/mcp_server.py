@@ -168,7 +168,7 @@ def _save(args: dict) -> str:
             "ts": ts, "turnId": ts,
             "userText": content, "agentText": "",
             "summary": content[:200],
-            "value": 0.5, "alpha": 0.3, "priority": 0,
+            "value": 0.5, "alpha": 0.3, "priority": 0.5,
             "toolCalls": [], "agentThinking": [],
         }],
         "policies": [], "worldModels": [], "skills": [],
