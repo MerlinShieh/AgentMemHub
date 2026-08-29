@@ -43,6 +43,42 @@ def recent(limit: int = 100) -> list[dict]:
         return list(_RING[-limit:])[::-1]
 
 
+# ---------------------------------------------------------------------------
+# 任务完整输出落盘：<data_dir>/tasks/<job_id>.log（页面关掉/进程中断也可追溯）
+# ---------------------------------------------------------------------------
+
+def task_log_dir() -> Path:
+    return config.config().data_dir / "tasks"
+
+
+def task_log_path(job_id: str) -> Path:
+    return task_log_dir() / f"{job_id}.log"
+
+
+def append_task_line(job_id: str, line: str) -> Path:
+    """把任务输出的一行追加到该 job 的完整日志文件（含时间戳前缀）。"""
+    p = task_log_path(job_id)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%H:%M:%S')}] {line}\n")
+    except Exception:
+        pass
+    return p
+
+
+def task_log_tail(job_id: str, limit: int = 40) -> str:
+    """任务完整日志尾部（查看/面板展示用）。"""
+    p = task_log_path(job_id)
+    if not p.exists():
+        return ""
+    try:
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        return "\n".join(lines[-limit:])
+    except Exception:
+        return ""
+
+
 def reset() -> None:
     """清空内存缓冲（测试用；不清文件）。"""
     with _LOCK:

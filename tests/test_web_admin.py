@@ -124,7 +124,7 @@ def test_admin_task_error_reported():
 def test_task_live_output_during_running():
     """emit 实时流：任务运行中 job.output 即可见部分输出（前端 loading 期显示进展）。"""
     tasks.reset()
-    def fn(emit):
+    def fn(emit, meta):
         emit("第一批完成")
         time.sleep(0.15)
         emit("第二批完成")
@@ -169,3 +169,33 @@ def test_admin_ingest_records_log(tmp_path, monkeypatch):
     msgs = [l["msg"] for l in logs.recent()]
     assert any("提交任务" in m for m in msgs)
     assert any("开始" in m for m in msgs) and any("完成" in m for m in msgs)
+
+
+def test_task_full_log_persisted_to_file(tmp_path, monkeypatch):
+    """推送任务完整输出逐行落盘到 <data_dir>/tasks/<job_id>.log，页面关掉也可追溯。"""
+    from agentmemhub.web import logs
+    monkeypatch.setattr("agentmemhub.web.logs.task_log_dir", lambda: tmp_path / "tasks")
+    c = _client()
+    fake = {"imported": 3, "skipped": 5,
+            "lines": ["[zcode] 推送 ok: imported=3 skipped=5"], "rebuilt": None}
+    with mock.patch("agentmemhub.memos_daemon.auth_state", return_value={}), \
+         mock.patch("agentmemhub.cli.push_to_memos", return_value=fake), \
+         mock.patch("agentmemhub.adapters.all_adapters", return_value=[]):
+        c.post("/api/admin/push")
+        done = _wait_done(c)
+    p = tmp_path / "tasks" / f"{done['id']}.log"
+    assert p.exists()
+    text = p.read_text(encoding="utf-8")
+    assert "推送 ok: imported=3" in text
+    assert logs.task_log_tail(done["id"]) == text.strip()
+
+
+def test_task_log_single_line_append(tmp_path, monkeypatch):
+    """append_task_line 单行追加 + tail 读取。"""
+    from agentmemhub.web import logs
+    monkeypatch.setattr("agentmemhub.web.logs.task_log_dir", lambda: tmp_path / "tasks")
+    logs.append_task_line("t1", "第一行")
+    logs.append_task_line("t1", "第二行")
+    text = logs.task_log_tail("t1")
+    assert "第一行" in text and "第二行" in text
+    assert logs.task_log_tail("no_such_job") == ""

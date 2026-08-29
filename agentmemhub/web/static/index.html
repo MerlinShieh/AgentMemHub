@@ -337,7 +337,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       <div class="flex flex-wrap items-center gap-2">
         <i data-lucide="scroll-text" class="h-4 w-4 text-primary"></i>
         <h2 class="text-sm font-semibold text-foreground">操作日志</h2>
-        <span class="text-[11px] text-muted-foreground">引擎启停 / 提取 / 推送等面板操作记录（同时留存于数据目录 web.log）</span>
+        <span class="text-[11px] text-muted-foreground">引擎启停 / 提取 / 推送等面板操作记录，留存于数据目录 web.log；任务完整输出另留 <数据目录>/tasks/&lt;任务id&gt;.log，页面关闭也可查</span>
         <button id="logsRefreshBtn"
                 class="ml-auto inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted transition-colors">
           <i data-lucide="refresh-cw" class="h-3.5 w-3.5"></i>刷新
