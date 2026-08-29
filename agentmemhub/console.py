@@ -43,9 +43,13 @@ def dashboard_port() -> int:
 
 
 def memos_probe(base_url: Optional[str] = None, timeout: float = 1.5) -> Optional[dict]:
-    """探测 MemOS 是否在线（GET /api/v1/overview）；离线返回 None。"""
+    """探测 MemOS 是否在线（公开端点 /api/v1/auth/status，设密码也通）；离线返回 None。
+
+    不要用 /api/v1/overview——它需鉴权，引擎设密码后无 cookie 会 401，
+    被误判为"未在线"。
+    """
     try:
-        url = (base_url or memos_base_url()) + "/api/v1/overview"
+        url = (base_url or memos_base_url()) + "/api/v1/auth/status"
         with urllib.request.urlopen(url, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8"))
     except Exception:
@@ -305,7 +309,7 @@ def action_memos() -> None:
     base = _ask(f"  MemOS 地址（回车 = {memos_base_url()}）> ", memos_base_url())
     probe = memos_probe(base)
     if probe is None:
-        if not _confirm("  ⚠ 记忆引擎未在线（可用 [6] 启动）。仍要生成 bundle 并尝试推送吗？"):
+        if not _confirm("  ⚠ 记忆引擎未在线（可用 [10] 启动）。仍要生成 bundle 并尝试推送吗？"):
             _out("  （已取消）")
             return
     else:
