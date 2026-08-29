@@ -202,12 +202,45 @@ def cmd_memos_daemon(args) -> None:
     _stdout(_json.dumps(r, ensure_ascii=False, indent=1))
 
 
+def push_to_memos(store: Store, *, sources: list[str], base_url: str,
+                  no_rebuild: bool = False,
+                  rebuild_mode: str = "repair") -> dict[str, Any]:
+    """构建并幂等推送 MemOS bundle（按 source 分批，失败批次继续），可选补向量。
+
+    MemOS /api/v1/import 上限 64 MiB——全量 bundle 可能超限（实测 90+MB），
+    因此按 source 分批 POST。trace id 由 src_id 派生 → 幂等（重复=skipped）。
+    返回 {imported, skipped, lines, rebuilt}；rebuilt 失败/跳过时为 None。
+    """
+    from agentmemhub.memos import build_bundle, push_bundle, rebuild_embeddings
+    total_ok = total_skip = 0
+    lines: list[str] = []
+    for src in sources:
+        b = build_bundle(store, src)
+        if not b["traces"]:
+            continue
+        try:
+            resp = push_bundle(b, base_url)
+            total_ok += resp.get("imported", 0)
+            total_skip += resp.get("skipped", 0)
+            lines.append(f"[{src}] 推送 ok: imported={resp.get('imported')} "
+                         f"skipped={resp.get('skipped')}")
+        except Exception as e:
+            lines.append(f"[{src}] 推送失败（继续下一批）: {e}")
+    rebuilt = None
+    if total_ok and not no_rebuild:
+        try:
+            rebuilt = rebuild_embeddings(base_url, mode=rebuild_mode)
+        except Exception as e:
+            lines.append(f"embedding rebuild 失败（可用 --no-rebuild 跳过）: {e}")
+    return {"imported": total_ok, "skipped": total_skip,
+            "lines": lines, "rebuilt": rebuilt}
+
+
 def run_memos(*, source: str = "", out: str = "exports/memos_bundle.json",
               push: str = "", no_rebuild: bool = False,
               rebuild_mode: str = "repair") -> None:
     """提取记忆 bundle + 可选推送 MemOS（CLI 与控制台共用）。"""
-    from agentmemhub.memos import (build_bundle, write_bundle, push_bundle,
-                                   rebuild_embeddings)
+    from agentmemhub.memos import build_bundle, write_bundle
     store = Store()
     bundle = build_bundle(store, source)
     _stdout(f"生成 bundle: {len(bundle['traces'])} traces")
@@ -215,31 +248,17 @@ def run_memos(*, source: str = "", out: str = "exports/memos_bundle.json",
     _stdout(f"已写入 → {out}")
     if push:
         try:
-            # MemOS /api/v1/import 上限 64 MiB——全量 bundle 可能超限（实测 90+MB），
-            # 因此推送时按 source 分批 POST，失败批次继续并汇总
             if source:
                 batches = [source]
             else:
                 batches = [a.source for a in adapters.all_adapters() if a.locate()]
-            total_ok = total_skip = 0
-            for src in batches:
-                b = build_bundle(store, src)
-                if not b["traces"]:
-                    continue
-                try:
-                    resp = push_bundle(b, push)
-                    total_ok += resp.get("imported", 0)
-                    total_skip += resp.get("skipped", 0)
-                    _stdout(f"[{src}] 推送 ok: imported={resp.get('imported')} skipped={resp.get('skipped')}")
-                except Exception as e:
-                    _stdout(f"[{src}] 推送失败（继续下一批）: {e}")
-            _stdout(f"MemOS 导入汇总: imported={total_ok}, skipped={total_skip}")
-            if not no_rebuild:
-                try:
-                    r = rebuild_embeddings(push, mode=rebuild_mode)
-                    _stdout(f"已触发 embedding {rebuild_mode}: {r}")
-                except Exception as e:
-                    _stdout(f"embedding rebuild 失败（可用 --no-rebuild 跳过）: {e}")
+            r = push_to_memos(store, sources=batches, base_url=push,
+                              no_rebuild=no_rebuild, rebuild_mode=rebuild_mode)
+            for line in r["lines"]:
+                _stdout(line)
+            _stdout(f"MemOS 导入汇总: imported={r['imported']}, skipped={r['skipped']}")
+            if r["rebuilt"]:
+                _stdout(f"已触发 embedding {rebuild_mode}: {r['rebuilt']}")
         except Exception as e:
             _stdout(f"推送失败（MemOS 可能在运行?）: {e}")
     store.close()
@@ -255,7 +274,6 @@ def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
     漏掉的同步靠幂等锚在下次启动补上（无耦合，不碰 harness）。
     """
     from agentmemhub import adapters, memos_daemon
-    from agentmemhub.memos import build_bundle, push_bundle, rebuild_embeddings
 
     sources = [source] if source else [a.source for a in adapters.all_adapters()]
     run_ingest(sources)
@@ -269,20 +287,13 @@ def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
     try:
         batches = ([source] if source
                    else [a.source for a in adapters.all_adapters() if a.locate()])
-        total_ok = total_skip = 0
-        for src in batches:
-            b = build_bundle(store, src)
-            if not b["traces"]:
-                continue
-            resp = push_bundle(b, push)
-            total_ok += resp.get("imported", 0)
-            total_skip += resp.get("skipped", 0)
-            _stdout(f"[{src}] imported={resp.get('imported')} "
-                    f"skipped={resp.get('skipped')}")
-        _stdout(f"同步汇总: imported={total_ok}, skipped={total_skip}")
-        if total_ok and not no_rebuild:
-            r = rebuild_embeddings(push, mode=rebuild_mode)
-            _stdout(f"已补向量({rebuild_mode}): {r}")
+        r = push_to_memos(store, sources=batches, base_url=push,
+                          no_rebuild=no_rebuild, rebuild_mode=rebuild_mode)
+        for line in r["lines"]:
+            _stdout(line)
+        _stdout(f"同步汇总: imported={r['imported']}, skipped={r['skipped']}")
+        if r["rebuilt"]:
+            _stdout(f"已补向量({rebuild_mode}): {r['rebuilt']}")
     finally:
         store.close()
 
