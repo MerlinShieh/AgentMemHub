@@ -24,3 +24,21 @@ def test_dashboard_pid_no_listening():
          mock.patch("agentmemhub.console.os.name", "nt"):
         mr.return_value = mock.Mock(stdout="  TCP  127.0.0.1:9000  ...\n")
         assert _dashboard_pid(8086) is None
+
+
+def test_memos_probe_uses_public_auth_status_endpoint():
+    """在线探测必须用公开端点（/api/v1/auth/status）——设密码后 overview 会 401 误判离线。"""
+    from agentmemhub.console import memos_probe
+    with mock.patch("urllib.request.urlopen") as mu:
+        mu.return_value = mock.MagicMock()
+        mu.return_value.__enter__.return_value.read.return_value = b'{"enabled": true}'
+        r = memos_probe("http://127.0.0.1:19800")
+    assert r == {"enabled": True}
+    url = mu.call_args[0][0]
+    assert url == "http://127.0.0.1:19800/api/v1/auth/status"
+
+
+def test_memos_probe_returns_none_when_offline():
+    from agentmemhub.console import memos_probe
+    with mock.patch("urllib.request.urlopen", side_effect=OSError("connect refused")):
+        assert memos_probe("http://127.0.0.1:19800") is None
