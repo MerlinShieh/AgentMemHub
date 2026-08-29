@@ -495,6 +495,12 @@ def create_app(db_path: Path | None = None):
             raise HTTPException(status_code=503, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"engine feedback failed: {e}")
+        # 手动打分成功 → 记入已评清单（重跑批量评分时跳过，不覆盖手动分）
+        try:
+            from agentmemhub.scoring import mark_scored
+            mark_scored(traceId)
+        except Exception:
+            pass
         logs.record(f"记忆打分：trace={traceId} {polarity}（幅度 {magnitude}）")
         return JSONResponse({"ok": True, "traceId": traceId, "feedback": res})
 

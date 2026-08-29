@@ -23,8 +23,10 @@ def _reset_tasks():
 
 @pytest.fixture(autouse=True)
 def _isolate_logs(tmp_path, monkeypatch):
-    """防测试污染真实数据目录日志（log_dir 指到临时目录）。"""
+    """防测试污染真实数据目录（日志与已评清单都指到临时目录）。"""
     monkeypatch.setattr("agentmemhub.logs.log_dir", lambda: tmp_path)
+    monkeypatch.setattr("agentmemhub.scoring._cache_path",
+                        lambda: tmp_path / "scored_traces.json")
 
 
 def _client() -> TestClient:
