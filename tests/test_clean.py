@@ -155,3 +155,96 @@ def test_run_sync_without_push_only_ingests(_ingest, capsys):
     out = capsys.readouterr().out
     # 无 --push 时只 ingest（不 probe 引擎、不推）
     assert "跳过推送" not in out
+
+
+class _FakeStore:
+    """带两个会话（一个旧一个新）的最小 store 假件。"""
+    def __init__(self):
+        import time as _t
+        self.new_ts = _t.time() - 100          # 新会话（锚后）
+        self.old_ts = _t.time() - 2000         # 旧会话（锚前）
+        self.closed = False
+
+    def list_conversations(self, src):
+        return [{"updated_at": self.new_ts}, {"updated_at": self.old_ts}]
+
+    def close(self):
+        self.closed = True
+
+
+@mock.patch.object(cli, "run_ingest", return_value=(0, 0))
+@mock.patch("agentmemhub.memos_daemon.auth_state", return_value={})
+def test_run_sync_incremental_pushes_only_new(_auth, _ingest, tmp_path, monkeypatch, capsys):
+    """增量：有锚时 since_ts 传给 push_to_memos（只推新会话），推送后推进锚。"""
+    import agentmemhub.cli as cli_mod
+    monkeypatch.setattr(cli_mod, "_sync_anchor_path", lambda: tmp_path / "last_sync.json")
+    cli_mod._save_sync_anchor(__import__("time").time() - 600)     # 上一轮同步在 10 分钟前
+    fake = _FakeStore()
+    with mock.patch.object(cli, "Store", return_value=fake), \
+         mock.patch.object(cli, "push_to_memos", return_value={
+             "imported": 5, "skipped": 0, "lines": [], "rebuilt": None}) as pm:
+        cli.run_sync(push="http://127.0.0.1:18800")
+    assert pm.called
+    assert pm.call_args.kwargs["since_ts"] is not None            # 增量锚生效
+    assert pm.call_args.kwargs["since_ts"] < fake.new_ts          # 新会话命中
+    assert fake.closed
+    # 锚已推进（下次 sync 基于本次完成时间）
+    import json as _j
+    assert _j.loads((tmp_path / "last_sync.json").read_text())["ts"] > fake.old_ts
+
+
+@mock.patch.object(cli, "run_ingest", return_value=(0, 0))
+@mock.patch("agentmemhub.memos_daemon.auth_state", return_value={})
+def test_run_sync_incremental_skips_when_nothing_new(_auth, _ingest, tmp_path, monkeypatch, capsys):
+    """增量：无新增会话 → 跳过推送（不调 push_to_memos，不推进锚）。"""
+    import agentmemhub.cli as cli_mod
+    import time as _t
+    monkeypatch.setattr(cli_mod, "_sync_anchor_path", lambda: tmp_path / "last_sync.json")
+    cli_mod._save_sync_anchor(_t.time() - 10)                     # 刚同步过 → 缓冲窗内无新会话
+
+    class _AllOld:
+        def list_conversations(self, src):
+            return [{"updated_at": _t.time() - 600}]              # 都在锚前
+        def close(self):
+            pass
+
+    with mock.patch.object(cli, "Store", return_value=_AllOld()), \
+         mock.patch.object(cli, "push_to_memos") as pm:
+        cli.run_sync(push="http://127.0.0.1:18800")
+    out = capsys.readouterr().out
+    assert "无新增会话" in out
+    assert not pm.called
+
+
+@mock.patch.object(cli, "run_ingest", return_value=(0, 0))
+@mock.patch("agentmemhub.memos_daemon.auth_state", return_value={})
+def test_run_sync_failure_keeps_anchor(_auth, _ingest, tmp_path, monkeypatch, capsys):
+    """推送有失败 → 不推进锚（下次增量仍含失败会话可重试，不丢数据）。"""
+    import agentmemhub.cli as cli_mod
+    import json as _j
+    monkeypatch.setattr(cli_mod, "_sync_anchor_path", lambda: tmp_path / "last_sync.json")
+    old_ts = __import__("time").time() - 600
+    cli_mod._save_sync_anchor(old_ts)
+    with mock.patch.object(cli, "Store", return_value=_FakeStore()), \
+         mock.patch.object(cli, "push_to_memos", return_value={
+             "imported": 0, "skipped": 0, "lines": [], "rebuilt": None,
+             "failed": 1}) as pm:
+        cli.run_sync(push="http://127.0.0.1:18800")
+    out = capsys.readouterr().out
+    assert "未推进增量锚" in out
+    assert _j.loads((tmp_path / "last_sync.json").read_text())["ts"] == old_ts
+
+
+@mock.patch.object(cli, "run_ingest", return_value=(0, 0))
+@mock.patch("agentmemhub.memos_daemon.auth_state", return_value={})
+def test_run_sync_full_ignores_anchor(_auth, _ingest, tmp_path, monkeypatch, capsys):
+    """--full 强制全量（since=None），与锚无关。"""
+    import agentmemhub.cli as cli_mod
+    monkeypatch.setattr(cli_mod, "_sync_anchor_path", lambda: tmp_path / "last_sync.json")
+    cli_mod._save_sync_anchor(__import__("time").time() - 600)
+    with mock.patch.object(cli, "Store", return_value=_FakeStore()), \
+         mock.patch.object(cli, "push_to_memos", return_value={
+             "imported": 5, "skipped": 0, "lines": [], "rebuilt": None}) as pm:
+        cli.run_sync(push="http://127.0.0.1:18800", full=True)
+    assert "全量同步" in capsys.readouterr().out
+    assert pm.call_args.kwargs.get("since_ts") is None

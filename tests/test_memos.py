@@ -131,6 +131,32 @@ def test_bundle_shape():
                       "worldModels", "skills"}
 
 
+def test_build_bundle_incremental_since_ts():
+    """增量：since_ts 只包含 updated_at >= 锚的会话（新会话才进 bundle）。"""
+    from agentmemhub.memos import build_bundle
+    from agentmemhub.store import Store
+    import tempfile
+    import pathlib
+
+    db = pathlib.Path(tempfile.mkdtemp()) / "t2.db"
+    st = Store(db)
+    def conv(cid, upd, src="zcode"):
+        evs = renumber([
+            _ev("user", f"问{cid}", src_id=f"u{cid}", turn_key=f"u{cid}", is_system=False, time=float(upd)),
+            _ev("assistant", "答", src_id=f"a{cid}", turn_key=f"u{cid}", time=float(upd) + 1),
+        ])
+        return {"source": src, "id": cid, "title": cid, "cwd": "w",
+                "created_at": float(upd), "updated_at": float(upd),
+                "model": "m", "meta": {}, "events": evs}
+    st.replace_source("zcode", [conv("new1", 2000.0), conv("old1", 1000.0)], signature="s")
+    b_full = build_bundle(st)
+    assert len(b_full["traces"]) == 2
+    b_inc = build_bundle(st, since_ts=1500.0)
+    assert len(b_inc["traces"]) == 1               # 只有 updated_at >= 1500 的新会话
+    assert b_inc["traces"][0]["userText"] == "问new1"
+    st.close()
+
+
 def json_str(ts) -> str:
     import json
     return json.dumps(ts, ensure_ascii=False)

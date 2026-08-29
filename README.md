@@ -211,7 +211,7 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 | `memos [--source] [--out] [--push url] [--no-rebuild]` | 生成/推送 MemOS bundle（push 自动分批 + 补向量）|
 | `memos-daemon start\|stop\|status\|logs` | 记忆引擎托管（见下文「记忆引擎管理」）|
 | `mcp [--http] [--bind H] [--port P]` | MCP 记忆网关：默认 stdio（Agent 拉起）；`--http` 常驻为 Streamable HTTP 供团队共享 |
-| `sync [--push URL] [--no-rebuild]` | 增量同步：ingest → 幂等 push MemOS → 补向量（可随时重跑；引擎离线自动跳过推送）|
+| `sync [--push URL] [--no-rebuild] [--full]` | 增量同步：ingest → **只推送上次同步后的新增会话**（时间锚，无新增自动跳过；`--full` 强制全量）→ 补向量（幂等，引擎离线跳过推送且不推进锚）|
 | `clean [--source x] [--apply]` | 记忆清洗：删除系统注入事件（默认预览，`--apply` 才执行并重建 FTS/计数）|
 | `score [--limit N] [--dry-run] [--workers N]` | LLM 批量自动评分历史记忆（三轴评估 → feedback 写入价值分；跳过已评，未完成封顶 99%）|
 | `rebuild [--mode repair\|rebuild]` | 补向量：触发引擎 embedding rebuild（导入记忆后修复语义检索）|
