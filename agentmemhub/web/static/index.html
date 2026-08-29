@@ -806,7 +806,16 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       }else out.classList.add('hidden');
       return;
     }
-    $('#adminJobBar').style.width='0%'; $('#adminJobPct').textContent='';
+    // 终态：进度条保留完成态（100% 绿显示"完成"），不归零变白
+    if(j && j.progress && j.progress.total
+       && (j.progress.done||0) >= (j.progress.total||0)){
+      const bar=$('#adminJobBar');
+      bar.style.width='100%';
+      bar.className='block h-full rounded-full bg-emerald-500';
+      $('#adminJobPct').textContent='100%';
+    }else{
+      $('#adminJobBar').style.width='0%'; $('#adminJobPct').textContent='';
+    }
     state.classList.add('hidden');
     if(j.error){ out.textContent='任务失败：'+j.error; out.classList.remove('hidden'); }
     else if(j.output!==undefined && j.output!==''){ out.textContent=j.output.split('\n').slice(-300).join('\n'); out.classList.remove('hidden'); }
@@ -826,7 +835,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         j=d.job;
       }catch(e){ err=e.message||'网络异常'; }
       if(seq!==pollSeq) return;
-      adminRender(j);
+      try{ adminRender(j); }catch(e){ /* 渲染异常不中断轮询（自愈到终态） */ }
       if(!j || j.status!=='running'){  // 无任务或已到终态（done/error）
         if(!err) $('#adminJobWarn').classList.add('hidden');
         if(j && (j.name||'').includes('提取') && j.status==='done'){
