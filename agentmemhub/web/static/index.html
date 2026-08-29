@@ -302,6 +302,23 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
           <div id="memosRecent" class="mt-1.5 max-h-64 space-y-1 overflow-y-auto scroll-thin"></div>
         </div>
       </div>
+      <div class="mt-3 border-t border-border pt-3">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="text-[11px] font-medium text-muted-foreground">数据操作</span>
+          <button id="adminIngestBtn"
+                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
+            <i data-lucide="download" class="h-3.5 w-3.5 text-primary"></i>提取会话入库
+          </button>
+          <button id="adminPushBtn"
+                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
+            <i data-lucide="upload" class="h-3.5 w-3.5 text-primary"></i>推送记忆到 MemOS
+          </button>
+          <span id="adminJobState" class="hidden items-center gap-1.5 text-xs text-muted-foreground">
+            <i data-lucide="loader-circle" class="h-3.5 w-3.5 animate-spin"></i><span id="adminJobName">任务运行中…</span>
+          </span>
+        </div>
+        <pre id="adminJobOut" class="mt-2 hidden max-h-40 overflow-y-auto rounded-md bg-muted/40 p-2 text-[10.5px] leading-relaxed text-muted-foreground scroll-thin"></pre>
+      </div>
     </div>
   </section>
 
@@ -527,6 +544,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     1: {label:'技能', color:'#A855F7'}, 2: {label:'记忆', color:'#3B82F6'},
     3: {label:'知识', color:'#06B6D4'},
   };
+  let adminTmr = null;            // 数据操作（ingest/push）轮询定时器
   async function initMemosPanel(){
     const panel = $('#memosPanel');
     let s;
@@ -669,6 +687,45 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     }
     btn.disabled = false;
     reicons();
+  }
+
+  // ---- 数据操作：提取入库 / 推送记忆（后台任务，轮询状态）----
+  function adminRender(j){
+    const state=$('#adminJobState'), out=$('#adminJobOut');
+    const ing=$('#adminIngestBtn'), push=$('#adminPushBtn');
+    if(!j){ state.classList.add('hidden'); out.classList.add('hidden'); ing.disabled=false; push.disabled=false; return; }
+    const busy=j.status==='running';
+    ing.disabled=busy; push.disabled=busy;
+    if(busy){
+      state.classList.remove('hidden'); state.classList.add('inline-flex');
+      $('#adminJobName').textContent=j.name||'任务运行中…';
+      out.classList.add('hidden');
+      return;
+    }
+    state.classList.add('hidden');
+    if(j.error){ out.textContent='任务失败：'+j.error; out.classList.remove('hidden'); }
+    else if(j.output!==undefined && j.output!==''){ out.textContent=j.output.trim(); out.classList.remove('hidden'); }
+    else out.classList.add('hidden');
+  }
+  async function adminPoll(){
+    try{
+      const d = await (await fetch('/api/admin/job')).json();
+      adminRender(d.job);
+      if(d.job && d.job.status==='running'){
+        adminTmr=setTimeout(adminPoll,1200);
+      }
+    }catch(e){ /* 服务重启/窗口短暂异常：下次操作自愈 */ }
+  }
+  async function adminSubmit(ep){
+    clearTimeout(adminTmr);
+    try{
+      const r = await fetch(ep, {method:'POST'});
+      const d = await r.json().catch(()=>({}));
+      if(r.status===409 || r.status===503){ toast(typeof d.detail==='string'?d.detail:'操作被拒绝'); adminPoll(); return; }
+      if(!r.ok){ toast('提交失败'); return; }
+      toast('任务已提交');
+      adminPoll();
+    }catch(e){ toast('提交失败：'+(e.message||e)); }
   }
 
   function updateStatsHead(meta){
@@ -833,6 +890,10 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         confirmText:'停止', confirmClass:'bg-error-solid', onConfirm:()=>memosStop(),
       });
     };
+    // 数据操作：提取入库 / 推送记忆（提交后台任务并轮询状态）
+    $('#adminIngestBtn').onclick=()=>adminSubmit('/api/admin/ingest');
+    $('#adminPushBtn').onclick=()=>adminSubmit('/api/admin/push');
+    adminPoll();   // 页面加载时恢复可能仍在进行中的任务
   }
   // P1 修复：原改写时遗漏此定义，导致勾选/删除触发 "updateBatchBtn is not defined"
   function updateBatchBtn(){ const n=selectedKeys.size; const b=$('#batchDelBtn'); b.classList.toggle('hidden',n===0); b.classList.toggle('inline-flex',n>0); }

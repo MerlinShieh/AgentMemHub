@@ -48,6 +48,46 @@ def _workspace_of(cwd: Optional[str]) -> str:
     return cwd.rstrip("\\/").rsplit("\\", 1)[-1].rsplit("/", 1)[-1] or "(unknown)"
 
 
+def _capture_stdout(fn) -> str:
+    """在后台线程里捕获 CLI 式操作（_stdout=print）的输出文本。"""
+    import io
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        fn()
+    return buf.getvalue()
+
+
+def _run_ingest_capture(cli, adapters, source: str, signature: str) -> str:
+    """看板「提取入库」后台动作。"""
+    def _do() -> None:
+        sources = [source] if source else [a.source for a in adapters.all_adapters()]
+        cli.run_ingest(sources, signature=signature)
+    return _capture_stdout(_do)
+
+
+def _run_push_capture(cli, source: str) -> str:
+    """看板「推送记忆」后台动作：按 source 幂等推送 + 补向量（不 ingest）。"""
+    from agentmemhub import adapters, memos_daemon
+    from agentmemhub.store import Store
+
+    def _do() -> None:
+        store = Store()
+        try:
+            batches = ([source] if source
+                       else [a.source for a in adapters.all_adapters() if a.locate()])
+            r = cli.push_to_memos(store, sources=batches,
+                                  base_url=memos_daemon.base_url())
+            for line in r["lines"]:
+                print(line)
+            print(f"MemOS 导入汇总: imported={r['imported']}, skipped={r['skipped']}")
+            if r["rebuilt"]:
+                print(f"已补向量(repair): {r['rebuilt']}")
+        finally:
+            store.close()
+    return _capture_stdout(_do)
+
+
 def _conv_to_dict(c: Any) -> dict[str, Any]:
     """conversations row → 前端 camelCase 契约字段。"""
     import json
@@ -385,6 +425,41 @@ def create_app(db_path: Path | None = None):
         ]
         return JSONResponse({"total": res.get("total"), "offset": offset,
                              "traces": traces})
+
+    # ------------------------------------------------------------------
+    # 数据操作后台任务（ingest / memos push）：耗时操作放后台线程，
+    # 前端轮询状态；同一时刻只允许一个任务（避免并发写库）
+    # ------------------------------------------------------------------
+
+    @app.post("/api/admin/ingest")
+    def api_admin_ingest(source: str = Query(default=""),
+                         signature: str = Query(default="")):
+        from agentmemhub import adapters, cli
+        from agentmemhub.web import tasks
+        job = tasks.submit(
+            f"提取会话入库{'（' + source + '）' if source else ''}",
+            lambda: _run_ingest_capture(cli, adapters, source, signature))
+        if job is None:
+            raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
+        return JSONResponse({"job": job})
+
+    @app.post("/api/admin/push")
+    def api_admin_push(source: str = Query(default="")):
+        from agentmemhub import cli, memos_daemon
+        from agentmemhub.web import tasks
+        if memos_daemon.auth_state() is None:
+            raise HTTPException(status_code=503, detail="记忆引擎未运行，无法推送")
+        job = tasks.submit(
+            f"推送记忆到 MemOS{'（' + source + '）' if source else ''}",
+            lambda: _run_push_capture(cli, source))
+        if job is None:
+            raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
+        return JSONResponse({"job": job})
+
+    @app.get("/api/admin/job")
+    def api_admin_job():
+        from agentmemhub.web import tasks
+        return JSONResponse({"job": tasks.status()})
 
     # ---- 静态页面（index.html 由 StaticFiles html=True 自动兜底 /）----
     static_dir = Path(__file__).resolve().parent / "static"
