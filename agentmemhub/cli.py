@@ -245,6 +245,83 @@ def run_memos(*, source: str = "", out: str = "exports/memos_bundle.json",
     store.close()
 
 
+def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
+             rebuild_mode: str = "repair") -> None:
+    """增量同步：ingest（幂等重跑）→ 按 source 幂等 push → 补向量。
+
+    replace_source 与 MemOS import 都幂等（trace id 由 src_id 派生），所以
+    sync 可随时重跑——新增的轮 imported、旧轮 skipped。引擎离线时 ingest
+    照常完成、推送跳过（启动引擎后重跑即可补推）。不做会话结束钩子：
+    漏掉的同步靠幂等锚在下次启动补上（无耦合，不碰 harness）。
+    """
+    from agentmemhub import adapters, memos_daemon
+    from agentmemhub.memos import build_bundle, push_bundle, rebuild_embeddings
+
+    sources = [source] if source else [a.source for a in adapters.all_adapters()]
+    run_ingest(sources)
+    if not push:
+        return
+    if memos_daemon.auth_state() is None:
+        _stdout("记忆引擎未运行——ingest 已完成，跳过推送。"
+                "启动引擎后重跑 `agentmemhub sync` 即可幂等补推。")
+        return
+    store = Store()
+    try:
+        batches = ([source] if source
+                   else [a.source for a in adapters.all_adapters() if a.locate()])
+        total_ok = total_skip = 0
+        for src in batches:
+            b = build_bundle(store, src)
+            if not b["traces"]:
+                continue
+            resp = push_bundle(b, push)
+            total_ok += resp.get("imported", 0)
+            total_skip += resp.get("skipped", 0)
+            _stdout(f"[{src}] imported={resp.get('imported')} "
+                    f"skipped={resp.get('skipped')}")
+        _stdout(f"同步汇总: imported={total_ok}, skipped={total_skip}")
+        if total_ok and not no_rebuild:
+            r = rebuild_embeddings(push, mode=rebuild_mode)
+            _stdout(f"已补向量({rebuild_mode}): {r}")
+    finally:
+        store.close()
+
+
+def cmd_sync(args) -> None:
+    run_sync(source=args.source, push=args.push,
+             no_rebuild=args.no_rebuild, rebuild_mode=args.rebuild_mode)
+
+
+def run_clean(store, *, source: str = "", apply: bool = False,
+              stdout: Any = None) -> None:
+    """记忆清洗：删除系统注入事件（is_system）。
+
+    默认只预览（dry-run）；apply=True 才物理删除并重建 FTS/event_count。
+    """
+    out = stdout or _stdout
+    rows = store.system_event_counts(source or None)
+    total = sum(r["n"] for r in rows)
+    if not rows:
+        out("（无系统注入事件——库已经干净）")
+        return
+    out(f"系统注入事件共 {total} 条（按 source）:")
+    for r in rows:
+        out(f"  [{r['source']}] {r['n']} 条（{r['convs']} 个会话）")
+    if not apply:
+        out("以上为预览——加 --apply 才会物理删除（删除后重建 FTS 索引与会话计数）")
+        return
+    deleted, convs = store.delete_system_events(source or None)
+    out(f"已删除 {deleted} 条注入事件（{convs} 个会话受影响，FTS/计数已重建）")
+
+
+def cmd_clean(args) -> None:
+    store = Store()
+    try:
+        run_clean(store, source=args.source, apply=args.apply)
+    finally:
+        store.close()
+
+
 def cmd_memos(args) -> None:
     run_memos(source=args.source, out=args.out, push=args.push,
               no_rebuild=args.no_rebuild, rebuild_mode=args.rebuild_mode)
@@ -333,6 +410,18 @@ def build_parser() -> argparse.ArgumentParser:
     pmc.add_argument("--port", type=int, default=9100, help="HTTP 监听端口（默认 9100）")
     pmc.add_argument("--bind", default="127.0.0.1",
                      help="HTTP 监听地址（默认仅本机；团队共享用 0.0.0.0）")
+
+    psy = sub.add_parser("sync", help="增量同步：ingest → 幂等 push MemOS → 补向量（可随时重跑）")
+    psy.add_argument("--source", default="")
+    psy.add_argument("--push", default="", help="MemOS base URL；非空则推送到引擎（幂等，离线自动跳过）")
+    psy.add_argument("--no-rebuild", action="store_true",
+                     help="push 后不触发 embedding rebuild（默认自动补向量）")
+    psy.add_argument("--rebuild-mode", default="repair", choices=("repair", "rebuild"))
+
+    pcl = sub.add_parser("clean", help="记忆清洗：删除系统注入事件（is_system；默认预览，--apply 执行）")
+    pcl.add_argument("--source", default="")
+    pcl.add_argument("--apply", action="store_true",
+                     help="执行删除（不带此参数仅统计预览；删除会重建 FTS 与会话计数）")
     return p
 
 
@@ -348,6 +437,7 @@ def main() -> None:
         "search": cmd_search, "export": cmd_export, "stats": cmd_stats,
         "adapters": cmd_adapters, "memos": cmd_memos, "folders": cmd_folders,
         "serve": cmd_serve, "memos-daemon": cmd_memos_daemon, "mcp": cmd_mcp,
+        "sync": cmd_sync, "clean": cmd_clean,
     }
     fn = handlers.get(args.command)
     if fn is None:
