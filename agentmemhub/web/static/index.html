@@ -769,57 +769,61 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     sel.value=cur;
   }
   function adminRender(j){
-    const state=$('#adminJobState'), out=$('#adminJobOut');
-    const ing=$('#adminIngestBtn'), push=$('#adminPushBtn'), score=$('#adminScoreBtn'),
-          clean=$('#adminCleanBtn'), rebuild=$('#adminRebuildBtn'), warn=$('#adminJobWarn');
-    if(!j){ state.classList.add('hidden'); warn.classList.add('hidden'); out.classList.add('hidden');
-      ing.disabled=false; push.disabled=!lastEngineOnline; score.disabled=!lastEngineOnline;
-      clean.disabled=false; rebuild.disabled=!lastEngineOnline; return; }
-    const busy=j.status==='running';
-    ing.disabled=busy; push.disabled=busy || !lastEngineOnline; score.disabled=busy || !lastEngineOnline;
-    clean.disabled=busy; rebuild.disabled=busy || !lastEngineOnline;   // 任务期间全部禁用
-    if(busy){
-      warn.classList.add('hidden');
-      state.classList.remove('hidden'); state.classList.add('inline-flex');
-      $('#adminJobName').textContent=j.name||'任务运行中…';
-      $('#adminJobClock').textContent='· 已运行 '+Math.max(0,Math.round(Date.now()/1000-(j.startedAt||Date.now()/1000)))+'s';
-      // 结构化进度（评分等任务）：进度条按百分比分级配色 + 实时百分比
-      // （百分比前端自算自 done/total，1.2s 轮询平滑推进，不依赖后端 pct 步进）
-      if(j.progress && j.progress.total){
-        const p=j.progress;
-        const pct=Math.max(0,Math.min(100,Math.round((p.done||0)*100/(p.total||1))));
-        const bar=$('#adminJobBar');
-        bar.style.width=pct+'%';
-        bar.className='block h-full rounded-full transition-all duration-300 '
-          +(pct>=90?'bg-emerald-500':(pct>=50?'bg-amber-500':'bg-error'));
-        $('#adminJobPct').textContent=pct+'%';
-        $('#adminJobClock').textContent=` · ${p.done||0}/${p.total}`;
-      }else{
-        $('#adminJobBar').style.width='0%'; $('#adminJobPct').textContent='';
-      }
-      // 实时进展：任务输出逐行流入（只渲染最近 300 行，避免巨文本每 1.2s
-      // 全量重排拖死主线程导致打字卡顿；内容无变化不重复写）
-      if(j.output){
-        const tail=j.output.split('\n').slice(-300).join('\n');
-        if(out.textContent!==tail){ out.textContent=tail; }
-        out.classList.remove('hidden'); out.scrollTop=out.scrollHeight;
-      }else out.classList.add('hidden');
+    // 基础状态先行（最可靠）：spinner 显隐 / 按钮禁用 / 提示隐藏——
+    // 独立于细节渲染，任何渲染异常都不会再卡住 loading
+    const state=$('#adminJobState'), out=$('#adminJobOut'), warn=$('#adminJobWarn');
+    const busy=!!(j && j.status==='running');
+    state.classList.toggle('hidden', !busy);
+    state.classList.toggle('inline-flex', busy);
+    $('#adminIngestBtn').disabled = busy;
+    $('#adminPushBtn').disabled = busy || !lastEngineOnline;
+    $('#adminScoreBtn').disabled = busy || !lastEngineOnline;
+    $('#adminCleanBtn').disabled = busy;
+    $('#adminRebuildBtn').disabled = busy || !lastEngineOnline;
+    warn.classList.add('hidden');
+    if(!j){
+      $('#adminJobBar').style.width='0%'; $('#adminJobPct').textContent='';
+      out.classList.add('hidden');
       return;
     }
-    // 终态：进度条保留完成态（100% 绿显示"完成"），不归零变白
-    if(j && j.progress && j.progress.total
-       && (j.progress.done||0) >= (j.progress.total||0)){
-      const bar=$('#adminJobBar');
-      bar.style.width='100%';
-      bar.className='block h-full rounded-full bg-emerald-500';
-      $('#adminJobPct').textContent='100%';
-    }else{
-      $('#adminJobBar').style.width='0%'; $('#adminJobPct').textContent='';
-    }
-    state.classList.add('hidden');
-    if(j.error){ out.textContent='任务失败：'+j.error; out.classList.remove('hidden'); }
-    else if(j.output!==undefined && j.output!==''){ out.textContent=j.output.split('\n').slice(-300).join('\n'); out.classList.remove('hidden'); }
-    else out.classList.add('hidden');
+    // 细节渲染（进度条 / 输出）——异常不致命，基础状态已保证
+    try{
+      if(busy){
+        $('#adminJobName').textContent=j.name||'任务运行中…';
+        $('#adminJobClock').textContent='· 已运行 '+Math.max(0,Math.round(Date.now()/1000-(j.startedAt||Date.now()/1000)))+'s';
+        if(j.progress && j.progress.total){
+          const p=j.progress;
+          // 未完成不显示 100%：floor 且上限 99（最后一条未评完时停在 99%）
+          const pct=Math.max(0, Math.min(99, Math.floor((p.done||0)*100/(p.total||1))));
+          const bar=$('#adminJobBar');
+          bar.style.width=pct+'%';
+          bar.className='block h-full rounded-full transition-all duration-300 '
+            +(pct>=90?'bg-emerald-500':(pct>=50?'bg-amber-500':'bg-error'));
+          $('#adminJobPct').textContent=pct+'%';
+          $('#adminJobClock').textContent=` · ${p.done||0}/${p.total}`;
+        }else{
+          $('#adminJobBar').style.width='0%'; $('#adminJobPct').textContent='';
+        }
+        // 实时进展：只渲染最近 300 行（防巨文本重排卡顿；无变化不重写）
+        if(j.output){
+          const tail=j.output.split('\n').slice(-300).join('\n');
+          if(out.textContent!==tail){ out.textContent=tail; }
+          out.classList.remove('hidden'); out.scrollTop=out.scrollHeight;
+        }else out.classList.add('hidden');
+      }else{
+        // 终态：完整进度保留 100% 绿（完成态），否则归零
+        if(j.progress && j.progress.total && (j.progress.done||0)>=(j.progress.total||0)){
+          const bar=$('#adminJobBar');
+          bar.style.width='100%'; bar.className='block h-full rounded-full bg-emerald-500';
+          $('#adminJobPct').textContent='100%';
+        }else{
+          $('#adminJobBar').style.width='0%'; $('#adminJobPct').textContent='';
+        }
+        if(j.error){ out.textContent='任务失败：'+j.error; out.classList.remove('hidden'); }
+        else if(j.output!==undefined && j.output!==''){ out.textContent=j.output.split('\n').slice(-300).join('\n'); out.classList.remove('hidden'); }
+        else out.classList.add('hidden');
+      }
+    }catch(e){ /* 细节渲染异常不致命（基础状态已先行处理） */ }
   }
   // 数据操作轮询：自愈循环——任何请求异常都不中断轮询（避免 UI 冻结在
   // running 快照）；pollSeq 作竞态保护，新提交/重进时旧轮询链作废
