@@ -141,6 +141,28 @@ def _wait_done(client: TestClient, timeout: float = 5.0) -> dict:
     raise AssertionError("job 未在超时内完成")
 
 
+def test_run_score_all_concurrent_workers():
+    """并发：4 worker 评估 4 条全部计入；进度行带 [N/总数]。"""
+    llm = {"endpoint": "https://x", "api_key": "k", "model": "m"}
+    traces = [{"id": f"t{i}", "userText": f"内容{i}", "agentText": "回复"} for i in range(4)]
+    lines: list[str] = []
+    def fake_er(method, path, *a, **k):
+        if path.startswith("/api/v1/traces"):
+            return {"total": 4, "traces": traces}
+        if path == "/api/v1/feedback":
+            return {"id": "fb"}
+        raise AssertionError(f"unexpected: {method} {path}")
+    with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
+         mock.patch("agentmemhub.scoring.evaluate_trace", return_value="positive"), \
+         mock.patch("agentmemhub.memos_daemon.engine_request", side_effect=fake_er) as er:
+        r = run_score_all(emit=lines.append, base_url="http://127.0.0.1:1", workers=4)
+    assert r["evaluated"] == 4 and r["positive"] == 4 and r["errors"] == 0
+    # 进度行带 [N/总数]（并发下总数正确）
+    assert any("[1/4]" in l for l in lines) and any("[4/4]" in l for l in lines)
+    fb = [c for c in er.call_args_list if c[0][1] == "/api/v1/feedback"]
+    assert len(fb) == 4
+
+
 def test_admin_score_offline_503():
     c = _client()
     with mock.patch("agentmemhub.memos_daemon.auth_state", return_value=None):
