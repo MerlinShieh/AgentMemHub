@@ -113,6 +113,7 @@ MENU = """
   [5] 状态总览（数据源 / 本地库 / 记忆引擎）
   [6] 启动记忆引擎（MemOS daemon，首次会提示插件目录）
   [7] 停止记忆引擎（仅限本工具启动的实例）
+  [8] 停止网页看板（结束占用看板端口的服务进程）
   [0] 退出
 """
 
@@ -175,6 +176,54 @@ def _port_listening(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.5)
         return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _dashboard_pid(port: int) -> Optional[int]:
+    """返回监听端口进程的 PID（Windows netstat；其他平台用 psutil 简化探测）。"""
+    if os.name == "nt":
+        out = subprocess.run(["netstat", "-ano"], capture_output=True,
+                             text=True).stdout
+        for line in out.splitlines():
+            if "LISTENING" in line and f":{port}" in line:
+                parts = line.split()
+                if parts:
+                    try:
+                        return int(parts[-1])
+                    except ValueError:
+                        return None
+    return None
+
+
+def action_dashboard_stop() -> None:
+    """停止网页看板：结束占用看板端口的服务进程（确认后执行）。"""
+    import time as _t
+    port = dashboard_port()
+    if not _port_listening(port):
+        _out(f"  看板未在运行（端口 {port} 空闲）")
+        return
+    pid = _dashboard_pid(port)
+    if pid is None:
+        _out(f"  端口 {port} 被占用但未能解析进程 PID，请手动关闭占用进程")
+        return
+    if not _confirm(f"  将停止看板进程（PID {pid}，端口 {port}）？"):
+        _out("  （已取消）")
+        return
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                       capture_output=True, text=True)
+    else:
+        import signal as _sig
+        try:
+            os.kill(pid, _sig.SIGTERM)
+        except OSError:
+            _out("  ✗ 进程不存在（可能已退出）")
+            return
+    for _ in range(20):                      # 等端口释放（最多 10 秒）
+        if not _port_listening(port):
+            _out(f"  ✓ 网页看板已停止（PID {pid}，端口 {port} 已释放）")
+            return
+        _t.sleep(0.5)
+    _out(f"  ⚠ 端口 {port} 仍在占用（进程可能未完全退出）")
 
 
 def action_memos() -> None:
@@ -247,6 +296,7 @@ ACTIONS = {
     "5": ("状态总览", action_status),
     "6": ("启动记忆引擎", action_engine_start),
     "7": ("停止记忆引擎", action_engine_stop),
+    "8": ("停止网页看板", action_dashboard_stop),
 }
 
 
