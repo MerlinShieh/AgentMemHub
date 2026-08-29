@@ -232,6 +232,7 @@ Claude Code 等支持 MCP 的 Agent harness 上——模型在会话进行中即
 | `memory_stats()` | 引擎在线状态 / 记忆总量 / 语义检索与 LLM 评分可用性 / 记忆模式 |
 | `memory_save(content)` | 写一条记忆（即时入库并补向量），供模型主动保存事实/结论 |
 
+```bash
 # 0. 先常驻记忆引擎（网关绝不代管其生命周期）：
 python -m agentmemhub memos-daemon start
 
