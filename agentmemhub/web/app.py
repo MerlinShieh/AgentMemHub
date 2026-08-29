@@ -132,14 +132,17 @@ def _run_score_fn(cli, limit: int, dry_run: bool):
 
     def _do(emit, meta) -> str:
         w = _DualWriter(emit)
-        last_pct = [0]
+        last_done = [0]
 
         def on_progress(done: int, total: int) -> None:
-            pct = int(done * 100 / total) if total else 0
-            if pct != last_pct[0] or done >= (total or 0):
-                last_pct[0] = pct
-                tasks.set_progress(meta["id"], {
-                    "done": done, "total": total, "pct": pct, "label": "评分"})
+            # 每条都更新（前端自算百分比平滑推进；终态 100% 由下方 set 兜底）
+            if done == last_done[0]:
+                return
+            last_done[0] = done
+            tasks.set_progress(meta["id"], {
+                "done": done, "total": total,
+                "pct": int(done * 100 / total) if total else 0,
+                "label": "评分"})
 
         with redirect_stdout(w):
             r = run_score_all(base_url="", limit=limit, dry_run=dry_run,
