@@ -106,15 +106,20 @@ def test_admin_push_online_job():
     fake = {"imported": 3, "skipped": 5,
             "lines": ["[zcode] 推送 ok: imported=3 skipped=5"],
             "rebuilt": {"done": True}}
+    def fake_push(store, **kw):
+        (kw.get("stdout") or print)("[zcode] 推送 ok: imported=3 skipped=5")
+        (kw.get("stdout") or print)("正在补向量（embedding repair，本地计算可能耗时数分钟）…")
+        (kw.get("stdout") or print)("MemOS 导入汇总: imported=3, skipped=5")
+        return fake
     with mock.patch("agentmemhub.memos_daemon.auth_state", return_value={}), \
-         mock.patch("agentmemhub.cli.push_to_memos", return_value=fake), \
+         mock.patch("agentmemhub.cli.push_to_memos", side_effect=fake_push), \
          mock.patch("agentmemhub.adapters.all_adapters", return_value=[]):
         r = c.post("/api/admin/push")
         assert r.status_code == 200
         done = _wait_done(c)
         assert done["status"] == "done"
         assert "imported=3" in done["output"]
-        assert "done" in done["output"]
+        assert "正在补向量" in done["output"]      # rebuild 进度实时可见
 
 
 def test_admin_task_error_reported():
@@ -184,8 +189,11 @@ def test_task_full_log_persisted_to_file(tmp_path, monkeypatch):
     c = _client()
     fake = {"imported": 3, "skipped": 5,
             "lines": ["[zcode] 推送 ok: imported=3 skipped=5"], "rebuilt": None}
+    def fake_push(store, **kw):
+        (kw.get("stdout") or print)("[zcode] 推送 ok: imported=3 skipped=5")
+        return fake
     with mock.patch("agentmemhub.memos_daemon.auth_state", return_value={}), \
-         mock.patch("agentmemhub.cli.push_to_memos", return_value=fake), \
+         mock.patch("agentmemhub.cli.push_to_memos", side_effect=fake_push), \
          mock.patch("agentmemhub.adapters.all_adapters", return_value=[]):
         c.post("/api/admin/push")
         done = _wait_done(c)
