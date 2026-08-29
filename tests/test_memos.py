@@ -4,11 +4,13 @@
 """
 import sys
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agentmemhub.models import Event, renumber
 from agentmemhub.memos import _session_events_to_traces as to_traces
+from agentmemhub.memos import push_bundle
 
 CONV = {"id": "c1"}
 
@@ -132,3 +134,15 @@ def test_bundle_shape():
 def json_str(ts) -> str:
     import json
     return json.dumps(ts, ensure_ascii=False)
+
+
+def test_push_bundle_goes_through_authenticated_gateway():
+    """推送走 engine_request（自动登录带 cookie）——引擎设密码后不再 401。"""
+    with mock.patch("agentmemhub.memos_daemon.engine_request") as er:
+        er.return_value = {"imported": 5, "skipped": 0}
+        r = push_bundle({"version": 1, "traces": []}, "http://127.0.0.1:18999")
+    assert r == {"imported": 5, "skipped": 0}
+    args, kwargs = er.call_args
+    assert args == ("POST", "/api/v1/import")
+    assert kwargs["body"] == {"version": 1, "traces": []}
+    assert kwargs["base"] == "http://127.0.0.1:18999"

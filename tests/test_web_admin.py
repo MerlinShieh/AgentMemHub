@@ -119,3 +119,53 @@ def test_admin_task_error_reported():
         done = _wait_done(c)
         assert done["status"] == "error"
         assert "boom" in done["error"]
+
+
+def test_task_live_output_during_running():
+    """emit 实时流：任务运行中 job.output 即可见部分输出（前端 loading 期显示进展）。"""
+    tasks.reset()
+    def fn(emit):
+        emit("第一批完成")
+        time.sleep(0.15)
+        emit("第二批完成")
+    job = tasks.submit("实时任务", fn)
+    assert job["status"] == "running"
+    time.sleep(0.05)
+    mid = tasks.status()
+    assert mid["status"] == "running" and "第一批完成" in mid["output"]
+    deadline = time.time() + 3
+    while time.time() < deadline and tasks.status()["status"] == "running":
+        time.sleep(0.02)
+    done = tasks.status()
+    assert done["status"] == "done"
+    assert "第二批完成" in done["output"]
+
+
+def test_logs_record_recent_and_endpoint(tmp_path, monkeypatch):
+    """统一日志：record/recent + /api/logs 端点（文件写 tmp，防污染真实数据目录）。"""
+    from agentmemhub.web import logs
+    monkeypatch.setattr("agentmemhub.web.logs._path", lambda: tmp_path / "web.log")
+    logs.reset()
+    logs.record("提取任务完成")
+    logs.record("引擎启动失败", level="error")
+    c = _client()
+    d = c.get("/api/logs?limit=10").json()
+    entries = d["logs"]
+    assert entries[0]["msg"] == "引擎启动失败" and entries[0]["level"] == "error"
+    assert entries[1]["msg"] == "提取任务完成"
+    assert (tmp_path / "web.log").exists()           # JSONL 留痕
+
+
+def test_admin_ingest_records_log(tmp_path, monkeypatch):
+    """提交任务写入统一日志（可追溯面板操作）。"""
+    from agentmemhub.web import logs
+    monkeypatch.setattr("agentmemhub.web.logs._path", lambda: tmp_path / "web.log")
+    logs.reset()
+    c = _client()
+    with mock.patch("agentmemhub.cli.run_ingest") as ri, \
+         mock.patch("agentmemhub.adapters.all_adapters", return_value=[]):
+        c.post("/api/admin/ingest")
+        _wait_done(c)
+    msgs = [l["msg"] for l in logs.recent()]
+    assert any("提交任务" in m for m in msgs)
+    assert any("开始" in m for m in msgs) and any("完成" in m for m in msgs)
