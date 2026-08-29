@@ -213,6 +213,8 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 | `mcp [--http] [--bind H] [--port P]` | MCP 记忆网关：默认 stdio（Agent 拉起）；`--http` 常驻为 Streamable HTTP 供团队共享 |
 | `sync [--push URL] [--no-rebuild]` | 增量同步：ingest → 幂等 push MemOS → 补向量（可随时重跑；引擎离线自动跳过推送）|
 | `clean [--source x] [--apply]` | 记忆清洗：删除系统注入事件（默认预览，`--apply` 才执行并重建 FTS/计数）|
+| `score [--limit N] [--dry-run] [--workers N]` | LLM 批量自动评分历史记忆（三轴评估 → feedback 写入价值分；跳过已评，未完成封顶 99%）|
+| `rebuild [--mode repair\|rebuild]` | 补向量：触发引擎 embedding rebuild（导入记忆后修复语义检索）|
 | `stats` / `adapters` | 统计 / adapter 状态 |
 
 > 更完整的代码与 SQL 示例（按 Agent 查询、按文件夹跨 Agent 统计、会话角色分布、直连数据库等）见 **[docs/EXAMPLES.md](./docs/EXAMPLES.md)**。
@@ -344,10 +346,13 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 功能：Agent/工作空间多选筛选 · 服务端分页列表 · 全文搜索（FTS5+LIKE）· 统计卡与图表 ·
 会话详情抽屉（用户消息/思维链/工具调用/代码补丁 全渲染，按记忆轮次分组）· 标题编辑与会话删除（真实写库）。
 引擎在线时画面下方有**「记忆引擎」板块**：运行状态（含托管标识/记忆规模/向量就绪）、
-语义检索框（直接搜历史记忆）、最近记忆列表（value 正负标注）、一键启动/停止与
-打开引擎页面链接；下方还有**「数据操作」**：一键**提取会话入库**（跑全部 adapter）与
-**推送记忆到 MemOS**（幂等导入 + 补向量）——两者都是后台任务，进度与结果实时回显，
-同一时刻只允许一个任务；MemOS 未安装时板块自动隐藏。
+语义检索框（直接搜历史记忆）、最近记忆列表（value 正负标注 + 👍/👎 单条打分）、
+一键启动/停止与打开引擎页面链接。下方还有**「数据操作」**（按流程排序）：
+**提取会话入库** → **清洗数据**（删系统注入，带确认弹窗）→ **推送记忆到 MemOS**（幂等导入 + 自动补向量）→
+**补向量**（embedding rebuild）→ **自动评分**（LLM 三轴批量补价值分，进度条 + 百分比，未完成封顶 99%）——
+全部为后台任务，**进度条按百分比分级配色**、结果实时回显、同一时刻只允许一个任务；
+顶部与数据操作区均有**「操作日志」**入口（引擎启停/任务提交执行/打分等记录，留存于 `<程序根>/logs/`，重启可查）。
+MemOS 未安装时板块自动隐藏。
 
 ![AgentMemHub 主看板 — 筛选栏、统计卡、趋势/占比图与会话列表](./docs/images/dashboard.png)
 
@@ -381,6 +386,9 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 - [x] 记忆引擎一体化管理（MemOS 平移进项目 + 启停/巡检/看板记忆板块）
 - [x] 统一配置体系（agentmemhub.yaml：全路径可配置）
 - [x] MCP 记忆网关（stdio / Streamable HTTP 双传输，供 ZCode/OpenCode 等 harness 检索/写入记忆）
+- [x] 记忆清洗（clean：删除系统注入事件，预览→执行并重建 FTS/计数）
+- [x] LLM 批量自动评分（score：三轴评估写价值分、跳过已评、面板进度条）
+- [x] 统一日志（`<程序根>/logs/`：web/cli/engine/tasks 分文件，面板可查历史）
 - [ ] 更多 Agent（Claude Code / Cursor / Gemini CLI / CodeBuddy）
-- [ ] 记忆清洗规则（去注入元数据、压缩折叠会话）
+- [ ] 记忆折叠压缩（超长会话压缩、相邻轮折叠）
 
