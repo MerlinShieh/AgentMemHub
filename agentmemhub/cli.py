@@ -370,7 +370,7 @@ def cmd_score(args) -> None:
         r = run_score_all(emit=_emit, base_url=args.push,
                           limit=args.limit, dry_run=args.dry_run,
                           workers=args.workers)
-        _stdout(f"评分完成: evaluated={r['evaluated']} "
+        _stdout(f"评分完成: evaluated={r['evaluated']} skipped={r['skipped']} "
                 f"positive={r['positive']} neutral={r['neutral']} "
                 f"negative={r['negative']} errors={r['errors']}"
                 + ("（dry-run，未写入）" if r["dryRun"] else ""))

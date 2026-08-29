@@ -16,6 +16,71 @@ from agentmemhub.models import Event, renumber
 from agentmemhub.store import Store
 
 
+def _empty_cache(tmp_path, monkeypatch):
+    """隔离已评清单到临时目录（防真实 data_dir 污染 + 互相干扰）。"""
+    monkeypatch.setattr("agentmemhub.scoring._cache_path",
+                        lambda: tmp_path / "scored_traces.json")
+    from agentmemhub import scoring
+    scoring.clear_scored()
+    return scoring
+
+
+@pytest.fixture(autouse=True)
+def _isolate_scored(tmp_path, monkeypatch):
+    _empty_cache(tmp_path, monkeypatch)
+
+
+def test_scored_cache_persist(tmp_path, monkeypatch):
+    """已评清单：mark/load/清空均持久化到文件。"""
+    scoring = _empty_cache(tmp_path, monkeypatch)
+    assert scoring._load_scored() == set()
+    scoring.mark_scored("t1")
+    scoring.mark_scored("t2")
+    scoring.mark_scored("t1")               # 已存在不重复
+    assert scoring._load_scored() == {"t1", "t2"}
+    assert (tmp_path / "scored_traces.json").exists()
+    scoring.clear_scored()
+    assert scoring._load_scored() == set()
+
+
+def test_run_score_all_skips_scored(tmp_path, monkeypatch):
+    """默认跳过已评清单（含手动 👍/👎 的），写入成功后才 mark。"""
+    scoring = _empty_cache(tmp_path, monkeypatch)
+    scoring.mark_scored("t1")               # 模拟手动已评
+    llm = {"endpoint": "https://x", "api_key": "k", "model": "m"}
+    traces = [{"id": "t1", "userText": "a", "agentText": "b"},
+              {"id": "t2", "userText": "c", "agentText": "d"}]
+    lines: list[str] = []
+    def fake_er(method, path, *a, **k):
+        if path.startswith("/api/v1/traces"):
+            return {"total": 2, "traces": traces}
+        if path == "/api/v1/feedback":
+            return {"id": "fb"}
+        raise AssertionError(f"unexpected {method} {path}")
+    with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
+         mock.patch("agentmemhub.scoring.evaluate_trace", return_value="positive"), \
+         mock.patch("agentmemhub.memos_daemon.engine_request", side_effect=fake_er) as er:
+        r = run_score_all(emit=lines.append, base_url="http://127.0.0.1:1", workers=2)
+    assert r["evaluated"] == 2 and r["skipped"] == 1      # t1 跳过，t2 评估
+    assert r["positive"] == 1
+    assert any("已评过，跳过" in l for l in lines)
+    assert "t2" in scoring._load_scored()                 # 写入成功 → 记入清单
+    assert "t1" in scoring._load_scored()
+
+
+def test_run_score_all_dry_run_not_mark(tmp_path, monkeypatch):
+    """dry-run 不写入也不记入已评清单。"""
+    scoring = _empty_cache(tmp_path, monkeypatch)
+    llm = {"endpoint": "https://x", "api_key": "k", "model": "m"}
+    with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
+         mock.patch("agentmemhub.scoring.evaluate_trace", return_value="positive"), \
+         mock.patch("agentmemhub.memos_daemon.engine_request") as er:
+        er.return_value = {"total": 1, "traces": [{"id": "t1", "userText": "a", "agentText": "b"}]}
+        r = run_score_all(limit=1, dry_run=True)
+    assert r["dryRun"] is True and r["positive"] == 1
+    assert scoring._load_scored() == set()                # 未写入 → 未标记
+
+
 def test_parse_verdict_variants():
     assert _parse_verdict('{"verdict": "positive", "reason": "x"}') == "positive"
     assert _parse_verdict('{"verdict":"negative"}') == "negative"

@@ -17,7 +17,9 @@
 from __future__ import annotations
 
 import json
+import threading
 import urllib.request
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from agentmemhub import memos_daemon
@@ -31,6 +33,57 @@ _SYSTEM_PROMPT = (
     "positive=值得保留（达成目标或有重要教训）；negative=无价值或纯噪音；"
     "neutral=一般，不置可否。"
 )
+
+# ---------------------------------------------------------------------------
+# 已评清单：<data_dir>/scored_traces.json（手动 👍/👎 与批量评分共同累计，
+# 重跑「自动评分」时跳过——避免批量 verdict 覆盖/稀释手动打分）
+# ---------------------------------------------------------------------------
+
+_scored_cache: Optional[set[str]] = None
+_cache_lock = threading.Lock()
+
+
+def _cache_path() -> Path:
+    from agentmemhub import config
+    return config.config().data_dir / "scored_traces.json"
+
+
+def _load_scored() -> set[str]:
+    global _scored_cache
+    p = _cache_path()
+    try:
+        if _scored_cache is None and p.exists():
+            _scored_cache = set(json.loads(p.read_text(encoding="utf-8")))
+    except Exception:
+        _scored_cache = set()
+    return _scored_cache or set()
+
+
+def mark_scored(trace_id: str) -> None:
+    """记录一条记忆已评分（批量成功写入或手动 👍/👎 后调用）。"""
+    global _scored_cache
+    with _cache_lock:
+        s = _load_scored()
+        if trace_id in s:
+            return
+        s.add(trace_id)
+        _scored_cache = s
+        try:
+            _cache_path().write_text(
+                json.dumps(sorted(s), ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+
+def clear_scored() -> None:
+    """清空已评清单（测试/重评用）。"""
+    global _scored_cache
+    with _cache_lock:
+        _scored_cache = set()
+        try:
+            _cache_path().unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def read_engine_llm() -> dict[str, Any]:
@@ -98,12 +151,15 @@ def _parse_verdict(content: str) -> str:
 def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
                   base_url: str = "", limit: int = 0,
                   dry_run: bool = False,
-                  workers: int = 1) -> dict[str, Any]:
-    """批量自动评分引擎内全部（或前 N 条）历史记忆。
+                  workers: int = 1,
+                  skip_scored: bool = True) -> dict[str, Any]:
+    """批量自动评分引擎内历史记忆（默认跳过已评过的——含手动 👍/👎）。
 
     emit(line)：进度实时输出，行内带 "[已处理/总数]"（面板/CLI 显示进度）；
-    workers：LLM 评估/写入是 IO 密集，>1 用线程池并发（默认 1=串行）。
-    返回 {evaluated, positive, neutral, negative, errors, dryRun}。
+    workers：LLM 评估/写入是 IO 密集，>1 用线程池并发（默认 1=串行）；
+    skip_scored：跳过已评清单中的 trace（默认开）。评分成功（或手动打分）
+    会记入清单，重跑不再覆盖。
+    返回 {evaluated, skipped, positive, neutral, negative, errors, dryRun}。
     """
     import threading
     from concurrent.futures import ThreadPoolExecutor
@@ -111,9 +167,10 @@ def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
     out = emit or (lambda s: None)
     llm_cfg = read_engine_llm()
     root = (base_url or memos_daemon.base_url()).rstrip("/")
-    summary = {"evaluated": 0, "positive": 0, "neutral": 0,
+    summary = {"evaluated": 0, "skipped": 0, "positive": 0, "neutral": 0,
                "negative": 0, "errors": 0, "dryRun": bool(dry_run)}
     lock = threading.Lock()
+    scored = _load_scored() if skip_scored else set()
     offset = 0
     page = 100
     total: Optional[int] = None
@@ -124,6 +181,11 @@ def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
             summary["evaluated"] += 1
             idx = summary["evaluated"]
         label = f"[{idx}/{total}]" if total else f"[{idx}]"
+        if tid in scored:
+            with lock:
+                summary["skipped"] += 1
+            out(f"{label} {tid} 已评过，跳过（手动或此前批量）")
+            return
         out(f"{label} 评估 {tid} …")
         try:
             verdict = evaluate_trace(t, llm_cfg)
@@ -146,6 +208,7 @@ def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
                 body={"channel": "explicit", "polarity": verdict,
                       "magnitude": 1.0, "traceId": tid},
                 base=root, timeout=30)
+            mark_scored(tid)          # 写入成功 → 进入已评清单（重跑跳过）
             out(f"{label} → {verdict} ✓ 已写入")
         except Exception as e:
             with lock:
