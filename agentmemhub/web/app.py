@@ -460,6 +460,31 @@ def create_app(db_path: Path | None = None):
                              "episodes": ov.get("episodes"),
                              "traces": ov.get("traces")})
 
+    @app.post("/api/memos/feedback")
+    def api_memos_feedback(traceId: str = Query(...),
+                           polarity: str = Query(..., pattern="^(positive|negative|neutral)$"),
+                           magnitude: float = Query(default=1.0),
+                           channel: str = Query(default="explicit")):
+        """记忆打分（正/负反馈）。
+
+        转发引擎 POST /api/v1/feedback 并带 traceId——引擎会立即按反馈
+        极性/幅度重算该条记忆的 value/rHuman/priority（无需 LLM）。
+        channel 必须是引擎约束的 explicit|implicit（面板人工评分=explicit）。
+        """
+        from agentmemhub import logs, memos_daemon
+        try:
+            res = memos_daemon.engine_request(
+                "POST", "/api/v1/feedback",
+                body={"channel": channel, "polarity": polarity,
+                      "magnitude": magnitude, "traceId": traceId},
+                timeout=15)
+        except memos_daemon.EngineAuthError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"engine feedback failed: {e}")
+        logs.record(f"记忆打分：trace={traceId} {polarity}（幅度 {magnitude}）")
+        return JSONResponse({"ok": True, "traceId": traceId, "feedback": res})
+
     @app.get("/api/memos/traces")
     def api_memos_traces(limit: int = Query(default=8, ge=1, le=50),
                          offset: int = Query(default=0, ge=0)):
