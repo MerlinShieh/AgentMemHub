@@ -23,8 +23,9 @@ _RING: list[dict] = []
 
 
 def log_dir() -> Path:
-    """统一日志根目录（数据目录/logs）。"""
-    return config.config().data_dir / "logs"
+    """统一日志根目录：<程序根>/logs（跟随程序所在目录，不占系统盘数据目录）。"""
+    from agentmemhub.config import PROJECT_ROOT
+    return PROJECT_ROOT / "logs"
 
 
 def _web_file() -> Path:
