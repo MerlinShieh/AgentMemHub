@@ -205,6 +205,61 @@ class Store:
         return cur.rowcount > 0
 
     # ------------------------------------------------------------------
+    # 记忆清洗：系统注入事件（is_system）统计/删除
+    # ------------------------------------------------------------------
+
+    def system_event_counts(self, source: Optional[str] = None) -> list[sqlite3.Row]:
+        """按 source 统计系统注入事件数（clean --dry-run 预览用）。"""
+        q = ("SELECT source, COUNT(*) AS n, COUNT(DISTINCT conversation_id) AS convs "
+             "FROM events WHERE is_system = 1")
+        params: tuple = ()
+        if source:
+            q += " AND source = ?"
+            params = (source,)
+        q += " GROUP BY source ORDER BY n DESC"
+        return self.conn.execute(q, params).fetchall()
+
+    def delete_system_events(self, source: Optional[str] = None) -> tuple[int, int]:
+        """删除全部系统注入事件，并重建受影响会话的 FTS 索引与 event_count。
+
+        破坏性操作：调用方应先 system_event_counts() 预览。
+        返回 (删除事件数, 受影响会话数)。
+        """
+        conn = self.conn
+        src_q = "" if source is None else " AND source = ?"
+        src_p: tuple = () if source is None else (source,)
+        with conn:
+            affected = conn.execute(
+                "SELECT DISTINCT source, conversation_id FROM events "
+                "WHERE is_system = 1" + src_q, src_p).fetchall()
+            cur = conn.execute("DELETE FROM events WHERE is_system = 1" + src_q, src_p)
+            deleted = cur.rowcount
+            for (s, cid) in affected:
+                # 重建该会话 FTS（events_fts 无 seq 列，删除行无法精确对应 → 整体重建）
+                conn.execute(
+                    "DELETE FROM events_fts WHERE source=? AND conversation_id=?",
+                    (s, cid))
+                evs = conn.execute(
+                    "SELECT role, content, tool_name, tool_output, reasoning, "
+                    "shell_cmd, shell_output, patch_diff FROM events "
+                    "WHERE source=? AND conversation_id=? ORDER BY seq",
+                    (s, cid)).fetchall()
+                for e in evs:
+                    conn.execute(
+                        "INSERT INTO events_fts (source, conversation_id, role, content, "
+                        "tool_name, tool_output, reasoning, shell_cmd, shell_output, "
+                        "patch_diff) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (s, cid, e["role"], e["content"] or "", e["tool_name"] or "",
+                         e["tool_output"] or "", e["reasoning"] or "",
+                         e["shell_cmd"] or "", e["shell_output"] or "",
+                         e["patch_diff"] or ""))
+                conn.execute(
+                    "UPDATE conversations SET event_count=(SELECT COUNT(*) FROM events "
+                    "WHERE source=? AND conversation_id=?) WHERE source=? AND id=?",
+                    (s, cid, s, cid))
+        return deleted, len(affected)
+
+    # ------------------------------------------------------------------
     # 读取
     # ------------------------------------------------------------------
 

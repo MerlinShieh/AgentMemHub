@@ -35,6 +35,9 @@ HANDOFF.md
 # 导出产物（含真实对话的 bundle / markdown，严禁入库）
 exports/
 
+# 统一日志目录（<程序根>/logs：web.log / cli.log / engine.log / tasks/*）
+logs/
+
 # 本地引擎 MemOS（平移到项目内的上游 repo / 记忆库，严禁入库）
 memOS/
 

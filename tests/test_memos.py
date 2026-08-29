@@ -4,11 +4,13 @@
 """
 import sys
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agentmemhub.models import Event, renumber
 from agentmemhub.memos import _session_events_to_traces as to_traces
+from agentmemhub.memos import push_bundle
 
 CONV = {"id": "c1"}
 
@@ -132,3 +134,29 @@ def test_bundle_shape():
 def json_str(ts) -> str:
     import json
     return json.dumps(ts, ensure_ascii=False)
+
+
+def test_push_bundle_goes_through_authenticated_gateway():
+    """推送走 engine_request（自动登录带 cookie）——引擎设密码后不再 401。"""
+    with mock.patch("agentmemhub.memos_daemon.engine_request") as er:
+        er.return_value = {"imported": 5, "skipped": 0}
+        r = push_bundle({"version": 1, "traces": []}, "http://127.0.0.1:18999")
+    assert r == {"imported": 5, "skipped": 0}
+    args, kwargs = er.call_args
+    assert args == ("POST", "/api/v1/import")
+    assert kwargs["body"] == {"version": 1, "traces": []}
+    assert kwargs["base"] == "http://127.0.0.1:18999"
+
+
+def test_rebuild_embeddings_goes_through_authenticated_gateway():
+    """embedding rebuild 同样走自动登录网关——修复设密码后的 401。"""
+    from agentmemhub.memos import rebuild_embeddings
+    with mock.patch("agentmemhub.memos_daemon.engine_request") as er:
+        er.return_value = {"processed": 10, "updated": 8, "failed": 0,
+                           "done": True, "statsAfter": None}
+        r = rebuild_embeddings("http://127.0.0.1:18999", mode="rebuild")
+    assert r["done"] is True and r["processed"] == 10
+    args, kwargs = er.call_args
+    assert args == ("POST", "/api/v1/embeddings/rebuild")
+    assert kwargs["body"] == {"mode": "rebuild", "limit": 500}
+    assert kwargs["base"] == "http://127.0.0.1:18999"

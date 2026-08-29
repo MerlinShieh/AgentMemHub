@@ -163,37 +163,45 @@ def write_bundle(bundle: dict[str, Any], out_path: Path) -> None:
 
 
 def push_bundle(bundle: dict[str, Any], base_url: str = "http://127.0.0.1:18800") -> dict:
-    """POST bundle 到 MemOS /api/v1/import。返回响应 JSON。"""
-    url = base_url.rstrip("/") + "/api/v1/import"
-    data = json.dumps(bundle, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    """POST bundle 到 MemOS /api/v1/import（走网关统一出口，自动登录带 cookie）。
+
+    引擎 viewer 设了密码时 urllib 直连会 401——统一走 engine_request
+    （登录缓存 cookie、401 自动重登），CLI/看板/MCP memory_save 全部受益。
+    """
+    from agentmemhub import memos_daemon
+    return memos_daemon.engine_request("POST", "/api/v1/import",
+                                       body=bundle, timeout=60, base=base_url)
 
 
 def rebuild_embeddings(base_url: str = "http://127.0.0.1:18800",
                        mode: str = "repair",
                        limit: int = 500,
-                       max_rounds: int = 200) -> dict:
+                       max_rounds: int = 200,
+                       on_progress=None) -> dict:
     """POST /api/v1/embeddings/rebuild 补齐缺失向量（导入的 trace 无 embedding，无法语义检索）。
 
+    走网关统一出口（自动登录带 cookie，引擎设密码后不再 401）。
     服务端每批只处理 limit 条并返回 done/nextOffset——此处分页循环直到全部补齐。
     mode: repair=只补 null 向量（默认，快）；rebuild=全部重算。
+    on_progress: 可选回调，每轮调用一次（on_progress(str)），供实时进度展示。
     返回汇总：{rounds, processed, updated, failed, done, statsAfter}。
     """
-    url = base_url.rstrip("/") + "/api/v1/embeddings/rebuild"
+    from agentmemhub import memos_daemon
     total = {"rounds": 0, "processed": 0, "updated": 0, "failed": 0,
              "done": False, "statsAfter": None}
     for _ in range(max_rounds):
-        body = json.dumps({"mode": mode, "limit": limit}, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            d = json.loads(resp.read().decode("utf-8"))
+        d = memos_daemon.engine_request(
+            "POST", "/api/v1/embeddings/rebuild",
+            body={"mode": mode, "limit": limit}, timeout=600, base=base_url)
         total["rounds"] += 1
         for k in ("processed", "updated", "failed"):
             total[k] += d.get(k, 0)
         total["done"] = bool(d.get("done"))
         total["statsAfter"] = d.get("statsAfter")
+        if on_progress is not None:
+            on_progress(f"embedding {mode}: 第 {total['rounds']} 轮 "
+                        f"processed={total['processed']} updated={total['updated']} "
+                        f"failed={total['failed']}")
         if total["done"]:
             break
     return total

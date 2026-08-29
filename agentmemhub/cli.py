@@ -32,6 +32,15 @@ def _stdout(s: str) -> None:
     print(s)
 
 
+def _cli_log(msg: str, level: str = "info") -> None:
+    """CLI/控制台操作落盘（logs/cli.log），不干扰终端输出。"""
+    try:
+        from agentmemhub import logs
+        logs.record(msg, level=level, actor="cli", dest="cli")
+    except Exception:
+        pass
+
+
 def run_ingest(sources: list[str], signature: str = "") -> tuple[int, int]:
     """提取指定 source 列表并入库（CLI 与控制台共用）。返回 (会话数, 事件数)。"""
     store = Store()
@@ -52,6 +61,7 @@ def run_ingest(sources: list[str], signature: str = "") -> tuple[int, int]:
         total_ev += n
         _stdout(f"[{src}] {len(sessions)} 会话, {n} 事件")
     store.close()
+    _cli_log(f"ingest sources={sources} → {total_conv} 会话, {total_ev} 事件")
     return total_conv, total_ev
 
 
@@ -202,12 +212,62 @@ def cmd_memos_daemon(args) -> None:
     _stdout(_json.dumps(r, ensure_ascii=False, indent=1))
 
 
+def push_to_memos(store: Store, *, sources: list[str], base_url: str,
+                  no_rebuild: bool = False, rebuild_mode: str = "repair",
+                  stdout: Any = None) -> dict[str, Any]:
+    """构建并幂等推送 MemOS bundle（按 source 分批，失败批次继续），可选补向量。
+
+    MemOS /api/v1/import 上限 64 MiB——全量 bundle 可能超限（实测 90+MB），
+    因此按 source 分批 POST。trace id 由 src_id 派生 → 幂等（重复=skipped）。
+    每批推送与 rebuild 进度**实时**经 stdout 输出（web 任务据此实时回显，
+    避免"导入汇总已完成"后看起来卡住）；lines 同时收集终态文本供日志。
+    返回 {imported, skipped, lines, rebuilt}；rebuilt 失败/跳过时为 None。
+    """
+    from agentmemhub.memos import build_bundle, push_bundle, rebuild_embeddings
+    out = stdout or print
+    lines: list[str] = []
+
+    def emit(s: str) -> None:
+        lines.append(s)
+        try:
+            out(s)
+        except Exception:
+            pass
+
+    total_ok = total_skip = 0
+    for src in sources:
+        b = build_bundle(store, src)
+        if not b["traces"]:
+            continue
+        try:
+            resp = push_bundle(b, base_url)
+            total_ok += resp.get("imported", 0)
+            total_skip += resp.get("skipped", 0)
+            emit(f"[{src}] 推送 ok: imported={resp.get('imported')} "
+                 f"skipped={resp.get('skipped')}")
+        except Exception as e:
+            emit(f"[{src}] 推送失败（继续下一批）: {e}")
+    rebuilt = None
+    if total_ok and not no_rebuild:
+        try:
+            # rebuild 是任务最耗时阶段（本地 embedding 计算可数分钟）——
+            # 先提示再逐轮打印进度，杜绝"看起来卡住"
+            emit(f"正在补向量（embedding {rebuild_mode}，本地计算可能耗时数分钟）…")
+            rebuilt = rebuild_embeddings(base_url, mode=rebuild_mode,
+                                         on_progress=lambda s: emit(s))
+            emit(f"已补向量({rebuild_mode}): {rebuilt}")
+        except Exception as e:
+            emit(f"embedding rebuild 失败（可用 --no-rebuild 跳过）: {e}")
+    emit(f"MemOS 导入汇总: imported={total_ok}, skipped={total_skip}")
+    return {"imported": total_ok, "skipped": total_skip,
+            "lines": lines, "rebuilt": rebuilt}
+
+
 def run_memos(*, source: str = "", out: str = "exports/memos_bundle.json",
               push: str = "", no_rebuild: bool = False,
               rebuild_mode: str = "repair") -> None:
     """提取记忆 bundle + 可选推送 MemOS（CLI 与控制台共用）。"""
-    from agentmemhub.memos import (build_bundle, write_bundle, push_bundle,
-                                   rebuild_embeddings)
+    from agentmemhub.memos import build_bundle, write_bundle
     store = Store()
     bundle = build_bundle(store, source)
     _stdout(f"生成 bundle: {len(bundle['traces'])} traces")
@@ -215,34 +275,126 @@ def run_memos(*, source: str = "", out: str = "exports/memos_bundle.json",
     _stdout(f"已写入 → {out}")
     if push:
         try:
-            # MemOS /api/v1/import 上限 64 MiB——全量 bundle 可能超限（实测 90+MB），
-            # 因此推送时按 source 分批 POST，失败批次继续并汇总
             if source:
                 batches = [source]
             else:
                 batches = [a.source for a in adapters.all_adapters() if a.locate()]
-            total_ok = total_skip = 0
-            for src in batches:
-                b = build_bundle(store, src)
-                if not b["traces"]:
-                    continue
-                try:
-                    resp = push_bundle(b, push)
-                    total_ok += resp.get("imported", 0)
-                    total_skip += resp.get("skipped", 0)
-                    _stdout(f"[{src}] 推送 ok: imported={resp.get('imported')} skipped={resp.get('skipped')}")
-                except Exception as e:
-                    _stdout(f"[{src}] 推送失败（继续下一批）: {e}")
-            _stdout(f"MemOS 导入汇总: imported={total_ok}, skipped={total_skip}")
-            if not no_rebuild:
-                try:
-                    r = rebuild_embeddings(push, mode=rebuild_mode)
-                    _stdout(f"已触发 embedding {rebuild_mode}: {r}")
-                except Exception as e:
-                    _stdout(f"embedding rebuild 失败（可用 --no-rebuild 跳过）: {e}")
+            # 进展已实时输出（stdout=_stdout），无需再循环打印 lines
+            r = push_to_memos(store, sources=batches, base_url=push,
+                              no_rebuild=no_rebuild, rebuild_mode=rebuild_mode,
+                              stdout=_stdout)
+            _cli_log(f"memos push → imported={r['imported']}, skipped={r['skipped']}")
         except Exception as e:
             _stdout(f"推送失败（MemOS 可能在运行?）: {e}")
+            _cli_log(f"memos push 失败 → {e}", level="error")
     store.close()
+    _cli_log(f"memos bundle 生成 → {out}（{len(bundle['traces'])} traces）")
+
+
+def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
+             rebuild_mode: str = "repair") -> None:
+    """增量同步：ingest（幂等重跑）→ 按 source 幂等 push → 补向量。
+
+    replace_source 与 MemOS import 都幂等（trace id 由 src_id 派生），所以
+    sync 可随时重跑——新增的轮 imported、旧轮 skipped。引擎离线时 ingest
+    照常完成、推送跳过（启动引擎后重跑即可补推）。不做会话结束钩子：
+    漏掉的同步靠幂等锚在下次启动补上（无耦合，不碰 harness）。
+    """
+    from agentmemhub import adapters, memos_daemon
+
+    sources = [source] if source else [a.source for a in adapters.all_adapters()]
+    run_ingest(sources)
+    if not push:
+        return
+    if memos_daemon.auth_state() is None:
+        _stdout("记忆引擎未运行——ingest 已完成，跳过推送。"
+                "启动引擎后重跑 `agentmemhub sync` 即可幂等补推。")
+        _cli_log("sync 跳过推送（引擎离线）", level="warn")
+        return
+    store = Store()
+    try:
+        batches = ([source] if source
+                   else [a.source for a in adapters.all_adapters() if a.locate()])
+        # 进展实时输出（stdout=_stdout），无需再循环打印 lines
+        r = push_to_memos(store, sources=batches, base_url=push,
+                          no_rebuild=no_rebuild, rebuild_mode=rebuild_mode,
+                          stdout=_stdout)
+        _cli_log(f"sync → imported={r['imported']}, skipped={r['skipped']}")
+    finally:
+        store.close()
+
+
+def cmd_sync(args) -> None:
+    run_sync(source=args.source, push=args.push,
+             no_rebuild=args.no_rebuild, rebuild_mode=args.rebuild_mode)
+
+
+def run_clean(store, *, source: str = "", apply: bool = False,
+              stdout: Any = None) -> None:
+    """记忆清洗：删除系统注入事件（is_system）。
+
+    默认只预览（dry-run）；apply=True 才物理删除并重建 FTS/event_count。
+    """
+    out = stdout or _stdout
+    rows = store.system_event_counts(source or None)
+    total = sum(r["n"] for r in rows)
+    if not rows:
+        out("（无系统注入事件——库已经干净）")
+        return
+    out(f"系统注入事件共 {total} 条（按 source）:")
+    for r in rows:
+        out(f"  [{r['source']}] {r['n']} 条（{r['convs']} 个会话）")
+    if not apply:
+        out("以上为预览——加 --apply 才会物理删除（删除后重建 FTS 索引与会话计数）")
+        return
+    deleted, convs = store.delete_system_events(source or None)
+    out(f"已删除 {deleted} 条注入事件（{convs} 个会话受影响，FTS/计数已重建）")
+    _cli_log(f"clean(source={source or 'all'}) → 删除 {deleted} 条注入事件")
+
+
+def cmd_clean(args) -> None:
+    store = Store()
+    try:
+        run_clean(store, source=args.source, apply=args.apply)
+    finally:
+        store.close()
+
+
+def cmd_rebuild(args) -> None:
+    """补向量：触发引擎 embedding rebuild（默认 repair 只补缺失向量）。"""
+    from agentmemhub import memos_daemon
+    from agentmemhub.memos import rebuild_embeddings
+    if memos_daemon.auth_state() is None:
+        _stdout("记忆引擎未运行（启动后重试）")
+        return
+
+    def _emit(s: str) -> None:
+        _stdout(f"  {s}")
+    _stdout(f"补向量（{args.mode}，本地计算可能耗时数分钟）…")
+    r = rebuild_embeddings(base_url=memos_daemon.base_url(),
+                           mode=args.mode, on_progress=_emit)
+    _stdout(f"完成: {r}")
+    _cli_log(f"rebuild({args.mode}) → {r}")
+
+
+def cmd_score(args) -> None:
+    """LLM 批量自动评分历史记忆（三轴评估 → feedback 写入）。"""
+    from agentmemhub.scoring import run_score_all
+
+    def _emit(s: str) -> None:
+        _stdout(s)
+    try:
+        r = run_score_all(emit=_emit, base_url=args.push,
+                          limit=args.limit, dry_run=args.dry_run,
+                          workers=args.workers)
+        _stdout(f"评分完成: evaluated={r['evaluated']} skipped={r['skipped']} "
+                f"positive={r['positive']} neutral={r['neutral']} "
+                f"negative={r['negative']} errors={r['errors']}"
+                + ("（dry-run，未写入）" if r["dryRun"] else ""))
+        _cli_log(f"score → {r}")
+    except Exception as e:
+        _stdout(f"评分失败：{e}")
+        _cli_log(f"score 失败 → {e}", level="error")
 
 
 def cmd_memos(args) -> None:
@@ -333,6 +485,27 @@ def build_parser() -> argparse.ArgumentParser:
     pmc.add_argument("--port", type=int, default=9100, help="HTTP 监听端口（默认 9100）")
     pmc.add_argument("--bind", default="127.0.0.1",
                      help="HTTP 监听地址（默认仅本机；团队共享用 0.0.0.0）")
+
+    psy = sub.add_parser("sync", help="增量同步：ingest → 幂等 push MemOS → 补向量（可随时重跑）")
+    psy.add_argument("--source", default="")
+    psy.add_argument("--push", default="", help="MemOS base URL；非空则推送到引擎（幂等，离线自动跳过）")
+    psy.add_argument("--no-rebuild", action="store_true",
+                     help="push 后不触发 embedding rebuild（默认自动补向量）")
+    psy.add_argument("--rebuild-mode", default="repair", choices=("repair", "rebuild"))
+
+    pcl = sub.add_parser("clean", help="记忆清洗：删除系统注入事件（is_system；默认预览，--apply 执行）")
+    pcl.add_argument("--source", default="")
+    pcl.add_argument("--apply", action="store_true",
+                     help="执行删除（不带此参数仅统计预览；删除会重建 FTS 与会话计数）")
+
+    psc = sub.add_parser("score", help="LLM 批量自动评分历史记忆（三轴评估 → feedback 写入，检索排序生效）")
+    psc.add_argument("--limit", type=int, default=0, help="最多评分条数（0=全部）")
+    psc.add_argument("--dry-run", action="store_true", help="只评估不写入（预览 verdict 分布）")
+    psc.add_argument("--workers", type=int, default=4, help="并发评估线程数（默认 4；IO 密集建议 4~8）")
+    psc.add_argument("--push", default="", help="引擎 base URL（默认 18800，一般不用设）")
+
+    prb = sub.add_parser("rebuild", help="补向量：触发引擎 embedding rebuild（repair=只补缺失，rebuild=全部重算）")
+    prb.add_argument("--mode", default="repair", choices=("repair", "rebuild"))
     return p
 
 
@@ -348,6 +521,7 @@ def main() -> None:
         "search": cmd_search, "export": cmd_export, "stats": cmd_stats,
         "adapters": cmd_adapters, "memos": cmd_memos, "folders": cmd_folders,
         "serve": cmd_serve, "memos-daemon": cmd_memos_daemon, "mcp": cmd_mcp,
+        "sync": cmd_sync, "clean": cmd_clean, "score": cmd_score, "rebuild": cmd_rebuild,
     }
     fn = handlers.get(args.command)
     if fn is None:
