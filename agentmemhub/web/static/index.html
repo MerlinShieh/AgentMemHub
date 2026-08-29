@@ -332,11 +332,15 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
                   class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
             <i data-lucide="star" class="h-3.5 w-3.5 text-primary"></i>自动评分
           </button>
+          <button id="adminLogsBtn" title="打开操作日志面板（顶部右侧也有入口）"
+                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted transition-colors">
+            <i data-lucide="scroll-text" class="h-3.5 w-3.5 text-primary"></i>操作日志
+          </button>
           <span id="adminJobState" class="hidden items-center gap-1.5 text-xs text-muted-foreground">
             <i data-lucide="loader-circle" class="h-3.5 w-3.5 animate-spin"></i><span id="adminJobName">任务运行中…</span>
             <span id="adminJobClock" class="tnum"></span>
-            <span class="inline-flex w-24 items-center gap-1">
-              <span class="h-1.5 flex-1 overflow-hidden rounded-full bg-muted"><span id="adminJobBar" class="block h-full rounded-full bg-primary transition-all" style="width:0%"></span></span>
+            <span class="inline-flex w-32 items-center gap-1">
+              <span class="h-2 flex-1 overflow-hidden rounded-full bg-muted"><span id="adminJobBar" class="block h-full rounded-full bg-primary transition-all" style="width:0%"></span></span>
               <span id="adminJobPct" class="tnum text-[10px]">0%</span>
             </span>
           </span>
@@ -779,11 +783,16 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       state.classList.remove('hidden'); state.classList.add('inline-flex');
       $('#adminJobName').textContent=j.name||'任务运行中…';
       $('#adminJobClock').textContent='· 已运行 '+Math.max(0,Math.round(Date.now()/1000-(j.startedAt||Date.now()/1000)))+'s';
-      // 结构化进度（评分等任务）：进度条 + 百分比
+      // 结构化进度（评分等任务）：进度条按百分比分级配色 + 实时百分比
+      // （百分比前端自算自 done/total，1.2s 轮询平滑推进，不依赖后端 pct 步进）
       if(j.progress && j.progress.total){
         const p=j.progress;
-        $('#adminJobBar').style.width=(p.pct||0)+'%';
-        $('#adminJobPct').textContent=(p.pct||0)+'%';
+        const pct=Math.max(0,Math.min(100,Math.round((p.done||0)*100/(p.total||1))));
+        const bar=$('#adminJobBar');
+        bar.style.width=pct+'%';
+        bar.className='block h-full rounded-full transition-all duration-300 '
+          +(pct>=90?'bg-emerald-500':(pct>=50?'bg-amber-500':'bg-error'));
+        $('#adminJobPct').textContent=pct+'%';
         $('#adminJobClock').textContent=` · ${p.done||0}/${p.total}`;
       }else{
         $('#adminJobBar').style.width='0%'; $('#adminJobPct').textContent='';
@@ -1088,6 +1097,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     setInterval(memosPollStatus, 15000);     // 之后每 15s 自动刷新（外部启停也能反映）
     $('#logsToggleBtn').onclick=toggleLogs;  // 操作日志面板
     $('#logsRefreshBtn').onclick=loadLogs;
+    $('#adminLogsBtn').onclick=toggleLogs;   // 数据操作区入口（与顶部按钮一致）
     // 记忆评分（正/负反馈）：事件委托（内联 onclick 无法访问 IIFE 内函数）
     $('#memosRecent').addEventListener('click', e=>{
       const btn=e.target.closest('button[data-score]');
