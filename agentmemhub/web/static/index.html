@@ -335,6 +335,10 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
           <span id="adminJobState" class="hidden items-center gap-1.5 text-xs text-muted-foreground">
             <i data-lucide="loader-circle" class="h-3.5 w-3.5 animate-spin"></i><span id="adminJobName">任务运行中…</span>
             <span id="adminJobClock" class="tnum"></span>
+            <span class="inline-flex w-24 items-center gap-1">
+              <span class="h-1.5 flex-1 overflow-hidden rounded-full bg-muted"><span id="adminJobBar" class="block h-full rounded-full bg-primary transition-all" style="width:0%"></span></span>
+              <span id="adminJobPct" class="tnum text-[10px]">0%</span>
+            </span>
           </span>
           <span id="adminJobWarn" class="hidden text-[11px] text-warning"></span>
         </div>
@@ -775,11 +779,21 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       state.classList.remove('hidden'); state.classList.add('inline-flex');
       $('#adminJobName').textContent=j.name||'任务运行中…';
       $('#adminJobClock').textContent='· 已运行 '+Math.max(0,Math.round(Date.now()/1000-(j.startedAt||Date.now()/1000)))+'s';
+      // 结构化进度（评分等任务）：进度条 + 百分比
+      if(j.progress && j.progress.total){
+        const p=j.progress;
+        $('#adminJobBar').style.width=(p.pct||0)+'%';
+        $('#adminJobPct').textContent=(p.pct||0)+'%';
+        $('#adminJobClock').textContent=` · ${p.done||0}/${p.total}`;
+      }else{
+        $('#adminJobBar').style.width='0%'; $('#adminJobPct').textContent='';
+      }
       // 实时进展：任务输出逐行流入，loading 期间即可看到（进度行 [N/总数]）
       if(j.output){ out.textContent=j.output; out.classList.remove('hidden'); out.scrollTop=out.scrollHeight; }
       else out.classList.add('hidden');
       return;
     }
+    $('#adminJobBar').style.width='0%'; $('#adminJobPct').textContent='';
     state.classList.add('hidden');
     if(j.error){ out.textContent='任务失败：'+j.error; out.classList.remove('hidden'); }
     else if(j.output!==undefined && j.output!==''){ out.textContent=j.output.trim(); out.classList.remove('hidden'); }

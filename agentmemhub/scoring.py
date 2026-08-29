@@ -148,17 +148,48 @@ def _parse_verdict(content: str) -> str:
     return "neutral"
 
 
+def _engine_db_path() -> Path:
+    home = memos_daemon.engine_home()
+    if home is None:
+        raise RuntimeError("未找到引擎 home（先配置 memos.home 或确认引擎默认位置）")
+    return home / "data" / "memos.db"
+
+
+def list_all_traces() -> list[dict[str, Any]]:
+    """只读枚举引擎库全部 traces（绕开 listTraces 的 500 行分页窗口上限）。
+
+    引擎 listTraces 在 repo 层把 fetch 窗口钳到最新 500 行（clampLimit 500），
+    超过 500 条时 API 分页取不到更早的 trace——评分需要全量，故只读直连
+    引擎 SQLite 枚举（仅 SELECT，不修改引擎数据；feedback 写入仍走 API）。
+    """
+    import sqlite3
+    db = _engine_db_path()
+    if not db.exists():
+        raise RuntimeError(f"引擎记忆库不存在：{db}（先启动引擎或确认 memos.home）")
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT id, user_text, agent_text FROM traces ORDER BY ts").fetchall()
+        return [{"id": r[0], "userText": r[1] or "", "agentText": r[2] or ""}
+                for r in rows]
+    finally:
+        conn.close()
+
+
 def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
                   base_url: str = "", limit: int = 0,
                   dry_run: bool = False,
                   workers: int = 1,
-                  skip_scored: bool = True) -> dict[str, Any]:
+                  skip_scored: bool = True,
+                  on_progress: Optional[Callable[[int, int], None]] = None,
+                  traces: Optional[list[dict]] = None,
+                  ) -> dict[str, Any]:
     """批量自动评分引擎内历史记忆（默认跳过已评过的——含手动 👍/👎）。
 
-    emit(line)：进度实时输出，行内带 "[已处理/总数]"（面板/CLI 显示进度）；
-    workers：LLM 评估/写入是 IO 密集，>1 用线程池并发（默认 1=串行）；
-    skip_scored：跳过已评清单中的 trace（默认开）。评分成功（或手动打分）
-    会记入清单，重跑不再覆盖。
+    emit(line)：进度实时输出（CLI 用，行内带 [已处理/总数]）；
+    on_progress(done, total)：结构化进度回调（面板进度条，逐条处理调用）；
+    traces：测试注入用（默认 list_all_traces() 只读枚举全部——绕开
+    listTraces 的 500 行窗口上限）；workers 并发；skip_scored 默认跳过已评。
     返回 {evaluated, skipped, positive, neutral, negative, errors, dryRun}。
     """
     import threading
@@ -171,9 +202,10 @@ def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
                "negative": 0, "errors": 0, "dryRun": bool(dry_run)}
     lock = threading.Lock()
     scored = _load_scored() if skip_scored else set()
-    offset = 0
-    page = 100
-    total: Optional[int] = None
+    all_traces = traces if traces is not None else list_all_traces()
+    total = len(all_traces)
+    if limit:
+        all_traces = all_traces[:limit]
 
     def work(t: dict) -> None:
         tid = t.get("id", "")
@@ -185,56 +217,41 @@ def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
             with lock:
                 summary["skipped"] += 1
             out(f"{label} {tid} 已评过，跳过（手动或此前批量）")
-            return
-        out(f"{label} 评估 {tid} …")
-        try:
-            verdict = evaluate_trace(t, llm_cfg)
-        except Exception as e:
-            with lock:
-                summary["errors"] += 1
-            out(f"{label} ✗ 评估失败: {e}")
-            return
-        with lock:
-            summary[verdict] += 1
-        if verdict == "neutral":
-            out(f"{label} → neutral（一般，不写入）")
-            return
-        if dry_run:
-            out(f"{label} → {verdict}（dry-run 不写入）")
-            return
-        try:
-            memos_daemon.engine_request(
-                "POST", "/api/v1/feedback",
-                body={"channel": "explicit", "polarity": verdict,
-                      "magnitude": 1.0, "traceId": tid},
-                base=root, timeout=30)
-            mark_scored(tid)          # 写入成功 → 进入已评清单（重跑跳过）
-            out(f"{label} → {verdict} ✓ 已写入")
-        except Exception as e:
-            with lock:
-                summary["errors"] += 1
-            out(f"{label} ✗ 写入失败: {e}")
+        else:
+            out(f"{label} 评估 {tid} …")
+            try:
+                verdict = evaluate_trace(t, llm_cfg)
+            except Exception as e:
+                with lock:
+                    summary["errors"] += 1
+                out(f"{label} ✗ 评估失败: {e}")
+            else:
+                with lock:
+                    summary[verdict] += 1
+                if verdict == "neutral":
+                    out(f"{label} → neutral（一般，不写入）")
+                elif dry_run:
+                    out(f"{label} → {verdict}（dry-run 不写入）")
+                else:
+                    try:
+                        memos_daemon.engine_request(
+                            "POST", "/api/v1/feedback",
+                            body={"channel": "explicit", "polarity": verdict,
+                                  "magnitude": 1.0, "traceId": tid},
+                            base=root, timeout=30)
+                        mark_scored(tid)          # 写入成功 → 进入已评清单（重跑跳过）
+                        out(f"{label} → {verdict} ✓ 已写入")
+                    except Exception as e:
+                        with lock:
+                            summary["errors"] += 1
+                        out(f"{label} ✗ 写入失败: {e}")
+        if on_progress is not None:
+            try:
+                on_progress(idx, total)
+            except Exception:
+                pass
 
-    while True:
-        res = memos_daemon.engine_request(
-            "GET", f"/api/v1/traces?limit={page}&offset={offset}&groupByTurn=1",
-            base=root, timeout=30)
-        traces = res.get("traces") or []
-        if not traces:
-            break
-        if total is None:
-            total = int(res.get("total") or 0)
-        remain = None if not limit else limit - summary["evaluated"]
-        batch = traces
-        if remain is not None:
-            batch = traces[:remain]
-        if not batch:
-            break
+    if all_traces:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
-            list(ex.map(work, batch))          # map 保持批内顺序（并发执行）
-        offset += len(batch)
-        if limit and summary["evaluated"] >= limit:
-            break
-        if offset >= int(res.get("total") or 0):
-            break
+            list(ex.map(work, all_traces))
     return summary
