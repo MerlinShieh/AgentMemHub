@@ -61,8 +61,11 @@ AgentMemHub/
 │   └── home/                     #   引擎数据：记忆库 memos.db / viewer 密码 / 引擎配置
 ├── agentmemhub.yaml(.example)    # 统一配置文件（复制 example 按需修改）
 ├── exports/                      # 导出产物（gitignore）
-├── scripts/                      # 验证/安全检查/E2E 脚本
-├── tests/                        # pytest（22 项）
+├── scripts/                      # 工具脚本（download_embedding_model 模型恢复 /
+│                                #   cleanup_empty_traces 空trace清理 / sensitive_scan 敏感扫描）
+├── tests/                        # pytest（98 项）
+├── AGENTS.md                     # Agent 协作约定（记忆保存纪律硬规则 + 项目约束速查）
+├── ClearTest.bat                 # 测试环境重置（删本地库/引擎数据，保留配置与模型）
 └── start.bat                     # Windows 一键入口（双击进控制台）
 ```
 
@@ -213,7 +216,7 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 | `mcp [--http] [--bind H] [--port P]` | MCP 记忆网关：默认 stdio（Agent 拉起）；`--http` 常驻为 Streamable HTTP 供团队共享 |
 | `sync [--push URL] [--no-rebuild] [--full]` | 增量同步：ingest → **只推送上次同步后的新增会话**（时间锚，无新增自动跳过；`--full` 强制全量）→ 补向量（幂等，引擎离线跳过推送且不推进锚）|
 | `clean [--source x] [--apply]` | 记忆清洗：删除系统注入事件（默认预览，`--apply` 才执行并重建 FTS/计数）|
-| `score [--limit N] [--dry-run] [--workers N] [--ids id1,id2] [--unscored-count]` | LLM 批量自动评分历史记忆（三轴评估 → feedback 写入价值分；跳过已评；`--ids` 只评指定条（写后即评/锚点用），`--unscored-count` 仅统计未评分条数供定时/定量触发判断）|
+| `score [--limit N] [--dry-run] [--workers N] [--ids id1,id2] [--unscored-count] [--sync-episodes]` | LLM 批量自动评分历史记忆（三轴评估 → feedback 写入价值分；跳过已评；`--ids` 只评指定条（写后即评/锚点用），`--unscored-count` 仅统计未评分条数供定时/定量触发判断，`--sync-episodes` 把 trace 分数回填 episode.r_task 供面板显示）|
 | `rebuild [--mode repair\|rebuild]` | 补向量：触发引擎 embedding rebuild（导入记忆后修复语义检索）|
 | `stats` / `adapters` | 统计 / adapter 状态 |
 
@@ -230,7 +233,8 @@ Claude Code 等支持 MCP 的 Agent harness 上——模型在会话进行中即
 | `memory_search(query, topK)` | 语义检索历史记忆（转发引擎 `/api/v1/memory/search`），返回命中条目 + 注入上下文 |
 | `memory_recent(limit)` | 最近写入的记忆时间线，快速了解近期积累 |
 | `memory_stats()` | 引擎在线状态 / 记忆总量 / 语义检索与 LLM 评分可用性 / 记忆模式 |
-| `memory_save(content)` | 写一条记忆（即时入库并补向量），供模型主动保存事实/结论 |
+| `memory_save(content)` | 写一条记忆（即时入库并补向量，写后验证 imported，失败明确报错不伪装）|
+| `memory_score(trace_id, polarity)` | 对刚写入/任意一条记忆写后即评（feedback → 引擎即时重算 value/priority，检索排序生效）|
 
 ```bash
 # 0. 先常驻记忆引擎（网关绝不代管其生命周期）：
@@ -294,7 +298,10 @@ OpenCode 对应写法（含裸命令备选：`pip install -e .` 后把 `.venv/Sc
 }
 ```
 
-> 两种传输的工具完全一致（`memory_search` / `memory_recent` / `memory_stats` / `memory_save`），按场景选一种即可。
+> 两种传输的工具完全一致（`memory_search` / `memory_recent` / `memory_stats` / `memory_save` / `memory_score`），按场景选一种即可。
+>
+> Agent 侧「何时该保存 + 保存后必须评分」的触发纪律以独立 Skill 仓库提供：
+> [Agent-skill-save-memory](https://github.com/MerlinShieh/Agent-skill-save-memory)（行为协议层，与本 MCP 强绑定）。
 
 设计要点：
 
@@ -433,6 +440,8 @@ MemOS 未安装时板块自动隐藏。
 - [x] 记忆清洗（clean：删除系统注入事件，预览→执行并重建 FTS/计数）
 - [x] LLM 批量自动评分（score：三轴评估写价值分、跳过已评、面板进度条）
 - [x] 统一日志（`<程序根>/logs/`：web/cli/engine/tasks 分文件，面板可查历史）
+- [x] MCP 写后即评（memory_score 工具 + save-memory Skill 独立仓：触发纪律/生效前提/逻辑归属）
+- [x] 导入数据质量（meta 幽灵轮剔除、纯工具轮标题兜底、恢复环境整源丢失修复、cleanup_empty_traces 清理脚本）
 - [ ] 更多 Agent（Claude Code / Cursor / Gemini CLI / CodeBuddy）
 - [ ] 记忆折叠压缩（超长会话压缩、相邻轮折叠）
 
