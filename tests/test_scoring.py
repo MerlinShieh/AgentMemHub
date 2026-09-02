@@ -154,11 +154,13 @@ def test_run_score_all_batch_loop():
 
 def test_run_score_all_dry_run_skips_write():
     llm = {"endpoint": "https://x", "api_key": "k", "model": "m"}
+    traces = [{"id": "t1", "userText": "a", "agentText": "b"},
+              {"id": "t2", "userText": "c", "agentText": "d"}]
     with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
          mock.patch("agentmemhub.scoring.evaluate_trace", return_value="positive"), \
+         mock.patch("agentmemhub.scoring.list_all_traces", return_value=traces), \
          mock.patch("agentmemhub.memos_daemon.engine_request") as er:
-        er.side_effect = [{"total": 2, "traces": [{"id": "t1", "userText": "a", "agentText": "b"}]},
-                          {"total": 2, "traces": []}]
+        er.side_effect = []
         r = run_score_all(limit=1, dry_run=True)
     assert r["evaluated"] == 1 and r["dryRun"] is True
     # dry-run 不产生 feedback POST

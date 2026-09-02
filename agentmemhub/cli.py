@@ -240,19 +240,26 @@ def push_to_memos(store: Store, *, sources: list[str], base_url: str,
 
     total_ok = total_skip = 0
     failed = 0                                # 失败批次计数（决定增量锚是否可推进）
+    chunk_size = 200                          # 单批 trace 上限：大 source 整包导入会超引擎
+                                              # HTTP 请求窗口（~300s）被服务端断连（实测 10053）
     for src in sources:
         b = build_bundle(store, src, since_ts=since_ts)
-        if not b["traces"]:
+        traces = b.get("traces") or []
+        if not traces:
             continue
-        try:
-            resp = push_bundle(b, base_url)
-            total_ok += resp.get("imported", 0)
-            total_skip += resp.get("skipped", 0)
-            emit(f"[{src}] 推送 ok: imported={resp.get('imported')} "
-                 f"skipped={resp.get('skipped')}")
-        except Exception as e:
-            failed += 1
-            emit(f"[{src}] 推送失败（继续下一批）: {e}")
+        chunks = [traces[i:i + chunk_size] for i in range(0, len(traces), chunk_size)]
+        for ci, chunk in enumerate(chunks):
+            payload = dict(b, traces=chunk)
+            label = f"[{src}]" if len(chunks) == 1 else f"[{src}/{ci + 1}]"
+            try:
+                resp = push_bundle(payload, base_url)
+                total_ok += resp.get("imported", 0)
+                total_skip += resp.get("skipped", 0)
+                emit(f"{label} 推送 ok: imported={resp.get('imported')} "
+                     f"skipped={resp.get('skipped')}")
+            except Exception as e:
+                failed += 1
+                emit(f"{label} 推送失败（继续下一批）: {e}")
     rebuilt = None
     if total_ok and not no_rebuild:
         try:
@@ -285,7 +292,10 @@ def run_memos(*, source: str = "", out: str = "exports/memos_bundle.json",
             if source:
                 batches = [source]
             else:
-                batches = [a.source for a in adapters.all_adapters() if a.locate()]
+                # bundle 从 store 构建——按 store 中实际存在的源推送。
+                # 不能用 adapter.locate() 过滤：恢复/迁移环境下源文件可能已不在
+                # 磁盘，但 store 里的数据必须完整推送（否则整源静默丢失）。
+                batches = sorted({c["source"] for c in store.list_conversations()})
             # 进展已实时输出（stdout=_stdout），无需再循环打印 lines
             r = push_to_memos(store, sources=batches, base_url=push,
                               no_rebuild=no_rebuild, rebuild_mode=rebuild_mode,
@@ -349,8 +359,10 @@ def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
         _stdout(f"增量同步（上次 {time.strftime('%m-%d %H:%M', time.localtime(anchor))} 之后的新会话）…")
     store = Store()
     try:
+        # 推送源 = store 中实际有数据的源（同 run_memos：不能用 locate() 过滤，
+        # 恢复环境下源文件不在磁盘也要能推 store 存量）
         batches = ([source] if source
-                   else [a.source for a in adapters.all_adapters() if a.locate()])
+                   else sorted({c["source"] for c in store.list_conversations()}))
         if since is not None:
             # 统计新增会话：没有就跳过（避免空跑）
             new_convs = 0
@@ -430,8 +442,32 @@ def cmd_rebuild(args) -> None:
     _cli_log(f"rebuild({args.mode}) → {r}")
 
 
+def _csv_ids(v: str) -> set[str]:
+    return {x.strip() for x in v.split(",") if x.strip()}
+
+
 def cmd_score(args) -> None:
     """LLM 批量自动评分历史记忆（三轴评估 → feedback 写入）。"""
+    if args.unscored_count:
+        from agentmemhub.scoring import count_unscored
+        try:
+            n = count_unscored(base_url=args.push)
+            _stdout(f"未评分记忆：{n} 条")
+            _cli_log(f"score --unscored-count → {n}")
+        except Exception as e:
+            _stdout(f"统计失败：{e}")
+            _cli_log(f"score --unscored-count 失败 → {e}", level="error")
+        return
+    if args.sync_episodes:
+        from agentmemhub.scoring import sync_episode_r_task
+        try:
+            n = sync_episode_r_task()
+            _stdout(f"已同步 {n} 个 episode 的 r_task（viewer 评分标签）")
+            _cli_log(f"score --sync-episodes → {n}")
+        except Exception as e:
+            _stdout(f"同步失败：{e}")
+            _cli_log(f"score --sync-episodes 失败 → {e}", level="error")
+        return
     from agentmemhub.scoring import run_score_all
 
     def _emit(s: str) -> None:
@@ -439,10 +475,12 @@ def cmd_score(args) -> None:
     try:
         r = run_score_all(emit=_emit, base_url=args.push,
                           limit=args.limit, dry_run=args.dry_run,
-                          workers=args.workers)
+                          workers=args.workers,
+                          only_ids=args.ids)
         _stdout(f"评分完成: evaluated={r['evaluated']} skipped={r['skipped']} "
                 f"positive={r['positive']} neutral={r['neutral']} "
                 f"negative={r['negative']} errors={r['errors']}"
+                + (f" missing={r['missing']}" if r.get("missing") else "")
                 + ("（dry-run，未写入）" if r["dryRun"] else ""))
         _cli_log(f"score → {r}")
     except Exception as e:
@@ -558,6 +596,12 @@ def build_parser() -> argparse.ArgumentParser:
     psc.add_argument("--dry-run", action="store_true", help="只评估不写入（预览 verdict 分布）")
     psc.add_argument("--workers", type=int, default=4, help="并发评估线程数（默认 4；IO 密集建议 4~8）")
     psc.add_argument("--push", default="", help="引擎 base URL（默认 18800，一般不用设）")
+    psc.add_argument("--ids", type=_csv_ids, default=None,
+                     help="只评分指定 trace id（逗号分隔，如 --ids trac_1,trac_2；配合写后即评/锚点）")
+    psc.add_argument("--unscored-count", action="store_true",
+                     help="只统计未评分记忆条数（供定时/定量触发判断），不做 LLM 评估")
+    psc.add_argument("--sync-episodes", action="store_true",
+                     help="只把各 episode 的 r_task 同步为受评 traces 的平均 value（让 viewer 评分标签显示真实分），不做 LLM 评估")
 
     prb = sub.add_parser("rebuild", help="补向量：触发引擎 embedding rebuild（repair=只补缺失，rebuild=全部重算）")
     prb.add_argument("--mode", default="repair", choices=("repair", "rebuild"))

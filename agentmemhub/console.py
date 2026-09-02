@@ -99,7 +99,7 @@ def _render_snapshot(s: dict) -> str:
         extra = f"，{traces} 条记忆" if traces is not None else ""
         lines.append(f"  记忆引擎: 运行中{pid}{managed}{extra}（{s['memos_url']}）")
     else:
-        lines.append(f"  记忆引擎: 已停止（[6] 启动；{s['memos_url']}）")
+        lines.append(f"  记忆引擎: 已停止（[10] 启动；{s['memos_url']}）")
     return "\n".join(lines)
 
 
@@ -265,7 +265,7 @@ def action_rebuild() -> None:
     from agentmemhub import memos_daemon
     from agentmemhub.memos import rebuild_embeddings
     if memos_daemon.auth_state() is None:
-        _out("  ⚠ 记忆引擎未在线（可用 [6] 启动）")
+        _out("  ⚠ 记忆引擎未在线（可用 [10] 启动）")
         if not _confirm("  仍要尝试补向量？"):
             _out("  （已取消）")
             return

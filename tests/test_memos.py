@@ -1,4 +1,4 @@
-"""memos 桥接器单元测试：幂等 id / turn 分组 / value 启发式 / 系统注入跳过。
+﻿"""memos 桥接器单元测试：幂等 id / turn 分组 / value 启发式 / 系统注入跳过。
 
 直接测纯函数 _session_events_to_traces（不需要 SQLite store）。
 """
@@ -157,6 +157,61 @@ def test_build_bundle_incremental_since_ts():
     st.close()
 
 
+def test_meta_events_never_create_ghost_trace():
+    """会话开头的 meta（separator）事件不得造出 userText/agentText 全空的幽灵轮次。"""
+    events = renumber([
+        _ev("meta", "separator", src_id="m1", time=99.0),
+        _ev("user", "真实问题", src_id="u1", turn_key="u1", is_system=False, time=100.0),
+        _ev("assistant", "回答", src_id="a1", turn_key="u1", time=101.0),
+    ])
+    ts = to_traces("zcode", CONV, events)
+    assert len(ts) == 1, f"meta 不应产出额外 trace: {json_str(ts)}"
+    assert ts[0]["userText"] == "真实问题"
+
+
+def test_meta_only_conversation_yields_nothing():
+    """只有 meta 事件的会话 → 0 条 trace（守卫兜底，与 meta 跳过双保险）。"""
+    events = renumber([
+        _ev("meta", "separator", src_id="m1", time=99.0),
+        _ev("meta", "[session_end]", src_id="m2", time=100.0),
+    ])
+    assert to_traces("dsh", CONV, events) == []
+
+
+def test_tool_only_turn_falls_back_to_title_summary():
+    """workbuddy 式纯 shell 会话：无 user/assistant 文本，summary 用标题兜底。"""
+    conv = {"id": "wb1", "title": "检查屏幕文字发虚问题"}
+    events = renumber([
+        _ev("tool", None, src_id="t1", time=10.0, tool_name="shell",
+            tool_status="completed", tool_input={"command": "ipconfig /all"}),
+        _ev("tool", None, src_id="t2", time=11.0, tool_name="shell",
+            tool_status="executed", tool_input={"command": "dism /online /get-featureinfo"}),
+    ])
+    ts = to_traces("workbuddy", conv, events)
+    assert len(ts) == 1
+    t = ts[0]
+    assert t["userText"] == "" and t["agentText"] == ""
+    assert t["summary"] == "检查屏幕文字发虚问题", "纯工具轮 summary 必须落到标题"
+    assert [tc["name"] for tc in t["toolCalls"]] == ["shell", "shell"]
+    assert t["value"] == 0.4  # 有工具启发式不变
+
+
+def test_title_fallback_works_with_sqlite_row():
+    """store 返回的是 sqlite3.Row（非 dict）——title 兜底必须同样生效（回归）。"""
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT ? AS id, ? AS title", ("wb2", "分析高考志愿择校")).fetchone()
+    events = renumber([
+        _ev("tool", None, src_id="t1", time=10.0, tool_name="shell",
+            tool_status="executed", tool_input={"command": "whoami"}),
+    ])
+    ts = to_traces("workbuddy", row, events)
+    assert len(ts) == 1
+    assert ts[0]["summary"] == "分析高考志愿择校"
+
+
 def json_str(ts) -> str:
     import json
     return json.dumps(ts, ensure_ascii=False)
@@ -184,5 +239,5 @@ def test_rebuild_embeddings_goes_through_authenticated_gateway():
     assert r["done"] is True and r["processed"] == 10
     args, kwargs = er.call_args
     assert args == ("POST", "/api/v1/embeddings/rebuild")
-    assert kwargs["body"] == {"mode": "rebuild", "limit": 500}
+    assert kwargs["body"] == {"mode": "rebuild", "limit": 500, "offset": 0}
     assert kwargs["base"] == "http://127.0.0.1:18999"
