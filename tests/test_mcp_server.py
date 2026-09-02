@@ -1,4 +1,4 @@
-"""MCP 记忆网关单元测试。
+﻿"""MCP 记忆网关单元测试。
 
 覆盖：JSON-RPC 握手/错误、tools/list 契约、四个工具在引擎离线/在线
 （mock engine API）下的行为。引擎调用一律 mock，不依赖真实引擎。
@@ -91,7 +91,7 @@ def test_tools_list_contract():
     h, _ = _handler()
     r = _call(h, _req("tools/list"))
     tools = {t["name"]: t for t in r["result"]["tools"]}
-    assert set(tools) == {"memory_search", "memory_recent", "memory_stats", "memory_save"}
+    assert set(tools) == {"memory_search", "memory_recent", "memory_stats", "memory_save", "memory_score"}
     # memory_search 的 query 必填
     assert tools["memory_search"]["inputSchema"]["required"] == ["query"]
     assert "topK" in tools["memory_search"]["inputSchema"]["properties"]

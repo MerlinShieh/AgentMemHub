@@ -165,8 +165,9 @@ class _FakeStore:
         self.old_ts = _t.time() - 2000         # 旧会话（锚前）
         self.closed = False
 
-    def list_conversations(self, src):
-        return [{"updated_at": self.new_ts}, {"updated_at": self.old_ts}]
+    def list_conversations(self, src=None):
+        return [{"source": "zcode", "updated_at": self.new_ts},
+                {"source": "zcode", "updated_at": self.old_ts}]
 
     def close(self):
         self.closed = True
@@ -203,8 +204,8 @@ def test_run_sync_incremental_skips_when_nothing_new(_auth, _ingest, tmp_path, m
     cli_mod._save_sync_anchor(_t.time() - 10)                     # 刚同步过 → 缓冲窗内无新会话
 
     class _AllOld:
-        def list_conversations(self, src):
-            return [{"updated_at": _t.time() - 600}]              # 都在锚前
+        def list_conversations(self, src=None):
+            return [{"source": "zcode", "updated_at": _t.time() - 600}]   # 都在锚前
         def close(self):
             pass
 

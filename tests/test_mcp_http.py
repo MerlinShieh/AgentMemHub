@@ -1,4 +1,4 @@
-"""MCP Streamable HTTP 传输单元测试（fastapi TestClient 直连，不启真实端口）。"""
+﻿"""MCP Streamable HTTP 传输单元测试（fastapi TestClient 直连，不启真实端口）。"""
 from __future__ import annotations
 
 from unittest import mock
@@ -38,7 +38,7 @@ def test_http_tools_list():
     r = _post({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     assert r.status_code == 200
     names = {t["name"] for t in r.json()["result"]["tools"]}
-    assert names == {"memory_search", "memory_recent", "memory_stats", "memory_save"}
+    assert names == {"memory_search", "memory_recent", "memory_stats", "memory_save", "memory_score"}
 
 
 @mock.patch.object(memos_daemon, "auth_state", return_value=None)

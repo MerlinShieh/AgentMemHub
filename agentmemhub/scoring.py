@@ -176,6 +176,55 @@ def list_all_traces() -> list[dict[str, Any]]:
         conn.close()
 
 
+def count_unscored(*, base_url: str = "", traces: Optional[list[dict]] = None) -> int:
+    """统计未评分记忆条数（供定时/定量触发判断），不做 LLM 评估。
+
+    与 run_score_all 同一枚举口径（跳过已评清单里的 id）。traces 测试注入用。
+    """
+    all_traces = traces if traces is not None else list_all_traces()
+    scored = _load_scored()
+    return sum(1 for t in all_traces if t.get("id") not in scored)
+
+
+def sync_episode_r_task(*, trace_ids: Optional[list[str]] = None,
+                        episode_ids: Optional[list[str]] = None) -> int:
+    """把 episode.r_task 同步为它受评 traces 的平均 value。
+
+    viewer 的记忆列表「评分」标签读 episodeRTask（memory-core.ts:5598 的
+    episodeRTask = episode?.rTask ?? null）——写入 r_task 后 viewer 不再把
+    已评记忆显示为「待评分」。引擎零改动（直接写 episodes 表）；引擎自身
+    reward 管线若日后运行会覆盖，本库无 rewardDirty 不触发、可接受。
+    """
+    import sqlite3
+    db = _engine_db_path()
+    if not db.exists():
+        raise RuntimeError(f"引擎记忆库不存在：{db}")
+    conn = sqlite3.connect(db, timeout=30)
+    updated = 0
+    try:
+        if trace_ids:
+            qmarks = ",".join("?" * len(trace_ids))
+            rows = conn.execute(
+                f"SELECT DISTINCT episode_id FROM traces WHERE id IN ({qmarks})",
+                tuple(trace_ids)).fetchall()
+            episode_ids = [r[0] for r in rows]
+        if not episode_ids:
+            episode_ids = [r[0] for r in conn.execute(
+                "SELECT id FROM episodes").fetchall()]
+        for ep in episode_ids:
+            avg = conn.execute(
+                "SELECT AVG(value) FROM traces WHERE episode_id=? AND value <> 0",
+                (ep,)).fetchone()[0]
+            conn.execute(
+                "UPDATE episodes SET r_task=? WHERE id=?",
+                (float(avg) if avg is not None else 0.0, ep))
+            updated += 1
+        conn.commit()
+    finally:
+        conn.close()
+    return updated
+
+
 def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
                   base_url: str = "", limit: int = 0,
                   dry_run: bool = False,
@@ -183,14 +232,17 @@ def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
                   skip_scored: bool = True,
                   on_progress: Optional[Callable[[int, int], None]] = None,
                   traces: Optional[list[dict]] = None,
+                  only_ids: Optional[set[str]] = None,
                   ) -> dict[str, Any]:
     """批量自动评分引擎内历史记忆（默认跳过已评过的——含手动 👍/👎）。
 
     emit(line)：进度实时输出（CLI 用，行内带 [已处理/总数]）；
     on_progress(done, total)：结构化进度回调（面板进度条，逐条处理调用）；
     traces：测试注入用（默认 list_all_traces() 只读枚举全部——绕开
-    listTraces 的 500 行窗口上限）；workers 并发；skip_scored 默认跳过已评。
-    返回 {evaluated, skipped, positive, neutral, negative, errors, dryRun}。
+    listTraces 的 500 行窗口上限）；workers 并发；skip_scored 默认跳过已评；
+    only_ids：只评分指定 trace id（写后即评/按 id 打分入口；请求了但库里
+    没有的 id 计入 summary.missing）。
+    返回 {evaluated, skipped, positive, neutral, negative, errors, missing, dryRun}。
     """
     import threading
     from concurrent.futures import ThreadPoolExecutor
@@ -199,13 +251,21 @@ def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
     llm_cfg = read_engine_llm()
     root = (base_url or memos_daemon.base_url()).rstrip("/")
     summary = {"evaluated": 0, "skipped": 0, "positive": 0, "neutral": 0,
-               "negative": 0, "errors": 0, "dryRun": bool(dry_run)}
+               "negative": 0, "errors": 0, "missing": 0, "dryRun": bool(dry_run)}
     lock = threading.Lock()
     scored = _load_scored() if skip_scored else set()
     all_traces = traces if traces is not None else list_all_traces()
+    if only_ids:
+        have = {t.get("id") for t in all_traces}
+        missing_ids = sorted(only_ids - have)
+        summary["missing"] = len(missing_ids)
+        all_traces = [t for t in all_traces if t.get("id") in only_ids]
+        for mid in missing_ids:
+            out(f"⚠ {mid} 未在引擎库中找到，跳过")
     total = len(all_traces)
     if limit:
         all_traces = all_traces[:limit]
+    written_ids: list[str] = []
 
     def work(t: dict) -> None:
         tid = t.get("id", "")
@@ -240,6 +300,7 @@ def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
                                   "magnitude": 1.0, "traceId": tid},
                             base=root, timeout=30)
                         mark_scored(tid)          # 写入成功 → 进入已评清单（重跑跳过）
+                        written_ids.append(tid)
                         out(f"{label} → {verdict} ✓ 已写入")
                     except Exception as e:
                         with lock:
@@ -254,4 +315,10 @@ def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
     if all_traces:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
             list(ex.map(work, all_traces))
+    if written_ids:
+        try:
+            n = sync_episode_r_task(trace_ids=written_ids)
+            out(f"已同步 {n} 个 episode 的 r_task（viewer 评分标签）")
+        except Exception as e:
+            out(f"r_task 同步失败（不影响已写入反馈）: {e}")
     return summary

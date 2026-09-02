@@ -9,8 +9,10 @@ AgentMemHub 作为「管理器」：拉起/停止/巡检 MemOS Local Plugin 的 
 - PID 文件：~/.agentmemhub/memos_daemon.pid（AGENTMEMHUB_DATA_DIR 可覆盖数据目录）
 - 日志：数据目录下 memos_daemon.log
 
-daemon 启动命令：npm run bridge:daemon -- --agent=<agent>（默认 hermes，
-端口随之 18800；与 memos.base_url 的 MEMOS_BASE_URL 约定保持独立）。
+daemon 启动命令：直接 `node <plugin>/node_modules/tsx/dist/cli.mjs bridge.cts
+--daemon --agent=<agent>`（即 package.json bridge:daemon 的等价命令，默认 hermes，
+端口随之 18800）。不走 npm 壳层：npm.cmd 可能被插件残留的残缺 npm 垫片劫持导致
+秒退，且 DETACHED 链丢日志。与 memos.base_url 的 MEMOS_BASE_URL 约定保持独立。
 """
 from __future__ import annotations
 
@@ -274,11 +276,13 @@ def _overview(timeout: float = 1.5) -> Optional[dict]:
 
 def _pid_alive(pid: int) -> bool:
     if os.name == "nt":
+        # tasklist 输出为 GBK：errors=replace 防 reader 线程解码炸（仅用 PID 子串）
         code = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"],
-                              capture_output=True, text=True).returncode
+                              capture_output=True, text=True,
+                              errors="replace").returncode
         return code == 0 and str(pid) in (subprocess.run(
             ["tasklist", "/FI", f"PID eq {pid}"],
-            capture_output=True, text=True).stdout or "")
+            capture_output=True, text=True, errors="replace").stdout or "")
     try:
         os.kill(pid, 0)
         return True
@@ -332,6 +336,91 @@ def daemon_status() -> dict[str, Any]:
     return result
 
 
+def _port_holder_pid(port: int) -> Optional[int]:
+    """返回当前监听 port 的进程 PID（Windows 经 netstat；其它系统返回 None）。"""
+    if os.name != "nt":
+        return None
+    try:
+        out = subprocess.run(["netstat", "-ano"], capture_output=True,
+                             text=True, errors="replace", timeout=5).stdout
+        for line in out.splitlines():
+            if f":{port} " in line and "LISTENING" in line:
+                parts = line.split()
+                try:
+                    return int(parts[-1])
+                except ValueError:
+                    pass
+    except Exception:
+        pass
+    return None
+
+
+def _base_port() -> int:
+    try:
+        from urllib.parse import urlsplit
+        return urlsplit(base_url()).port or 18800
+    except Exception:
+        return 18800
+
+
+def _resolve_node(plugin_dir: Path) -> Optional[str]:
+    """挑一个能实际加载插件原生模块（better-sqlite3）的 node。
+
+    PATH 里的 node 可能是 nvm4w 等版本管理器指向的其它大版本（如 v25），
+    而 node_modules 里的原生 .node 按某 ABI 编译——版本不匹配时 tsx 刚起就
+    崩（NODE_MODULE_VERSION mismatch），表现为"秒退且日志为空"。这里对候选
+    node 逐个跑一次 require 冒烟测试，取第一个通过的。
+    """
+    import shutil as _shutil
+    cands: list[str] = []
+    for name in ("node", "node.exe"):
+        w = _shutil.which(name)
+        if w:
+            cands.append(w)
+    for p in (r"C:\Program Files\nodejs\node.exe",):
+        if Path(p).is_file():
+            cands.append(p)
+    seen: set[str] = set()
+    for c in cands:
+        if c in seen:
+            continue
+        seen.add(c)
+        try:
+            r = subprocess.run(
+                [c, "-e", "new (require('better-sqlite3'))(':memory:').close()"],
+                cwd=str(plugin_dir), capture_output=True, timeout=15)
+            if r.returncode == 0:
+                return c
+        except Exception:
+            pass
+    return None
+
+
+def _spawn(cmd_str: str, d: Path, flags: int, env: dict) -> Optional[subprocess.Popen]:
+    try:
+        proc = subprocess.Popen(cmd_str, cwd=str(d), shell=True,
+                                creationflags=flags, close_fds=True, env=env)
+    except FileNotFoundError:
+        return None
+    try:
+        _pid_file().write_text(str(proc.pid), encoding="utf-8")
+    except Exception:
+        pass
+    return proc
+
+
+def _wait_started(proc: subprocess.Popen, wait_s: float):
+    """轮询直到：在线 / 进程退出 / 超时。返回 (state, holder)。"""
+    deadline = time.time() + wait_s
+    while time.time() < deadline:
+        if auth_state() is not None:
+            return "online", None
+        if proc.poll() is not None:
+            return "exited", _port_holder_pid(_base_port())
+        time.sleep(1.0)
+    return "timeout", None
+
+
 def daemon_start(agent: str = "hermes",
                  plugin_dir: Optional[str] = None,
                  wait_s: int = _START_TIMEOUT_S) -> dict[str, Any]:
@@ -342,8 +431,11 @@ def daemon_start(agent: str = "hermes",
     if d is None:
         return {"started": False, "reason": "plugin-dir-not-found",
                 "hint": "设置环境变量 MEMOS_PLUGIN_DIR 指向 MemOS repo 的 apps/memos-local-plugin"}
-    npm = "npm.cmd" if os.name == "nt" else "npm"
-    log = open(_log_file(), "ab")
+    log_path = _log_file()
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
     flags = 0
     if os.name == "nt":
         # 脱离父进程：控制台退出后 daemon 继续存活
@@ -354,28 +446,54 @@ def daemon_start(agent: str = "hermes",
     mh = config.config().memos_home
     if mh and mh.is_dir():
         env["MEMOS_HOME"] = str(mh)
-    try:
-        proc = subprocess.Popen(
-            [npm, "run", "bridge:daemon", "--", f"--agent={agent}"],
-            cwd=str(d), stdout=log, stderr=subprocess.STDOUT,
-            creationflags=flags, close_fds=True, env=env,
-        )
-    except FileNotFoundError:
-        return {"started": False, "reason": "npm-not-found",
-                "hint": "未找到 npm，请先安装 Node.js >= 20"}
-    _pid_file().write_text(str(proc.pid), encoding="utf-8")
-
-    deadline = time.time() + wait_s
-    while time.time() < deadline:
-        if auth_state() is not None:
-            return {"started": True, "pid": proc.pid, **daemon_status()}
-        if proc.poll() is not None:
-            return {"started": False, "reason": "process-exited",
-                    "pid": proc.pid, "returncode": proc.returncode,
-                    "log": str(_log_file())}
-        time.sleep(1.0)
+    # 绕过 npm 壳层直接跑 bridge:daemon 的等价命令（package.json 即
+    # "tsx bridge.cts --daemon"）：npm.cmd 可能被插件目录残留的残缺 npm 垫片
+    # 劫持（实测 Cannot find module '...\node_modules\npm\bin\npm-prefix.js'
+    # → 秒退；而 npm 输出走 DETACHED cmd 链还会丢日志）。
+    import shutil
+    node = _resolve_node(d)
+    if node is None:
+        return {"started": False, "reason": "node-incompatible",
+                "hint": "找不到能加载插件原生模块的 node（nvm 切到插件 node_modules 编译时的版本，"
+                        "如 Node 22/24，或在插件目录重新 npm rebuild）"}
+    tsx_cli = d / "node_modules" / "tsx" / "dist" / "cli.mjs"
+    if not tsx_cli.is_file():
+        return {"started": False, "reason": "tsx-not-found",
+                "hint": f"插件缺少 tsx（{tsx_cli}）——先在插件目录执行 npm install"}
+    # 重定向必须走 shell 字符串：直接把文件句柄交给 DETACHED 子进程，输出会丢
+    cmd_str = (f'"{node}" "{tsx_cli}" bridge.cts --daemon --agent={agent} '
+               f'>> "{log_path}" 2>&1')
+    proc = _spawn(cmd_str, d, flags, env)
+    if proc is None:
+        return {"started": False, "reason": "node-not-found",
+                "hint": "未找到 node，请先安装 Node.js >= 20"}
+    state, holder = _wait_started(proc, wait_s)
+    if state == "online":
+        return {"started": True, "pid": proc.pid, **daemon_status()}
+    if state == "exited" and holder is None:
+        # 刚停的实例可能仍在释放端口（竞态）：等 3 秒再拉一次
+        time.sleep(3)
+        proc2 = _spawn(cmd_str, d, flags, env)
+        if proc2 is not None:
+            proc = proc2
+            state, holder = _wait_started(proc, wait_s)
+            if state == "online":
+                return {"started": True, "pid": proc.pid, **daemon_status()}
+    if state == "exited":
+        out = {"started": False, "reason": "process-exited",
+               "pid": proc.pid, "returncode": proc.returncode,
+               "log": str(log_path)}
+        if holder:
+            out["port_holder"] = holder
+            out["hint"] = (f"端口 {_base_port()} 被其它进程占用（PID {holder}）——"
+                           "引擎实例秒退多为端口被占；先结束该进程"
+                           "（或用面板/`memos-daemon stop` 停掉已有实例）再重试")
+        else:
+            out["hint"] = (f"引擎秒退且端口空闲——可能刚停的进程残留仍在释放，"
+                           f"或启动即崩；请看 {log_path}，或数秒后再试一次")
+        return out
     return {"started": False, "reason": "timeout", "pid": proc.pid,
-            "log": str(_log_file())}
+            "log": str(log_path)}
 
 
 def daemon_stop() -> dict[str, Any]:
@@ -389,7 +507,7 @@ def daemon_stop() -> dict[str, Any]:
     pid = st["pid"]
     if os.name == "nt":
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, errors="replace")
     else:
         import signal
         try:

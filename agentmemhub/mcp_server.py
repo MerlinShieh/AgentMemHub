@@ -169,17 +169,38 @@ def _save(args: dict) -> str:
             "userText": content, "agentText": "",
             "summary": content[:200],
             "value": 0.5, "alpha": 0.3, "priority": 0.5,
-            "toolCalls": [], "agentThinking": [],
+            "toolCalls": [], "agentThinking": None,
         }],
         "policies": [], "worldModels": [], "skills": [],
     }
-    try:
-        from agentmemhub.memos import push_bundle
-        resp = push_bundle(bundle, memos_daemon.base_url())
-    except memos_daemon.EngineAuthError:
-        raise _ToolError(_AUTH_HINT)
-    except Exception as e:
-        raise _ToolError(f"记忆写入失败：{e}")
+    # 写后验证：import 偶发瞬时失败（SQLITE_BUSY 被引擎静默吞，返回 imported=0）
+    # 时重试一次；仍失败则落日志并明确报错，不再伪装“已写入”。
+    imported = skipped = 0
+    resp: dict = {}
+    for attempt in (1, 2):
+        try:
+            from agentmemhub.memos import push_bundle
+            resp = push_bundle(bundle, memos_daemon.base_url())
+        except memos_daemon.EngineAuthError:
+            raise _ToolError(_AUTH_HINT)
+        except Exception as e:
+            if attempt == 2:
+                raise _ToolError(f"记忆写入失败：{e}")
+            time.sleep(0.6)
+            continue
+        imported = int(resp.get("imported", 0) or 0)
+        skipped = int(resp.get("skipped", 0) or 0)
+        if imported > 0:
+            break
+        time.sleep(0.6)
+    if imported == 0:
+        try:
+            from agentmemhub import logs
+            logs.record(f"memory_save 写入未生效 id={tid} imported=0 skipped={skipped}",
+                        level="error", actor="mcp", dest="cli")
+        except Exception:
+            pass
+        raise _ToolError(f"记忆写入未生效（imported=0, skipped={skipped}），请稍后重试")
     # 单条入库后补一次增量向量（repair：只补缺失），失败不阻塞
     try:
         memos_daemon.engine_request(
@@ -187,8 +208,39 @@ def _save(args: dict) -> str:
             body={"mode": "repair"}, timeout=300)
     except Exception:
         pass
-    return (f"记忆已写入（imported={resp.get('imported')}, skipped={resp.get('skipped')}）\n"
-            f"id={tid}\n内容：{content[:120]}" + ("…" if len(content) > 120 else ""))
+    return (f"记忆已写入（id={tid}，imported={imported}）\n"
+            f"内容：{content[:120]}" + ("…" if len(content) > 120 else ""))
+
+
+def _score(args: dict) -> str:
+    """写后即评：给已写入的记忆打极性分（feedback explicit → 引擎立即重算 value/priority）。"""
+    tid = str(args.get("trace_id") or args.get("traceId") or "").strip()
+    if not tid:
+        raise _ToolError("memory_score 需要 trace_id 参数")
+    polarity = str(args.get("polarity") or "").strip().lower()
+    if polarity not in ("positive", "neutral", "negative"):
+        raise _ToolError("polarity 必须是 positive | neutral | negative")
+    try:
+        memos_daemon.engine_request(
+            "POST", "/api/v1/feedback",
+            body={"channel": "explicit", "polarity": polarity,
+                  "magnitude": 1.0, "traceId": tid},
+            timeout=30)
+    except memos_daemon.EngineAuthError:
+        raise _ToolError(_AUTH_HINT)
+    except Exception as e:
+        raise _ToolError(f"评分失败（trace 不存在或引擎异常）：{e}")
+    try:
+        from agentmemhub.scoring import mark_scored
+        mark_scored(tid)          # 进入已评清单，后续批量重跑不再覆盖/稀释
+    except Exception:
+        pass
+    try:
+        from agentmemhub.scoring import sync_episode_r_task
+        sync_episode_r_task(trace_ids=[tid])   # 同步所在 episode 的 r_task，viewer 评分标签即时可见
+    except Exception:
+        pass
+    return f"已评分（{tid} → {polarity}，引擎已重算 value/priority）"
 
 
 _TOOL_HANDLERS: dict[str, Callable[[dict], str]] = {
@@ -196,6 +248,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict], str]] = {
     "memory_recent": _recent,
     "memory_stats": _stats,
     "memory_save": _save,
+    "memory_score": _score,
 }
 
 _TOOLS: list[dict] = [
@@ -228,13 +281,25 @@ _TOOLS: list[dict] = [
     },
     {
         "name": "memory_save",
-        "description": "把一条值得长期保留的事实/结论写入记忆引擎（独立于会话采集链路，即时入库并补向量）。适合在用户明确要求记住、或发现重要且可复用的结论时调用。",
+        "description": "把一条值得长期保留的事实/结论写入记忆引擎（独立于会话采集链路，即时入库并补向量）。适合在用户明确要求记住、或发现重要且可复用的结论时调用。写入成功返回 trace id；失败会明确报错。",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "content": {"type": "string", "description": "要保存的记忆内容（一句话结论或事实，可含少量上下文）"},
             },
             "required": ["content"],
+        },
+    },
+    {
+        "name": "memory_score",
+        "description": "给已写入的记忆打极性分（写后即评）：positive=值得保留 / neutral=一般 / negative=无价值。通过 feedback 让引擎立即重算该记忆的 value/priority（检索排序生效）。用于 memory_save 之后紧接着评分已保存的记忆。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "trace_id": {"type": "string", "description": "memory_save 返回的 trace id"},
+                "polarity": {"type": "string", "description": "positive | neutral | negative"},
+            },
+            "required": ["trace_id", "polarity"],
         },
     },
 ]

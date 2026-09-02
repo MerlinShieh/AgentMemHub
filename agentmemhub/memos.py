@@ -1,4 +1,4 @@
-"""AgentMemHub → MemOS 桥接器。
+﻿"""AgentMemHub → MemOS 桥接器。
 
 把统一事件流（store 中的会话）转换为 MemOS Local Plugin 的导入 bundle
 （TraceDTO 格式），可直接 POST 到 MemOS 的 /api/v1/import 生成历史记忆。
@@ -11,7 +11,9 @@
 稳定幂等（v2）：
 - trace id 由 src_id 派生（sha256），同一条源事件重复导出 id 不变 → MemOS 按 id 去重
 - turn 按事件流顺序以 user 消息为界切分（与 events 表 turn_key 语义一致）；
-  系统注入的 user 消息（is_system）直接跳过，不进 bundle
+  系统注入的 user 消息（is_system）与 meta 事件直接跳过，不进 bundle；
+  无 user 起点且无实质内容的轮次不产出（防幽灵空 trace）；
+  纯工具轮（如 workbuddy shell 审计）以会话标题兜底 summary
 - value 启发式初值：让导入 trace 有正向价值信号（参与检索排序），
   error 轮给负值；后续 MemOS 真实 reward 会覆盖这些静态值
 
@@ -60,10 +62,14 @@ def _heuristic_value(tools: list[dict], agent_text: str) -> float:
 
 def _session_events_to_traces(source: str, conv: Any,
                               events: list[Any]) -> list[dict[str, Any]]:
-    """把统一事件流分割为 MemOS traces（按 user 消息为界，系统注入跳过）。"""
+    """把统一事件流分割为 MemOS traces（按 user 消息为界，系统注入/meta 跳过）。"""
     traces: list[dict[str, Any]] = []
     session_id = _id([source, str(conv["id"])], "semem_session")
     episode_id = _id([source, str(conv["id"])], "semem_ep")
+    try:  # conv 可能是 dict（测试/adapter）或 sqlite3.Row（store 行）——统一按键取 title
+        title = (conv["title"] or "").strip()
+    except (KeyError, IndexError, TypeError):
+        title = ""
 
     # 当前轮状态
     user_ev: Optional[Any] = None      # 轮起点 user 事件（is_system 的不开轮）
@@ -94,6 +100,11 @@ def _session_events_to_traces(source: str, conv: Any,
                 if b.content:
                     thinking.append(b.content)
 
+        # 无 user 起点且桶内无任何实质内容（文本/工具/思维链）→ 不出幽灵轮次
+        if user_ev is None and not agent_text and not tools and not thinking:
+            user_ev, bucket = None, []
+            return
+
         # 时间轴：user 事件时间优先，否则桶内首个事件
         ts_ev = user_ev if user_ev is not None else (bucket[0] if bucket else None)
         ts = int((ts_ev.time or 0) * 1000) if ts_ev and ts_ev.time else 0
@@ -110,7 +121,7 @@ def _session_events_to_traces(source: str, conv: Any,
             "turnId": ts,
             "userText": (user_ev.content or "") if user_ev is not None else "",
             "agentText": agent_text,
-            "summary": (agent_text or (user_ev.content if user_ev else "") or "")[:200],
+            "summary": (agent_text or (user_ev.content if user_ev else "") or title)[:200],
             "toolCalls": tools,
             "agentThinking": "\n".join(thinking) if thinking else None,
             "value": value,
@@ -126,6 +137,8 @@ def _session_events_to_traces(source: str, conv: Any,
             user_ev = ev
             bucket = []
         elif role == "user":  # 系统注入消息（TodoWrite / DSH runtime context 等）不进 bundle
+            continue
+        elif role == "meta":  # 分隔符/审计标记等非对话内容，不开轮也不入桶
             continue
         else:
             bucket.append(ev)
@@ -177,7 +190,7 @@ def push_bundle(bundle: dict[str, Any], base_url: str = "http://127.0.0.1:18800"
     """
     from agentmemhub import memos_daemon
     return memos_daemon.engine_request("POST", "/api/v1/import",
-                                       body=bundle, timeout=60, base=base_url)
+                                       body=bundle, timeout=300, base=base_url)
 
 
 def rebuild_embeddings(base_url: str = "http://127.0.0.1:18800",
