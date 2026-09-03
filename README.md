@@ -226,7 +226,9 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 
 把本地记忆引擎（MemOS）的语义检索/写入包装成 **MCP server**，挂在 ZCode / OpenCode /
 Claude Code 等支持 MCP 的 Agent harness 上——模型在会话进行中即可检索历史记忆、
-主动保存值得长期保留的结论。与离线链路（统一提取 → bundle → 导入）互补：
+主动保存值得长期保留的结论。与离线链路（统一提取 → bundle → 导入）互补。
+**⚠️ 本网关必须与 [save-memory Skill](https://github.com/MerlinShieh/Agent-skill-save-memory)
+配套安装**（触发纪律所在，见下文「必装组件」），只配 MCP 不装 Skill 不算接入完成。
 
 | 工具 | 说明 |
 |---|---|
@@ -299,9 +301,30 @@ OpenCode 对应写法（含裸命令备选：`pip install -e .` 后把 `.venv/Sc
 ```
 
 > 两种传输的工具完全一致（`memory_search` / `memory_recent` / `memory_stats` / `memory_save` / `memory_score`），按场景选一种即可。
->
-> Agent 侧「何时该保存 + 保存后必须评分」的触发纪律以独立 Skill 仓库提供：
-> [Agent-skill-save-memory](https://github.com/MerlinShieh/Agent-skill-save-memory)（行为协议层，与本 MCP 强绑定）。
+
+### ⚠️ 必装组件：save-memory Skill（与本项目强绑定）
+
+MCP 网关只提供「做得到」（执行层工具），**不解决「何时必须做」**——Agent 主动保存记忆并
+写后即评的触发纪律，由独立 Skill 仓库承载：
+
+> **https://github.com/MerlinShieh/Agent-skill-save-memory**
+
+该 Skill 是本记忆链路的**必装组件**（不装则模型保存记忆行为不可靠：漏保存、保存不评分，
+本项目实测踩过）。完整启用需要三件套，缺一不可：
+
+1. **MCP 服务**（执行层，本仓库）——按下方「注册配置」接入 harness；
+2. **save-memory Skill**（行为协议层）——克隆到当前 harness 的 skills 目录：
+   ```bash
+   # ZCode
+   git clone https://github.com/MerlinShieh/Agent-skill-save-memory ~/.zcode/skills/save-memory
+   # OpenCode（或 ~/.agents/skills/）
+   git clone https://github.com/MerlinShieh/Agent-skill-save-memory ~/.config/opencode/skills/save-memory
+   ```
+3. **AGENTS.md 硬规则**（触发保障）——把 SKILL.md「生效前提」中的规则原文粘贴进项目
+   `AGENTS.md` 或 harness 全局指令文件（如 `~/.zcode/AGENTS.md`）。
+
+三层边界：**AGENTS.md 管「必须做」、SKILL.md 管「怎么做」、MCP 管「做得到」**。
+Skill 与 MCP 强绑定、无降级路径——MCP 不可用时 Skill 会明确提醒配置而非改用别的方式保存。
 
 设计要点：
 
