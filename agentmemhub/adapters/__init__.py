@@ -14,17 +14,19 @@ from .qwen import QwenAdapter
 from .qodercn import QoderCnAdapter
 from .workbuddy import WorkBuddyAdapter
 from .dsh import DshAdapter
+from .trae import TraeAdapter
 
 #: 全部内置 adapter（按 source 名索引）
 ADAPTERS: dict[str, AgentAdapter] = {
     a.source: a for a in (
         ZCodeAdapter(), OpenCodeAdapter(), HermesAdapter(),
         WorkBuddyAdapter(), QwenAdapter(), QoderCnAdapter(), DshAdapter(),
+        TraeAdapter(),
     )
 }
 
 #: 有身份验证/路径可探测顺序（仅用于展示/自动发现）
-DEFAULT_ORDER = ("zcode", "opencode", "hermes", "workbuddy", "qwen", "qodercn", "dsh")
+DEFAULT_ORDER = ("zcode", "opencode", "hermes", "workbuddy", "qwen", "qodercn", "dsh", "trae")
 
 
 def get_adapter(source: str) -> Optional[AgentAdapter]:
