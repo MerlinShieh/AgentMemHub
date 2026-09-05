@@ -15,6 +15,11 @@
 | **Qwen** | `~/.qwen/projects/*/chats/*.jsonl` | JSONL |
 | **QoderCN** | `~/.qoder-cn/.../*.jsonl` | JSONL |
 | **DSH** | `~/.dsh/sessions/*/session.jsonl.zstd` | zstd JSONL |
+| **Trae (CN)** | `%APPDATA%\Trae CN\ModularData\ai-agent\` + `~/.trae-cn/` | Git 快照 + JSON + Markdown |
+
+> **部分支持来源（最小可用）**：WorkBuddy 与 Trae 受源数据封闭限制，目前只能拿到
+> **会话清单 + 局部数据**（WorkBuddy：Shell 命令审计；Trae：每轮代码变更 diff + SOLO
+> 产物清单 + 项目记忆），**拿不到用户/助手的完整输入输出**——等待官方开放接口后补全。
 
 ## 项目架构
 
@@ -24,7 +29,7 @@
    │  采集层                        存储层                 消费层                     │
    │  ┌──────────────┐           ┌────────────┐     ┌────────────────────┐          │
    │  │ adapters/    │  ingest   │ SQLite 会话库│    │ CLI（7+ 子命令）      │          │
-   │  │ 7 个数据源     │ ────────▶│ (store.py) │     │ 控制台（start.bat）    │          │
+   │  │ 8 个数据源     │ ────────▶│ (store.py) │     │ 控制台（start.bat）    │          │
    │  │ (sqlite/jsonl)│           │ events+fts │     │ Web 看板（/api/*）    │          │
    │  └──────────────┘           └─────┬──────┘     └────────┬───────────┘          │
    │                                  │                      │                      │
@@ -54,7 +59,7 @@ AgentMemHub/
 │   ├── store.py + schema.sql     # SQLite 会话库（conversations/events/events_fts）
 │   ├── memos.py                  # MemOS bundle 桥接（幂等导入/价值/rebuild）
 │   ├── memos_daemon.py           # 记忆引擎托管（启停/状态/密码自动登录/轻量开关）
-│   ├── adapters/                 # 7 个 Agent 数据源适配器（src_id/turn_key/注入识别）
+│   ├── adapters/                 # 8 个 Agent 数据源适配器（src_id/turn_key/注入识别）
 │   └── web/                      # FastAPI 看板 + 前端 + /api/memos 记忆网关
 ├── memOS/                        # 上游记忆引擎（已平移进项目，gitignore）
 │   ├── apps/memos-local-plugin/  #   引擎程序 + npm 依赖 + 本地嵌入模型
@@ -114,7 +119,7 @@ uv run python -m agentmemhub memos --push http://127.0.0.1:18800
 ```bash
 # ---- 关键词搜索 ----
 # 中文自动走 LIKE 子串匹配，英文/词组走 FTS5 全文索引
-python -m agentmemhub search "登录"                        # 全部 7 个来源
+python -m agentmemhub search "登录"                        # 全部 8 个来源
 python -m agentmemhub search "登录" --source zcode         # 只搜某个来源
 python -m agentmemhub search "登录" --role tool            # 只搜工具事件
 python -m agentmemhub search "登录" --role reasoning       # 只搜思维链
@@ -452,7 +457,8 @@ MemOS 未安装时板块自动隐藏。
 ## Roadmap
 
 - [x] 统一事件模型 + SQLite 存储（FTS5）
-- [x] 7 个 Agent Adapter（含 src_id/turn_key 稳定锚与系统注入识别）
+- [x] 8 个 Agent Adapter（含 src_id/turn_key 稳定锚与系统注入识别）
+- [x] Trae 适配器（最小可用：会话清单 + 每轮快照 diff + 项目记忆；对话正文等官方开放接口）
 - [x] 全量检索 + JSONL/Markdown 导出
 - [x] MemOS bundle 桥接（幂等导入 + 价值启发式 + embedding 自动补齐）
 - [x] Web 仪表盘（FastAPI + 原生 JS，服务端分页、事件按需加载、真删改）
