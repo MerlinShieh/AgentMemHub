@@ -224,7 +224,7 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 | `mcp [--http] [--bind H] [--port P]` | MCP 记忆网关：默认 stdio（Agent 拉起）；`--http` 常驻为 Streamable HTTP 供团队共享 |
 | `sync [--push URL] [--no-rebuild] [--full]` | 增量同步：ingest 增量 → 清洗变更会话 → **只推送变更会话的 traces**（watermarks 变更集，无变更自动跳过；`--full` 强制全量）→ 补向量（幂等，引擎离线跳过推送且变更集保留待补推）|
 | `clean [--source x] [--apply]` | 记忆清洗：删除系统注入事件（默认预览，`--apply` 才执行并重建 FTS/计数；sync 会自动只清变更会话）|
-| `score [--pending] [--limit N] [--dry-run] [--workers N] [--ids id1,id2] [--unscored-count] [--sync-episodes]` | LLM 批量自动评分历史记忆（三轴评估 → feedback 写入价值分；跳过已评；`--pending` 消费 sync 推送后入队的待评分队列，`--ids` 只评指定条（写后即评/锚点用），`--unscored-count` 仅统计未评分条数供定时/定量触发判断，`--sync-episodes` 把 trace 分数回填 episode.r_task 供面板显示）|
+| `score [--pending] [--limit N] [--dry-run] [--workers N] [--ids id1,id2] [--unscored-count] [--sync-episodes]` | LLM 批量自动评分历史记忆（三轴评估 → feedback 写入价值分；跳过已评；LLM 调用**强制直连**、不受系统代理状态影响，确需代理设 `AGENTMEMHUB_LLM_PROXY`；`--pending` 消费 sync 推送后入队的待评分队列，`--ids` 只评指定条（写后即评/锚点用），`--unscored-count` 仅统计未评分条数供定时/定量触发判断，`--sync-episodes` 把 trace 分数回填 episode.r_task 供面板显示）|
 | `rebuild [--mode repair\|rebuild]` | 补向量：触发引擎 embedding rebuild（导入记忆后修复语义检索）|
 | `stats` / `adapters` | 统计 / adapter 状态 |
 

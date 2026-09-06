@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import urllib.request
 from pathlib import Path
@@ -105,6 +106,20 @@ def read_engine_llm() -> dict[str, Any]:
     return {"endpoint": endpoint, "api_key": api_key, "model": model}
 
 
+def _llm_opener() -> urllib.request.OpenerDirector:
+    """LLM 评估专用 opener：**强制直连**。
+
+    Python urllib 默认会自动采用 Windows 系统代理（注册表）与 *_proxy 环境变量
+    ——Clash 等工具开关/切节点会让 LLM 请求时通时断（TLS 握手被掐 =
+    UNEXPECTED_EOF）。这里显式置空代理表，直连不受本机代理状态影响；
+    确需走代理的私有部署用环境变量 AGENTMEMHUB_LLM_PROXY 显式指定。
+    """
+    proxy = os.environ.get("AGENTMEMHUB_LLM_PROXY", "").strip()
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler(
+            {"http": proxy, "https": proxy} if proxy else {}))
+
+
 def evaluate_trace(trace: dict, llm_cfg: dict, timeout: float = 45) -> str:
     """LLM 三轴评估一条 trace，返回 verdict（positive|neutral|negative）。"""
     user_text = (trace.get("userText") or "").strip()[:800]
@@ -126,7 +141,7 @@ def evaluate_trace(trace: dict, llm_cfg: dict, timeout: float = 45) -> str:
         headers={"Content-Type": "application/json",
                  "Authorization": f"Bearer {llm_cfg['api_key']}"},
         method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with _llm_opener().open(req, timeout=timeout) as r:
         data = json.loads(r.read().decode("utf-8"))
     content = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
     verdict = _parse_verdict(content)
