@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from agentmemhub.models import Event, _to_epoch, renumber, is_system_inject, message_text
 from .base import AgentAdapter
@@ -40,7 +40,44 @@ class QwenAdapter(AgentAdapter):
         p = Path.home() / ".qwen"
         return p if p.exists() else None
 
-    def load(self, path: Path) -> list[dict[str, Any]]:
+    def list_sessions(self, path: Path) -> Optional[list[dict[str, Any]]]:
+        """轻量清单：rglob + 首行 peek sessionId + 文件 mtime（不逐行解析）。"""
+        seen: set[Path] = set()
+        for root in (path / "projects", path):
+            if root.is_dir():
+                for fp in root.rglob("*.jsonl"):
+                    seen.add(fp.resolve())
+        out: dict[str, float] = {}
+        for p in sorted(seen):
+            fp = Path(p)
+            if fp.name in ("usage_record.jsonl",) or "usage" in fp.name:
+                continue
+            try:
+                mtime = _to_epoch(fp.stat().st_mtime) or 0
+            except OSError:
+                continue
+            sid = self._peek_sid(fp) or fp.stem
+            out[sid] = max(out.get(sid, 0.0), mtime)
+        return [{"id": k, "updated_at": v} for k, v in out.items()]
+
+    @staticmethod
+    def _peek_sid(fp: Path) -> Optional[str]:
+        """只读首行取 sessionId（清单/增量预过滤用，失败返回 None）。"""
+        try:
+            with open(fp, encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    o = json.loads(line)
+                    if isinstance(o, dict) and o.get("sessionId"):
+                        return str(o["sessionId"])
+                    return None
+        except Exception:
+            return None
+        return None
+
+    def load(self, path: Path, only_ids: Optional[set[str]] = None) -> list[dict[str, Any]]:
         # 收集所有 chats/*.jsonl（按大小排，跳过 usage_record/系统文件）
         # 注意：projects/ 下的文件会被 path.rglob 和 (path/"projects").rglob 双重复收集
         # ——必须按 resolve() 去重，否则同一会话事件双倍入库
@@ -54,7 +91,18 @@ class QwenAdapter(AgentAdapter):
                        if p.name not in ("usage_record.jsonl",) and "usage" not in p.name]
 
         sessions_map: dict[str, dict] = {}
+        # 会话级 updated_at = 所有贡献文件的 mtime 最大值（增量对比锚；
+        # 内容时间戳与文件写入时间有偏差，用 mtime 才能与清单精确对齐）
+        sid_mtime: dict[str, float] = {}
         for fp in jsonl_files:
+            if only_ids is not None:
+                guess = {fp.stem}
+                peek = self._peek_sid(fp)
+                if peek:
+                    guess.add(peek)
+                if not (guess & only_ids):
+                    continue  # 增量：内容 id 与文件名都不在变更集 → 不读
+            mtime = _to_epoch(fp.stat().st_mtime) or 0
             try:
                 turn_by_uuid: dict[str, str] = {}
                 with open(fp, encoding="utf-8", errors="ignore") as f:
@@ -95,15 +143,14 @@ class QwenAdapter(AgentAdapter):
                                 "source": self.source, "id": sid,
                                 "title": "", "cwd": o.get("cwd") or "",
                                 "created_at": _to_epoch(o.get("timestamp")),
-                                "updated_at": _to_epoch(o.get("timestamp")),
+                                "updated_at": 0,
                                 "model": o.get("model") or "",
                                 "meta": {"file": str(fp)}, "events": [],
                             }
+                        sid_mtime[sid] = max(sid_mtime.get(sid, 0.0), mtime)
                         sessions_map[sid]["events"].append(ev)
                         if o.get("cwd"):
                             sessions_map[sid]["cwd"] = o["cwd"]
-                        if o.get("timestamp"):
-                            sessions_map[sid]["updated_at"] = _to_epoch(o["timestamp"])
             except Exception:
                 continue
 
@@ -116,6 +163,7 @@ class QwenAdapter(AgentAdapter):
                     if e.role == "user" and e.content:
                         s["title"] = e.content[:40]
                         break
+            s["updated_at"] = sid_mtime.get(s["id"]) or s["updated_at"]
             sessions.append(s)
         return sessions
 

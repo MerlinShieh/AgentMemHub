@@ -20,6 +20,9 @@ __pycache__/
 UserData/
 .trash/
 
+# 增量分支沙箱（start_dev.bat：本分支所有可写数据落这里，不碰真实数据目录）
+temp_path/
+
 # PyInstaller 打包产物
 build/
 dist/

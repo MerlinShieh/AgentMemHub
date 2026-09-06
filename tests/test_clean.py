@@ -169,83 +169,98 @@ class _FakeStore:
         return [{"source": "zcode", "updated_at": self.new_ts},
                 {"source": "zcode", "updated_at": self.old_ts}]
 
+    def delete_system_events(self, source=None, *, conversations=None):
+        return (0, 0)
+
     def close(self):
         self.closed = True
 
 
+def _wm_setup(tmp_path, monkeypatch, changed):
+    """config.data_dir → tmp_path 并预置一份含 changed 变更集的水位状态。"""
+    from agentmemhub import watermarks
+
+    class _CfgStub:
+        data_dir = tmp_path
+
+    monkeypatch.setattr("agentmemhub.config.config", lambda: _CfgStub())
+    st = watermarks.load_state(tmp_path)
+    watermarks.record_ingest(st, ts=1000.0, changed=changed)
+    watermarks.save_state(tmp_path, st)
+    return st
+
+
 @mock.patch.object(cli, "run_ingest", return_value=(0, 0))
 @mock.patch("agentmemhub.memos_daemon.auth_state", return_value={})
-def test_run_sync_incremental_pushes_only_new(_auth, _ingest, tmp_path, monkeypatch, capsys):
-    """增量：有锚时 since_ts 传给 push_to_memos（只推新会话），推送后推进锚。"""
-    import agentmemhub.cli as cli_mod
-    monkeypatch.setattr(cli_mod, "_sync_anchor_path", lambda: tmp_path / "last_sync.json")
-    cli_mod._save_sync_anchor(__import__("time").time() - 600)     # 上一轮同步在 10 分钟前
+def test_run_sync_incremental_pushes_only_delta(_auth, _ingest, tmp_path, monkeypatch, capsys):
+    """增量：delta 会话以 only= 精确下推 push_to_memos；成功后标记消费并入队评分。"""
+    from agentmemhub import watermarks
+    _wm_setup(tmp_path, monkeypatch,
+              [{"source": "zcode", "id": "conv_new", "status": "added"}])
     fake = _FakeStore()
     with mock.patch.object(cli, "Store", return_value=fake), \
          mock.patch.object(cli, "push_to_memos", return_value={
-             "imported": 5, "skipped": 0, "lines": [], "rebuilt": None}) as pm:
+             "imported": 5, "skipped": 0, "lines": [], "rebuilt": None,
+             "failed": 0, "pushed_ids": ["trac_1", "trac_2"]}) as pm:
         cli.run_sync(push="http://127.0.0.1:18800")
     assert pm.called
-    assert pm.call_args.kwargs["since_ts"] is not None            # 增量锚生效
-    assert pm.call_args.kwargs["since_ts"] < fake.new_ts          # 新会话命中
+    assert pm.call_args.kwargs["only"] == {"zcode": {"conv_new"}}   # delta 精确过滤
+    assert pm.call_args.kwargs.get("since_ts") is None
     assert fake.closed
-    # 锚已推进（下次 sync 基于本次完成时间）
-    import json as _j
-    assert _j.loads((tmp_path / "last_sync.json").read_text())["ts"] > fake.old_ts
+    st = watermarks.load_state(tmp_path)
+    assert st["consumed"]["push"] >= 1000.0                # delta 已标记消费
+    assert st["pending_score"] == ["trac_1", "trac_2"]     # 推送 trace 入队评分
 
 
 @mock.patch.object(cli, "run_ingest", return_value=(0, 0))
 @mock.patch("agentmemhub.memos_daemon.auth_state", return_value={})
-def test_run_sync_incremental_skips_when_nothing_new(_auth, _ingest, tmp_path, monkeypatch, capsys):
-    """增量：无新增会话 → 跳过推送（不调 push_to_memos，不推进锚）。"""
-    import agentmemhub.cli as cli_mod
-    import time as _t
-    monkeypatch.setattr(cli_mod, "_sync_anchor_path", lambda: tmp_path / "last_sync.json")
-    cli_mod._save_sync_anchor(_t.time() - 10)                     # 刚同步过 → 缓冲窗内无新会话
+def test_run_sync_incremental_skips_when_nothing_pending(_auth, _ingest, tmp_path, monkeypatch, capsys):
+    """增量：delta 已消费/为空 → 跳过推送（不调 push_to_memos）。"""
+    from agentmemhub import watermarks
+    st = _wm_setup(tmp_path, monkeypatch,
+                   [{"source": "zcode", "id": "conv_new", "status": "added"}])
+    watermarks.mark_consumed(st, "push")
+    watermarks.save_state(tmp_path, st)
 
-    class _AllOld:
-        def list_conversations(self, src=None):
-            return [{"source": "zcode", "updated_at": _t.time() - 600}]   # 都在锚前
-        def close(self):
-            pass
-
-    with mock.patch.object(cli, "Store", return_value=_AllOld()), \
+    with mock.patch.object(cli, "Store", return_value=_FakeStore()), \
          mock.patch.object(cli, "push_to_memos") as pm:
         cli.run_sync(push="http://127.0.0.1:18800")
     out = capsys.readouterr().out
-    assert "无新增会话" in out
+    assert "无待推送变更" in out
     assert not pm.called
 
 
 @mock.patch.object(cli, "run_ingest", return_value=(0, 0))
 @mock.patch("agentmemhub.memos_daemon.auth_state", return_value={})
-def test_run_sync_failure_keeps_anchor(_auth, _ingest, tmp_path, monkeypatch, capsys):
-    """推送有失败 → 不推进锚（下次增量仍含失败会话可重试，不丢数据）。"""
-    import agentmemhub.cli as cli_mod
-    import json as _j
-    monkeypatch.setattr(cli_mod, "_sync_anchor_path", lambda: tmp_path / "last_sync.json")
-    old_ts = __import__("time").time() - 600
-    cli_mod._save_sync_anchor(old_ts)
+def test_run_sync_failure_keeps_delta(_auth, _ingest, tmp_path, monkeypatch, capsys):
+    """推送有失败 → 不标记 delta 消费（下次 sync 重试失败批次，不丢数据）。"""
+    from agentmemhub import watermarks
+    _wm_setup(tmp_path, monkeypatch,
+              [{"source": "zcode", "id": "conv_new", "status": "added"}])
     with mock.patch.object(cli, "Store", return_value=_FakeStore()), \
          mock.patch.object(cli, "push_to_memos", return_value={
              "imported": 0, "skipped": 0, "lines": [], "rebuilt": None,
-             "failed": 1}) as pm:
+             "failed": 1, "pushed_ids": []}) as pm:
         cli.run_sync(push="http://127.0.0.1:18800")
     out = capsys.readouterr().out
-    assert "未推进增量锚" in out
-    assert _j.loads((tmp_path / "last_sync.json").read_text())["ts"] == old_ts
+    assert "变更集未标记消费" in out
+    st = watermarks.load_state(tmp_path)
+    assert st["consumed"].get("push", 0) < 1000.0          # 未标记消费
+    assert st["pending_score"] == []                        # 失败批次不入评分队列
 
 
 @mock.patch.object(cli, "run_ingest", return_value=(0, 0))
 @mock.patch("agentmemhub.memos_daemon.auth_state", return_value={})
-def test_run_sync_full_ignores_anchor(_auth, _ingest, tmp_path, monkeypatch, capsys):
-    """--full 强制全量（since=None），与锚无关。"""
-    import agentmemhub.cli as cli_mod
-    monkeypatch.setattr(cli_mod, "_sync_anchor_path", lambda: tmp_path / "last_sync.json")
-    cli_mod._save_sync_anchor(__import__("time").time() - 600)
-    with mock.patch.object(cli, "Store", return_value=_FakeStore()), \
+def test_run_sync_full_ignores_delta(_auth, _ingest, tmp_path, monkeypatch, capsys):
+    """--full 强制全量推送（only=None），并跳过 delta 清洗。"""
+    from agentmemhub import watermarks
+    _wm_setup(tmp_path, monkeypatch,
+              [{"source": "zcode", "id": "conv_new", "status": "added"}])
+    fake = _FakeStore()
+    with mock.patch.object(cli, "Store", return_value=fake), \
          mock.patch.object(cli, "push_to_memos", return_value={
-             "imported": 5, "skipped": 0, "lines": [], "rebuilt": None}) as pm:
+             "imported": 5, "skipped": 0, "lines": [], "rebuilt": None,
+             "failed": 0, "pushed_ids": []}) as pm:
         cli.run_sync(push="http://127.0.0.1:18800", full=True)
-    assert "全量同步" in capsys.readouterr().out
-    assert pm.call_args.kwargs.get("since_ts") is None
+    assert _ingest.call_args.kwargs.get("full") is True
+    assert pm.call_args.kwargs.get("only") is None          # 全量，不走 delta 过滤

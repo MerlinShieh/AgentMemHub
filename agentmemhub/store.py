@@ -48,6 +48,8 @@ class Store:
                 str(self.db_path), check_same_thread=self._check_same_thread)
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL")
+            # WAL + NORMAL：断电最多丢最后一个事务，不损库（写入吞吐显著提升）
+            self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._init_schema()
         return self._conn
@@ -110,62 +112,115 @@ class Store:
 
             event_total = 0
             for sess in sessions:
-                events = sess.get("events") or []
-                cid = str(sess.get("id", ""))
-                roles = [e.role for e in events]
-
-                conn.execute(
-                    """INSERT OR REPLACE INTO conversations
-                       (source, id, title, cwd, model, created_at, updated_at,
-                        event_count, roles_json, meta_json, signature, session_key)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (
-                        source, cid, sess.get("title", ""), sess.get("cwd", ""),
-                        sess.get("model", ""),
-                        sess.get("created_at") or 0,
-                        sess.get("updated_at") or 0,
-                        len(events),
-                        json.dumps(roles, ensure_ascii=False),
-                        json.dumps(sess.get("meta") or {}, ensure_ascii=False),
-                        signature,
-                        sess.get("session_key") or None,
-                    ),
-                )
-
-                for e in events:
-                    tok_input = None
-                    if e.tool_input is not None:
-                        tok_input = json.dumps(e.tool_input, ensure_ascii=False)
-                    conn.execute(
-                        """INSERT OR REPLACE INTO events
-                           (source, conversation_id, seq, role, content,
-                            tool_name, tool_input_json, tool_output, tool_status,
-                            reasoning, patch_file, patch_diff, shell_cmd,
-                            shell_output, shell_cwd, parent_id, time, model, raw_json,
-                            src_id, turn_key, is_system)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (
-                            source, cid, e.seq, e.role, e.content,
-                            e.tool_name, tok_input, e.tool_output, e.tool_status,
-                            e.reasoning, e.patch_file, e.patch_diff, e.shell_cmd,
-                            e.shell_output, e.shell_cwd, e.parent_id,
-                            int(e.time) if e.time else None, e.model, e.raw_json,
-                            e.src_id, e.turn_key,
-                            (1 if e.is_system else 0) if e.is_system is not None else 0,
-                        ),
-                    )
-                    # FTS 行（role UNINDEXED，正文可搜）
-                    fts_doc = (e.role, e.content or "", e.tool_name or "",
-                               e.tool_output or "", e.reasoning or "",
-                               e.shell_cmd or "", e.shell_output or "",
-                               e.patch_diff or "")
-                    conn.execute(
-                        "INSERT INTO events_fts (source, conversation_id, role, content, tool_name, tool_output, reasoning, shell_cmd, shell_output, patch_diff) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                        (source, cid) + fts_doc,
-                    )
-                    event_total += 1
-
+                event_total += self._insert_session(conn, source, sess,
+                                                    signature=signature)
         return event_total
+
+    def _insert_session(self, conn: sqlite3.Connection, source: str,
+                        sess: dict[str, Any], *, signature: str = "") -> int:
+        """写单个会话（conversations + events + FTS 行）。返回写入事件数。
+
+        须在调用方事务内执行（不自行开启/提交事务）。
+        """
+        events = sess.get("events") or []
+        cid = str(sess.get("id", ""))
+        roles = [e.role for e in events]
+
+        conn.execute(
+            """INSERT OR REPLACE INTO conversations
+               (source, id, title, cwd, model, created_at, updated_at,
+                event_count, roles_json, meta_json, signature, session_key)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                source, cid, sess.get("title", ""), sess.get("cwd", ""),
+                sess.get("model", ""),
+                sess.get("created_at") or 0,
+                sess.get("updated_at") or 0,
+                len(events),
+                json.dumps(roles, ensure_ascii=False),
+                json.dumps(sess.get("meta") or {}, ensure_ascii=False),
+                signature,
+                sess.get("session_key") or None,
+            ),
+        )
+
+        n = 0
+        for e in events:
+            tok_input = None
+            if e.tool_input is not None:
+                tok_input = json.dumps(e.tool_input, ensure_ascii=False)
+            conn.execute(
+                """INSERT OR REPLACE INTO events
+                   (source, conversation_id, seq, role, content,
+                    tool_name, tool_input_json, tool_output, tool_status,
+                    reasoning, patch_file, patch_diff, shell_cmd,
+                    shell_output, shell_cwd, parent_id, time, model, raw_json,
+                    src_id, turn_key, is_system)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    source, cid, e.seq, e.role, e.content,
+                    e.tool_name, tok_input, e.tool_output, e.tool_status,
+                    e.reasoning, e.patch_file, e.patch_diff, e.shell_cmd,
+                    e.shell_output, e.shell_cwd, e.parent_id,
+                    int(e.time) if e.time else None, e.model, e.raw_json,
+                    e.src_id, e.turn_key,
+                    (1 if e.is_system else 0) if e.is_system is not None else 0,
+                ),
+            )
+            # FTS 行（role UNINDEXED，正文可搜）
+            fts_doc = (e.role, e.content or "", e.tool_name or "",
+                       e.tool_output or "", e.reasoning or "",
+                       e.shell_cmd or "", e.shell_output or "",
+                       e.patch_diff or "")
+            conn.execute(
+                "INSERT INTO events_fts (source, conversation_id, role, content, tool_name, tool_output, reasoning, shell_cmd, shell_output, patch_diff) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (source, cid) + fts_doc,
+            )
+            n += 1
+        return n
+
+    def upsert_sessions(
+        self,
+        source: str,
+        sessions: list[dict[str, Any]],
+        *,
+        signature: str = "",
+        force: bool = False,
+    ) -> dict[str, int]:
+        """会话级增量写入：新增插入；updated_at（或事件数）变化则整会话重写；
+        未变化跳过；force=True 忽略对比全部重写（源级新鲜度信号触发整源重扫）。
+
+        与 replace_source 的差异：不删除「源端已消失」的会话（历史保全），
+        单事务，增量粒度 = 会话。返回 {"added", "updated", "unchanged", "events"}。
+        """
+        conn = self.conn
+        added = updated = unchanged = 0
+        events_total = 0
+        with conn:
+            for sess in sessions:
+                cid = str(sess.get("id", ""))
+                events = sess.get("events") or []
+                new_updated = sess.get("updated_at") or 0
+                row = conn.execute(
+                    "SELECT updated_at, event_count FROM conversations "
+                    "WHERE source=? AND id=?",
+                    (source, cid),
+                ).fetchone()
+                if row is not None:
+                    stored_updated = row["updated_at"] or 0
+                    if (not force
+                            and abs(new_updated - stored_updated) < 1e-6
+                            and len(events) == (row["event_count"] or 0)):
+                        unchanged += 1
+                        continue
+                    self._delete_conversation_rows(conn, source, cid)
+                    updated += 1
+                else:
+                    added += 1
+                events_total += self._insert_session(conn, source, sess,
+                                                     signature=signature)
+        return {"added": added, "updated": updated,
+                "unchanged": unchanged, "events": events_total}
 
     def delete_source(self, source: str) -> None:
         conn = self.conn
@@ -178,21 +233,32 @@ class Store:
         """删除单个会话（事务级联 conversations/events/FTS）。返回删除的事件数。"""
         conn = self.conn
         with conn:
-            cur = conn.execute(
-                "DELETE FROM events WHERE source=? AND conversation_id=?",
+            exists = conn.execute(
+                "SELECT 1 FROM conversations WHERE source=? AND id=?",
                 (source, conversation_id),
-            )
-            n_events = cur.rowcount
-            conn.execute(
-                "DELETE FROM events_fts WHERE source=? AND conversation_id=?",
-                (source, conversation_id),
-            )
-            cur2 = conn.execute(
-                "DELETE FROM conversations WHERE source=? AND id=?",
-                (source, conversation_id),
-            )
-            if cur2.rowcount == 0:
+            ).fetchone()
+            if exists is None:
                 raise KeyError(f"conversation not found: {source}/{conversation_id}")
+            n_events = self._delete_conversation_rows(conn, source, conversation_id)
+        return n_events
+
+    @staticmethod
+    def _delete_conversation_rows(conn: sqlite3.Connection, source: str,
+                                  cid: str) -> int:
+        """删除单会话三表行（事务内 helper，不自行开事务）。返回删除事件数。"""
+        cur = conn.execute(
+            "DELETE FROM events WHERE source=? AND conversation_id=?",
+            (source, cid),
+        )
+        n_events = cur.rowcount
+        conn.execute(
+            "DELETE FROM events_fts WHERE source=? AND conversation_id=?",
+            (source, cid),
+        )
+        conn.execute(
+            "DELETE FROM conversations WHERE source=? AND id=?",
+            (source, cid),
+        )
         return n_events
 
     def update_title(self, source: str, conversation_id: str, title: str) -> bool:
@@ -208,32 +274,68 @@ class Store:
     # 记忆清洗：系统注入事件（is_system）统计/删除
     # ------------------------------------------------------------------
 
-    def system_event_counts(self, source: Optional[str] = None) -> list[sqlite3.Row]:
-        """按 source 统计系统注入事件数（clean --dry-run 预览用）。"""
+    def system_event_counts(self, source: Optional[str] = None, *,
+                            conversations: Optional[list[tuple[str, str]]] = None
+                            ) -> list[sqlite3.Row]:
+        """统计系统注入事件数（clean --dry-run 预览用）。
+
+        conversations：可选 (source, conversation_id) 列表——只统计这些会话
+        （delta 增量清洗）；None = 全库。
+        """
         q = ("SELECT source, COUNT(*) AS n, COUNT(DISTINCT conversation_id) AS convs "
              "FROM events WHERE is_system = 1")
-        params: tuple = ()
+        params: list = []
         if source:
             q += " AND source = ?"
-            params = (source,)
-        q += " GROUP BY source ORDER BY n DESC"
-        return self.conn.execute(q, params).fetchall()
+            params.append(source)
+        conn = self.conn
+        with conn:
+            if conversations is not None:
+                self._prepare_delta_targets(conn, conversations)
+                q += (" AND EXISTS (SELECT 1 FROM _delta_targets t WHERE "
+                      "t.source = events.source AND t.cid = events.conversation_id)")
+            q += " GROUP BY source ORDER BY n DESC"
+            rows = conn.execute(q, params).fetchall()
+            if conversations is not None:
+                conn.execute("DROP TABLE IF EXISTS temp._delta_targets")
+        return rows
 
-    def delete_system_events(self, source: Optional[str] = None) -> tuple[int, int]:
-        """删除全部系统注入事件，并重建受影响会话的 FTS 索引与 event_count。
+    @staticmethod
+    def _prepare_delta_targets(conn: sqlite3.Connection,
+                               conversations: list[tuple[str, str]]) -> None:
+        """把 (source, conversation_id) 目标集装进临时表（无 SQL 参数上限）。"""
+        conn.execute("DROP TABLE IF EXISTS temp._delta_targets")
+        conn.execute("CREATE TEMP TABLE _delta_targets (source TEXT, cid TEXT)")
+        conn.executemany("INSERT INTO _delta_targets (source, cid) VALUES (?,?)",
+                         [(s, c) for s, c in conversations])
 
-        破坏性操作：调用方应先 system_event_counts() 预览。
+    def delete_system_events(self, source: Optional[str] = None, *,
+                             conversations: Optional[list[tuple[str, str]]] = None
+                             ) -> tuple[int, int]:
+        """删除系统注入事件，并重建受影响会话的 FTS 索引与 event_count。
+
+        conversations：可选 (source, conversation_id) 列表——只处理这些会话
+        （delta 增量清洗）；None = 全库。破坏性操作：调用方应先预览。
         返回 (删除事件数, 受影响会话数)。
         """
         conn = self.conn
         src_q = "" if source is None else " AND source = ?"
-        src_p: tuple = () if source is None else (source,)
+        src_p: list = [] if source is None else [source]
+        tgt_q = (" AND EXISTS (SELECT 1 FROM _delta_targets t WHERE "
+                 "t.source = events.source AND t.cid = events.conversation_id)")
         with conn:
+            if conversations is not None:
+                self._prepare_delta_targets(conn, conversations)
+            else:
+                tgt_q = ""
             affected = conn.execute(
                 "SELECT DISTINCT source, conversation_id FROM events "
-                "WHERE is_system = 1" + src_q, src_p).fetchall()
-            cur = conn.execute("DELETE FROM events WHERE is_system = 1" + src_q, src_p)
+                "WHERE is_system = 1" + src_q + tgt_q, src_p).fetchall()
+            cur = conn.execute("DELETE FROM events WHERE is_system = 1" + src_q + tgt_q,
+                               src_p)
             deleted = cur.rowcount
+            if conversations is not None:
+                conn.execute("DROP TABLE IF EXISTS temp._delta_targets")
             for (s, cid) in affected:
                 # 重建该会话 FTS（events_fts 无 seq 列，删除行无法精确对应 → 整体重建）
                 conn.execute(

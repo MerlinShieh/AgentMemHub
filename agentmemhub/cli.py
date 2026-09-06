@@ -42,33 +42,116 @@ def _cli_log(msg: str, level: str = "info") -> None:
         pass
 
 
-def run_ingest(sources: list[str], signature: str = "") -> tuple[int, int]:
-    """提取指定 source 列表并入库（CLI 与控制台共用）。返回 (会话数, 事件数)。"""
+#: 清单 mtime 与库内 updated_at 的对比容差（秒）：文件落盘/时钟偏差
+_MTIME_TOL = 5.0
+
+
+def run_ingest(sources: list[str], signature: str = "", *,
+               full: bool = False, stdout: Any = None) -> tuple[int, int]:
+    """提取指定 source 列表并入库（CLI 与控制台共用）。返回 (会话数, 事件数)。
+
+    默认会话级增量：adapter.list_sessions 轻量清单 vs 库内 updated_at 对比，
+    只重读变化会话并 upsert_sessions（源端已删除的会话保留在库 = 历史保全）。
+    三级回退（扩展点，见 base.py）：
+    - source_freshness 信号 > 上次水位 → 整源重扫（force upsert），兜底清单
+      看不见的变更（如 workbuddy 审计日志追加）；
+    - 无轻量清单的源（trae）→ 整源重扫，upsert 按 updated_at 幂等对比；
+    - full=True → 旧的整源 replace_source（--full 逃生口 / 库修复用）。
+    成功后变更集写入 <data_dir>/watermarks.json，供 clean/push/score 增量消费。
+    """
+    from agentmemhub import config, watermarks
+    out = stdout or _stdout
     store = Store()
     total_conv = 0
     total_ev = 0
+    changed: list[dict[str, str]] = []
+    source_counts: dict[str, dict] = {}
+    now = time.time()
+    wm_state = watermarks.load_state(config.config().data_dir)
+
     for src in sources:
         a = adapters.get_adapter(src)
         if a is None:
-            _stdout(f"[{src}] 未知 source")
+            out(f"[{src}] 未知 source")
             continue
         p = a.locate()
         if p is None:
-            _stdout(f"[{src}] 未找到数据源")
+            out(f"[{src}] 未找到数据源")
             continue
-        sessions = a.load(p)
-        n = store.replace_source(src, sessions, signature=signature or "")
-        total_conv += len(sessions)
-        total_ev += n
-        _stdout(f"[{src}] {len(sessions)} 会话, {n} 事件")
+        sig = signature or ""
+        if full:
+            sessions = a.load(p)
+            n = store.replace_source(src, sessions, signature=sig)
+            total_conv += len(sessions)
+            total_ev += n
+            changed.extend({"source": src, "id": str(s["id"]), "status": "updated"}
+                           for s in sessions)
+            source_counts[src] = {"ts": now, "counts": {
+                "added": len(sessions), "updated": 0, "unchanged": 0}}
+            out(f"[{src}] 全量重建 {len(sessions)} 会话, {n} 事件")
+            continue
+
+        wm_ts = float((wm_state.get("last_ingest", {}).get("sources", {})
+                       .get(src, {}) or {}).get("ts") or 0)
+        fresh = a.source_freshness(p)
+        listed = a.list_sessions(p)
+        force = False
+        only_ids: Optional[set[str]] = None
+        plan: dict[str, str] = {}          # sid -> 预期状态（对比阶段）
+        if fresh is not None and wm_ts and fresh > wm_ts + 1.0:
+            force = True                    # 清单看不见的变更 → 整源重扫
+        elif listed is None:
+            pass                            # 无轻量清单 → 整源重扫（幂等对比）
+        else:
+            stored = {r["id"]: (r["updated_at"] or 0)
+                      for r in store.list_conversations(src)}
+            for entry in listed:
+                sid = str(entry["id"])
+                ts = entry.get("updated_at") or 0
+                if sid not in stored:
+                    plan[sid] = "added"
+                elif ts > stored[sid] + _MTIME_TOL:
+                    plan[sid] = "updated"
+            if not plan:
+                source_counts[src] = {"ts": now, "counts": {
+                    "added": 0, "updated": 0, "unchanged": len(listed)}}
+                out(f"[{src}] 无变化（{len(listed)} 会话跳过重读）")
+                continue
+            only_ids = set(plan)
+
+        sessions = a.load(p, only_ids=only_ids)
+        r = store.upsert_sessions(src, sessions, signature=sig, force=force)
+        total_conv += r["added"] + r["updated"]
+        total_ev += r["events"]
+        if force or listed is None:
+            changed.extend({"source": src, "id": str(s["id"]), "status": "updated"}
+                           for s in sessions)
+            label = "信号触发整源重扫" if force else "整源重扫"
+            out(f"[{src}] {label}: 新增 {r['added']}, 更新 {r['updated']}, "
+                f"未变 {r['unchanged']}（{r['events']} 事件）")
+        else:
+            changed.extend({"source": src, "id": sid, "status": stt}
+                           for sid, stt in plan.items())
+            skipped = (len(listed) - len(plan)) + r["unchanged"]
+            out(f"[{src}] 增量: 新增 {r['added']}, 更新 {r['updated']}, "
+                f"未变 {skipped}（{r['events']} 事件）")
+        source_counts[src] = {"ts": now, "counts": {
+            "added": r["added"], "updated": r["updated"],
+            "unchanged": r["unchanged"]}}
+
     store.close()
-    _cli_log(f"ingest sources={sources} → {total_conv} 会话, {total_ev} 事件")
+    watermarks.record_ingest(wm_state, ts=now, source_counts=source_counts,
+                             changed=changed)
+    watermarks.save_state(config.config().data_dir, wm_state)
+    _cli_log(f"ingest sources={sources} full={full} → {total_conv} 会话, "
+             f"{total_ev} 事件, delta {len(changed)} 条")
     return total_conv, total_ev
 
 
 def cmd_ingest(args) -> None:
     sources = [args.source] if args.source else [a.source for a in adapters.all_adapters()]
-    total_conv, total_ev = run_ingest(sources, signature=args.signature)
+    total_conv, total_ev = run_ingest(sources, signature=args.signature,
+                                      full=args.full)
     _stdout(f"完成: {total_conv} 会话, {total_ev} 事件")
 
 
@@ -216,16 +299,20 @@ def cmd_memos_daemon(args) -> None:
 def push_to_memos(store: Store, *, sources: list[str], base_url: str,
                   no_rebuild: bool = False, rebuild_mode: str = "repair",
                   stdout: Any = None,
-                  since_ts: Optional[float] = None) -> dict[str, Any]:
+                  since_ts: Optional[float] = None,
+                  only: Optional[dict[str, set[str]]] = None) -> dict[str, Any]:
     """构建并幂等推送 MemOS bundle（按 source 分批，失败批次继续），可选补向量。
 
     MemOS /api/v1/import 上限 64 MiB——全量 bundle 可能超限（实测 90+MB），
     因此按 source 分批 POST。trace id 由 src_id 派生 → 幂等（重复=skipped）。
-    since_ts：增量——只构建 updated_at >= since_ts 的会话（避免全量重复
-    提取/构建/传输；无锚时由调用方传 None 走全量）。
+    since_ts：按会话 updated_at 时间窗过滤（旧增量锚模式）。
+    only：{source: {conversation_id}} —— delta 精确过滤（watermarks 模式），
+    只构建/推送变更会话；与 since_ts 可叠加（交集生效）。
     每批推送与 rebuild 进度**实时**经 stdout 输出（web 任务据此实时回显，
     避免"导入汇总已完成"后看起来卡住）；lines 同时收集终态文本供日志。
-    返回 {imported, skipped, lines, rebuilt}；rebuilt 失败/跳过时为 None。
+    返回 {imported, skipped, lines, rebuilt, failed, pushed_ids}；
+    pushed_ids = 推送成功批次的 trace id（供 score --pending 入队）；
+    rebuilt 失败/跳过时为 None。
     """
     from agentmemhub.memos import build_bundle, push_bundle, rebuild_embeddings
     out = stdout or print
@@ -240,10 +327,12 @@ def push_to_memos(store: Store, *, sources: list[str], base_url: str,
 
     total_ok = total_skip = 0
     failed = 0                                # 失败批次计数（决定增量锚是否可推进）
+    pushed_ids: list[str] = []
     chunk_size = 200                          # 单批 trace 上限：大 source 整包导入会超引擎
                                               # HTTP 请求窗口（~300s）被服务端断连（实测 10053）
     for src in sources:
-        b = build_bundle(store, src, since_ts=since_ts)
+        b = build_bundle(store, src, since_ts=since_ts,
+                         only_ids=(only or {}).get(src))
         traces = b.get("traces") or []
         if not traces:
             continue
@@ -255,6 +344,7 @@ def push_to_memos(store: Store, *, sources: list[str], base_url: str,
                 resp = push_bundle(payload, base_url)
                 total_ok += resp.get("imported", 0)
                 total_skip += resp.get("skipped", 0)
+                pushed_ids.extend(str(t["id"]) for t in chunk if t.get("id"))
                 emit(f"{label} 推送 ok: imported={resp.get('imported')} "
                      f"skipped={resp.get('skipped')}")
             except Exception as e:
@@ -274,7 +364,8 @@ def push_to_memos(store: Store, *, sources: list[str], base_url: str,
     emit(f"MemOS 导入汇总: imported={total_ok}, skipped={total_skip}"
          + (f"，{failed} 个批次失败" if failed else ""))
     return {"imported": total_ok, "skipped": total_skip,
-            "lines": lines, "rebuilt": rebuilt, "failed": failed}
+            "lines": lines, "rebuilt": rebuilt, "failed": failed,
+            "pushed_ids": pushed_ids}
 
 
 def run_memos(*, source: str = "", out: str = "exports/memos_bundle.json",
@@ -308,82 +399,87 @@ def run_memos(*, source: str = "", out: str = "exports/memos_bundle.json",
     _cli_log(f"memos bundle 生成 → {out}（{len(bundle['traces'])} traces）")
 
 
-def _sync_anchor_path() -> Path:
-    from agentmemhub import config
-    return config.config().data_dir / "last_sync.json"
-
-
-def _read_sync_anchor() -> Optional[float]:
-    """上次成功推送的时间锚（None=从未同步 → 首次全量）。"""
-    try:
-        import json as _j
-        return float(_j.loads(_sync_anchor_path().read_text(encoding="utf-8"))["ts"])
-    except Exception:
-        return None
-
-
-def _save_sync_anchor(ts: Optional[float] = None) -> None:
-    import json as _j
-    _sync_anchor_path().write_text(
-        _j.dumps({"ts": ts or time.time()}, ensure_ascii=False), encoding="utf-8")
-
-
 def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
              rebuild_mode: str = "repair", full: bool = False) -> None:
-    """增量同步：ingest（幂等重跑）→ 只推送【自上次同步以来新增的会话】→ 补向量。
+    """增量同步：ingest（会话级增量）→ 清洗 delta 注入事件 → 只推送变更会话。
 
-    增量锚：<data_dir>/last_sync.json 记录上次成功推送的时间；本次只构建
-    updated_at 在锚之后的会话（默认带 5 分钟缓冲防边界漏），无新增则跳过
-    推送——避免全量提取/构建/传输的重复损耗。首次同步或 --full 时全量。
-    replace_source 与 MemOS import 幂等兜底，随时可重跑。引擎离线时 ingest
-    照常完成、推送跳过（不推进锚，下次补推）。不做会话结束钩子：漏掉的
-    同步靠幂等锚在下次启动补上（无耦合，不碰 harness）。
+    全链路围绕 <data_dir>/watermarks.json 的变更集（delta）：
+    - ingest：list_sessions 对比库内 updated_at，只重读变化会话并 upsert；
+    - clean：只清 delta 会话的系统注入事件（--full / oversized 时跳过，
+      手动 `clean --apply` 仍为全库清理）；
+    - push：只构建/推送 delta 会话的 traces（trace id 幂等，引擎去重）；
+    - 推送成功的 trace id 入 pending_score 队列，`score --pending` 消费
+      （sync 不自动评分——LLM 成本由用户显式触发）。
+    delta 缺失/oversized 时推送回退全量（幂等兜底）。引擎离线：ingest 照常
+    完成，推送跳过（delta 保留，下次 sync 补推）。推送有失败批次时 delta
+    不标记消费，下次 sync 重试。
     """
-    from agentmemhub import adapters, memos_daemon
+    from agentmemhub import adapters, config, memos_daemon, watermarks
 
     sources = [source] if source else [a.source for a in adapters.all_adapters()]
-    run_ingest(sources)
+    run_ingest(sources, full=full)
     if not push:
         return
     if memos_daemon.auth_state() is None:
-        _stdout("记忆引擎未运行——ingest 已完成，跳过推送（不推进增量锚）。"
-                "启动引擎后重跑 `agentmemhub sync` 即可增量补推。")
+        _stdout("记忆引擎未运行——ingest 已完成，跳过推送（变更集保留，下次 sync 补推）。")
         _cli_log("sync 跳过推送（引擎离线）", level="warn")
         return
-    anchor = _read_sync_anchor()
-    since = None
-    if full or anchor is None:
-        _stdout("全量同步（首次或 --full）…")
-    else:
-        since = anchor - 300         # 5 分钟缓冲，防边界会话漏推
-        _stdout(f"增量同步（上次 {time.strftime('%m-%d %H:%M', time.localtime(anchor))} 之后的新会话）…")
+    data_dir = config.config().data_dir
+    state = watermarks.load_state(data_dir)
+    pending = watermarks.pending_for(state, "push")
+    if full:
+        pending = None                     # --full 强制全量推送
+
     store = Store()
     try:
-        # 推送源 = store 中实际有数据的源（同 run_memos：不能用 locate() 过滤，
-        # 恢复环境下源文件不在磁盘也要能推 store 存量）
         batches = ([source] if source
                    else sorted({c["source"] for c in store.list_conversations()}))
-        if since is not None:
-            # 统计新增会话：没有就跳过（避免空跑）
-            new_convs = 0
-            for src in batches:
-                new_convs += sum(1 for c in store.list_conversations(src)
-                                 if (c["updated_at"] or 0) >= since)
-            if new_convs == 0:
-                _stdout("增量：无新增会话，跳过推送（--full 强制全量）")
+        only: Optional[dict[str, set[str]]] = None
+        if pending is not None:
+            if not pending:
+                _stdout("增量：无待推送变更，跳过推送（--full 强制全量）")
+                watermarks.mark_consumed(state, "push")
+                watermarks.mark_consumed(state, "clean")
+                watermarks.save_state(data_dir, state)
                 return
-            _stdout(f"增量：{new_convs} 个新会话，仅推送这些…")
+            only = {}
+            for c in pending:
+                if source and c["source"] != source:
+                    continue
+                only.setdefault(c["source"], set()).add(c["id"])
+            only = {k: v for k, v in only.items() if v}
+            if not only:
+                _stdout("增量：无待推送变更，跳过推送")
+                watermarks.mark_consumed(state, "push")
+                watermarks.mark_consumed(state, "clean")
+                watermarks.save_state(data_dir, state)
+                return
+            _stdout(f"增量：{sum(len(v) for v in only.values())} 个变更会话"
+                    f"（清洗注入事件 → 推送）…")
+            # delta 增量清洗：只清变更会话的系统注入事件（不动全库）
+            pairs = [(s, cid) for s, ids in only.items() for cid in ids]
+            deleted, convs = store.delete_system_events(conversations=pairs)
+            if deleted:
+                _stdout(f"已清洗 {deleted} 条注入事件（{convs} 个变更会话）")
         # 进展实时输出（stdout=_stdout），无需再循环打印 lines
         r = push_to_memos(store, sources=batches, base_url=push,
                           no_rebuild=no_rebuild, rebuild_mode=rebuild_mode,
-                          stdout=_stdout, since_ts=since)
-        # 锚只在【无失败】时推进；有失败保留旧锚 → 下次增量窗口仍含失败会话，可重试
+                          stdout=_stdout, only=only)
+        # delta 只在【无失败】时标记消费；有失败保留 → 下次 sync 重试失败批次
         if r.get("failed", 0) == 0:
-            _save_sync_anchor()
+            watermarks.mark_consumed(state, "push")
+            if pending is not None:        # clean 只在 delta 模式实际执行过
+                watermarks.mark_consumed(state, "clean")
+            watermarks.add_pending_score(state, r.get("pushed_ids") or [])
+            watermarks.save_state(data_dir, state)
+            if r.get("pushed_ids"):
+                _stdout(f"已入队 {len(r['pushed_ids'])} 条待评分 trace"
+                        f"（运行 `agentmemhub score --pending` 消费）")
         else:
-            _stdout("存在推送失败——未推进增量锚，下次 sync 会重试失败批次")
+            _stdout("存在推送失败——变更集未标记消费，下次 sync 会重试失败批次")
         _cli_log(f"sync → imported={r['imported']}, skipped={r['skipped']}, "
-                 f"failed={r.get('failed', 0)}")
+                 f"failed={r.get('failed', 0)}, "
+                 f"pending_score={len(r.get('pushed_ids') or [])}")
     finally:
         store.close()
 
@@ -395,16 +491,33 @@ def cmd_sync(args) -> None:
 
 
 def run_clean(store, *, source: str = "", apply: bool = False,
-              stdout: Any = None) -> None:
+              stdout: Any = None,
+              only: Optional[list[dict[str, str]]] = None) -> None:
     """记忆清洗：删除系统注入事件（is_system）。
 
     默认只预览（dry-run）；apply=True 才物理删除并重建 FTS/event_count。
+    only：可选变更集 [{source, id}]——只清洗这些会话（watermarks delta
+    模式）；None = 全库。apply 成功后登记 clean 消费水位。
     """
+    from agentmemhub import config, watermarks
     out = stdout or _stdout
-    rows = store.system_event_counts(source or None)
+
+    def _mark_clean_consumed() -> None:
+        """apply 成功后登记 clean 消费水位（失败不影响清洗结果）。"""
+        try:
+            st = watermarks.load_state(config.config().data_dir)
+            watermarks.mark_consumed(st, "clean")
+            watermarks.save_state(config.config().data_dir, st)
+        except Exception:
+            pass
+
+    pairs = ([(c["source"], c["id"]) for c in only] if only else None)
+    rows = store.system_event_counts(source or None, conversations=pairs)
     total = sum(r["n"] for r in rows)
     if not rows:
         out("（无系统注入事件——库已经干净）")
+        if apply:
+            _mark_clean_consumed()
         return
     out(f"系统注入事件共 {total} 条（按 source）:")
     for r in rows:
@@ -412,9 +525,11 @@ def run_clean(store, *, source: str = "", apply: bool = False,
     if not apply:
         out("以上为预览——加 --apply 才会物理删除（删除后重建 FTS 索引与会话计数）")
         return
-    deleted, convs = store.delete_system_events(source or None)
+    deleted, convs = store.delete_system_events(source or None, conversations=pairs)
     out(f"已删除 {deleted} 条注入事件（{convs} 个会话受影响，FTS/计数已重建）")
-    _cli_log(f"clean(source={source or 'all'}) → 删除 {deleted} 条注入事件")
+    _cli_log(f"clean(source={source or 'all'}, only={len(pairs) if pairs else 'ALL'})"
+             f" → 删除 {deleted} 条注入事件")
+    _mark_clean_consumed()
 
 
 def cmd_clean(args) -> None:
@@ -448,6 +563,35 @@ def _csv_ids(v: str) -> set[str]:
 
 def cmd_score(args) -> None:
     """LLM 批量自动评分历史记忆（三轴评估 → feedback 写入）。"""
+    if args.pending:
+        from agentmemhub import config, watermarks
+        from agentmemhub.scoring import run_score_all
+
+        def _emit(s: str) -> None:
+            _stdout(s)
+        data_dir = config.config().data_dir
+        st = watermarks.load_state(data_dir)
+        ids = watermarks.take_pending_score(st)
+        if not ids:
+            _stdout("无待评分记忆（sync 推送成功后自动入队，此处消费）")
+            return
+        _stdout(f"待评分 {len(ids)} 条（pending_score 队列）…")
+        try:
+            r = run_score_all(emit=_emit, base_url=args.push,
+                              dry_run=args.dry_run, workers=args.workers,
+                              only_ids=set(ids))
+            _stdout(f"评分完成: evaluated={r['evaluated']} skipped={r['skipped']} "
+                    f"positive={r['positive']} neutral={r['neutral']} "
+                    f"negative={r['negative']} errors={r['errors']}"
+                    + (f" missing={r['missing']}" if r.get("missing") else "")
+                    + ("（dry-run，未写入、队列保留）" if r["dryRun"] else ""))
+            _cli_log(f"score --pending → {r}")
+            if not r["dryRun"]:
+                watermarks.save_state(data_dir, st)   # 消费并清空队列
+        except Exception as e:
+            _stdout(f"评分失败（队列保留，重跑 score --pending 即可重试）：{e}")
+            _cli_log(f"score --pending 失败 → {e}", level="error")
+        return
     if args.unscored_count:
         from agentmemhub.scoring import count_unscored
         try:
@@ -511,9 +655,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="agentmemhub", description="AgentMemHub 统一 Agent 会话提取")
     sub = p.add_subparsers(dest="command")
 
-    pi = sub.add_parser("ingest", help="提取所有 adapter 并入库")
+    pi = sub.add_parser("ingest", help="提取所有 adapter 并入库（默认会话级增量）")
     pi.add_argument("--source", default="")
     pi.add_argument("--signature", default="")
+    pi.add_argument("--full", action="store_true",
+                    help="强制全量重建（整源清空重写；默认增量只重读变化会话）")
 
     pl = sub.add_parser("list", help="列出会话")
     pl.add_argument("--source", default="")
@@ -577,14 +723,14 @@ def build_parser() -> argparse.ArgumentParser:
     pmc.add_argument("--bind", default="127.0.0.1",
                      help="HTTP 监听地址（默认仅本机；团队共享用 0.0.0.0）")
 
-    psy = sub.add_parser("sync", help="增量同步：ingest → 幂等 push MemOS → 补向量（可随时重跑）")
+    psy = sub.add_parser("sync", help="增量同步：ingest 增量 → 清洗变更会话 → 增量 push MemOS → 补向量")
     psy.add_argument("--source", default="")
     psy.add_argument("--push", default="", help="MemOS base URL；非空则推送到引擎（幂等，离线自动跳过）")
     psy.add_argument("--no-rebuild", action="store_true",
                      help="push 后不触发 embedding rebuild（默认自动补向量）")
     psy.add_argument("--rebuild-mode", default="repair", choices=("repair", "rebuild"))
     psy.add_argument("--full", action="store_true",
-                     help="强制全量同步（默认只推送上次同步后的新增会话）")
+                     help="强制全量同步（默认按 watermarks 变更集增量推送）")
 
     pcl = sub.add_parser("clean", help="记忆清洗：删除系统注入事件（is_system；默认预览，--apply 执行）")
     pcl.add_argument("--source", default="")
@@ -592,6 +738,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="执行删除（不带此参数仅统计预览；删除会重建 FTS 与会话计数）")
 
     psc = sub.add_parser("score", help="LLM 批量自动评分历史记忆（三轴评估 → feedback 写入，检索排序生效）")
+    psc.add_argument("--pending", action="store_true",
+                     help="只评分 sync 推送成功后入队的 trace（pending_score 队列，"
+                          "成功后消费清空；dry-run 不清空）")
     psc.add_argument("--limit", type=int, default=0, help="最多评分条数（0=全部）")
     psc.add_argument("--dry-run", action="store_true", help="只评估不写入（预览 verdict 分布）")
     psc.add_argument("--workers", type=int, default=4, help="并发评估线程数（默认 4；IO 密集建议 4~8）")
