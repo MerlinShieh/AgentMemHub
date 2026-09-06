@@ -88,6 +88,18 @@ def test_parse_verdict_variants():
     assert _parse_verdict("看不懂") == "neutral"     # 解析失败兜底
 
 
+class _FakeOpener:
+    """替换 _llm_opener 的假 opener：记录请求并回放 LLM 响应。"""
+    calls: list = []
+
+    def __init__(self, respond):
+        self._respond = respond
+
+    def open(self, req, timeout=None):
+        _FakeOpener.calls.append(req)
+        return self._respond(req, timeout)
+
+
 def test_evaluate_trace_calls_llm_endpoint():
     llm = {"endpoint": "https://example.com/v1/chat/completions",
            "api_key": "k-123", "model": "glm-x"}
@@ -109,12 +121,17 @@ def test_evaluate_trace_calls_llm_endpoint():
         assert "修登录" in body["messages"][1]["content"]
         assert "k-123" in req.headers["Authorization"]
         return R()
-    with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+    _FakeOpener.calls = []
+    with mock.patch("agentmemhub.scoring._llm_opener",
+                    return_value=_FakeOpener(fake_urlopen)):
         assert evaluate_trace(trace, llm) == "positive"
+    # 请求端点 = 引擎配置的 LLM endpoint
+    assert _FakeOpener.calls[0].full_url == llm["endpoint"]
 
 
 def test_evaluate_trace_empty_returns_neutral():
-    with mock.patch("urllib.request.urlopen", side_effect=AssertionError("不应调用")):
+    with mock.patch("agentmemhub.scoring._llm_opener",
+                    side_effect=AssertionError("不应调用")):
         assert evaluate_trace({"id": "t", "userText": "", "agentText": ""},
                               {"endpoint": "x", "api_key": "k", "model": "m"}) == "neutral"
 
@@ -270,3 +287,29 @@ def test_admin_score_job_runs():
         # 结构进度写入 job（面板进度条依据）
         assert done["progress"] is not None and done["progress"]["pct"] == 100
         assert done["progress"]["total"] == 500
+
+# ---------------------------------------------------------------------------
+# LLM 强制直连（不受系统代理/环境变量影响）
+# ---------------------------------------------------------------------------
+
+def test_llm_opener_direct_by_default(monkeypatch):
+    """默认强制直连：opener 中不注册任何 ProxyHandler。
+
+    机制说明：build_opener 传入 ProxyHandler 实例会跳过默认「读系统代理」的
+    ProxyHandler；空代理表的实例没有任何 xxx_open 方法，根本不会被注册
+    （实测 handlers 无 ProxyHandler）→ 请求不经过任何代理 = 直连。
+    """
+    import urllib.request
+    from agentmemhub import scoring
+    monkeypatch.delenv("AGENTMEMHUB_LLM_PROXY", raising=False)
+
+    def _proxy_handlers(op):
+        return [h for h in op.handlers
+                if isinstance(h, urllib.request.ProxyHandler)]
+
+    assert _proxy_handlers(scoring._llm_opener()) == []
+    # 显式指定才走代理（私有部署逃生口）
+    monkeypatch.setenv("AGENTMEMHUB_LLM_PROXY", "http://127.0.0.1:7897")
+    phs = _proxy_handlers(scoring._llm_opener())
+    assert len(phs) == 1 and phs[0].proxies == {
+        "http": "http://127.0.0.1:7897", "https": "http://127.0.0.1:7897"}
