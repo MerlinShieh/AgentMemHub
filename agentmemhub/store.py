@@ -21,7 +21,7 @@ from agentmemhub.models import Event
 
 
 def default_db_path() -> Path:
-    """SQLite 位置：统一配置（agentmemhub.yaml / 环境变量）→ 默认 ~/.agentmemhub。"""
+    """SQLite 位置：统一配置（agentmemhub.yaml / 环境变量）→ 默认 <项目根>/database。"""
     from agentmemhub import config
     cfg = config.config()
     return cfg.db_path

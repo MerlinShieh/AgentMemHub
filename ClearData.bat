@@ -1,19 +1,19 @@
 @echo off
 rem =====================================================================
-rem  ClearSandbox.bat - wipe the temp_path sandbox of feat/incremental-sync
+rem  ClearData.bat - wipe AgentMemHub's own data (fresh-start for the app)
 rem
-rem  Deletes (DESTRUCTIVE - sandbox only, NOT recoverable):
-rem    1. temp_path  (sandbox db / watermarks / scored state)
-rem    2. logs and exports (project artifacts, shared working dir)
+rem  Deletes (DESTRUCTIVE - NOT recoverable):
+rem    1. database  (agentmemhub.db / watermarks / scored_traces.json)
+rem    2. logs and exports (project artifacts)
 rem
 rem  Does NOT touch:
-rem    - real data dir %USERPROFILE%\.agentmemhub
 rem    - MemOS engine home memOS\home (engine data / config / password)
 rem    - any agent source data
+rem    - legacy data dir %USERPROFILE%\.agentmemhub (old installs)
 rem
 rem  Usage (confirmation is the Y argument - deterministic, no prompt):
-rem    ClearSandbox.bat Y          wipe
-rem    ClearSandbox.bat            show this help, do nothing
+rem    ClearData.bat Y          wipe
+rem    ClearData.bat            show this help, do nothing
 rem =====================================================================
 setlocal
 chcp 65001 >nul
@@ -21,26 +21,26 @@ cd /d "%~dp0"
 
 set "CONFIRM=%~1"
 if /i not "%CONFIRM%"=="Y" (
-    echo ClearSandbox - wipe temp_path sandbox data
+    echo ClearData - wipe AgentMemHub data dir + project artifacts
     echo.
-    echo Usage:  ClearSandbox.bat Y
+    echo Usage:  ClearData.bat Y
     echo.
     echo Will delete: NOT recoverable
-    echo   1. %CD%\temp_path
+    echo   1. %CD%\database
     echo   2. %CD%\logs  and  %CD%\exports
-    echo Keeps: real data dir, engine home, all agent sources.
+    echo Keeps: engine home, all agent sources, legacy data dir.
     echo.
     echo Pass Y as the first argument to actually wipe.
     exit /b 1
 )
 
-echo ClearSandbox - wipe sandbox data
-echo [1/2] Wiping temp_path...
-if exist "temp_path" (
-    rmdir /s /q "temp_path"
-    echo   - deleted temp_path
+echo ClearData - wipe AgentMemHub data
+echo [1/2] Wiping database...
+if exist "database" (
+    rmdir /s /q "database"
+    echo   - deleted database
 ) else (
-    echo   - temp_path not found, skipped
+    echo   - database not found, skipped
 )
 
 echo [2/2] Wiping project artifacts (logs / exports)...
@@ -54,6 +54,6 @@ if exist "exports" (
 )
 
 echo.
-echo [OK] Sandbox clean.
+echo [OK] Clean state ready. Next ingest rebuilds from agent sources.
 endlocal
 exit /b 0

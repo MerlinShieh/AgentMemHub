@@ -38,6 +38,7 @@ class Config:
                 cfg_path = Path(named).expanduser()
             else:
                 for cand in (PROJECT_ROOT / "agentmemhub.yaml",
+                             PROJECT_ROOT / "database" / "config.yaml",
                              Path.home() / ".agentmemhub" / "config.yaml"):
                     if cand.exists():
                         cfg_path = cand
@@ -49,12 +50,17 @@ class Config:
 
     @property
     def data_dir(self) -> Path:
+        """可写数据根目录（db / watermarks / 评分状态 / 托管 pid）。
+
+        默认项目内 <项目根>/database/（随项目走，便于备份与整机迁移）；
+        仍可用 AGENTMEM_HUB_DATA_DIR 环境变量或 yaml data_dir 覆盖（测试隔离用）。
+        """
         v = self._env.get("AGENTMEM_HUB_DATA_DIR", "")
         if not v:
             v = str(self._get("data_dir", ""))
         if v:
             return self._resolve(v)
-        return Path.home() / ".agentmemhub"
+        return PROJECT_ROOT / "database"
 
     @property
     def db_path(self) -> Path:

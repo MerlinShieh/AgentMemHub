@@ -87,9 +87,6 @@ AgentMemHub/
 ```bash
 # Windows 双击 start.bat，或命令行无参数直接进入菜单：
 uv run python -m agentmemhub
-
-# 开发/测试请用沙箱入口（数据全部写入项目内 temp_path/，不碰真实数据目录）：
-start_dev.bat
 ```
 
 菜单涵盖：环境检测（各 Agent 数据源/库规模/记忆引擎在线状态）→ 提取入库 → 检索 → 启动看板 → 推送记忆 → 引擎启停 → 退出。
@@ -168,9 +165,15 @@ python -m agentmemhub memos --push http://127.0.0.1:18800              # 或直�
 
 | 内容 | 默认位置 | 覆盖方式 |
 |---|---|---|
-| SQLite 数据库 | `~/.agentmemhub/agentmemhub.db` | 环境变量 `AGENTMEMHUB_DB` 或 `AGENTMEM_HUB_DATA_DIR` |
+| 数据目录（db / watermarks / 评分状态） | 项目内 `database/` | 环境变量 `AGENTMEM_HUB_DATA_DIR` 或 yaml `data_dir` |
+| SQLite 数据库 | `database/agentmemhub.db` | 环境变量 `AGENTMEMHUB_DB` |
 | 导出目录 | 项目下 `exports/` | `--out` 参数 |
 | MemOS bundle | `exports/memos_bundle.json` | `--out` 参数 |
+
+> **默认数据已收进项目内 `database/`**（已 gitignore，随项目走，备份/整机迁移只需带走项目目录）。
+> **从旧版 `~/.agentmemhub` 迁移**：把旧目录内容整体复制到 `database/` 即可
+> （`agentmemhub.db` 连同 `-wal/-shm`、`scored_traces.json`、`config.json`）；
+> 不迁移则视为全新环境，由增量 ingest 从各 Agent 源自动重建。
 
 数据库三张核心表：
 
@@ -189,7 +192,7 @@ python -m agentmemhub memos --push http://127.0.0.1:18800              # 或直�
 ```python
 from agentmemhub.store import Store
 
-store = Store()                                  # 默认 ~/.agentmemhub/agentmemhub.db
+store = Store()                                  # 默认 <项目根>/database/agentmemhub.db
 convs = store.list_conversations("zcode")        # 列出 zcode 的会话
 events = store.get_events("zcode", "<session-id>")  # 读取某会话事件流
 hits = store.search("登录", role="tool")          # 搜索工具事件
@@ -264,12 +267,14 @@ score --pending（消费评分队列；sync 不自动评分，LLM 成本由用�
 
 水位文件缺失/损坏 = 无状态，下一次 ingest 仍可运行（对比基准是库本身），下游回退全量——**任何时候 `ingest --full` 都是逃生口**。
 
-### temp_path 沙箱（开发/测试隔离）
+### 数据默认存放在项目内（database/）
 
-`start_dev.bat` 与 `start.bat` 的唯一区别：设置 `AGENTMEM_HUB_DATA_DIR=<项目根>/temp_path`，
-使数据库、watermarks、评分状态等全部可写数据落进项目内 `temp_path/`（已 gitignore），
-**不触碰真实数据目录 `~/.agentmemhub`**。`ClearSandbox.bat Y` 一键清空沙箱（不动引擎与真实数据）。
-推送仍走真实引擎——trace id 幂等，重复推送自动去重，安全。
+可写数据（SQLite 库、watermarks、评分状态、托管 pid）默认落 `<项目根>/database/`
+——随项目走，备份/整机迁移只需带走项目目录；`database/` 已 gitignore，严禁入库。
+环境变量 `AGENTMEM_HUB_DATA_DIR` 或 yaml `data_dir` 仍可覆盖（测试隔离/自定义位置，
+测试套件由 conftest 强制指向临时目录）。
+`ClearData.bat Y` 一键清空应用数据重新开始（不动引擎与 Agent 源数据）；
+旧版数据在 `~/.agentmemhub`，整体复制进 `database/` 即完成迁移。
 
 ## MCP 记忆网关（实时记忆读写）
 
@@ -429,7 +434,7 @@ uv run python -m agentmemhub memos-daemon --set-password <密码>  # 引擎 view
 所有路径/端口默认采用官方默认；需要覆盖时创建 `agentmemhub.yaml`（模板见 `agentmemhub.yaml.example`）。优先级：环境变量 > 配置文件 > 内置默认。
 
 ```yaml
-data_dir: "~/.agentmemhub"            # 本地库/日志/托管状态
+data_dir: "database"                  # 本地库/水位/评分/托管状态（默认项目内 database/）
 db_path: ""                           # 会话库 SQLite（默认 <data_dir>/agentmemhub.db）
 agents:
   zcode: ""                           # 各 harness 会话位置；留空=官方默认自动发现
@@ -515,7 +520,7 @@ MemOS 未安装时板块自动隐藏。
 - [x] 统一日志（`<程序根>/logs/`：web/cli/engine/tasks 分文件，面板可查历史）
 - [x] MCP 写后即评（memory_score 工具 + save-memory Skill 独立仓：触发纪律/生效前提/逻辑归属）
 - [x] 导入数据质量（meta 幽灵轮剔除、纯工具轮标题兜底、恢复环境整源丢失修复、cleanup_empty_traces 清理脚本）
-- [x] 增量同步架构（会话级清单对比 → upsert → watermarks 变更集贯通 clean/push/score --pending；cap 超限回退全量；temp_path 开发沙箱）
+- [x] 增量同步架构（会话级清单对比 → upsert → watermarks 变更集贯通 clean/push/score --pending；cap 超限回退全量；默认数据目录收进项目内 database/）
 - [ ] 更多 Agent（Claude Code / Cursor / Gemini CLI / CodeBuddy）
 - [ ] 记忆折叠压缩（超长会话压缩、相邻轮折叠）
 - [ ] 存储扩展（单库增长的按 source 分片/归档；data_root 已参数化，见 watermarks 扩展点设计）

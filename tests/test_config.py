@@ -10,8 +10,9 @@ def _cfg(env=None, path=None):
 
 def test_defaults():
     c = _cfg()
-    assert c.data_dir == Path.home() / ".agentmemhub"
-    assert c.db_path == Path.home() / ".agentmemhub" / "agentmemhub.db"
+    # 默认数据目录在项目内（database/，随项目走便于备份迁移）
+    assert c.data_dir == C.PROJECT_ROOT / "database"
+    assert c.db_path == C.PROJECT_ROOT / "database" / "agentmemhub.db"
     assert c.web_port == 8086
     # MemOS repo 默认 = 项目根/memOS
     assert c.memos_repo_dir == C.PROJECT_ROOT / "memOS"

@@ -3,8 +3,8 @@ rem =====================================================================
 rem  ClearTest.bat - wipe AgentMemHub test data back to a clean environment
 rem
 rem  Deletes (DESTRUCTIVE - test only, NOT recoverable):
-rem    1. AgentMemHub unified conversation DB dir (%USERPROFILE%\.agentmemhub)
-rem       - agentmemhub.db / events / FTS / scored_traces.json / sync anchor
+rem    1. AgentMemHub unified conversation DB dir (%CD%\database)
+rem       - agentmemhub.db / watermarks / scored_traces.json / sync anchor
 rem    2. Project artifacts: logs\ (operation logs) and exports\
 rem    3. MemOS engine data: memOS\home\data\ (memos.db + WAL),
 rem       memOS\home\logs\ (engine logs), memOS\home\daemon\ (bridge state)
@@ -25,7 +25,7 @@ setlocal
 chcp 65001 >nul
 cd /d "%~dp0"
 
-set "DATA_DIR=%USERPROFILE%\.agentmemhub"
+set "DATA_DIR=%CD%\database"
 set "ENGINE_HOME=memOS\home"
 
 set "CONFIRM=%~1"

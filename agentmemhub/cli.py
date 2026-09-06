@@ -688,7 +688,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     pv = sub.add_parser("serve", help="启动本地 Web 页面（可选功能）")
     pv.add_argument("--port", type=int, default=8086)
-    pv.add_argument("--db", default="", help="数据库路径（默认 ~/.agentmemhub/agentmemhub.db）")
+    pv.add_argument("--db", default="", help="数据库路径（默认 <项目根>/database/agentmemhub.db）")
     # 成对开关：--open / --no-open（默认自动打开浏览器）
     pv.add_argument("--open", action=argparse.BooleanOptionalAction, default=True,
                     help="启动后自动打开浏览器（默认开启；用 --no-open 关闭）")
@@ -709,7 +709,7 @@ def build_parser() -> argparse.ArgumentParser:
     pmd.add_argument("--plugin-dir", default="",
                      help="MemOS 插件目录（默认走 MEMOS_PLUGIN_DIR 或常见位置探测）")
     pmd.add_argument("--set-dir", default="",
-                     help="持久化 MemOS 插件目录到 ~/.agentmemhub/config.json 后退出")
+                     help="持久化 MemOS 插件目录到 <数据目录>/config.json 后退出")
     pmd.add_argument("--set-password", default="",
                      help="保存 MemOS viewer 密码（引擎设了密码时网关自动登录）后退出")
     pmd.add_argument("--lightweight", choices=("on", "off"), default=None,
