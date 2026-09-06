@@ -30,7 +30,20 @@ _META_TIMELINE_TYPES = {"model_change", "model-switch", "title", "summary"}
 class SqliteConversationAdapter(AgentAdapter):
     """基于 session/message/part 表的通用 adapter（子类只需给 source/label/candidate_paths）。"""
 
-    def load(self, path: Path) -> list[dict[str, Any]]:
+    def list_sessions(self, path: Path) -> Optional[list[dict[str, Any]]]:
+        """轻量清单：单 SELECT 只取 id/时间，不读 message/part（增量对比用）。"""
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            conn.execute("PRAGMA query_only=ON")
+            try:
+                rows = conn.execute("SELECT id, time_updated FROM session").fetchall()
+            finally:
+                conn.close()
+        except Exception:
+            return None
+        return [{"id": str(r[0]), "updated_at": _to_epoch(r[1]) or 0} for r in rows]
+
+    def load(self, path: Path, only_ids: Optional[set[str]] = None) -> list[dict[str, Any]]:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         conn.execute("PRAGMA query_only=ON")
         conn.row_factory = sqlite3.Row
@@ -39,6 +52,8 @@ class SqliteConversationAdapter(AgentAdapter):
         try:
             for s in conn.execute("SELECT * FROM session").fetchall():
                 sid = s["id"]
+                if only_ids is not None and str(sid) not in only_ids:
+                    continue  # 增量：未变化会话不读事件（事件读取才是大头）
                 meta = {"project_id": s["project_id"], "parent_id": s["parent_id"],
                         "permission": s["permission"], "slug": s["slug"]}
                 session_dict = {

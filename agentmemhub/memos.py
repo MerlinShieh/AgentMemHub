@@ -148,16 +148,20 @@ def _session_events_to_traces(source: str, conv: Any,
 
 
 def build_bundle(store: Store, source: Optional[str] = None,
-                 since_ts: Optional[float] = None) -> dict[str, Any]:
+                 since_ts: Optional[float] = None,
+                 only_ids: Optional[set[str]] = None) -> dict[str, Any]:
     """从 store 构建 MemOS bundle。
 
-    since_ts：增量模式，只包含 updated_at >= since_ts 的会话（按源最新
-    更新时间推进锚，避免每次全量构建/推送；无锚时全量幂等兜底）。
+    since_ts：按会话 updated_at 时间窗过滤（旧增量锚模式）；
+    only_ids：会话 id 精确过滤（watermarks delta 模式，优先于 since_ts 语义
+    ——两者可叠加，交集生效）。二者皆空 = 全量构建（幂等兜底）。
     """
     convs = store.list_conversations(source)
     traces: list[dict] = []
     for c in convs:
         if since_ts is not None and (c["updated_at"] or 0) < since_ts:
+            continue
+        if only_ids is not None and c["id"] not in only_ids:
             continue
         events = store.get_events(c["source"], c["id"])
         if not events:

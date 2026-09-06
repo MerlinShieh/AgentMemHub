@@ -46,7 +46,27 @@ class DshAdapter(AgentAdapter):
     def candidate_paths(self) -> list[Path]:
         return [Path.home() / ".dsh"]
 
-    def load(self, path: Path) -> list[dict[str, Any]]:
+    def list_sessions(self, path: Path) -> Optional[list[dict[str, Any]]]:
+        """轻量清单：只解压每个 .zstd 首行取会话 id + 文件 mtime。
+
+        代价远小于整文件解压解析；peek 失败的文件回退目录名。
+        """
+        if zstandard is None:
+            return None
+        sessions_dir = path / "sessions"
+        if not sessions_dir.is_dir():
+            return []
+        out: dict[str, float] = {}
+        for zf in sessions_dir.rglob("*.jsonl.zstd"):
+            try:
+                mtime = _to_epoch(zf.stat().st_mtime) or 0
+                sid = self._peek_sid(zf) or zf.parent.name
+                out[sid] = max(out.get(sid, 0.0), mtime)
+            except OSError:
+                continue
+        return [{"id": k, "updated_at": v} for k, v in out.items()]
+
+    def load(self, path: Path, only_ids: Optional[set[str]] = None) -> list[dict[str, Any]]:
         if zstandard is None:
             raise RuntimeError("zstandard 未安装：pip install zstandard")
         sessions_dir = path / "sessions"
@@ -55,11 +75,43 @@ class DshAdapter(AgentAdapter):
 
         sessions_map: dict[str, dict] = {}
         for zf in sessions_dir.rglob("*.jsonl.zstd"):
+            if only_ids is not None:
+                guess = {zf.parent.name}
+                peek = self._peek_sid(zf)
+                if peek:
+                    guess.add(peek)
+                if not (guess & only_ids):
+                    continue  # 增量：目录名与内容 id 都不在变更集 → 免整文件解压
             try:
                 self._read_zstd(zf, sessions_map)
             except Exception:
                 continue
         return list(sessions_map.values())
+
+    @staticmethod
+    def _peek_sid(zf: Path) -> Optional[str]:
+        """只解压首行读 session 头的 id（清单/增量预过滤用，失败返回 None）。"""
+        if zstandard is None:
+            return None
+        try:
+            dctx = zstandard.ZstdDecompressor()
+            with open(zf, "rb") as f:
+                with dctx.stream_reader(f) as reader:
+                    chunk = reader.read(65536).decode("utf-8", errors="ignore")
+        except Exception:
+            return None
+        for line in chunk.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+            except Exception:
+                return None
+            if isinstance(o, dict) and o.get("type") == "session" and o.get("id"):
+                return str(o["id"])
+            return None
+        return None
 
     def _read_zstd(self, zf: Path, sessions_map: dict[str, dict]) -> None:
         dctx = zstandard.ZstdDecompressor()
@@ -114,8 +166,10 @@ class DshAdapter(AgentAdapter):
                 if e.role == "user" and e.content:
                     s["title"] = e.content[:40]
                     break
-        times = [e.time for e in s["events"] if e.time]
-        s["updated_at"] = max(times) if times else s["created_at"]
+        # 会话级 updated_at = 文件 mtime（增量对比锚）。事件内容时间与文件
+        # 写入时间有偏差：若用 max(事件时间)，清单 mtime 会永远大于库内值，
+        # 每次增量都误判"已变化"。
+        s["updated_at"] = max(s["updated_at"] or 0, _to_epoch(zf.stat().st_mtime) or 0)
         sessions_map[sid] = s
 
     def _line_to_events(self, o: dict, turn_key: str | None = None,

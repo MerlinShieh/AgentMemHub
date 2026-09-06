@@ -63,7 +63,9 @@ class TraeAdapter(AgentAdapter):
             paths.append(Path(appdata) / "Trae")      # 国际版
         return paths
 
-    def load(self, path: Path) -> list[dict[str, Any]]:
+    def load(self, path: Path, only_ids: Optional[set[str]] = None) -> list[dict[str, Any]]:
+        # trae 数据量小且无廉价逐会话清单（快照是 git 仓库）→ 始终整源重扫，
+        # only_ids 忽略；增量收益交给源级小体积兜底。
         sessions: list[dict[str, Any]] = []
         ai_dir = path / "ModularData" / "ai-agent"
         if ai_dir.is_dir():

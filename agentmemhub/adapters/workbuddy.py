@@ -34,7 +34,41 @@ class WorkBuddyAdapter(AgentAdapter):
         paths.append(home / ".workbuddy" / "workbuddy.db")
         return paths
 
-    def load(self, path: Path) -> list[dict[str, Any]]:
+    def list_sessions(self, path: Path) -> Optional[list[dict[str, Any]]]:
+        """轻量清单：sessions 表单 SELECT（不读 audit-log，增量对比用）。
+
+        ⚠️ 清单看不见 audit-log 追加（文件 mtime 变化）——该源靠
+        source_freshness 兜底触发整源重扫。
+        """
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            conn.execute("PRAGMA query_only=ON")
+            try:
+                has_sessions = any(
+                    r[0] == "sessions"
+                    for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'"))
+                rows = (conn.execute(
+                    "SELECT id, updated_at, last_activity_at FROM sessions").fetchall()
+                    if has_sessions else [])
+            finally:
+                conn.close()
+        except Exception:
+            return None
+        return [{"id": str(r[0]),
+                 "updated_at": _to_epoch(r[1] or r[2]) or 0} for r in rows]
+
+    def source_freshness(self, path: Path) -> Optional[float]:
+        """audit-log 目录最大 mtime（追加审计行不体现于 sessions 表）。"""
+        db_dir = path.parent if path.name == "workbuddy.db" else path
+        audit_dir = Path(os.environ.get("WORKBUDDY_AUDIT_DIR", str(db_dir / "audit-log")))
+        if not audit_dir.is_dir():
+            return None
+        try:
+            return max(f.stat().st_mtime for f in audit_dir.glob("*.jsonl"))
+        except (OSError, ValueError):
+            return None
+
+    def load(self, path: Path, only_ids: Optional[set[str]] = None) -> list[dict[str, Any]]:
         db_dir = path.parent if path.name == "workbuddy.db" else path
         conn = None
         sessions_list: list[dict[str, Any]] = []
@@ -48,6 +82,8 @@ class WorkBuddyAdapter(AgentAdapter):
             if has_sessions:
                 rows = conn.execute("SELECT * FROM sessions").fetchall()
                 for r in rows:
+                    if only_ids is not None and str(r["id"]) not in only_ids:
+                        continue  # 增量：未变化会话不带 audit 事件
                     sessions_list.append({
                         "source": self.source,
                         "id": r["id"],
@@ -65,10 +101,11 @@ class WorkBuddyAdapter(AgentAdapter):
                 conn.close()
 
         # 收集 audit-log，关联到会话
-        self._attach_shell_events(db_dir, sessions_list)
+        self._attach_shell_events(db_dir, sessions_list, only_ids=only_ids)
         return sessions_list
 
-    def _attach_shell_events(self, db_dir: Path, sessions_list: list[dict]) -> None:
+    def _attach_shell_events(self, db_dir: Path, sessions_list: list[dict],
+                             only_ids: Optional[set[str]] = None) -> None:
         audit_dir = Path(os.environ.get("WORKBUDDY_AUDIT_DIR", str(db_dir / "audit-log")))
         if not audit_dir.is_dir():
             return
@@ -90,6 +127,10 @@ class WorkBuddyAdapter(AgentAdapter):
                             continue
                         sid = o.get("sessionId")
                         if not sid:
+                            continue
+                        if only_ids is not None and str(sid) not in only_ids \
+                                and sid not in idx:
+                            # 增量：不在变更集内的 audit 会话既不新建也不关联
                             continue
                         ev = self._audit_to_event(o)
                         if ev is None:

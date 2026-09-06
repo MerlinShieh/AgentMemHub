@@ -41,7 +41,23 @@ class HermesAdapter(AgentAdapter):
         ]
         return paths
 
-    def load(self, path: Path) -> list[dict[str, Any]]:
+    def list_sessions(self, path: Path) -> Optional[list[dict[str, Any]]]:
+        """轻量清单：sessions 表单 SELECT（不读 messages，增量对比用）。"""
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            conn.execute("PRAGMA query_only=ON")
+            try:
+                rows = conn.execute(
+                    "SELECT id, last_activity_at, ended_at FROM sessions").fetchall()
+            finally:
+                conn.close()
+        except Exception:
+            return None
+        return [{"id": str(r[0]),
+                 "updated_at": _to_epoch(r[1]) or _to_epoch(r[2]) or 0}
+                for r in rows]
+
+    def load(self, path: Path, only_ids: Optional[set[str]] = None) -> list[dict[str, Any]]:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         conn.execute("PRAGMA query_only=ON")
         conn.row_factory = sqlite3.Row
@@ -50,6 +66,8 @@ class HermesAdapter(AgentAdapter):
         try:
             for s in conn.execute("SELECT * FROM sessions").fetchall():
                 sid = s["id"]
+                if only_ids is not None and str(sid) not in only_ids:
+                    continue  # 增量：未变化会话不读 messages
                 events = renumber(self._load_events(conn, sid, s))
                 sessions.append({
                     "source": self.source,
