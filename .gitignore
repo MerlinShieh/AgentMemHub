@@ -20,7 +20,10 @@ __pycache__/
 UserData/
 .trash/
 
-# 增量分支沙箱（start_dev.bat：本分支所有可写数据落这里，不碰真实数据目录）
+# 项目内默认数据目录（真实会话数据，严禁入库）
+database/
+
+# 旧增量分支沙箱目录（已废弃，可删）
 temp_path/
 
 # PyInstaller 打包产物
