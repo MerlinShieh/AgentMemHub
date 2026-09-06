@@ -57,6 +57,7 @@ AgentMemHub/
 │   ├── console.py                # 交互式控制台（环境检测/提取/检索/看板/记忆推送）
 │   ├── config.py                 # 统一配置体系（YAML + 环境变量 + 默认）
 │   ├── store.py + schema.sql     # SQLite 会话库（conversations/events/events_fts）
+│   ├── watermarks.py             # 增量同步水位/变更集（delta）状态
 │   ├── memos.py                  # MemOS bundle 桥接（幂等导入/价值/rebuild）
 │   ├── memos_daemon.py           # 记忆引擎托管（启停/状态/密码自动登录/轻量开关）
 │   ├── adapters/                 # 8 个 Agent 数据源适配器（src_id/turn_key/注入识别）
@@ -64,13 +65,15 @@ AgentMemHub/
 ├── memOS/                        # 上游记忆引擎（已平移进项目，gitignore）
 │   ├── apps/memos-local-plugin/  #   引擎程序 + npm 依赖 + 本地嵌入模型
 │   └── home/                     #   引擎数据：记忆库 memos.db / viewer 密码 / 引擎配置
-├── agentmemhub.yaml(.example)    # 统一配置文件（复制 example 按需修改）
+├── database/                     # 默认数据目录（gitignore）：SQLite 会话库 / watermarks / 评分状态
+├── agentmemhub.yaml(.example)    # 统一配置文件（复制 example 修改；yaml 本体 gitignore）
 ├── exports/                      # 导出产物（gitignore）
 ├── scripts/                      # 工具脚本（download_embedding_model 模型恢复 /
 │                                #   cleanup_empty_traces 空trace清理 / sensitive_scan 敏感扫描）
-├── tests/                        # pytest（98 项）
+├── tests/                        # pytest（121 项）
 ├── AGENTS.md                     # Agent 协作约定（记忆保存纪律硬规则 + 项目约束速查）
-├── ClearTest.bat                 # 测试环境重置（删本地库/引擎数据，保留配置与模型）
+├── ClearData.bat                 # 清空应用数据（database/+logs/exports；不动引擎与 Agent 源）
+├── ClearTest.bat                 # 测试环境重置（应用数据+引擎数据；保留配置与嵌入模型）
 └── start.bat                     # Windows 一键入口（双击进控制台）
 ```
 

@@ -35,6 +35,13 @@ dist/
 # 运行时实例信息（端口复用）
 instance.json
 
+# 本地配置文件本体（含本机路径/可选密钥；example 入库，本体不入库）
+agentmemhub.yaml
+
+# 本地环境文件与测试缓存（防误加）
+.env
+.pytest_cache/
+
 # 交接文档（仅供二次检查，不入库）
 HANDOFF.md
 
