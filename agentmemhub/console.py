@@ -282,22 +282,22 @@ def action_rebuild() -> None:
 
 
 def action_score() -> None:
-    """自动评分：LLM 三轴批量评估未评记忆并写入价值分（4 worker 并发）。"""
+    """自动评分：LLM 三轴评估记忆并写入价值分（增量优先，4 worker 并发）。"""
     from agentmemhub.cli import _cli_log
-    from agentmemhub.scoring import run_score_all
+    from agentmemhub.scoring import run_score_incremental
     limit_raw = _ask("  最多评分条数（回车=全部）> ", "0")
     try:
         limit = max(0, int(limit_raw.strip() or "0"))
     except ValueError:
         limit = 0
     dry = _ask("  模式（回车=实际写入 / dry=只评估不写入）> ", "").strip().lower() in ("dry", "dry-run", "d")
-    if not dry and not _confirm("  将对未评过的记忆评估并写入价值分（4 并发，可能耗时数分钟），确认？"):
+    if not dry and not _confirm("  将评估并写入价值分（增量优先：先评 sync 推送的新记忆；4 并发，可能耗时数分钟），确认？"):
         _out("  （已取消）")
         return
     _out(f"  评分中（{'dry-run，不写入' if dry else '实际写入'}）…")
-    r = run_score_all(emit=lambda s: _out(f"    {s}"), limit=limit,
-                      dry_run=dry, workers=4)
-    _out(f"  ✓ 完成: evaluated={r['evaluated']} skipped={r['skipped']} "
+    r = run_score_incremental(emit=lambda s: _out(f"    {s}"), limit=limit,
+                              dry_run=dry, workers=4)
+    _out(f"  ✓ 完成[{r.get('mode', '?')}]: evaluated={r['evaluated']} skipped={r['skipped']} "
          f"positive={r['positive']} neutral={r['neutral']} "
          f"negative={r['negative']} errors={r['errors']}"
          + ("（dry-run）" if r["dryRun"] else ""))

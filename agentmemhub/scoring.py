@@ -191,14 +191,59 @@ def list_all_traces() -> list[dict[str, Any]]:
         conn.close()
 
 
+def list_trace_ids() -> list[str]:
+    """只读枚举引擎库全部 trace id（不取正文，廉价）——增量评分先筛 id 再定点读。"""
+    import sqlite3
+    db = _engine_db_path()
+    if not db.exists():
+        raise RuntimeError(f"引擎记忆库不存在：{db}（先启动引擎或确认 memos.home）")
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        return [r[0] for r in conn.execute("SELECT id FROM traces ORDER BY ts").fetchall()]
+    finally:
+        conn.close()
+
+
+def list_traces_by_ids(ids: set[str]) -> list[dict[str, Any]]:
+    """定点只读指定 trace id（增量评分路径：零全量枚举，500/批防变量数上限）。
+
+    与 list_all_traces 同口径（id/userText/agentText）；不存在的 id 不报错，
+    由调用方 diff 出 missing。
+    """
+    import sqlite3
+    id_list = sorted({str(i) for i in ids if i})
+    if not id_list:
+        return []
+    db = _engine_db_path()
+    if not db.exists():
+        raise RuntimeError(f"引擎记忆库不存在：{db}（先启动引擎或确认 memos.home）")
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    result: list[tuple[Any, dict[str, Any]]] = []
+    try:
+        for i in range(0, len(id_list), 500):
+            chunk = id_list[i:i + 500]
+            marks = ",".join("?" * len(chunk))
+            rows = conn.execute(
+                f"SELECT id, user_text, agent_text, ts FROM traces WHERE id IN ({marks})",
+                tuple(chunk)).fetchall()
+            result.extend((r[3], {"id": r[0], "userText": r[1] or "",
+                                  "agentText": r[2] or ""}) for r in rows)
+    finally:
+        conn.close()
+    result.sort(key=lambda x: x[0] or 0)   # 与 list_all_traces 同口径（ts 升序）
+    return [d for _, d in result]
+
+
 def count_unscored(*, base_url: str = "", traces: Optional[list[dict]] = None) -> int:
     """统计未评分记忆条数（供定时/定量触发判断），不做 LLM 评估。
 
-    与 run_score_all 同一枚举口径（跳过已评清单里的 id）。traces 测试注入用。
+    只读 id 集合（不读正文 blob）与已评清单求差——与 run_score_all 全量模式
+    同一枚举口径。traces 测试注入用。
     """
-    all_traces = traces if traces is not None else list_all_traces()
+    ids = ([t.get("id") for t in traces] if traces is not None
+           else list_trace_ids())
     scored = _load_scored()
-    return sum(1 for t in all_traces if t.get("id") not in scored)
+    return sum(1 for i in ids if i not in scored)
 
 
 def sync_episode_r_task(*, trace_ids: Optional[list[str]] = None,
@@ -251,12 +296,15 @@ def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
                   ) -> dict[str, Any]:
     """批量自动评分引擎内历史记忆（默认跳过已评过的——含手动 👍/👎）。
 
-    emit(line)：进度实时输出（CLI 用，行内带 [已处理/总数]）；
+    数据来源三级策略（零无谓全量枚举）：
+    - only_ids 给定（score --pending / --ids）：list_traces_by_ids 定点只读，
+      引擎库全表枚举不发生；请求了但库里没有的 id 计入 summary.missing；
+    - 全量模式：list_trace_ids 廉价取 id → 减去已评清单 → 只定点读未评正文
+      （重跑不再每次全库读所有 blob；已评数不进循环，无逐条「跳过」刷屏）；
+    - traces 注入（测试用）：按原样使用，only_ids/skip_scored 作过滤器。
+    emit(line)：进度实时输出（行内 [已处理/总数]）；
     on_progress(done, total)：结构化进度回调（面板进度条，逐条处理调用）；
-    traces：测试注入用（默认 list_all_traces() 只读枚举全部——绕开
-    listTraces 的 500 行窗口上限）；workers 并发；skip_scored 默认跳过已评；
-    only_ids：只评分指定 trace id（写后即评/按 id 打分入口；请求了但库里
-    没有的 id 计入 summary.missing）。
+    workers 并发；skip_scored 默认跳过已评。
     返回 {evaluated, skipped, positive, neutral, negative, errors, missing, dryRun}。
     """
     import threading
@@ -269,14 +317,31 @@ def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
                "negative": 0, "errors": 0, "missing": 0, "dryRun": bool(dry_run)}
     lock = threading.Lock()
     scored = _load_scored() if skip_scored else set()
-    all_traces = traces if traces is not None else list_all_traces()
-    if only_ids:
+    if traces is not None:
+        # 测试注入：直接用传入列表，only_ids/skip_scored 作为过滤器
+        all_traces = traces
+        if only_ids:
+            have = {t.get("id") for t in all_traces}
+            missing_ids = sorted(only_ids - have)
+            summary["missing"] = len(missing_ids)
+            all_traces = [t for t in all_traces if t.get("id") in only_ids]
+    elif only_ids:
+        # score --pending / --ids：只定点读队列里的 id，零全量枚举
+        all_traces = list_traces_by_ids(only_ids)
         have = {t.get("id") for t in all_traces}
         missing_ids = sorted(only_ids - have)
         summary["missing"] = len(missing_ids)
-        all_traces = [t for t in all_traces if t.get("id") in only_ids]
-        for mid in missing_ids:
-            out(f"⚠ {mid} 未在引擎库中找到，跳过")
+        if missing_ids:
+            out(f"⚠ {len(missing_ids)} 个 id 未在引擎库中找到，跳过（如 {missing_ids[0]}…）")
+    else:
+        # 全量评分：先廉价取 id 集、减去已评清单，再只定点读未评正文——
+        # 重跑不再每次全库读所有 blob（旧实现 list_all_traces 全量枚举）
+        todo = list_trace_ids()
+        if skip_scored:
+            before = len(todo)
+            todo = [i for i in todo if i not in scored]
+            summary["skipped"] += before - len(todo)
+        all_traces = list_traces_by_ids(set(todo)) if todo else []
     total = len(all_traces)
     if limit:
         all_traces = all_traces[:limit]
@@ -337,3 +402,45 @@ def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
         except Exception as e:
             out(f"r_task 同步失败（不影响已写入反馈）: {e}")
     return summary
+
+
+def run_score_incremental(*, emit: Optional[Callable[[str], None]] = None,
+                          base_url: str = "", limit: int = 0,
+                          dry_run: bool = False,
+                          workers: int = 1,
+                          on_progress: Optional[Callable[[int, int], None]] = None,
+                          ) -> dict[str, Any]:
+    """评分统一入口（CLI / 控制台 / 看板共用）：增量优先。
+
+    依据 watermarks 的 pending_score 队列（sync 推送成功后自动入队的新 trace）：
+    - 队列非空 → 只评队列里的 id（定点读引擎库，零全量枚举）；
+    - 队列空   → 全量扫描未评（先廉价筛 id、只定点读未评正文，无逐条「跳过」刷屏）。
+    队列消费规则：非 dry-run 且本轮无失败 → 已处理 id 出队；有失败 → 队列原样
+    保留下次重试（已成功条由已评清单保护，重跑绝不双评）。limit 为队列消费
+    上限（超出部分留在队列）。
+    返回 run_score_all 的 summary，附加 mode（pending|full）。
+    """
+    from agentmemhub import config, watermarks
+    out = emit or (lambda s: None)
+    data_dir = config.config().data_dir
+    st = watermarks.load_state(data_dir)
+    ids = list(st.get("pending_score") or [])
+    if not ids:
+        r = run_score_all(emit=out, base_url=base_url, limit=limit,
+                          dry_run=dry_run, workers=workers,
+                          on_progress=on_progress)
+        r["mode"] = "full"
+        return r
+    take = ids[:limit] if limit else ids
+    rest = ids[len(take):]
+    out(f"增量评分：pending_score 队列 {len(ids)} 条，本轮处理 {len(take)} 条"
+        f"（定点读取，不做全量枚举）…")
+    r = run_score_all(emit=out, base_url=base_url, dry_run=dry_run,
+                      workers=workers, on_progress=on_progress,
+                      only_ids=set(take))
+    if not dry_run:
+        # 有失败：整队列保留下次重试；无失败：已处理条出队
+        st["pending_score"] = ids if r.get("errors", 0) else rest
+        watermarks.save_state(data_dir, st)
+    r["mode"] = "pending"
+    return r

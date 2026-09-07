@@ -56,6 +56,7 @@ def test_run_score_all_skips_scored(tmp_path, monkeypatch):
         return {"id": "fb"}
     with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
          mock.patch("agentmemhub.scoring.evaluate_trace", return_value="positive"), \
+         mock.patch("agentmemhub.scoring.sync_episode_r_task", return_value=0), \
          mock.patch("agentmemhub.memos_daemon.engine_request", side_effect=fake_er) as er:
         r = run_score_all(emit=lines.append, base_url="http://127.0.0.1:1",
                           workers=2, traces=traces)
@@ -152,6 +153,7 @@ def test_run_score_all_batch_loop():
     with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
          mock.patch("agentmemhub.scoring.evaluate_trace",
                     side_effect=lambda t, c: next(verdicts)), \
+         mock.patch("agentmemhub.scoring.sync_episode_r_task", return_value=0), \
          mock.patch("agentmemhub.memos_daemon.engine_request", side_effect=fake_er) as er:
         r = run_score_all(emit=lines.append, base_url="http://127.0.0.1:1",
                           traces=traces)
@@ -175,13 +177,159 @@ def test_run_score_all_dry_run_skips_write():
               {"id": "t2", "userText": "c", "agentText": "d"}]
     with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
          mock.patch("agentmemhub.scoring.evaluate_trace", return_value="positive"), \
-         mock.patch("agentmemhub.scoring.list_all_traces", return_value=traces), \
+         mock.patch("agentmemhub.scoring.list_trace_ids", return_value=["t1", "t2"]), \
+         mock.patch("agentmemhub.scoring.list_traces_by_ids", return_value=traces), \
          mock.patch("agentmemhub.memos_daemon.engine_request") as er:
         er.side_effect = []
         r = run_score_all(limit=1, dry_run=True)
     assert r["evaluated"] == 1 and r["dryRun"] is True
     # dry-run 不产生 feedback POST
     assert not [c for c in er.call_args_list if c[0][0] == "POST"]
+
+
+def test_run_score_all_full_reads_only_unscored():
+    """全量模式：先廉价筛 id、减去已评，再只定点读未评正文——不触发 list_all_traces。"""
+    llm = {"endpoint": "https://x", "api_key": "k", "model": "m"}
+    with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
+         mock.patch("agentmemhub.scoring.evaluate_trace", return_value="positive"), \
+         mock.patch("agentmemhub.scoring.mark_scored"), \
+         mock.patch("agentmemhub.scoring.sync_episode_r_task", return_value=0), \
+         mock.patch("agentmemhub.scoring.list_all_traces",
+                    side_effect=AssertionError("全量模式不应调用 list_all_traces 全表枚举")), \
+         mock.patch("agentmemhub.scoring.list_trace_ids",
+                    return_value=["t1", "t2", "t3"]), \
+         mock.patch("agentmemhub.scoring.list_traces_by_ids") as by_ids, \
+         mock.patch("agentmemhub.memos_daemon.engine_request") as er:
+        er.return_value = {"id": "fb"}
+        by_ids.return_value = [{"id": "t2", "userText": "c", "agentText": "d"},
+                               {"id": "t3", "userText": "e", "agentText": "f"}]
+        # t1 视为已评（monkeypatch _load_scored 返回含 t1）
+        with mock.patch("agentmemhub.scoring._load_scored", return_value={"t1"}):
+            r = run_score_all()
+    # 只定点读未评的 t2/t3（t1 在 id 层就被筛掉，不读其正文）
+    read_ids = by_ids.call_args[0][0]
+    assert read_ids == {"t2", "t3"}
+    assert r["evaluated"] == 2 and r["skipped"] == 1
+    assert r["errors"] == 0
+
+
+def test_run_score_all_only_ids_targeted_no_full_scan():
+    """score --ids/--pending 语义：只定点读队列 id，list_all_traces 不被调用。"""
+    llm = {"endpoint": "https://x", "api_key": "k", "model": "m"}
+    with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
+         mock.patch("agentmemhub.scoring.evaluate_trace", return_value="positive"), \
+         mock.patch("agentmemhub.scoring.mark_scored"), \
+         mock.patch("agentmemhub.scoring.sync_episode_r_task", return_value=0), \
+         mock.patch("agentmemhub.scoring.list_all_traces",
+                    side_effect=AssertionError("定点路径不应全表枚举")), \
+         mock.patch("agentmemhub.scoring.list_traces_by_ids",
+                    return_value=[{"id": "t1", "userText": "a", "agentText": "b"}]) as by_ids, \
+         mock.patch("agentmemhub.memos_daemon.engine_request") as er:
+        er.return_value = {"id": "fb"}
+        r = run_score_all(only_ids={"t1", "ghost"})
+    by_ids.assert_called_once_with({"t1", "ghost"})
+    assert r["evaluated"] == 1 and r["missing"] == 1     # ghost 库中无 → 计入 missing
+
+
+def test_list_traces_by_ids_subset_and_missing(tmp_path):
+    """定点读：命中子集按 ts 升序返回；不存在的 id 静默缺失（由调用方 diff missing）。"""
+    import sqlite3
+    from agentmemhub import scoring
+    db = tmp_path / "memos.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE traces (id TEXT PRIMARY KEY, user_text TEXT, "
+                 "agent_text TEXT, ts INTEGER)")
+    conn.executemany("INSERT INTO traces VALUES (?,?,?,?)",
+                     [("a", "A用", "A答", 1), ("b", "B用", "B答", 2),
+                      ("c", "C用", "C答", 3)])
+    conn.commit()
+    conn.close()
+    with mock.patch("agentmemhub.scoring._engine_db_path", return_value=db):
+        rows = scoring.list_traces_by_ids({"c", "a", "nope"})
+        assert [r["id"] for r in rows] == ["a", "c"]      # ts 升序，nope 缺失
+        assert rows[0]["userText"] == "A用"
+        assert scoring.list_trace_ids() == ["a", "b", "c"]
+
+
+def _incr_cfg(tmp_path, monkeypatch):
+    """run_score_incremental 的 config.config().data_dir 指向测试临时目录。"""
+    from agentmemhub import config as cfg_mod
+
+    class _C:
+        data_dir = tmp_path
+    monkeypatch.setattr(cfg_mod, "config", lambda: _C())
+
+
+def test_run_score_incremental_queue_consumed_on_success(tmp_path, monkeypatch):
+    """队列非空 → 只评队列（定点）；无失败 → 已处理 id 出队。"""
+    from agentmemhub import scoring, watermarks
+    _incr_cfg(tmp_path, monkeypatch)
+    st = watermarks.load_state(tmp_path)
+    watermarks.add_pending_score(st, ["t1", "t2"])
+    watermarks.save_state(tmp_path, st)
+    seen: dict = {}
+
+    def fake_all(*, emit=None, only_ids=None, **kw):
+        seen["only_ids"] = only_ids
+        return {"evaluated": len(only_ids), "skipped": 0, "positive": 1,
+                "neutral": 0, "negative": 0, "errors": 0, "missing": 0,
+                "dryRun": False}
+    monkeypatch.setattr(scoring, "run_score_all", fake_all)
+    r = scoring.run_score_incremental()
+    assert r["mode"] == "pending"
+    assert seen["only_ids"] == {"t1", "t2"}
+    assert watermarks.load_state(tmp_path)["pending_score"] == []   # 全部出队
+
+
+def test_run_score_incremental_failure_keeps_queue(tmp_path, monkeypatch):
+    """本轮有失败 → 队列原样保留下次重试（已成功条由已评清单保护，重跑不双评）。"""
+    from agentmemhub import scoring, watermarks
+    _incr_cfg(tmp_path, monkeypatch)
+    st = watermarks.load_state(tmp_path)
+    watermarks.add_pending_score(st, ["t1", "t2", "t3"])
+    watermarks.save_state(tmp_path, st)
+    monkeypatch.setattr(scoring, "run_score_all", lambda **k: {
+        "evaluated": 3, "skipped": 0, "positive": 2, "neutral": 0,
+        "negative": 0, "errors": 1, "missing": 0, "dryRun": False})
+    r = scoring.run_score_incremental()
+    assert r["mode"] == "pending" and r["errors"] == 1
+    assert watermarks.load_state(tmp_path)["pending_score"] == ["t1", "t2", "t3"]
+
+
+def test_run_score_incremental_limit_partial(tmp_path, monkeypatch):
+    """limit 为队列消费上限：取前 N 条评，其余留在队列。"""
+    from agentmemhub import scoring, watermarks
+    _incr_cfg(tmp_path, monkeypatch)
+    st = watermarks.load_state(tmp_path)
+    watermarks.add_pending_score(st, ["t1", "t2", "t3", "t4"])
+    watermarks.save_state(tmp_path, st)
+    seen: dict = {}
+
+    def fake_all(*, emit=None, only_ids=None, **kw):
+        seen["only_ids"] = only_ids
+        return {"evaluated": len(only_ids), "skipped": 0, "positive": 0,
+                "neutral": 0, "negative": 0, "errors": 0, "missing": 0,
+                "dryRun": False}
+    monkeypatch.setattr(scoring, "run_score_all", fake_all)
+    scoring.run_score_incremental(limit=2)
+    assert seen["only_ids"] == {"t1", "t2"}
+    assert watermarks.load_state(tmp_path)["pending_score"] == ["t3", "t4"]
+
+
+def test_run_score_incremental_empty_queue_falls_back_full(tmp_path, monkeypatch):
+    """队列为空 → 回退全量扫描未评（mode=full）。"""
+    from agentmemhub import scoring
+    _incr_cfg(tmp_path, monkeypatch)
+    called: dict = {}
+
+    def fake_all(**kw):
+        called["only_ids"] = kw.get("only_ids")
+        return {"evaluated": 0, "skipped": 0, "positive": 0, "neutral": 0,
+                "negative": 0, "errors": 0, "missing": 0, "dryRun": False}
+    monkeypatch.setattr(scoring, "run_score_all", fake_all)
+    r = scoring.run_score_incremental()
+    assert r["mode"] == "full"
+    assert called["only_ids"] is None      # 全量模式不带定点过滤
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +377,7 @@ def test_run_score_all_concurrent_workers():
         return {"id": "fb"}
     with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
          mock.patch("agentmemhub.scoring.evaluate_trace", return_value="positive"), \
+         mock.patch("agentmemhub.scoring.sync_episode_r_task", return_value=0), \
          mock.patch("agentmemhub.memos_daemon.engine_request", side_effect=fake_er) as er:
         r = run_score_all(emit=lines.append, base_url="http://127.0.0.1:1",
                           workers=4, traces=traces)

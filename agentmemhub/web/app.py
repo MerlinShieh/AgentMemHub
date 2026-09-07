@@ -122,12 +122,14 @@ def _run_push_fn(cli, source: str):
 def _run_score_fn(cli, limit: int, dry_run: bool):
     """看板「自动评分」后台动作（tasks.submit 的 fn(emit, meta) 契约）。
 
+    增量优先（run_score_incremental）：pending_score 队列非空只评队列（定点读，
+    零全量枚举）；队列空则全量扫描未评（先筛 id 再定点读，无逐条跳过刷屏）。
     面板不逐条刷评估行（进度条/百分比展示）：逐条进度经 on_progress 结构化
     写入 job.progress（前端进度条），output 只留结束汇总。
     """
     from contextlib import redirect_stdout
 
-    from agentmemhub.scoring import run_score_all
+    from agentmemhub.scoring import run_score_incremental
     from agentmemhub.web import tasks
 
     def _do(emit, meta) -> str:
@@ -145,12 +147,13 @@ def _run_score_fn(cli, limit: int, dry_run: bool):
                 "label": "评分"})
 
         with redirect_stdout(w):
-            r = run_score_all(base_url="", limit=limit, dry_run=dry_run,
-                              workers=4, on_progress=on_progress)
+            r = run_score_incremental(base_url="", limit=limit, dry_run=dry_run,
+                                      workers=4, on_progress=on_progress)
             tasks.set_progress(meta["id"], {
                 "done": r["evaluated"], "total": r["evaluated"],
                 "pct": 100 if not r["errors"] else 99, "label": "评分"})
-            print(f"评分完成: evaluated={r['evaluated']} skipped={r['skipped']} "
+            print(f"评分完成[{r.get('mode', '?')}]: evaluated={r['evaluated']} "
+                  f"skipped={r['skipped']} "
                   f"positive={r['positive']} neutral={r['neutral']} "
                   f"negative={r['negative']} errors={r['errors']}"
                   + ("（dry-run，未写入）" if r["dryRun"] else ""))

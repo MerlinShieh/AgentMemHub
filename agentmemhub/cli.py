@@ -408,8 +408,8 @@ def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
     - clean：只清 delta 会话的系统注入事件（--full / oversized 时跳过，
       手动 `clean --apply` 仍为全库清理）；
     - push：只构建/推送 delta 会话的 traces（trace id 幂等，引擎去重）；
-    - 推送成功的 trace id 入 pending_score 队列，`score --pending` 消费
-      （sync 不自动评分——LLM 成本由用户显式触发）。
+    - 推送成功的 trace id 入 pending_score 队列，评分入口（score / 面板 / 控制台）
+      增量优先消费（sync 不自动评分——LLM 成本由用户显式触发）。
     delta 缺失/oversized 时推送回退全量（幂等兜底）。引擎离线：ingest 照常
     完成，推送跳过（delta 保留，下次 sync 补推）。推送有失败批次时 delta
     不标记消费，下次 sync 重试。
@@ -474,7 +474,7 @@ def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
             watermarks.save_state(data_dir, state)
             if r.get("pushed_ids"):
                 _stdout(f"已入队 {len(r['pushed_ids'])} 条待评分 trace"
-                        f"（运行 `agentmemhub score --pending` 消费）")
+                        f"（下次评分自动增量优先：score / score --pending / 面板评分）")
         else:
             _stdout("存在推送失败——变更集未标记消费，下次 sync 会重试失败批次")
         _cli_log(f"sync → imported={r['imported']}, skipped={r['skipped']}, "
@@ -612,21 +612,28 @@ def cmd_score(args) -> None:
             _stdout(f"同步失败：{e}")
             _cli_log(f"score --sync-episodes 失败 → {e}", level="error")
         return
-    from agentmemhub.scoring import run_score_all
+    from agentmemhub.scoring import run_score_all, run_score_incremental
 
     def _emit(s: str) -> None:
         _stdout(s)
     try:
-        r = run_score_all(emit=_emit, base_url=args.push,
-                          limit=args.limit, dry_run=args.dry_run,
-                          workers=args.workers,
-                          only_ids=args.ids)
-        _stdout(f"评分完成: evaluated={r['evaluated']} skipped={r['skipped']} "
+        if args.ids:
+            r = run_score_all(emit=_emit, base_url=args.push,
+                              limit=args.limit, dry_run=args.dry_run,
+                              workers=args.workers, only_ids=args.ids)
+            mode = "ids"
+        else:
+            # 默认走增量优先：pending_score 队列非空只评队列，空则全量筛未评定点读
+            r = run_score_incremental(emit=_emit, base_url=args.push,
+                                      limit=args.limit, dry_run=args.dry_run,
+                                      workers=args.workers)
+            mode = r.get("mode", "?")
+        _stdout(f"评分完成[{mode}]: evaluated={r['evaluated']} skipped={r['skipped']} "
                 f"positive={r['positive']} neutral={r['neutral']} "
                 f"negative={r['negative']} errors={r['errors']}"
                 + (f" missing={r['missing']}" if r.get("missing") else "")
                 + ("（dry-run，未写入）" if r["dryRun"] else ""))
-        _cli_log(f"score → {r}")
+        _cli_log(f"score({mode}) → {r}")
     except Exception as e:
         _stdout(f"评分失败：{e}")
         _cli_log(f"score 失败 → {e}", level="error")

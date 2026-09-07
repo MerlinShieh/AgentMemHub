@@ -230,7 +230,7 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 | `mcp [--http] [--bind H] [--port P]` | MCP 记忆网关：默认 stdio（Agent 拉起）；`--http` 常驻为 Streamable HTTP 供团队共享 |
 | `sync [--push URL] [--no-rebuild] [--full]` | 增量同步：ingest 增量 → 清洗变更会话 → **只推送变更会话的 traces**（watermarks 变更集，无变更自动跳过；`--full` 强制全量）→ 补向量（幂等，引擎离线跳过推送且变更集保留待补推）|
 | `clean [--source x] [--apply]` | 记忆清洗：删除系统注入事件（默认预览，`--apply` 才执行并重建 FTS/计数；sync 会自动只清变更会话）|
-| `score [--pending] [--limit N] [--dry-run] [--workers N] [--ids id1,id2] [--unscored-count] [--sync-episodes]` | LLM 批量自动评分历史记忆（三轴评估 → feedback 写入价值分；跳过已评；LLM 调用**强制直连**、不受系统代理状态影响，确需代理设 `AGENTMEMHUB_LLM_PROXY`；`--pending` 消费 sync 推送后入队的待评分队列，`--ids` 只评指定条（写后即评/锚点用），`--unscored-count` 仅统计未评分条数供定时/定量触发判断，`--sync-episodes` 把 trace 分数回填 episode.r_task 供面板显示）|
+| `score [--pending] [--limit N] [--dry-run] [--workers N] [--ids id1,id2] [--unscored-count] [--sync-episodes]` | LLM 批量自动评分历史记忆（**增量优先**：pending_score 队列非空只评队列·定点读零全量枚举，队列空则先筛未评 id 再读正文；`--pending` 仅评队列，`--ids` 只评指定条（写后即评），`--unscored-count` 统计未评条数（只读 id），`--sync-episodes` 回填 episode.r_task；跳过已评；LLM 调用**强制直连**、不受系统代理影响，确需代理设 `AGENTMEMHUB_LLM_PROXY`）|
 | `rebuild [--mode repair\|rebuild]` | 补向量：触发引擎 embedding rebuild（导入记忆后修复语义检索）|
 | `stats` / `adapters` | 统计 / adapter 状态 |
 
@@ -250,7 +250,7 @@ store.upsert_sessions（会话级 upsert，单事务，源端已删会话保留=
 clean（只清变更会话的注入事件） → push（只构建/推送变更会话的 traces）
         │ 推送成功的 trace id 入 pending_score 队列
         ▼
-score --pending（消费评分队列；sync 不自动评分，LLM 成本由用户显式触发）
+score（增量优先：队列非空只评队列·定点读引擎库，队列空才全量筛未评——零无谓全表枚举）
 ```
 
 **适配器三级增量策略**（新 adapter 按数据源能力自选层级，见 `adapters/base.py`）：
@@ -265,7 +265,7 @@ score --pending（消费评分队列；sync 不自动评分，LLM 成本由用�
 
 - `last_ingest.sources` — 每源上次同步水位（新鲜度信号对比基准）
 - `delta.conversations` — 变更会话集 `[{source, id, status}]`；连续两次 ingest 之间下游未消费时自动合并防丢；超 `cap`(5000) 标记 `oversized`，下游该轮回退全量扫描（正确性优先）
-- `pending_score` — 待评分 trace id 队列（`score --pending` 消费清空，dry-run 保留）
+- `pending_score` — 待评分 trace id 队列（评分入口**增量优先**消费：面板/控制台/`score`/`score --pending` 队列非空即只定点评这批，成功后出队、有失败整队列保留下次重试）
 - `consumed` — 各阶段消费水位；推送有失败批次时不标记，下次 sync 重试
 
 水位文件缺失/损坏 = 无状态，下一次 ingest 仍可运行（对比基准是库本身），下游回退全量——**任何时候 `ingest --full` 都是逃生口**。
@@ -523,7 +523,7 @@ MemOS 未安装时板块自动隐藏。
 - [x] 统一日志（`<程序根>/logs/`：web/cli/engine/tasks 分文件，面板可查历史）
 - [x] MCP 写后即评（memory_score 工具 + save-memory Skill 独立仓：触发纪律/生效前提/逻辑归属）
 - [x] 导入数据质量（meta 幽灵轮剔除、纯工具轮标题兜底、恢复环境整源丢失修复、cleanup_empty_traces 清理脚本）
-- [x] 增量同步架构（会话级清单对比 → upsert → watermarks 变更集贯通 clean/push/score --pending；cap 超限回退全量；默认数据目录收进项目内 database/）
+- [x] 增量同步架构（会话级清单对比 → upsert → watermarks 变更集贯通 clean/push；评分增量优先·定点读零全量枚举；cap 超限回退全量；默认数据目录收进项目内 database/）
 - [ ] 更多 Agent（Claude Code / Cursor / Gemini CLI / CodeBuddy）
 - [ ] 记忆折叠压缩（超长会话压缩、相邻轮折叠）
 - [ ] 存储扩展（单库增长的按 source 分片/归档；data_root 已参数化，见 watermarks 扩展点设计）
