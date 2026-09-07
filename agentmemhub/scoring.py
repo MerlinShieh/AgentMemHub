@@ -37,7 +37,9 @@ _SYSTEM_PROMPT = (
 
 # ---------------------------------------------------------------------------
 # 已评清单：<data_dir>/scored_traces.json（手动 👍/👎 与批量评分共同累计，
-# 重跑「自动评分」时跳过——避免批量 verdict 覆盖/稀释手动打分）
+# 重跑「自动评分」时跳过——避免批量 verdict 覆盖/稀释手动打分）。三档 verdict
+# （positive/neutral/negative）评估过都记入此清单：positive/negative 顺带写
+# value，neutral 只记「已评」不写值——否则这批每次都重新枚举、白耗一次 LLM。
 # ---------------------------------------------------------------------------
 
 _scored_cache: Optional[set[str]] = None
@@ -69,6 +71,27 @@ def mark_scored(trace_id: str) -> None:
             return
         s.add(trace_id)
         _scored_cache = s
+        try:
+            _cache_path().write_text(
+                json.dumps(sorted(s), ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+
+def mark_scored_many(trace_ids: list[str]) -> None:
+    """批量记入已评清单（一次文件写）——neutral 判定这类「评过但不写 value」的
+    条目用它，避免每条各写一遍全量 JSON。"""
+    global _scored_cache
+    ids = {t for t in trace_ids if t}
+    if not ids:
+        return
+    with _cache_lock:
+        s = _load_scored()
+        before = len(s)
+        s |= ids
+        _scored_cache = s
+        if len(s) == before:
+            return
         try:
             _cache_path().write_text(
                 json.dumps(sorted(s), ensure_ascii=False), encoding="utf-8")
@@ -346,6 +369,7 @@ def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
     if limit:
         all_traces = all_traces[:limit]
     written_ids: list[str] = []
+    neutral_ids: list[str] = []   # 评过但判「一般」——不写 value，但要记入跳过清单
 
     def work(t: dict) -> None:
         tid = t.get("id", "")
@@ -369,7 +393,12 @@ def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
                 with lock:
                     summary[verdict] += 1
                 if verdict == "neutral":
-                    out(f"{label} → neutral（一般，不写入）")
+                    if not dry_run:
+                        with lock:
+                            neutral_ids.append(tid)
+                        out(f"{label} → neutral（一般，不写 value，已记入跳过清单）")
+                    else:
+                        out(f"{label} → neutral（一般，dry-run 不记录）")
                 elif dry_run:
                     out(f"{label} → {verdict}（dry-run 不写入）")
                 else:
@@ -395,6 +424,9 @@ def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
     if all_traces:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
             list(ex.map(work, all_traces))
+    if neutral_ids:
+        mark_scored_many(neutral_ids)             # 一次写盘：neutral 不再每次重评
+        out(f"已记入 {len(neutral_ids)} 条 neutral 到跳过清单（下次不再重复评估）")
     if written_ids:
         try:
             n = sync_episode_r_task(trace_ids=written_ids)

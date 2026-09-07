@@ -43,6 +43,36 @@ def test_scored_cache_persist(tmp_path, monkeypatch):
     assert scoring._load_scored() == set()
 
 
+def test_neutral_marked_scored_not_reevaluated(tmp_path, monkeypatch):
+    """回归：neutral 判「不写 value」但仍要记入跳过清单——否则每次评分重评这批
+    （用户症状：跑完再评还是同样 300 多条）。dry-run 例外，不记录。"""
+    scoring = _empty_cache(tmp_path, monkeypatch)
+    llm = {"endpoint": "https://x", "api_key": "k", "model": "m"}
+    traces = [{"id": "n1", "userText": "寒暄", "agentText": "嗯"},
+              {"id": "n2", "userText": "无结论", "agentText": "再说"}]
+    with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
+         mock.patch("agentmemhub.scoring.evaluate_trace", return_value="neutral"), \
+         mock.patch("agentmemhub.memos_daemon.engine_request") as er:
+        r = run_score_all(traces=traces)
+    assert r["neutral"] == 2 and r["errors"] == 0
+    # neutral 不写 feedback
+    assert not [c for c in er.call_args_list if c[0][0] == "POST"]
+    # 但已记入跳过清单 → 二次跑直接 skip、不再评估
+    assert scoring._load_scored() == {"n1", "n2"}
+    lines2: list[str] = []
+    r2 = run_score_all(emit=lines2.append, traces=traces)
+    assert r2["evaluated"] == 2 and r2["neutral"] == 0 and r2["skipped"] == 2
+    assert all("已评过" in l for l in lines2)
+
+    # dry-run：neutral 不记入跳过清单
+    scoring.clear_scored()
+    with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
+         mock.patch("agentmemhub.scoring.evaluate_trace", return_value="neutral"), \
+         mock.patch("agentmemhub.memos_daemon.engine_request"):
+        run_score_all(traces=traces, dry_run=True)
+    assert scoring._load_scored() == set()
+
+
 def test_run_score_all_skips_scored(tmp_path, monkeypatch):
     """默认跳过已评清单（含手动 👍/👎 的），写入成功后才 mark。"""
     scoring = _empty_cache(tmp_path, monkeypatch)
