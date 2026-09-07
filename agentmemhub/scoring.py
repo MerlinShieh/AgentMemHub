@@ -9,6 +9,8 @@
 - 复用引擎已配置的 LLM（engine config.yaml 的 llm 段，openai_compatible）
 - 按 MemOS reward 的三轴思想（目标达成 / 过程质量 / 用户价值）逐条评估
 - 判定 positive（值得保留）/ neutral（一般）/ negative（无价值或噪音）
+- 三档 verdict 都记入跳过清单（neutral 不写 value 但不再重评）；网关内容审核
+  拒评（code 1301）确定性无法评估 → 归 neutral 记账，不重复送、不算 error
 - 通过 feedback 接口批量写入 → 引擎立即重算每条记忆的 value/priority，
   语义检索排序随之生效
 
@@ -19,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -143,10 +146,41 @@ def _llm_opener() -> urllib.request.OpenerDirector:
             {"http": proxy, "https": proxy} if proxy else {}))
 
 
+class ContentFilterRejected(Exception):
+    """LLM 网关因输入内容审核（bigmodel code 1301 等）确定性拒评——非网络/鉴权错误，
+    重试永远 400，应按「无法评估」处理（视作 neutral、记入跳过清单、不写 value）。"""
+
+
+def _scrub_text(s: str) -> str:
+    """剥离零宽/控制字符（0x200b 等不可见码点最易触发审核/解析异常），
+    保留 \n\t；用于评估前净化正文。"""
+    if not s:
+        return s
+    import unicodedata
+    keep = []
+    for ch in s:
+        cat = unicodedata.category(ch)
+        if ch in ("\n", "\t") or cat not in ("Cc", "Cf", "Cs", "Co", "Cn"):
+            keep.append(ch)
+    return "".join(keep)
+
+
+def _is_content_filter(code: int, body: str) -> bool:
+    """判定是否内容审核类 400（智谱 1301 / contentFilter / 敏感字样）。"""
+    if code != 400 or not body:
+        return False
+    return ("1301" in body) or ("contentFilter" in body) or ("敏感内容" in body) \
+        or ("不安全" in body)
+
+
 def evaluate_trace(trace: dict, llm_cfg: dict, timeout: float = 45) -> str:
-    """LLM 三轴评估一条 trace，返回 verdict（positive|neutral|negative）。"""
-    user_text = (trace.get("userText") or "").strip()[:800]
-    agent_text = (trace.get("agentText") or "").strip()[:1200]
+    """LLM 三轴评估一条 trace，返回 verdict（positive|neutral|negative）。
+
+    正文净化后再送；网关内容审核确定性拒评抛 ContentFilterRejected，其它
+    HTTP/网络错误抛出并带上响应体原因（便于日志定位，不再只有一句 Bad Request）。
+    """
+    user_text = _scrub_text((trace.get("userText") or "").strip())[:800]
+    agent_text = _scrub_text((trace.get("agentText") or "").strip())[:1200]
     if not user_text and not agent_text:
         return "neutral"
     body = {
@@ -164,8 +198,19 @@ def evaluate_trace(trace: dict, llm_cfg: dict, timeout: float = 45) -> str:
         headers={"Content-Type": "application/json",
                  "Authorization": f"Bearer {llm_cfg['api_key']}"},
         method="POST")
-    with _llm_opener().open(req, timeout=timeout) as r:
-        data = json.loads(r.read().decode("utf-8"))
+    try:
+        with _llm_opener().open(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace")[:200]
+        except Exception:
+            pass
+        if _is_content_filter(e.code, detail):
+            raise ContentFilterRejected(detail or "内容审核拒绝") from None
+        raise RuntimeError(f"HTTP {e.code} {e.reason}"
+                           + (f": {detail}" if detail else "")) from None
     content = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
     verdict = _parse_verdict(content)
     return verdict
@@ -385,6 +430,15 @@ def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
             out(f"{label} 评估 {tid} …")
             try:
                 verdict = evaluate_trace(t, llm_cfg)
+            except ContentFilterRejected:
+                # 网关内容审核确定性拒评：无法评估 → 视作 neutral（不写 value），
+                # 记入跳过清单，下次不再重复送这条（否则每次评分都卡这 1 条报错）
+                with lock:
+                    summary["neutral"] += 1
+                    if not dry_run:
+                        neutral_ids.append(tid)
+                out(f"{label} → neutral（内容审核拒评，无法评估；不写 value"
+                    + ("、记入跳过清单）" if not dry_run else "、dry-run 不记录）"))
             except Exception as e:
                 with lock:
                     summary["errors"] += 1

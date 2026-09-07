@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import tempfile
 import time
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -71,6 +72,78 @@ def test_neutral_marked_scored_not_reevaluated(tmp_path, monkeypatch):
          mock.patch("agentmemhub.memos_daemon.engine_request"):
         run_score_all(traces=traces, dry_run=True)
     assert scoring._load_scored() == set()
+
+
+import io
+from email.message import Message as _Msg
+
+
+def _http_error(code, body: str, url="https://x", reason="Bad Request"):
+    return urllib.error.HTTPError(url, code, reason, _Msg(), io.BytesIO(body.encode()))
+
+
+def test_scrub_text_strips_invisible_control():
+    from agentmemhub import scoring
+    s = scoring._scrub_text("零宽​甲\n正常\t制表\rother\x00")
+    assert "​" not in s
+    assert "\n" in s and "\t" in s         # 换行/制表保留
+    assert "其他" in s or "other" in s
+
+
+def test_is_content_filter_detects_bigmodel_1301():
+    from agentmemhub import scoring
+    assert scoring._is_content_filter(400, '{"error":{"code":"1301","message":"敏感内容"}}')
+    assert scoring._is_content_filter(400, '{"contentFilter":[{"level":0}]}')
+    assert not scoring._is_content_filter(400, '{"error":{"code":"1102","message":"余额不足"}}')
+    assert not scoring._is_content_filter(401, '{"error":"unauthorized"}')
+    assert not scoring._is_content_filter(500, "boom")
+
+
+def test_evaluate_trace_content_filter_raises_typed():
+    from agentmemhub import scoring
+    body = '{"error":{"code":"1301","message":"系统检测到输入或生成内容可能包含不安全或敏感内容"}}'
+    with mock.patch("agentmemhub.scoring._llm_opener",
+                    side_effect=lambda: _FakeOpener(
+                        lambda req, timeout: (_ for _ in ()).throw(_http_error(400, body)))), \
+         mock.patch("agentmemhub.scoring.read_engine_llm",
+                    return_value={"endpoint": "https://x", "api_key": "k", "model": "m"}):
+        import pytest as _pt
+        with _pt.raises(scoring.ContentFilterRejected):
+            scoring.evaluate_trace({"userText": "x", "agentText": "y"},
+                                   {"endpoint": "https://x", "api_key": "k", "model": "m"})
+
+
+def test_evaluate_trace_other_400_surfaces_body():
+    from agentmemhub import scoring
+    body = '{"error":{"code":"1102","message":"欠费"}}'
+    with mock.patch("agentmemhub.scoring._llm_opener",
+                    side_effect=lambda: _FakeOpener(
+                        lambda req, timeout: (_ for _ in ()).throw(_http_error(400, body)))), \
+         mock.patch("agentmemhub.scoring.read_engine_llm",
+                    return_value={"endpoint": "https://x", "api_key": "k", "model": "m"}):
+        import pytest as _pt
+        with _pt.raises(RuntimeError) as ei:
+            scoring.evaluate_trace({"userText": "x", "agentText": "y"},
+                                   {"endpoint": "https://x", "api_key": "k", "model": "m"})
+    assert "1102" in str(ei.value) or "欠费" in str(ei.value)
+
+
+def test_content_filter_neutral_marked_not_error(tmp_path, monkeypatch):
+    """内容审核拒评 → 归 neutral + 记跳过清单（非 error）；二次跑直接跳过。"""
+    from agentmemhub import scoring
+    _empty_cache(tmp_path, monkeypatch)
+    llm = {"endpoint": "https://x", "api_key": "k", "model": "m"}
+    traces = [{"id": "blocked", "userText": "测试 API", "agentText": "敏感"}]
+
+    def blocked(*a, **k):
+        raise scoring.ContentFilterRejected("1301")
+    with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
+         mock.patch("agentmemhub.scoring.evaluate_trace", side_effect=blocked), \
+         mock.patch("agentmemhub.memos_daemon.engine_request") as er:
+        r = scoring.run_score_all(traces=traces)
+    assert r["neutral"] == 1 and r["errors"] == 0
+    assert not [c for c in er.call_args_list if c[0][0] == "POST"]   # 不写 value
+    assert scoring._load_scored() == {"blocked"}                     # 记入跳过清单
 
 
 def test_run_score_all_skips_scored(tmp_path, monkeypatch):
