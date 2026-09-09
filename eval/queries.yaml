@@ -55,3 +55,102 @@ cases:
   - id: hermes-export
     query: 把智能体的聊天历史导出来给另一个工具读
     expect_any: [Hermes, hermes, 导入, 导出]
+  - id: zcode-runtime-structure
+    query: 那个桌面客户端的安装目录和运行时文件是怎么组织的
+    expect_any: [ZCode, Electron, 运行时]
+  - id: opencode-skill-audit
+    query: 查查看开源编码工具现在装了哪些技能
+    expect_any: [技能, 已装, 检查]
+  - id: skill-mcp-doc
+    query: 技能和MCP服务器怎么添加，有没有说明
+    expect_any: [MCP, mcp, Skills]
+  - id: side-chat-selection
+    query: 选中文字旁边弹出聊天小窗的功能
+    expect_any: [Selection, side chat, 选中]
+  - id: voice-wake-assistant
+    query: 喊一声或者按快捷键就能唤醒的电脑助手
+    expect_any: [语音唤醒, 组合键, 全局]
+  - id: backup-restore-chat
+    query: 用目录里的存档把先前聊天记录找回来
+    expect_any: [备份, 恢复]
+  - id: opencode-model-config
+    query: 那套编码工具接的什么模型，查它的配置
+    expect_any: [OpenCode, 大模型配置, 模型]
+  - id: promo-video-script
+    query: 给记忆项目做宣传视频的解说稿子
+    expect_any: [口播, 视频]
+  - id: tts-price-compat
+    query: 阿里的语音合成接口多少钱、支持哪些
+    expect_any: [百炼, 千问, TTS, 价格]
+  - id: agent-identity
+    query: 问智能体它的来历和身份
+    expect_any: [自我介绍, 我是, Nous]
+  - id: suspicious-paths
+    query: 检查电脑里有没有可疑的可执行文件位置
+    expect_any: [可疑, 排查]
+  - id: rom-compat-fix
+    query: 手机刷机后真机兼容问题怎么修
+    expect_any: [ROM, 真机, 兼容]
+  - id: timeout-dead-field
+    query: 一个超时参数不起作用被修掉了
+    expect_any: [timeout_seconds, 死字段]
+  - id: github-file-access
+    query: 智能体能不能直接读代码托管仓库上的文件
+    expect_any: [github, GitHub]
+  - id: log-error-analysis
+    query: 把日志路径贴过去让它分析报错原因
+    expect_any: [日志, 报错]
+  - id: cli-subcommand
+    query: 给命令行工具新加一个子命令
+    expect_any: [CLI, 子命令]
+  - id: harness-plugin-guide
+    query: DeepSeek那个harness的插件开发流程文档
+    expect_any: [Harness, 插件]
+  - id: retry-terminal-state
+    query: 重试状态没做成终态的缺陷修复
+    expect_any: [RETRYING, 终态]
+  - id: session-dashboard
+    query: 会话记录做成能实时刷新查看的网页看板
+    expect_any: [看板, live artifact]
+  - id: adb-wrapper
+    query: 把安卓调试桥命令封装成工具函数
+    expect_any: [ADB, adb]
+  - id: github-multi-account
+    query: 本机git多账号配置删掉只留令牌登录
+    expect_any: [多账户, Token, 令牌]
+  - id: phone-mcp-research
+    query: 研究一下手机控制MCP那个开源仓库
+    expect_any: [phone-mcp, phone]
+  - id: voice-studio-deploy
+    query: 一个语音工作台项目怎么本地化部署
+    expect_any: [VoiceStudio, 语音]
+  - id: qwen-code-new-model
+    query: 给终端编码工具换一个模型服务地址
+    expect_any: [base_url, 大模型]
+  - id: local-models-launch
+    query: 看看本地模型文件夹里配置的启动逻辑
+    expect_any: [localModels, config.ini, 启动]
+  - id: sms-read-capability
+    query: 让助手实现自动读取验证码短信
+    expect_any: [短信, 验证码]
+  - id: html-tutorial-visual
+    query: 教程页面的代码演示改成可视化示例
+    expect_any: [HTML, 教程, 可视化]
+  - id: memos-plugin-deepdive
+    query: 深入分析记忆插件仓库那套的实现
+    expect_any: [MemOS, memos]
+  - id: agentmemhub-source-probe
+    query: 调查采集库数据库里存了什么结构
+    expect_any: [agentmemh, AgentMemHub]
+  - id: bash-hang-rootcause
+    query: 终端命令一直转圈不返回的根本原因
+    expect_any: [根因, 卡loading]
+  - id: opencode-slim-install
+    query: 精简版编码工具增强包的安装配置
+    expect_any: [oh-my-opencode, slim]
+  - id: llamacpp-desktop-project
+    query: llama推理的桌面版项目分析
+    expect_any: [llamacpp, llama, desktop]
+  - id: system-llm-closed-loop
+    query: 把操作系统的各种能力接给大模型形成执行闭环
+    expect_any: [系统能力, 闭环]

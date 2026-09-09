@@ -44,21 +44,24 @@ uv run python -m asrag eval --model <新id>             # A/B 召回对比
   全量耗时：bge-small ~9.5 分钟 / bge-base ~47 分钟（CPU q8）。
 - **双模型向量表共存**（vec_bge_small_zh_v1_5 @512 + vec_bge_base_zh_v1_5 @768），
   `--model` 零成本切换，验证了模型切换契约端到端可用。
-- 评测集 18 题（改写式查询防偷题），k=10：
+- 评测集 **51 题**（改写式查询防偷题；`scripts/check_eval_grounding.py`
+  校验 51/51 全部有语料落地依据），k=10：
 
-| mode | small-vector | small-fts | small-hybrid | base-vector | base-hybrid |
+| mode | small-vector | small-fts | small-hybrid | base-vector | **base-hybrid** |
 |---|---|---|---|---|---|
-| recall@10 | 0.889 | 0.778 | **0.944** | **0.944** | **0.944** |
-| MRR | 0.755 | 0.451 | **0.772** | 0.792 | 0.720 |
+| recall@10 | 0.902 | 0.725 | 0.902 | 0.882 | **0.922** |
+| MRR | 0.769 | 0.450 | 0.730 | 0.714 | 0.729 |
 
-- 结论：混合召回显著优于单路；bge-base 纯向量召回追平 small-hybrid（top-1 位次
-  MRR 略降），18 题样本下 small-hybrid 综合最稳，精度升级收益待更大评测集定论。
+- 结论（51 题修正 18 题初判）：**bge-base-hybrid 召回最优（0.922）**，大模型收益
+  在大样本下才显现；small 档上 hybrid 与 vector 打平；混合 ≥ 单路、
+  全文路兜底向量盲区（RETRYING/终态类精确术语）、向量路兜底全文盲区的双向互补成立。
 - 模型加载实测：Python(onnxruntime) 与 Node(transformers.js) 双实现向量语义一致。
 - 测试：49 项单测全绿（含 vec0 孤儿向量 GC 回归、位级确定性、幂等、水印回放）。
 
 ## 已知改进点
 
-- `starship-prompt` 用例三档全失：会话消息正文不含关键词、仅标题含——
-  后续考虑「标题+消息」联合嵌入或字段加权。
+- `starship-prompt`、`side-chat-selection` 51 题下仍三档全失：共性是关键词只存在于
+  会话标题或英文标题（如 "Selection side chat"）而正文不含——「标题+消息」联合嵌入
+  或标题字段加权是下一个最高收益改进点。
 - reasoning 角色未入库（英文思考流、信噪比差），`ingest --include-reasoning` 可开。
-- 评测集偏小（18 题），模型选型结论需扩充至 50+ 题并引入人工标注金集。
+- 评测判定为「top-k 含期望关键词」的宽松口径，下一步可引入人工标注会话级金集。
