@@ -1,0 +1,15 @@
+logs/
+database/session_rag.db
+database/session_rag.db-*
+# 源库是 AgentMemHub 的 745MB 采集库快照（只读输入）——绝不入库
+database/agentmemhub.db*
+database/config.json
+database/watermarks.json
+database/scored_traces.json
+database/*.pid
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+ultralytics/
+*.tmp

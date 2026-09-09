@@ -1,0 +1,57 @@
+# 召回评测集：query 用同义转述（与标题/原文不同形），保证全文档路与向量路公平对比。
+# expect_any：top-k 任一结果的 text 或 title 含其中任一关键词 → 该用例命中。
+cases:
+  - id: desktop-assistant
+    query: 在 Windows 上做一个能听能说的全局智能助手怎么实现
+    expect_any: [桌面AI助手, 全局AI助手, 桌宠]
+  - id: mobile-autotest
+    query: 手机上应用自动化测试工程怎么搭
+    expect_any: [AutoTest, 自动化测试, 自动测试]
+  - id: whisper-install
+    query: 本地语音识别模型 faster whisper 装好了吗
+    expect_any: [faster-whisper, faster_whisper]
+  - id: starship-prompt
+    query: 终端提示字体的美化工具怎么启用
+    expect_any: [Starship, starship]
+  - id: tts-config
+    query: 文字转语音朗读功能配置在哪里
+    expect_any: [语音, TTS, 朗读]
+  - id: qwen-gguf
+    query: 千问的大模型 GGUF 权重文件放到本地怎么用
+    expect_any: [Qwen, qwen, GGUF, gguf]
+  - id: tencentdb-analysis
+    query: 腾讯那个数据库的智能体记忆项目帮我分析一下
+    expect_any: [TencentDB, Tencent, 记忆]
+  - id: clash-proxy-dl
+    query: 挂梯子从国外站点下载共享会话文件
+    expect_any: [Clash, 代理, 7897]
+  - id: opencode-notfound
+    query: 命令行里敲那个开源编码工具说命令不认识
+    expect_any: [opencode, 不认识, not rec]
+  - id: opencode-import
+    query: 把旧编辑器的配置搬到现在的桌面客户端里
+    expect_any: [opencode, 配置, zcode, zCode]
+  - id: complaint-analysis
+    query: 客户投诉打标签然后出统计报告的思路
+    expect_any: [客诉, 投诉, 标签]
+  - id: resume-markdown
+    query: 求职简历用标记语言重新排版
+    expect_any: [简历]
+  - id: tv-black-screen
+    query: 电视机画面突然没了或者卡住怎么自动检测
+    expect_any: [黑屏, 卡顿, 电视]
+  - id: tampermonkey-script
+    query: 浏览器插件批量注册显卡官网账号的脚本
+    expect_any: [篡改猴, Tampermonkey, NVIDIA, 批量注册]
+  - id: ffmpeg-split
+    query: 把视频里的声音和画面拆开分别保存
+    expect_any: [FFmpeg, ffmpeg, 音视频分离]
+  - id: desktop-pet
+    query: 屏幕上一个叫蕾米的小动物程序开发
+    expect_any: [蕾米, 桌宠]
+  - id: bash-loading-hang
+    query: shell 命令执行界面一直转圈不动了排查
+    expect_any: [loading, 卡住, bash]
+  - id: hermes-export
+    query: 把智能体的聊天历史导出来给另一个工具读
+    expect_any: [Hermes, hermes, 导入, 导出]
