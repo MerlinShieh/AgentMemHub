@@ -113,17 +113,13 @@ MENU = """
   ── 数据流程（按顺序操作）────────────────────────
   [1] 提取所有 Agent 会话入库（可选单个 Agent）
   [2] 清洗数据（删除系统注入事件，先预览后确认）
-  [3] 推送记忆到 MemOS（导入 + 幂等 + 自动补向量）
-  [4] 补向量（embedding rebuild，导入后修复语义检索）
-  [5] 自动评分（LLM 三轴批量补价值分，跳过已评）
+  [3] 写入记忆（向量化采集库会话到记忆索引）
+  [4] 自动评分（LLM 三轴批量补价值分，跳过已评）
   ── 日常查询与看板 ──────────────────────────────
-  [6] 检索关键字（跨 Agent 全文搜索）
-  [7] 启动网页看板（后台运行，菜单不阻塞）
-  [8] 停止网页看板（结束占用看板端口的服务进程）
-  [9] 状态总览（数据源 / 本地库 / 记忆引擎）
-  ── 记忆引擎管理 ────────────────────────────────
-  [10] 启动记忆引擎（MemOS daemon，首次会提示插件目录）
-  [11] 停止记忆引擎（仅限本工具启动的实例）
+  [5] 检索关键字（跨 Agent 全文搜索）
+  [6] 启动网页看板（后台运行，菜单不阻塞）
+  [7] 停止网页看板（结束占用看板端口的服务进程）
+  [8] 状态总览（数据源 / 本地库 / 记忆索引）
   [0] 退出
 """
 
@@ -260,27 +256,6 @@ def action_clean() -> None:
         store.close()
 
 
-def action_rebuild() -> None:
-    """补向量：触发引擎 embedding rebuild（默认 repair，实时进度）。"""
-    from agentmemhub import memos_daemon
-    from agentmemhub.memos import rebuild_embeddings
-    if memos_daemon.auth_state() is None:
-        _out("  ⚠ 记忆引擎未在线（可用 [10] 启动）")
-        if not _confirm("  仍要尝试补向量？"):
-            _out("  （已取消）")
-            return
-    mode = _ask("  模式（repair=只补缺失向量[默认] / rebuild=全部重算）> ", "repair")
-    mode = mode.strip().lower()
-    if mode not in ("repair", "rebuild"):
-        mode = "repair"
-    _out(f"  补向量中（{mode}，本地计算可能耗时数分钟）…")
-    r = rebuild_embeddings(base_url=memos_daemon.base_url(), mode=mode,
-                           on_progress=lambda s: _out(f"    {s}"))
-    _out(f"  ✓ 完成: {r}")
-    from agentmemhub.cli import _cli_log
-    _cli_log(f"rebuild（控制台，{mode}）→ {r}")
-
-
 def action_score() -> None:
     """自动评分：LLM 三轴评估记忆并写入价值分（增量优先，4 worker 并发）。"""
     from agentmemhub.cli import _cli_log
@@ -305,79 +280,35 @@ def action_score() -> None:
 
 
 def action_memos() -> None:
-    from agentmemhub.cli import run_memos
-    base = _ask(f"  MemOS 地址（回车 = {memos_base_url()}）> ", memos_base_url())
-    probe = memos_probe(base)
-    if probe is None:
-        if not _confirm("  ⚠ 记忆引擎未在线（可用 [10] 启动）。仍要生成 bundle 并尝试推送吗？"):
-            _out("  （已取消）")
-            return
+    """写入记忆：把采集库的会话向量化写入记忆索引（小模型先跑完即可检索）。"""
+    from agentmemhub.cli import _vectorize_stage
+    if not _confirm("  开始向量化写入记忆索引？"):
+        _out("  （已取消）")
+        return
+    r = _vectorize_stage(stdout=lambda m: _out("  " + str(m)))
+    if r.get("failed"):
+        _out("  ✗ 写入失败（详见日志）")
     else:
-        if not _confirm("  MemOS 在线，开始推送（导入后自动补 embedding）？"):
-            return
-    run_memos(push=base)
+        _out(f"  ✓ 已写入可检索（{r.get('embedded', 0)} 条新嵌入）")
+        if r.get("background"):
+            _out(f"    提示：{r.get('background_hint', '')}")
+            _out(f"    后台继续：{', '.join(r['background'])}")
+    _cli_log(f"写入记忆（控制台）→ {r.get('embedded')} 条")
 
 
 def action_status() -> None:
     _out(_render_snapshot(env_snapshot()))
 
 
-def action_engine_start() -> None:
-    from agentmemhub import memos_daemon
-    if memos_daemon.find_plugin_dir() is None:
-        _out("  未找到 MemOS 插件目录（MemOS repo 的 apps/memos-local-plugin）。")
-        raw = input("  输入路径（回车取消）> ").strip()
-        if not raw:
-            _out("  （已取消）")
-            return
-        try:
-            p = memos_daemon.save_plugin_dir(raw)
-            _out(f"  已记住插件目录: {p}")
-        except Exception as e:
-            _out(f"  ✗ 保存失败: {e}")
-            return
-    _out("  启动记忆引擎中（最多等 30 秒）…")
-    r = memos_daemon.daemon_start()
-    if r.get("online") or r.get("started"):
-        st = r.get("summary") or {}
-        _out(f"  ✓ 记忆引擎在线（PID {r.get('pid')}，{st.get('traces')} 条记忆）")
-        if r.get("auth_required"):
-            raw = input("  引擎已设密码，输入以保存（回车跳过）> ").strip()
-            if raw:
-                memos_daemon.save_password(raw)
-                ok = memos_daemon._login()
-                _out("  ✓ 密码已保存并登录" if ok else "  ⚠ 密码已保存但登录未通过，请核对后重设")
-    else:
-        _out(f"  ✗ 启动失败: {r.get('reason')}")
-        if r.get("hint"):
-            _out(f"    提示: {r['hint']}")
-        if r.get("log"):
-            _out(f"    日志: {r['log']}")
-
-
-def action_engine_stop() -> None:
-    from agentmemhub import memos_daemon
-    r = memos_daemon.daemon_stop()
-    if r.get("stopped"):
-        _out(f"  ✓ 记忆引擎已停止（PID {r.get('pid')}）")
-    else:
-        _out(f"  - 未停止: {r.get('reason')}")
-        if r.get("hint"):
-            _out(f"    提示: {r['hint']}")
-
-
 ACTIONS = {
     "1": ("提取会话入库", action_ingest),
     "2": ("清洗数据", action_clean),
-    "3": ("推送记忆到 MemOS", action_memos),
-    "4": ("补向量", action_rebuild),
-    "5": ("自动评分", action_score),
-    "6": ("检索关键字", action_search),
-    "7": ("启动网页看板", action_dashboard),
-    "8": ("停止网页看板", action_dashboard_stop),
-    "9": ("状态总览", action_status),
-    "10": ("启动记忆引擎", action_engine_start),
-    "11": ("停止记忆引擎", action_engine_stop),
+    "3": ("写入记忆", action_memos),
+    "4": ("自动评分", action_score),
+    "5": ("检索关键字", action_search),
+    "6": ("启动网页看板", action_dashboard),
+    "7": ("停止网页看板", action_dashboard_stop),
+    "8": ("状态总览", action_status),
 }
 
 

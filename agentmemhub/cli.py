@@ -257,6 +257,19 @@ def cmd_adapters(args) -> None:
         _stdout(f"[{d['source']}] {d['label']}: {'✓ ' + (d['path'] or '') if d['located'] else '✗ 未找到'}")
 
 
+def cmd_serve(args) -> None:
+    """启动本地 Web 页面加载统一会话库。"""
+    from agentmemhub.web import run_server
+    run_server(port=args.port, open_browser=args.open,
+               db=args.db or None)
+
+
+def cmd_adapters(args) -> None:
+    for a in adapters.all_adapters():
+        d = a.describe()
+        _stdout(f"[{d['source']}] {d['label']}: {'✓ ' + (d['path'] or '') if d['located'] else '✗ 未找到'}")
+
+
 def cmd_memos_daemon(args) -> None:
     """MemOS 记忆引擎 daemon 管理（启动/停止/巡检/日志/配置）。"""
     import json as _json
@@ -785,20 +798,6 @@ def build_parser() -> argparse.ArgumentParser:
     pm.add_argument("--rebuild-mode", default="repair", choices=("repair", "rebuild"),
                     help="embedding rebuild 模式：repair=只补缺失向量（默认），rebuild=全部重算")
 
-    pmd = sub.add_parser("memos-daemon", help="MemOS 记忆引擎管理（start/stop/status/logs）")
-    pmd.add_argument("action", nargs="?", default="status",
-                     choices=("start", "stop", "status", "logs"))
-    pmd.add_argument("--agent", default="hermes", help="daemon 的 agent 标识（决定端口/home）")
-    pmd.add_argument("--plugin-dir", default="",
-                     help="MemOS 插件目录（默认走 MEMOS_PLUGIN_DIR 或常见位置探测）")
-    pmd.add_argument("--set-dir", default="",
-                     help="持久化 MemOS 插件目录到 <数据目录>/config.json 后退出")
-    pmd.add_argument("--set-password", default="",
-                     help="保存 MemOS viewer 密码（引擎设了密码时网关自动登录）后退出")
-    pmd.add_argument("--lightweight", choices=("on", "off"), default=None,
-                     help="开关 MemOS 轻量记忆模式（off=完整进化链；写托管配置，重启引擎生效）")
-    pmd.add_argument("--lines", type=int, default=40, help="logs 动作显示的行数")
-
     pmc = sub.add_parser("mcp", help="启动 MCP 记忆网关（stdio 默认；--http 转 Streamable HTTP 常驻）")
     pmc.add_argument("--http", action="store_true",
                      help="以 Streamable HTTP 模式常驻（默认 stdio 由 Agent 拉起）")
@@ -853,7 +852,7 @@ def main() -> None:
         "ingest": cmd_ingest, "list": cmd_list, "show": cmd_show,
         "search": cmd_search, "export": cmd_export, "stats": cmd_stats,
         "adapters": cmd_adapters, "memos": cmd_memos, "folders": cmd_folders,
-        "serve": cmd_serve, "memos-daemon": cmd_memos_daemon, "mcp": cmd_mcp,
+        "serve": cmd_serve, "mcp": cmd_mcp,
         "sync": cmd_sync, "clean": cmd_clean, "score": cmd_score, "rebuild": cmd_rebuild,
     }
     fn = handlers.get(args.command)

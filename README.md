@@ -2,15 +2,35 @@
 
 统一提取你电脑上所有 AI Agent Harness 的对话历史 → 归一为**全量事件流**（含工具链、思维链、Shell 执行、代码补丁）→ 本地 SQLite 存储可搜索 → 导出 JSONL / Markdown → **内置记忆引擎 `agentmemhub.rag`**（会话向量化 + 混合召回 + 价值评分，进程内直调、无独立服务）。
 
-> **2026-09-10 重构说明（refactor/agentmemrag 分支）**：记忆后端已从上游 MemOS 引擎切换为
-> 自研内置引擎 `agentmemhub.rag`（原 AgentMemRAG 项目内核化，含全部提交历史）。Skill/MCP 五工具
-> 触发面与看板网关**零改动**；一行配置可回退 MemOS（`agentmemhub.yaml` 设 `backend.backend: memos`
-> 或 env `AGENTMEMHUB_BACKEND=memos`，vendored `memOS/` 目录保留未删）。MemOS 时代的历史记忆
-> （2286 traces / 3836 feedback）已经 `scripts/migrate_memos_to_rag.py` 零丢失迁入
-> `database/session_rag.db`。详见 `docs/rag-bridge-switch-plan.md`。下文凡述 MemOS 之处，
-> 在 rag 后端下由 rag_bridge 以同语义进程内实现。
-
 **让任何 Agent 的会话经验，变成可检索、可迁移、可复用的统一记忆资产。**
+
+> **v2.0（2026-09-10）**：记忆后端从上游 MemOS 引擎切换为**自研内置引擎 `agentmemhub.rag`**
+> ——进程内直调，**无独立服务、无端口、无守护进程**，启动面板或跑 `sync` 即完整可用。
+> MCP 五工具与面板契约零改动；如需回退 MemOS，在 `agentmemhub.yaml` 设 `backend.backend: memos`
+> 即可（vendored `memOS/` 保留未删）。详见 [docs/rag-bridge-switch-plan.md](docs/rag-bridge-switch-plan.md)。
+
+## 模型准备（首次使用必读）
+
+记忆索引依赖**嵌入模型**将文本向量化。仓库**自带最轻量模型开箱即用**，更大模型按需下载：
+
+| 模型 | 维度 | 体积 | 说明 |
+|---|---|---|---|
+| **bge-small-zh-v1.5** | 512 | ~23MB | **随仓库分发**，clone 即可用（默认启用） |
+| bge-base-zh-v1.5 | 768 | ~99MB | 精度更高（召回 0.930 vs 0.887），按需下载 |
+
+**下载更大模型**（可选，二选一后改 `agentmemhub.yaml` 的 `rag.active`）：
+
+```bash
+# 从 HuggingFace 镜像下载（默认走 hf-mirror）
+uv run python scripts/fetch_model.py Xenova/bge-base-zh-v1.5
+
+# 下载后在 agentmemhub.yaml 中把 rag.active 改为 bge-base-zh-v1.5
+# （模型目录名即模型 id；下载脚本会自动登记到配置）
+```
+
+模型来源：[Xenova/bge-small-zh-v1.5](https://huggingface.co/Xenova/bge-small-zh-v1.5) ·
+[Xenova/bge-base-zh-v1.5](https://huggingface.co/Xenova/bge-base-zh-v1.5)（均为量化 ONNX）。
+网络受限时脚本自动回退代理；国内可加 `--base https://hf-mirror.com`。
 
 ## 支持的 Agent
 
@@ -43,14 +63,14 @@
    │                                  │                      │                      │
    │   记忆层   ┌──────────────────────┼──────────────────────┘                      │
    │            ▼                      ▼                                             │
-   │      统一事件流         bundle 生成（memos.py，幂等/价值启发式）                    │
+   │      统一事件流        向量化 ingest（按长度分桶 + 多模型编排）                      │
    │            │                      │                                             │
    │            │                      ▼                                             │
-   │            │             ┌────────────────┐    ┌─────────────────┐              │
-   │            │             │ 引擎托管        │    │ 上游引擎 MemOS    │              │
-   │            └────────────▶│ memos_daemon.py│──▶│ (项目内 memOS/)   │              │
-   │          （检索/看板/导出）│ 启停/状态/密码/开关│    │ 记忆库+进化链      │              │
-   │                          └────────────────┘    └─────────────────┘              │
+   │            │             ┌──────────────────────────────────┐                   │
+   │            │             │ 内置记忆引擎 agentmemhub/rag      │                   │
+   │            └────────────▶│ units + vec_<model> + trigram FTS │                   │
+   │          （检索/看板/导出）│ 三路召回 RRF 融合 + 价值评分       │                   │
+   │                          └──────────────────────────────────┘                   │
    │                                                                                 │
    │   配置层：agentmemhub.yaml（全路径可配置）＋ 环境变量覆盖                           │
    └─────────────────────────────────────────────────────────────────────────────────┘
@@ -66,13 +86,15 @@ AgentMemHub/
 │   ├── config.py                 # 统一配置体系（YAML + 环境变量 + 默认）
 │   ├── store.py + schema.sql     # SQLite 会话库（conversations/events/events_fts）
 │   ├── watermarks.py             # 增量同步水位/变更集（delta）状态
-│   ├── memos.py                  # MemOS bundle 桥接（幂等导入/价值/rebuild）
-│   ├── memos_daemon.py           # 记忆引擎托管（启停/状态/密码自动登录/轻量开关）
+│   ├── rag/                      # ★ 内置记忆引擎（config/embedder/ingest/search/memstore）
+│   ├── rag_bridge.py             # ★ 引擎接缝：原 MemOS 端点语义的进程内实现
+│   ├── memos.py                  # 回退路径：bundle 构建与推送（backend=memos 时启用）
+│   ├── memos_daemon.py           # 回退路径：上游引擎托管（同上）
 │   ├── adapters/                 # 8 个 Agent 数据源适配器（src_id/turn_key/注入识别）
-│   └── web/                      # FastAPI 看板 + 前端 + /api/memos 记忆网关
-├── memOS/                        # 上游记忆引擎（已平移进项目，gitignore）
-│   ├── apps/memos-local-plugin/  #   引擎程序 + npm 依赖 + 本地嵌入模型
-│   └── home/                     #   引擎数据：记忆库 memos.db / viewer 密码 / 引擎配置
+│   └── web/                      # FastAPI 记忆面板 + 前端 + /api/memos 记忆网关
+├── models/                       # 嵌入模型（自带 bge-small；更大模型按需下载）
+├── agentmemhub.yaml              # 统一配置（模型/分桶/召回/后端开关）
+├── memOS/                        # 回退用上游引擎（gitignore，默认不参与运行）
 ├── database/                     # 默认数据目录（gitignore）：SQLite 会话库 / watermarks / 评分状态
 ├── agentmemhub.yaml(.example)    # 统一配置文件（复制 example 修改；yaml 本体 gitignore）
 ├── exports/                      # 导出产物（gitignore）
@@ -89,7 +111,7 @@ AgentMemHub/
 
 1. **采集**：`ingest` 从各 Agent 的官方数据位置读取会话（路径可经 `agents.*` 配置覆盖），归一为全量事件流（含工具链/思维链/Shell/补丁，每事件带 `src_id`/`turn_key` 稳定锚与系统注入标记）写入本地 SQLite
 2. **消费**：CLI/控制台/Web 看板检索、浏览、导出、管理会话——全部读本地库，不上传任何数据
-3. **记忆**：`memos` 把事件流转成 MemOS bundle（幂等、按轮分组、带价值信号）→ 经引擎托管通道导入项目内 `memOS/`，之后对话时可被语义检索命中
+3. **记忆**：`sync` 把事件流向量化写入内置索引（按长度分桶批处理、多模型并发、`src_id` 幂等）→ 对话时经三路召回（向量/全文/标识符）融合命中
 
 ## 快速开始
 
@@ -100,7 +122,7 @@ AgentMemHub/
 uv run python -m agentmemhub
 ```
 
-菜单涵盖：环境检测（各 Agent 数据源/库规模/记忆引擎在线状态）→ 提取入库 → 检索 → 启动看板 → 推送记忆 → 引擎启停 → 退出。
+菜单涵盖：环境检测 → 提取入库 → 清洗数据 → **写入记忆（向量化）** → 自动评分 → 检索 → 看板启停 → 状态总览。
 
 **方式 B — 命令行**
 
@@ -118,11 +140,11 @@ uv run python -m agentmemhub show zcode sess_xxxx
 uv run python -m agentmemhub export --format jsonl --out exports/
 uv run python -m agentmemhub export --format markdown --out exports_md/
 
-# 5. 生成 MemOS 导入 bundle
-uv run python -m agentmemhub memos --out exports/memos_bundle.json
+# 5. 写入记忆：采集 + 向量化（小模型先跑完即可检索，大模型后台并发补齐）
+uv run python -m agentmemhub sync
 
-# 6. 推送到运行中的 MemOS 记忆引擎
-uv run python -m agentmemhub memos --push http://127.0.0.1:18800
+# 6. LLM 批量评分（可选，给记忆打价值分以优化排序）
+uv run python -m agentmemhub score
 ```
 
 ## 查询示例
@@ -159,9 +181,8 @@ python -m agentmemhub export --format markdown --out exports_md/
 # 只导出某个来源、指定输出目录
 python -m agentmemhub export --format markdown --source zcode --out exports_zcode/
 
-# 导出后导入 MemOS（先启动 MemOS Local Plugin）
-python -m agentmemhub memos --out exports/memos_bundle.json              # 生成 bundle
-python -m agentmemhub memos --push http://127.0.0.1:18800              # 或直接推送
+# 写入记忆索引（采集 + 向量化；小模型先跑完即可检索）
+python -m agentmemhub sync
 ```
 
 导出的 JSONL 每行就是一个标准事件：
@@ -233,10 +254,10 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 | `search <q> [--source] [--role] [--limit]` | 全文搜索事件正文 |
 | `export --format jsonl\|markdown [--source] [--out dir]` | 导出 |
 | `folders [--source] [--limit]` | 按文件夹统计各 Agent 会话数 |
-| `memos [--source] [--out] [--push url] [--no-rebuild]` | 生成/推送 MemOS bundle（push 自动分批 + 补向量）|
-| `memos-daemon start\|stop\|status\|logs` | 记忆引擎托管（见下文「记忆引擎管理」）|
+| `sync [--source] [--full]` | **采集 + 向量化写入记忆索引**（增量；小模型先跑完即可检索，大模型后台并发补齐）|
 | `mcp [--http] [--bind H] [--port P]` | MCP 记忆网关：默认 stdio（Agent 拉起）；`--http` 常驻为 Streamable HTTP 供团队共享 |
-| `sync [--push URL] [--no-rebuild] [--full]` | 增量同步：ingest 增量 → 清洗变更会话 → **只推送变更会话的 traces**（watermarks 变更集，无变更自动跳过；`--full` 强制全量）→ 补向量（幂等，引擎离线跳过推送且变更集保留待补推）|
+| `rebuild [--mode repair\|rebuild]` | 补齐缺失向量（repair）/ 全量重算 |
+| `memos [--source] [--out]` | 回退路径：生成 MemOS bundle（backend=memos 时用）|
 | `clean [--source x] [--apply]` | 记忆清洗：删除系统注入事件（默认预览，`--apply` 才执行并重建 FTS/计数；sync 会自动只清变更会话）|
 | `score [--pending] [--limit N] [--dry-run] [--workers N] [--ids id1,id2] [--unscored-count] [--sync-episodes]` | LLM 批量自动评分历史记忆（**增量优先**：pending_score 队列非空只评队列·定点读零全量枚举，队列空则先筛未评 id 再读正文；`--pending` 仅评队列，`--ids` 只评指定条（写后即评），`--unscored-count` 统计未评条数（只读 id），`--sync-episodes` 回填 episode.r_task；**三档 verdict 均记入跳过清单**——positive/negative 写 value、neutral 不写值但仍标记「已评」避免下次重评（dry-run 一律不记录）；网关**内容审核拒评（如智谱 1301）自动归 neutral 并记账**，不再每次卡该条报错；LLM 调用**强制直连**、不受系统代理影响，确需代理设 `AGENTMEMHUB_LLM_PROXY`）|
 | `rebuild [--mode repair\|rebuild]` | 补向量：触发引擎 embedding rebuild（导入记忆后修复语义检索）|
@@ -289,7 +310,7 @@ score（增量优先：队列非空只评队列·定点读引擎库，队列空�
 
 ## MCP 记忆网关（实时记忆读写）
 
-把本地记忆引擎（MemOS）的语义检索/写入包装成 **MCP server**，挂在 ZCode / OpenCode /
+把内置记忆引擎（`agentmemhub.rag`）的语义检索/写入包装成 **MCP server**，挂在 ZCode / OpenCode /
 Claude Code 等支持 MCP 的 Agent harness 上——模型在会话进行中即可检索历史记忆、
 主动保存值得长期保留的结论。与离线链路（统一提取 → bundle → 导入）互补。
 **⚠️ 本网关必须与 [save-memory Skill](https://github.com/MerlinShieh/Agent-skill-save-memory)
@@ -408,37 +429,43 @@ Skill 与 MCP 强绑定、无降级路径——MCP 不可用时 Skill 会明确�
 
 详见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
-## 记忆引擎管理（MemOS 已集成进项目）
+## 记忆引擎管理（内置 agentmemhub.rag）
 
-本项目把 [MemOS Local Plugin](https://github.com/MemTensor/MemOS) 作为**上游记忆引擎**集成——AgentMemHub 只负责调用其接口与托管其进程，不修改其源码。MemOS 默认平移到项目内 `memOS/` 目录（`repo_dir` 可配置到任意位置）：
+**v2.0 起记忆引擎内置于本项目**（`agentmemhub/rag/`），进程内直调：
+**无独立服务、无端口、无守护进程、无鉴权**。启动面板或执行一次 `sync` 即完整可用。
 
 ```
 AgentMemHub/
-├── agentmemhub/                 ← 本项目代码
-├── memOS/                       ← 上游引擎（已 gitignore，不入库）
-│   ├── apps/memos-local-plugin/ ← 引擎程序（npm 依赖 + 本地嵌入模型随项目）
-│   └── home/                    ← 引擎数据：记忆库 memos.db、viewer 密码、引擎配置
-└── agentmemhub.yaml             ← 可选：统一配置文件（复制自 example）
+├── agentmemhub/
+│   ├── rag/                     ← 内置记忆引擎（向量化 / 混合召回 / 价值评分）
+│   ├── rag_bridge.py            ← 引擎接缝：以原 MemOS 端点语义实现进程内调用
+│   └── memos*.py                ← 回退路径（backend=memos 时启用）
+├── database/                    ← 采集库 agentmemhub.db + 索引库 session_rag.db
+├── models/                      ← 嵌入模型（自带 bge-small；更大模型按需下载）
+└── agentmemhub.yaml             ← 统一配置（模型/分桶/召回/后端开关）
 ```
 
-引擎托管（启动/停止/巡检/日志/配置开关）：
+常用操作：
 
 ```bash
-uv run python -m agentmemhub memos-daemon start        # 拉起引擎（memOS/home 自动注入）
-uv run python -m agentmemhub memos-daemon stop         # 停止（仅停本工具拉起的实例）
-uv run python -m agentmemhub memos-daemon status       # 巡检：在线/鉴权/路径/记忆规模/轻量模式
-uv run python -m agentmemhub memos-daemon logs         # 查看引擎日志
-uv run python -m agentmemhub memos-daemon --lightweight off   # 完整进化链（新对话自动评分/归纳）
-uv run python -m agentmemhub memos-daemon --lightweight on    # 轻量模式（只写记忆不进化）
-uv run python -m agentmemhub memos-daemon --set-password <密码>  # 引擎 viewer 设了密码时保存（网关自动登录）
+uv run python -m agentmemhub sync        # 采集 + 向量化写入记忆索引（首次必跑）
+uv run python -m agentmemhub score       # LLM 批量评分（优化检索排序）
+uv run python -m agentmemhub stats       # 索引规模统计
+uv run python -m agentmemhub serve       # 启动记忆面板 http://127.0.0.1:8086
 ```
 
 要点：
 
-- **密码自动登录**：引擎 viewer 设置了密码（`.auth.json`）后，网关遇 401 会用保存的密码自动登录，看板/检索不受影响
-- **MemOS 页面**：平移后需构建一次 viewer（`cd memOS\apps\memos-local-plugin && npm run build:viewer`）；升级引擎或重装 node_modules 后重跑
-- **本地嵌入模型（`npm install` 会清掉）**：引擎的本地嵌入模型文件在 `memOS/apps/memos-local-plugin/node_modules/@huggingface/transformers/models/Xenova/bge-small-zh-v1.5/`，**不属于 npm 依赖**——重装依赖会被删除，嵌入会失效；重装后执行 `uv run python scripts/download_embedding_model.py` 恢复（断点续传 + 大小校验，默认回填本项目的 bge-small-zh-v1.5；换模型用 `--model Xenova/…`，镜像源用 `--base https://hf-mirror.com`）
-- **完整进化链**：`--lightweight off` 后新对话自动跑 reward 打分 / 经验归纳 / 技能结晶（需要引擎配置了 LLM）；历史导入记忆保持价值 0，仍可被检索
+- **"启动引擎"这个概念没有了**：内置引擎由调用方进程加载。建立索引 = `sync`；
+  面板/CLI/MCP 谁会用到谁就在自己进程里加载，不需要也不能"启停服务"。
+- **多模型写入**：`agentmemhub.yaml` 的 `rag.write.order` 支持多模型。
+  默认策略是**小模型先跑完即可检索**（bge-small 约 3 分钟完成全量），
+  高精度模型在后台子进程并发补齐，完成后自动生效。
+- **性能优化**：批量嵌入按**文本长度分桶**，避免短文本被长文本 padding 拖累
+  （实测 bge-base 从 5.26 → 26 条/秒，全量 51 分钟 → 11.6 分钟）。
+- **回退 MemOS**：改 `agentmemhub.yaml` 的 `backend.backend: memos`（或设环境变量
+  `AGENTMEMHUB_BACKEND=memos`）即可切回 vendored 引擎，此时才需要其独立服务与
+  `memos-daemon` 管理命令。
 
 ## 统一配置
 
@@ -484,14 +511,20 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 
 功能：Agent/工作空间多选筛选 · 服务端分页列表 · 全文搜索（FTS5+LIKE）· 统计卡与图表 ·
 会话详情抽屉（用户消息/思维链/工具调用/代码补丁 全渲染，按记忆轮次分组）· 标题编辑与会话删除（真实写库）。
-引擎在线时画面下方有**「记忆引擎」板块**：运行状态（含托管标识/记忆规模/向量就绪）、
-语义检索框（直接搜历史记忆）、最近记忆列表（value 正负标注 + 👍/👎 单条打分）、
-一键启动/停止与打开引擎页面链接。下方还有**「数据操作」**（按流程排序）：
-**提取会话入库** → **清洗数据**（删系统注入，带确认弹窗）→ **推送记忆到 MemOS**（幂等导入 + 自动补向量）→
-**补向量**（embedding rebuild）→ **自动评分**（LLM 三轴批量补价值分，进度条 + 百分比，未完成封顶 99%）——
-全部为后台任务，**进度条按百分比分级配色**、结果实时回显、同一时刻只允许一个任务；
-顶部与数据操作区均有**「操作日志」**入口（引擎启停/任务提交执行/打分等记录，留存于 `<程序根>/logs/`，重启可查）。
-MemOS 未安装时板块自动隐藏。
+页面顶部下方有**「记忆索引」板块**：状态（就绪/记忆规模/模型/向量覆盖率/已排除数）、
+语义检索框（按相关度返回具体轮次，**结果可点击跳转**到对应会话并定位该轮）、
+最近记忆列表（value 正负标注 + 👍/👎 单条打分）。操作行按流程排序：
+**提取会话入库** → **清洗数据**（删系统注入，带确认弹窗）→ **写入记忆**（向量化）→
+**自动评分**（LLM 三轴批量补价值分，进度条 + 百分比）——全部为后台任务，
+**进度条按百分比分级配色**、结果实时回显、同一时刻只允许一个任务。
+
+**记忆写入控制**（独占能力）：
+- **会话级**：主表格勾选会话 → 「设为不写入记忆」/「恢复写入」；整会话被排除的行显示**淡红底 + 左红边 + 「不写入」角标**
+- **轮次级**：点会话进右侧抽屉，每个轮次分割线处有勾选框 → 勾上即该轮不写入；
+  被排除轮次**灰化 + 「不写入记忆」角标**，所在行显示**淡橙底 + 左橙边 + 「部分不写入」**角标
+- **层级语义**：整会话排除**覆盖并清除**其下所有轮次排除；取消整会话即彻底恢复
+- 排除是**立即生效**的（索引即刻移除，不再被召回）；原文始终保留在采集库，
+  取消排除后下次「写入记忆」即恢复
 
 ![AgentMemHub 主看板 — 筛选栏、统计卡、趋势/占比图与会话列表](./docs/images/dashboard.png)
 
@@ -520,10 +553,10 @@ MemOS 未安装时板块自动隐藏。
 - [x] 8 个 Agent Adapter（含 src_id/turn_key 稳定锚与系统注入识别）
 - [x] Trae 适配器（最小可用：会话清单 + 每轮快照 diff + 项目记忆；对话正文等官方开放接口）
 - [x] 全量检索 + JSONL/Markdown 导出
-- [x] MemOS bundle 桥接（幂等导入 + 价值启发式 + embedding 自动补齐）
+- [x] ~~MemOS bundle 桥接~~（v2.0 起退役为回退路径）
 - [x] Web 仪表盘（FastAPI + 原生 JS，服务端分页、事件按需加载、真删改）
 - [x] 交互式控制台入口（start.bat / 无参数菜单）
-- [x] 记忆引擎一体化管理（MemOS 平移进项目 + 启停/巡检/看板记忆板块）
+- [x] ~~记忆引擎一体化管理（MemOS 平移）~~（v2.0 起改为内置引擎）
 - [x] 统一配置体系（agentmemhub.yaml：全路径可配置）
 - [x] MCP 记忆网关（stdio / Streamable HTTP 双传输，供 ZCode/OpenCode 等 harness 检索/写入记忆）
 - [x] 记忆清洗（clean：删除系统注入事件，预览→执行并重建 FTS/计数）
@@ -532,6 +565,19 @@ MemOS 未安装时板块自动隐藏。
 - [x] MCP 写后即评（memory_score 工具 + save-memory Skill 独立仓：触发纪律/生效前提/逻辑归属）
 - [x] 导入数据质量（meta 幽灵轮剔除、纯工具轮标题兜底、恢复环境整源丢失修复、cleanup_empty_traces 清理脚本）
 - [x] 增量同步架构（会话级清单对比 → upsert → watermarks 变更集贯通 clean/push；评分增量优先·定点读零全量枚举；cap 超限回退全量；默认数据目录收进项目内 database/）
+### v2.0（2026-09-10）记忆引擎自研内核
+
+- [x] 内置记忆引擎 `agentmemhub.rag`（向量化 / 三路混合召回 / 价值评分，进程内直调、无独立服务）
+- [x] 引擎接缝 `rag_bridge`：原 MemOS 端点语义的进程内实现，MCP 五工具与面板契约零改动
+- [x] 一行配置回退 MemOS（`backend.backend: memos`），vendored `memOS/` 保留
+- [x] 存量零丢失迁移（MemOS 2286 traces / 3836 feedback → 新索引）
+- [x] 记忆写入控制：会话级 + 轮次级排除（立即生效、层级语义、防回流、跨源副本同步）
+- [x] 面板改造为「AgentMemHub 记忆面板」：记忆控制台 + 检索可跳转 + 排除态双色阶标记
+- [x] 批量嵌入性能优化：按文本长度分桶（bge-base 5.26 → 26 条/秒，全量 51 → 11.6 分钟）
+- [x] 多模型写入编排：小模型先跑完即可检索，高精度模型后台子进程并发补齐
+- [x] 统一配置 `agentmemhub.yaml`（模型注册/分桶/召回/写入策略/后端开关单文件）
+- [x] 带标签的版本锚点（`v0-pre-rag` 回滚点 / `v1-rag-backend-only` / v2.0）
+
 - [ ] 更多 Agent（Claude Code / Cursor / Gemini CLI / CodeBuddy）
 - [ ] 记忆折叠压缩（超长会话压缩、相邻轮折叠）
 - [ ] 存储扩展（单库增长的按 source 分片/归档；data_root 已参数化，见 watermarks 扩展点设计）

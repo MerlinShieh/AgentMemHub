@@ -717,28 +717,6 @@ def create_app(db_path: Path | None = None):
         except Exception:
             raise HTTPException(status_code=503, detail="memory engine offline")
 
-    @app.post("/api/memos/start")
-    def api_memos_start():
-        from agentmemhub import memos_daemon
-        from agentmemhub import logs
-        r = memos_daemon.daemon_start()
-        if not (r.get("started") or r.get("online")):
-            logs.record(f"引擎启动失败：{r.get('reason', r)}", level="error")
-            raise HTTPException(status_code=502, detail=r)
-        logs.record(f"引擎启动成功（{'托管' if r.get('managed') else '外部'}）")
-        return JSONResponse(r)
-
-    @app.post("/api/memos/stop")
-    def api_memos_stop():
-        from agentmemhub import memos_daemon
-        from agentmemhub import logs
-        r = memos_daemon.daemon_stop()
-        if not r.get("stopped") and r.get("reason") not in ("not-online",):
-            logs.record(f"引擎停止失败：{r.get('reason', r)}", level="error")
-            raise HTTPException(status_code=502, detail=r)
-        logs.record("引擎已停止")
-        return JSONResponse(r)
-
     @app.get("/api/memos/search")
     def api_memos_search(q: str = Query(default="", min_length=1),
                          top: int = Query(default=20, ge=1, le=50)):

@@ -51,8 +51,16 @@ exports/
 # 统一日志目录（<程序根>/logs：web.log / cli.log / engine.log / tasks/*）
 logs/
 
-# 本地引擎 MemOS（平移到项目内的上游 repo / 记忆库，严禁入库）
+# 记忆引擎：vendored MemOS（回退用，平移到项目内的上游 repo，严禁入库）
 memOS/
+
+# 嵌入模型：仅保留最轻量的 bge-small 入库（~23MB，开箱即用）；
+# 更大模型用 scripts/fetch_model.py 下载（详见 README「模型准备」）
+models/bge-base-zh-v1.5/
+models/multilingual-*/
+models/gte-*/
+models/text2vec-*/
+models/*/onnx/*.part
 
 # Python 虚拟环境 (uv)（uv.lock 应提交以复现构建）
 .venv/

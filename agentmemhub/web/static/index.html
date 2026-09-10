@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Agent 会话历史看板 · AgentMemHub</title>
+    <title>AgentMemHub 记忆面板</title>
     <link rel="icon" href="data:,">
     <style id="theme-vars">
 /* Agent Session Dashboard — Brand CSS (prefix: as)
@@ -153,7 +153,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
           <i data-lucide="history" class="h-5 w-5"></i>
         </div>
         <div class="leading-tight">
-          <h1 class="text-[15px] font-semibold text-foreground">Agent 会话历史看板</h1>
+          <h1 class="text-[15px] font-semibold text-foreground">AgentMemHub 记忆面板</h1>
           <p class="text-[11px] text-muted-foreground" id="srcLabel">正在连接本地数据库…</p>
         </div>
       </div>
@@ -319,17 +319,9 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
                   class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
             <i data-lucide="upload" class="h-3.5 w-3.5 text-primary"></i>写入记忆
           </button>
-          <button id="adminRebuildBtn" title="补齐缺失的向量（repair）；全量重建用命令行 sync --rebuild"
-                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
-            <i data-lucide="wand-2" class="h-3.5 w-3.5 text-primary"></i>补向量
-          </button>
           <button id="adminScoreBtn" title="LLM 三轴批量评估记忆并写入价值分（需已配置 LLM）"
                   class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
             <i data-lucide="star" class="h-3.5 w-3.5 text-primary"></i>自动评分
-          </button>
-          <button id="adminLogsBtn" title="打开操作日志面板（顶部右侧也有入口）"
-                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted transition-colors">
-            <i data-lucide="scroll-text" class="h-3.5 w-3.5 text-primary"></i>操作日志
           </button>
           <span id="adminJobState" class="hidden items-center gap-1.5 text-xs text-muted-foreground">
             <i data-lucide="loader-circle" class="h-3.5 w-3.5 animate-spin"></i><span id="adminJobName">任务运行中…</span>
@@ -579,7 +571,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     CONVS = D.conversations.slice();
     filtered = CONVS.slice();
     $('#srcLabel').textContent = `${D.meta.dbPath || ''}`;
-    document.title = `Agent 会话看板 (${D.meta.totalConversations})`;
+    document.title = `AgentMemHub 记忆面板 (${D.meta.totalConversations})`;
     buildFilters();
     updateStatsHead(D.meta);
     bindStaticEvents();
@@ -772,7 +764,6 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     $('#adminPushBtn').disabled = busy || !lastEngineOnline;
     $('#adminScoreBtn').disabled = busy || !lastEngineOnline;
     $('#adminCleanBtn').disabled = busy;
-    $('#adminRebuildBtn').disabled = busy || !lastEngineOnline;
     warn.classList.add('hidden');
     if(!j){
       $('#adminJobBar').style.width='0%'; $('#adminJobPct').textContent='';
@@ -893,7 +884,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     CONVS = D.conversations.slice();
     filtered = CONVS.slice();
     $('#srcLabel').textContent = `${D.meta.dbPath || ''}`;
-    document.title = `Agent 会话看板 (${D.meta.totalConversations})`;
+    document.title = `AgentMemHub 记忆面板 (${D.meta.totalConversations})`;
     updateStatsHead(D.meta); updateSummary();
     renderStats(); renderCharts(); renderTable();
     fillAdminSource(); reicons();
@@ -1087,7 +1078,6 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     $('#adminIngestBtn').onclick=()=>adminSubmit('/api/admin/ingest');
     $('#adminPushBtn').onclick=()=>adminSubmit('/api/admin/push');
     $('#adminScoreBtn').onclick=()=>adminSubmit('/api/admin/score');   // LLM 批量自动评分
-    $('#adminRebuildBtn').onclick=()=>adminSubmit('/api/admin/rebuild'); // 补向量
     // 清洗数据：破坏性操作，先弹确认
     $('#adminCleanBtn').onclick=()=>{
       showModal({
@@ -1102,7 +1092,6 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     setInterval(memosPollStatus, 15000);     // 之后每 15s 自动刷新（外部启停也能反映）
     $('#logsToggleBtn').onclick=toggleLogs;  // 操作日志面板
     $('#logsRefreshBtn').onclick=loadLogs;
-    $('#adminLogsBtn').onclick=toggleLogs;   // 数据操作区入口（与顶部按钮一致）
     // 记忆评分（正/负反馈）：事件委托（内联 onclick 无法访问 IIFE 内函数）
     $('#memosRecent').addEventListener('click', e=>{
       const btn=e.target.closest('button[data-score]');
