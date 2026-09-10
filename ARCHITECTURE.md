@@ -44,7 +44,7 @@ AgentMemHub/
 │       ├── workbuddy.py        #   sessions 元数据 + audit-log(Shell)
 │       ├── dsh.py              #   zstd 解压 JSONL
 │       └── __init__.py         #   adapter 注册表 + load_all
-├── docs/                       # IMPLEMENTATION_REVIEW、EXAMPLES
+├── docs/                       # 使用示例、召回融合说明、MCP 注册模板、界面截图
 ├── scripts/                    # sensitive_scan / web_verify / js_check
 ├── agentmemhub/web/            # 可选 Web 子模块（feat/web-ui 分支）
 │   ├── app.py                  #   FastAPI 路由：stats·facets·conversations(分页)·events·folders + DELETE/PATCH，绑定 127.0.0.1

@@ -35,4 +35,4 @@
 - `README.md` — 使用说明与快速开始（含「Agent 协作配置」章节）
 - `ARCHITECTURE.md` — 架构说明
 - `docs/recall-fusion.md` — 三路召回融合的现状与实测数据
-- `docs/rag-bridge-switch-plan.md` — v2.0 引擎切换的设计与实施记录
+- `docs/recall-fusion.md` — 三路召回融合的机制与实测数据

@@ -7,7 +7,7 @@
 > **v2.0（2026-09-10）**：记忆后端从上游 MemOS 引擎切换为**自研内置引擎 `agentmemhub.rag`**
 > ——进程内直调，**无独立服务、无端口、无守护进程**，启动面板或跑 `sync` 即完整可用。
 > MCP 五工具与面板契约零改动；如需回退 MemOS，在 `agentmemhub.yaml` 设 `backend.backend: memos`
-> 即可（vendored `memOS/` 保留未删）。详见 [docs/rag-bridge-switch-plan.md](docs/rag-bridge-switch-plan.md)。
+> 即可（vendored `memOS/` 保留未删）。召回机制与实测数据见 [docs/recall-fusion.md](docs/recall-fusion.md)。
 
 ## 模型准备（首次使用必读）
 
