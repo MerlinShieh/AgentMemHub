@@ -92,9 +92,11 @@ def main(argv: list[str] | None = None) -> int:
         else:
             for i, h in enumerate(hits, 1):
                 snip = h.text.replace("\n", " ")[:90]
+                tag = f" vec={h.vec_rank} fts={h.fts_rank}"
+                if h.ident_rank:
+                    tag += f" ident={h.ident_rank}"
                 print(f"{i:2d}. [{h.role}] {h.title or h.conversation_id}"
-                      f" #{h.unit_id} score={h.score:.4f}"
-                      f" vec={h.vec_rank} fts={h.fts_rank} | {snip}")
+                      f" #{h.unit_id} score={h.score:.4f}{tag} | {snip}")
             print(f"-- {len(hits)} hits (mode={args.mode}, k={args.k})")
     return 0
 

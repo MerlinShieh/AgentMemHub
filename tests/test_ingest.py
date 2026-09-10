@@ -42,7 +42,7 @@ def test_ingest_role_whitelist(project_settings, embedder, fixture_source_db, tm
     st = run_stats(dataclasses.replace(
         project_settings, index_db=idx), log=_qlog)
     assert st["units_total"] == ELIGIBLE_COUNT
-    assert st["by_role"] == {"user": 3, "assistant": 3}
+    assert st["by_role"] == {"user": 4, "assistant": 3}
     assert s["embedded"] == ELIGIBLE_COUNT and s["skipped_known"] == 0
     # tool/reasoning/meta/空白内容全部未入库
     assert set(st["by_role"]) <= set(DEFAULT_ROLES)
@@ -111,8 +111,8 @@ def test_watermark_recorded(project_settings, embedder, fixture_source_db, tmp_p
     _ingest(project_settings, embedder, fixture_source_db, idx)
     st = run_stats(dataclasses.replace(project_settings, index_db=idx), log=_qlog)
     wm = st["watermark"]
-    # 全序 source→conv→seq，最后一条是 zcode/conv-d/1
-    assert wm == {**wm, "source": "zcode", "conversation_id": "conv-d", "seq": 1}
+    # 全序 source→conv→seq，最后一条是 zcode/conv-e/1（conv-e > conv-d > conv-a）
+    assert wm == {**wm, "source": "zcode", "conversation_id": "conv-e", "seq": 1}
     assert "at" in wm
 
 

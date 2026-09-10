@@ -55,10 +55,13 @@ _FIXTURE_EVENTS = [
     ("trae", "conv-c", 1, "meta", "产物清单 node_modules", "1", "msg:20", None, None),
     # 无 conversations 行的孤儿事件（title join 落空也要能吃下）
     ("zcode", "conv-d", 1, "user", "孤儿会话事件没有元数据行", "1", "msg:30", None, None),
+    # P0-2 精确标识符通道用例（高熵串，正文唯一持有者）
+    ("zcode", "conv-e", 1, "user", "修复 retry_handler_v2_max 这个死字段", "1", "msg:40", None, None),
 ]
 
-# 可嵌入单元：role∈{user,assistant} 且内容非空白 → conv-a:2 + conv-b:3 + conv-d:1 = 6
-ELIGIBLE_COUNT = 6
+# 可嵌入单元：role∈{user,assistant} 且内容非空白
+# → conv-a:2 + conv-b:3 + conv-d:1 + conv-e:1 = 7
+ELIGIBLE_COUNT = 7
 
 
 @pytest.fixture()

@@ -45,23 +45,25 @@ uv run python -m asrag eval --model <新id>             # A/B 召回对比
 - **双模型向量表共存**（vec_bge_small_zh_v1_5 @512 + vec_bge_base_zh_v1_5 @768），
   `--model` 零成本切换，验证了模型切换契约端到端可用。
 - 评测集 **51 题**（改写式查询防偷题；`scripts/check_eval_grounding.py`
-  校验 51/51 全部有语料落地依据），k=10：
+  校验 51/51 全部有语料落地依据），k=10。P0 四件套（标题通道/标识符通道/
+  滑窗噪音过滤/会话限席+MMR）落地后：
 
-| mode | small-vector | small-fts | small-hybrid | base-vector | **base-hybrid** |
+| mode | small-vector | small-fts | small-hybrid | base-vector | base-hybrid |
 |---|---|---|---|---|---|
-| recall@10 | 0.902 | 0.725 | 0.902 | 0.882 | **0.922** |
-| MRR | 0.769 | 0.450 | 0.730 | 0.714 | 0.729 |
+| recall@10 | 0.902 | 0.824 | 0.941 | 0.882 | **0.980** |
+| MRR | 0.769 | 0.581 | **0.793** | 0.714 | 0.746 |
 
-- 结论（51 题修正 18 题初判）：**bge-base-hybrid 召回最优（0.922）**，大模型收益
-  在大样本下才显现；small 档上 hybrid 与 vector 打平；混合 ≥ 单路、
-  全文路兜底向量盲区（RETRYING/终态类精确术语）、向量路兜底全文盲区的双向互补成立。
+- P0 实测收益：base-hybrid **0.922→0.980**（51 题仅 1 失）、fts 单路 0.725→0.824；
+  hybrid 延迟 **p50=113ms / p95=151ms**（目标 <500ms 大幅达标）。
+- 选型观察：base 召回占优、small 的 MRR 占优——active 终选留待 P1（候选级 RRF）
+  落地后按质量/延迟帕累托定夺。
 - 模型加载实测：Python(onnxruntime) 与 Node(transformers.js) 双实现向量语义一致。
-- 测试：49 项单测全绿（含 vec0 孤儿向量 GC 回归、位级确定性、幂等、水印回放）。
+- 测试：57 项单测全绿（P0 各通道回归 + vec0 GC + 位级确定性 + 幂等 + 水印回放）。
 
 ## 已知改进点
 
-- `starship-prompt`、`side-chat-selection` 51 题下仍三档全失：共性是关键词只存在于
-  会话标题或英文标题（如 "Selection side chat"）而正文不含——「标题+消息」联合嵌入
-  或标题字段加权是下一个最高收益改进点。
+- 唯一残留顽题 `starship-prompt`：查询与语料无公共三元组窗口，
+  "Starship=终端提示美化"需世界知识桥接——属查询改写/LLM 终审（P1/P2）课题，
+  非索引缺陷（side-chat 等标题盲区已被 P0-1 标题通道解决并转绿）。
 - reasoning 角色未入库（英文思考流、信噪比差），`ingest --include-reasoning` 可开。
 - 评测判定为「top-k 含期望关键词」的宽松口径，下一步可引入人工标注会话级金集。
