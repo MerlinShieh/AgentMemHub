@@ -418,7 +418,7 @@ def _vectorize_stage(*, stdout=None) -> dict:
         _cli_log(f"vectorize 失败：{e}", level="error")
         return {"failed": 1, "pushed_ids": []}
     st("向量化：扫描 %(scanned)d / 新嵌入 %(embedded)d / 已知跳过 %(skipped_known)d"
-       "（%(secs).1fs，模型 %(model)s）" % summary)
+       "（%(seconds).1fs，模型 %(model)s）" % summary)
     _cli_log("vectorize %s" % {k: summary[k] for k in
              ("scanned", "embedded", "skipped_known", "seconds")})
     return {"failed": 0, "pushed_ids": [], **summary}
