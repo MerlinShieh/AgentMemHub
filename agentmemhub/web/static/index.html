@@ -883,12 +883,13 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       if(!s.online) $('#memosOnline').classList.add('hidden');
     }catch(e){}
   }
-  async function refreshData(){
+  async function refreshData(opts){
+    const silent = !!(opts && opts.silent);
     try{
       const r=await fetchWithTimeout('/api/bootstrap',{},10000);
       if(!r.ok) throw new Error('HTTP '+r.status);
       D = await r.json();
-    }catch(e){ toast('刷新数据失败：'+e.message); return; }
+    }catch(e){ if(!silent) toast('刷新数据失败：'+e.message); return; }
     CONVS = D.conversations.slice();
     filtered = CONVS.slice();
     $('#srcLabel').textContent = `${D.meta.dbPath || ''}`;
@@ -896,7 +897,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     updateStatsHead(D.meta); updateSummary();
     renderStats(); renderCharts(); renderTable();
     fillAdminSource(); reicons();
-    toast('数据已刷新');
+    if(!silent) toast('数据已刷新');
   }
   // ---- 统一操作日志（面板控制/任务执行）----
   let logsTmr=null, logsVisible=false;
@@ -1161,6 +1162,12 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       : `已恢复 ${ok} 个会话${fail?`（${fail} 失败）`:''} — 下次「写入记忆」后重新入库`);
     selectedKeys.clear(); $$('.row-chk').forEach(ch=>ch.checked=false);
     updateBatchBtn(); loadExclusionSummary();
+    // 修复：排除态变更后必须重载数据并重渲染，否则列表红/橙标记要手动刷新才出现
+    await refreshData({silent:true});
+    if(curConv){
+      const still = CONVS.find(x=>x.source===curConv.source && x.id===curConv.id);
+      if(still) curConv = still;    // 同步抽屉持有的对象（保持 excl 字段最新）
+    }
   }
 
   // ---- stats over in-memory filtered set ----
@@ -1494,6 +1501,12 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       }
       loadExclusionSummary();
       renderDrawerBody();
+      // 修复：抽屉内轮次操作后同步刷新列表（行级红/橙标记即时更新）
+      await refreshData({silent:true});
+      if(curConv){
+        const still = CONVS.find(x=>x.source===curConv.source && x.id===curConv.id);
+        if(still) curConv = still;
+      }
     }catch(e){
       toast((exclude?'排除失败：':'恢复失败：')+(e.message||e));
       if(cb) cb.disabled=false;
