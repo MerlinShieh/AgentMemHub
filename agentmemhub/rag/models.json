@@ -1,0 +1,29 @@
+{
+  "active": "bge-base-zh-v1.5",
+  "models": {
+    "bge-small-zh-v1.5": {
+      "path": "models/bge-small-zh-v1.5",
+      "dim": 512,
+      "pooling": "cls",
+      "normalize": true,
+      "quantized": true,
+      "maxTokens": 512,
+      "language": "zh",
+      "queryPrefix": "",
+      "source": "Xenova/bge-small-zh-v1.5 (HF), quantized ONNX only",
+      "verified": "2026-09-09 transformers.js v4 dtype:'q8' 实测 dim=512"
+    },
+    "bge-base-zh-v1.5": {
+      "path": "models/bge-base-zh-v1.5",
+      "dim": 768,
+      "pooling": "cls",
+      "normalize": true,
+      "quantized": true,
+      "maxTokens": 512,
+      "language": "zh",
+      "queryPrefix": "",
+      "source": "Xenova/bge-base-zh-v1.5 (HF, quantized ONNX)",
+      "verified": "2026-09-10 71 题 eval：hybrid recall 0.930 最优，p95=175.8ms；经 reembed+eval+回归后置 active"
+    }
+  }
+}
