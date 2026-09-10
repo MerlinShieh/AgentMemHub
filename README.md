@@ -1,6 +1,14 @@
 ﻿# AgentMemHub
 
-统一提取你电脑上所有 AI Agent Harness 的对话历史 → 归一为**全量事件流**（含工具链、思维链、Shell 执行、代码补丁）→ 本地 SQLite 存储可搜索 → 导出 JSONL / Markdown → 桥接 [MemOS Local Plugin](https://github.com/MemTensor/MemOS) 生成记忆。
+统一提取你电脑上所有 AI Agent Harness 的对话历史 → 归一为**全量事件流**（含工具链、思维链、Shell 执行、代码补丁）→ 本地 SQLite 存储可搜索 → 导出 JSONL / Markdown → **内置记忆引擎 `agentmemhub.rag`**（会话向量化 + 混合召回 + 价值评分，进程内直调、无独立服务）。
+
+> **2026-09-10 重构说明（refactor/agentmemrag 分支）**：记忆后端已从上游 MemOS 引擎切换为
+> 自研内置引擎 `agentmemhub.rag`（原 AgentMemRAG 项目内核化，含全部提交历史）。Skill/MCP 五工具
+> 触发面与看板网关**零改动**；一行配置可回退 MemOS（`agentmemhub.yaml` 设 `backend.backend: memos`
+> 或 env `AGENTMEMHUB_BACKEND=memos`，vendored `memOS/` 目录保留未删）。MemOS 时代的历史记忆
+> （2286 traces / 3836 feedback）已经 `scripts/migrate_memos_to_rag.py` 零丢失迁入
+> `database/session_rag.db`。详见 `docs/rag-bridge-switch-plan.md`。下文凡述 MemOS 之处，
+> 在 rag 后端下由 rag_bridge 以同语义进程内实现。
 
 **让任何 Agent 的会话经验，变成可检索、可迁移、可复用的统一记忆资产。**
 
