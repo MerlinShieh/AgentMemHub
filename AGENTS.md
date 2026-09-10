@@ -1,4 +1,4 @@
-# AgentSessionRag — 项目规约（AGENTS.md）
+# AgentMemRAG — 项目规约（AGENTS.md）
 
 ## 接线契约（P2 外置接口，`asrag.ext`）
 
@@ -47,7 +47,7 @@
 ## 目录结构
 
 ```
-AgentSessionRag/
+AgentMemRAG/
 ├── AGENTS.md / README.md / models.json / pyproject.toml
 ├── models/<model-id>/          # ONNX 模型资产（量化版为主，仅 model_quantized.onnx）
 ├── database/                   # agentmemhub.db(源,只读) + session_rag.db(索引)

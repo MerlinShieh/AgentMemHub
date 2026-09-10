@@ -1,4 +1,4 @@
-# AgentSessionRag
+# AgentMemRAG
 
 独立实验项目：不依赖 MemOS，用通用 RAG 向量化技术实现两个核心能力——
 
