@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -143,12 +144,29 @@ def drop_vec_table(conn: sqlite3.Connection, spec: ModelSpec) -> None:
     conn.commit()
 
 
-def _existing_keys(conn: sqlite3.Connection) -> set[tuple]:
+def _existing_keys(conn: sqlite3.Connection, vec_table: str | None = None) -> set[tuple]:
+    """已入库的单元键集合（用于摄取去重）。
+
+    vec_table 非空时，判定标准是「units 有该行 **且该模型的向量表里也有对应行」**
+    —— 多模型架构的核心：每个模型各自判断自己的向量是否齐备，
+    否则后跑模型会把前一个模型已入库的单元全当成 "known" 跳过（实测白跑）。
+    """
+    if not vec_table:
+        return {
+            (r[0], r[1], r[2])
+            for r in conn.execute(
+                "SELECT source, conversation_id, seq FROM units")
+        }
+    has_vec = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (vec_table,)).fetchone()
+    if not has_vec:
+        return set()          # 该模型尚无向量表 → 全部视为待嵌入
     return {
         (r[0], r[1], r[2])
         for r in conn.execute(
-            "SELECT source, conversation_id, seq FROM units"
-        )
+            f"SELECT u.source, u.conversation_id, u.seq FROM units u"
+            f" JOIN {vec_table} v ON v.rowid = u.id")
     }
 
 
@@ -208,6 +226,7 @@ def run_ingest(
     settings: Settings,
     *,
     embedder: Embedder | None = None,
+    model_id: str | None = None,
     source_db: Path | str | None = None,
     index_db: Path | str | None = None,
     roles: tuple[str, ...] | None = None,
@@ -216,13 +235,17 @@ def run_ingest(
     rebuild: bool = False,
     log: logging.Logger | None = None,
 ) -> dict:
-    """增量摄取（rebuild=True 时清空索引全量重建）。返回汇总统计。"""
+    """增量摄取（rebuild=True 时清空索引全量重建）。返回汇总统计。
+
+    model_id：指定用哪个模型嵌入（默认 active）。必须与 embedder 匹配——
+    多模型编排（run_ingest_multi）时为每个模型分别指定。
+    """
     log = log or logging.getLogger("asrag.ingest")
-    spec = settings.active_spec
+    spec = settings.model(model_id) if model_id else settings.active_spec
     src_path = Path(source_db) if source_db else settings.source_db
     idx_path = Path(index_db) if index_db else settings.index_db
     roles = tuple(roles or DEFAULT_ROLES)
-    embedder = embedder or get_embedder(spec, batch_size=batch_size)
+    embedder = embedder or get_embedder(spec, batch_size=batch_size, settings=settings)
 
     idx = open_index(idx_path)
     try:
@@ -237,7 +260,7 @@ def run_ingest(
         src = open_source_ro(src_path)
         try:
             validate_source_schema(src)
-            known = _existing_keys(idx)
+            known = _existing_keys(idx, spec.vec_table)
             cursor = None
             summary = {
                 "scanned": 0, "embedded": 0, "skipped_known": 0,
@@ -261,21 +284,30 @@ def run_ingest(
                     vecs = embedder.encode_passages([t for _, t in kept])
                     with idx:
                         for (r, t), v in zip(kept, vecs):
-                            cur = idx.execute(
-                                "INSERT INTO units(source, conversation_id, seq,"
-                                " role, turn_key, src_id, time, title, text, chars)"
-                                " VALUES(?,?,?,?,?,?,?,?,?,?)",
-                                (r["source"], r["conversation_id"], r["seq"],
-                                 r["role"], r["turn_key"], r["src_id"], r["time"],
-                                 r["title"], t, len(t)),
-                            )
+                            key = (r["source"], r["conversation_id"], r["seq"])
+                            # 多模型语义：units 是模型无关的文本层，已存在则复用其 id
+                            # （否则第二个模型重插会撞 UNIQUE 约束——实测 bug）
+                            row = idx.execute(
+                                "SELECT id FROM units WHERE source=? AND"
+                                " conversation_id=? AND seq=?", key).fetchone()
+                            if row:
+                                uid = row[0]
+                            else:
+                                uid = idx.execute(
+                                    "INSERT INTO units(source, conversation_id, seq,"
+                                    " role, turn_key, src_id, time, title, text,"
+                                    " chars) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                                    (r["source"], r["conversation_id"], r["seq"],
+                                     r["role"], r["turn_key"], r["src_id"],
+                                     r["time"], r["title"], t, len(t)),
+                                ).lastrowid
                             idx.execute(
-                                f"INSERT INTO {spec.vec_table}(rowid, embedding)"
-                                " VALUES(?,?)",
-                                (cur.lastrowid,
+                                f"INSERT OR REPLACE INTO {spec.vec_table}"
+                                "(rowid, embedding) VALUES(?,?)",
+                                (uid,
                                  np.ascontiguousarray(v, dtype=np.float32).tobytes()),
                             )
-                            known.add((r["source"], r["conversation_id"], r["seq"]))
+                            known.add(key)
                     summary["embedded"] += len(kept)
                 summary["scanned"] += len(rows)
                 summary["batches"] += 1
@@ -338,7 +370,7 @@ def run_reembed(
     """模型切换路径：units(文本)不动，按新模型重建其专属向量表。"""
     log = log or logging.getLogger("asrag.ingest")
     spec = settings.model(model_id) if model_id else settings.active_spec
-    embedder = get_embedder(spec, batch_size=batch_size)
+    embedder = get_embedder(spec, batch_size=batch_size, settings=settings)
     idx = open_index(settings.index_db)
     try:
         n_units = idx.execute("SELECT COUNT(*) FROM units").fetchone()[0]
@@ -461,3 +493,115 @@ def delete_units_for_turn(conn: sqlite3.Connection, source: str,
             conn.executemany(f"DELETE FROM {t} WHERE rowid = ?",
                              [(i,) for i in ids])
     return len(ids)
+
+
+def run_ingest_multi(
+    settings: Settings,
+    *,
+    source_db: Path | str | None = None,
+    index_db: Path | str | None = None,
+    roles: tuple[str, ...] | None = None,
+    batch_size: int | None = None,
+    limit: int | None = None,
+    models: list[str] | None = None,
+    fast_first: bool | None = None,
+    on_model_done=None,
+    log: logging.Logger | None = None,
+) -> dict:
+    """多模型向量化编排（配置 rag.write）：小模型先跑完即可用，其余后台并发。
+
+    - 按 settings.write_order 顺序执行；fast_first=True（默认）时，
+      第一个模型完成后立即返回（此时检索已可用），其余模型在后台线程继续；
+    - on_model_done(model_id, summary) 回调用于提示（CLI/面板打印进度）；
+    - 返回 {"completed": [...], "background": [...], "model": <首个>,
+            "summary": <首个汇总>, "background_hint": <提示语>}
+
+    设计依据：小模型（bge-small 130 条/秒）远快于大模型（bge-base 26 条/秒），
+    先跑小模型能让"记忆可检索"提前数分钟达成；大模型补齐后检索质量再提升。
+    """
+    import threading
+
+    log = log or logging.getLogger("asrag.ingest")
+    order = list(models or settings.write_order)
+    if not order:
+        order = [settings.active_model]
+    fast_first = settings.write.get("fast_first", True) if fast_first is None else fast_first
+    hint = settings.write.get("background_hint") or "高精度模型正在后台向量化"
+
+    result: dict = {"completed": [], "background": [], "model": None,
+                    "summary": None, "background_hint": hint}
+
+    def _run_one(mid: str) -> dict:
+        spec = settings.model(mid)
+        emb = get_embedder(spec, batch_size=batch_size, settings=settings)
+        s = run_ingest(settings, embedder=emb, model_id=mid, source_db=source_db,
+                       index_db=index_db, roles=roles,
+                       batch_size=batch_size or settings.embed.get("batch_size", 32),
+                       limit=limit, rebuild=False, log=log)
+        if on_model_done:
+            try:
+                on_model_done(mid, s)
+            except Exception:
+                pass
+        return s
+
+    # 第一个模型：同步跑完（决定"何时可检索"）
+    first = order[0]
+    result["summary"] = _run_one(first)
+    result["model"] = first
+    result["completed"].append(first)
+
+    rest = order[1:]
+    if not rest:
+        return result
+
+    if fast_first:
+        # 其余模型转【独立子进程】后台并发。
+        # 为什么不用线程：daemon 线程随父进程退出即被杀死（实测 CLI 退出后
+        # 后台模型从未完成）；子进程 detached 后可独立跑完。
+        for mid in rest:
+            try:
+                _spawn_background_model(mid, source_db=source_db,
+                                        index_db=index_db, roles=roles,
+                                        batch_size=batch_size, limit=limit,
+                                        log=log)
+                result["background"].append(mid)
+            except Exception as e:
+                log.warning("background spawn failed mid=%s err=%s", mid, e)
+        log.info("multi-ingest: completed=%s background=%s (fast_first, detached)",
+                 result["completed"], result["background"])
+    else:
+        for mid in rest:                     # 全部同步跑完
+            result["completed"].append(mid)
+            result["summary"] = _run_one(mid)
+        log.info("multi-ingest: completed=%s (sync all)", result["completed"])
+    return result
+
+
+def _spawn_background_model(model_id: str, *, source_db=None, index_db=None,
+                            roles=None, batch_size=None, limit=None, log=None):
+    """以独立子进程后台跑单个模型的向量化（父进程退出后仍继续）。
+
+    通过 `python -m agentmemhub.rag.cli ingest --model <id>` 复用既有入口，
+    日志与进度落在同一 logs/ 目录，面板/CLI 可查。
+    """
+    import subprocess
+    import sys as _sys
+
+    args = [_sys.executable, "-m", "agentmemhub.rag.cli", "ingest",
+            "--model", model_id]
+    if batch_size:
+        args += ["--batch-size", str(batch_size)]
+    if limit:
+        args += ["--limit", str(limit)]
+    if roles:
+        args += ["--roles", ",".join(roles)]
+    creation = 0
+    if os.name == "nt":
+        creation = (subprocess.CREATE_NEW_PROCESS_GROUP
+                    | subprocess.DETACHED_PROCESS)
+    with open(os.devnull, "wb") as _null:
+        subprocess.Popen(args, stdin=_null, stdout=_null, stderr=_null,
+                         creationflags=creation, close_fds=True)
+    if log:
+        log.info("background model spawned pid-detached model=%s", model_id)

@@ -87,7 +87,7 @@ def run_eval(
 ) -> dict:
     log = log or logging.getLogger("asrag.eval")
     spec = settings.active_spec
-    embedder = embedder or get_embedder(spec)
+    embedder = embedder or get_embedder(spec, settings=settings)
     gold_map = {c.id: gold_conversations(settings.index_db, c) for c in cases}
     report: dict = {
         "model": spec.id, "dim": spec.dim, "k": k,

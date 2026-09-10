@@ -407,21 +407,35 @@ def _vectorize_stage(*, stdout=None) -> dict:
     """
     import time as _t
     from agentmemhub import rag_bridge
-    from agentmemhub.rag.ingest import run_ingest
+    from agentmemhub.rag.ingest import run_ingest_multi
 
     st = _stdout if stdout is None else stdout
+    settings = rag_bridge.settings()
     t0 = _t.perf_counter()
+    order = settings.write_order
+
+    def _on_done(mid, summ):
+        st("  [%(model)s] 扫描 %(scanned)d / 新嵌入 %(embedded)d / 跳过 %(skipped_known)d"
+           "（%(seconds).1fs）" % summ)
+
     try:
-        summary = run_ingest(rag_bridge.settings(), log=_rag_log())
+        r = run_ingest_multi(settings, on_model_done=_on_done, log=_rag_log())
     except Exception as e:
         st(f"向量化失败：{e}")
         _cli_log(f"vectorize 失败：{e}", level="error")
         return {"failed": 1, "pushed_ids": []}
-    st("向量化：扫描 %(scanned)d / 新嵌入 %(embedded)d / 已知跳过 %(skipped_known)d"
-       "（%(seconds).1fs，模型 %(model)s）" % summary)
-    _cli_log("vectorize %s" % {k: summary[k] for k in
-             ("scanned", "embedded", "skipped_known", "seconds")})
-    return {"failed": 0, "pushed_ids": [], **summary}
+
+    first = r["summary"] or {}
+    st("向量化完成可检索：模型 %s（%.1fs）；多模型顺序：%s"
+       % (r["model"], _t.perf_counter() - t0, " → ".join(order)))
+    if r["background"]:
+        st("提示：%s（%s）" % (r["background_hint"], "、".join(r["background"])))
+    _cli_log("vectorize %s completed=%s background=%s" % (
+        {k: first.get(k) for k in ("scanned", "embedded", "skipped_known", "seconds")},
+        r["completed"], r["background"]))
+    return {"failed": 0, "pushed_ids": [], **first,
+            "completed": r["completed"], "background": r["background"],
+            "background_hint": r["background_hint"]}
 
 
 def _rag_log():

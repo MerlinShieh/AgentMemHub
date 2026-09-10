@@ -364,7 +364,7 @@ def hybrid_search(
     t0 = time.perf_counter()
     conn = open_index(settings.index_db)
     conn.row_factory = sqlite3.Row
-    embedder = embedder or get_embedder(spec)
+    embedder = embedder or get_embedder(spec, settings=settings)
     try:
         ensure_search_schema(conn, log=log)
         excl = _excl_ids(conn, exclude_session)

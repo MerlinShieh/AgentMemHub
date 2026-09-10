@@ -23,6 +23,10 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("ingest", help="增量摄取会话消息并嵌入")
     p.add_argument("--limit", type=int, default=None, help="最多扫描候选条数（试跑用）")
     p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--model", default=None,
+                   help="用指定模型嵌入（默认 active）——多模型编排/后台子进程入口")
+    p.add_argument("--roles", default=None,
+                   help="逗号分隔的 role 白名单（默认 user,assistant）")
     p.add_argument("--include-reasoning", action="store_true",
                    help="将 reasoning 消息一并嵌入（默认不嵌）")
     p.add_argument("--rebuild", action="store_true",
@@ -61,8 +65,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "ingest":
         log = get_logger("ingest", settings.log_dir, console=False)
-        roles = DEFAULT_ROLES + ("reasoning",) if args.include_reasoning else DEFAULT_ROLES
+        if args.roles:
+            roles = tuple(r.strip() for r in args.roles.split(",") if r.strip())
+        else:
+            roles = (DEFAULT_ROLES + ("reasoning",)
+                     if args.include_reasoning else DEFAULT_ROLES)
         s = run_ingest(settings, roles=roles, batch_size=args.batch_size,
+                       model_id=args.model,
                        limit=args.limit, rebuild=args.rebuild, log=log)
         print(json.dumps(s, ensure_ascii=False, indent=2))
     elif args.cmd == "stats":
