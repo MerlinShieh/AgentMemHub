@@ -44,8 +44,9 @@ class ModelSpec:
     quantized: bool
     max_tokens: int
     language: str
-    query_prefix: str = ""
-    family: str = ""      # 家族标签（异族融合判断用）
+    query_prefix: str = ""     # 查询侧前缀（E5 用 "query: "）
+    passage_prefix: str = ""   # 文档侧前缀（E5 用 "passage: "）
+    family: str = ""           # 家族标签（异族融合判断用）
 
     @property
     def onnx_file(self) -> Path:
@@ -171,6 +172,7 @@ def load_settings(root: Path | str | None = None) -> Settings:
             max_tokens=int(m.get("maxTokens", 512)),
             language=m.get("language", "zh"),
             query_prefix=m.get("queryPrefix", ""),
+            passage_prefix=m.get("passagePrefix", ""),
             family=m.get("family", ""),
         )
 

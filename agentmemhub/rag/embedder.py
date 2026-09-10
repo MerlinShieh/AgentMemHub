@@ -145,6 +145,8 @@ class OnnxEmbedder(Embedder):
         n = len(texts)
         if not n:
             return np.zeros((0, self.spec.dim), dtype=np.float32)
+        if self.spec.passage_prefix:      # E5 等模型文档侧也需前缀
+            texts = [f"{self.spec.passage_prefix}{t}" for t in texts]
         out = np.empty((n, self.spec.dim), dtype=np.float32)
 
         if not self.bucketing:
