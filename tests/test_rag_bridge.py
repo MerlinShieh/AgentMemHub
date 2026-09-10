@@ -189,17 +189,51 @@ class _FakeStore:
 
 # ── R5.1 验收修复回归 ──────────────────────────────────────────────────
 
-def test_search_curate_caps_like_memos_max_keep(rag_env):
-    """机械终审：≤5 且 ≥0.7×top（MemOS llmFilterMaxKeep 同量级），curate=False 关闭。"""
+def test_search_curate_truncates_by_relevance_not_hard_5(rag_env):
+    """机械终审：按 ≥0.7×top 截断；上限放宽到 SEARCH_MAX_HITS=20（R6 体验反馈：
+    硬砍 5 条让用户以为"只有这么点相关"，改为相关度截断）。"""
     rag_bridge.import_bundle([
         {"id": f"mcp_c{i}", "userText": f"终审验证条目 编号{i} 内容递增一点点{i * 7}",
          "ts": 100 + i} for i in range(8)])
     all_hits = rag_bridge.search("h", "终审验证条目", k=8, curate=False)["hits"]
     curated = rag_bridge.search("h", "终审验证条目", k=8, curate=True)["hits"]
     assert len(all_hits) == 8
-    assert 1 <= len(curated) <= 5
+    assert len(curated) <= rag_bridge.SEARCH_MAX_HITS
+    assert len(curated) > 5 or len(curated) == len(all_hits), "不再硬砍到 5 条"
     top = curated[0]["score"]
     assert all(h["score"] >= 0.7 * top - 1e-9 for h in curated)
+
+
+def test_search_hits_include_conversation_location(rag_env):
+    """R6 体验修复：命中项必须带会话定位（source/conversationId/turnKey/title），
+    面板才能点击跳转到对应会话的对应轮次。原子记忆带 atomic 标记。"""
+    st = rag_bridge.settings()
+    from agentmemhub.rag.ingest import open_index, run_ingest
+    import sqlite3, dataclasses as dc
+    src = st.source_db
+    if not src.exists():
+        pytest.skip("无真实采集库")
+    conn = open_index(st.index_db)
+    try:
+        row = conn.execute(
+            "SELECT source, conversation_id, turn_key, text FROM units"
+            " WHERE source<>'memory' AND turn_key IS NOT NULL LIMIT 1").fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        pytest.skip("索引无会话单元")
+    res = rag_bridge.search("h", row[3][:30], k=5)
+    sess = [h for h in res["hits"] if not h["atomic"]]
+    assert sess, "应至少有一条会话单元命中"
+    h = sess[0]
+    assert h["source"] and h["conversationId"], "会话定位字段不得为空"
+    assert "turnKey" in h and "title" in h
+
+    rag_bridge.import_bundle([{"id": "mcp_loc", "userText": "定位测试原子记忆",
+                              "ts": 1}])
+    res2 = rag_bridge.search("h", "定位测试原子记忆", k=5)
+    atomic = [h for h in res2["hits"] if h["atomic"]]
+    assert atomic, "原子记忆须标记 atomic=True（无对应会话）"
 
 
 def test_safe_cutoff_hits_rules():

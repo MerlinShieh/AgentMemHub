@@ -59,6 +59,25 @@ _SORTABLE = {
 }
 
 
+def _exclusions_map(store) -> dict:
+    """全库排除态映射：(source, id) → {"whole": bool, "turns": int}。
+
+    列表页据此给会话行打「整会话排除（红）/ 部分轮次排除（橙）」标记。
+    """
+    m: dict = {}
+    try:
+        for r in store.list_exclusions():
+            k = (r["source"], r["conversation_id"])
+            e = m.setdefault(k, {"whole": False, "turns": 0})
+            if r["turn_key"]:
+                e["turns"] += 1
+            else:
+                e["whole"] = True
+    except Exception:
+        return {}
+    return m
+
+
 def _index_counts(source: str, cid: str,
                   turn_keys: Optional[list[str]] = None,
                   whole: bool = False) -> tuple[int, int]:
@@ -327,14 +346,19 @@ def _logged_task(name: str, fn) -> Any:
     return _do
 
 
-def _conv_to_dict(c: Any) -> dict[str, Any]:
-    """conversations row → 前端 camelCase 契约字段。"""
+def _conv_to_dict(c: Any, *, excl_map: Optional[dict] = None) -> dict[str, Any]:
+    """conversations row → 前端 camelCase 契约字段。
+
+    excl_map：(source, id) → {"whole": bool, "turns": int}——R6 记忆排除态，
+    供列表页渲染「整会话排除（红）/ 部分轮次排除（橙）」双色阶标记。
+    不传则不带该字段（保持既有调用方形状不变）。
+    """
     import json
     try:
         roles = json.loads(c["roles_json"]) if c["roles_json"] else []
     except Exception:
         roles = []
-    return {
+    d = {
         "source": c["source"],
         "id": c["id"],
         "title": c["title"] or "",
@@ -346,6 +370,14 @@ def _conv_to_dict(c: Any) -> dict[str, Any]:
         "eventCount": c["event_count"] or 0,
         "roles": roles,
     }
+    if excl_map:
+        st = excl_map.get((c["source"], c["id"]))
+        if st and st.get("whole"):
+            d["excl"] = "whole"
+        elif st and st.get("turns"):
+            d["excl"] = "partial"
+            d["exclTurns"] = st["turns"]
+    return d
 
 
 def _event_to_short(e: Any, *, whole: bool = False,
@@ -445,9 +477,10 @@ def create_app(db_path: Path | None = None):
             source_colors = {s["source"]: s["color"] for s in bundle["stats"]["sources"]}
             role_colors = {r["role"]: r["color"] for r in bundle["stats"]["roles"]}
             models_map = agg.conv_models()   # P2: 从 events 反查补全缺失的 model
+            excl_map = _exclusions_map(store)   # R6: 排除态（列表行双色阶标记）
             convs = []
             for i, c in enumerate(store.list_conversations()):
-                d = _conv_to_dict(c)
+                d = _conv_to_dict(c, excl_map=excl_map)
                 if not d["model"]:
                     d["model"] = models_map.get((d["source"], d["id"]), "") or ""
                 d["idx"] = i
@@ -494,9 +527,10 @@ def create_app(db_path: Path | None = None):
         with _LOCK:
             convs = store.list_conversations(src_filter[0] if len(src_filter) == 1 else None)
             models_map = agg.conv_models()   # P2: 从 events 反查补全缺失的 model
+            excl_map = _exclusions_map(store)   # R6: 排除态
         items = []
         for c in convs:
-            d = _conv_to_dict(c)
+            d = _conv_to_dict(c, excl_map=excl_map)
             if not d["model"]:
                 d["model"] = models_map.get((d["source"], d["id"]), "") or ""
             items.append(d)
@@ -707,8 +741,8 @@ def create_app(db_path: Path | None = None):
 
     @app.get("/api/memos/search")
     def api_memos_search(q: str = Query(default="", min_length=1),
-                         top: int = Query(default=8, ge=1, le=30)):
-        """转发语义检索：返回 hits（tier/refKind/score/snippet）。"""
+                         top: int = Query(default=20, ge=1, le=50)):
+        """语义检索：返回 hits（含会话定位信息，前端可点击跳转）。"""
         import json as _json
         from agentmemhub import memos_daemon
         ov = _require_engine()
@@ -723,7 +757,13 @@ def create_app(db_path: Path | None = None):
         hits = [
             {"tier": h.get("tier"), "refKind": h.get("refKind"),
              "score": h.get("score"), "snippet": h.get("snippet") or "",
-             "refId": h.get("refId")}
+             "refId": h.get("refId"),
+             # 会话定位（点击跳转到对应会话/轮次）
+             "source": h.get("source") or "",
+             "conversationId": h.get("conversationId") or "",
+             "turnKey": h.get("turnKey") or "",
+             "title": h.get("title") or "",
+             "atomic": bool(h.get("atomic"))}
             for h in (res.get("hits") or [])[:top]
         ]
         return JSONResponse({"query": q, "hits": hits,

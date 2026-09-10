@@ -165,3 +165,70 @@ def test_peer_hint_when_not_synced(client, store):
     client.post(base, json={"turn_key": "tk2"})          # 不同步副本
     body = client.get(base).json()
     assert any(p["id"] == "copy2" for p in body["peerTurns"].get("tk2", []))
+
+
+def test_list_endpoints_carry_exclusion_state(client, store):
+    """列表页双色阶标记数据源：bootstrap 与 conversations 均带 excl 字段。"""
+    store.add_exclusion("zcode", "sess_x")                 # 整会话
+    s2 = Store(store.db_path)
+    try:
+        s2.replace_source("hermes", [{
+            "source": "hermes", "id": "part_x", "title": "部分排除",
+            "cwd": "/y", "created_at": 1, "updated_at": 2, "model": "m",
+            "meta": {}, "events": renumber([
+                Event(role="user", content="一", time=1, src_id="a", turn_key="t1"),
+                Event(role="user", content="二", time=2, src_id="b", turn_key="t2")]),
+        }], signature="s9")
+        s2.add_exclusion("hermes", "part_x", "t1")          # 部分轮次
+    finally:
+        s2.close()
+
+    def find(items, cid):
+        return next((i for i in items if i["id"] == cid), None)
+
+    boot = client.get("/api/bootstrap").json()["conversations"]
+    a = find(boot, "sess_x")
+    assert a and a["excl"] == "whole"
+    b = find(boot, "part_x")
+    assert b and b["excl"] == "partial" and b["exclTurns"] == 1
+    c_ = find(boot, "sess_1" if find(boot, "sess_1") else "x", )
+    # 未排除的会话不带 excl 字段
+    normal = [i for i in boot if i["id"] == "sess_x"][0]
+    assert normal["excl"] == "whole"
+    others = [i for i in boot if i["id"] not in ("sess_x", "part_x")]
+    assert all("excl" not in i for i in others)
+
+    convs = client.get("/api/conversations?all=1").json()["items"]
+    assert find(convs, "sess_x")["excl"] == "whole"
+    assert find(convs, "part_x")["excl"] == "partial"
+
+
+def test_search_hits_carry_location(client, monkeypatch):
+    """语义检索结果必须带会话定位字段（前端点击跳转用）。
+
+    面板端点经 engine_request 转发 → mock 该出口，验证字段透传与上限放宽。
+    """
+    from agentmemhub import memos_daemon
+    seen = {}
+
+    def fake_engine(method, path, body=None, **kw):
+        if path == "/api/v1/auth/status":
+            return {"enabled": False, "authenticated": True}
+        if path == "/api/v1/overview":
+            return {"ok": True, "episodes": 1, "traces": 2}
+        if path == "/api/v1/memory/search":
+            seen["path"] = path
+            return {"hits": [{"refId": "unit:1", "score": 1.0, "snippet": "x",
+                              "source": "zcode", "conversationId": "sess_x",
+                              "turnKey": "tk1", "title": "标题",
+                              "atomic": False}],
+                    "injectedContext": ""}
+        return {}
+
+    monkeypatch.setattr(memos_daemon, "engine_request", fake_engine)
+    r = client.get("/api/memos/search?q=测试")
+    assert seen.get("path") == "/api/v1/memory/search"
+    assert r.status_code == 200
+    h = r.json()["hits"][0]
+    assert h["source"] == "zcode" and h["conversationId"] == "sess_x"
+    assert h["turnKey"] == "tk1" and h["title"] == "标题"

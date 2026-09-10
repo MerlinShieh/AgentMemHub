@@ -166,9 +166,19 @@ def safe_cutoff_hits(hits: list[dict], *, max_keep: int = 5,
 
 # ── 端点语义实现 ───────────────────────────────────────────────────────
 
-def search(agent: str, query: str, *, k: int = 8, curate: bool = True,
+#: 面板语义检索的默认返回上限。curate 只做「相关度截断」不做「硬砍到 5 条」——
+#: 用户搜东西期望看到"有哪些相关"，5 条过少（R6 体验反馈）。
+SEARCH_MAX_HITS = 20
+
+
+def search(agent: str, query: str, *, k: int = SEARCH_MAX_HITS,
+           curate: bool = True,
            exclude_session: tuple[str, str] | None = None) -> dict:
-    """POST /api/v1/memory/search 的 rag 实现（hits 形状对齐 RetrievalResultDTO）。"""
+    """POST /api/v1/memory/search 的 rag 实现（hits 形状对齐 RetrievalResultDTO）。
+
+    额外带回会话定位信息（source/conversationId/turnKey/title），
+    让面板能把命中项点开跳回对应会话的对应轮次。
+    """
     t0 = time.perf_counter()
     st = settings()
     hits = hybrid_search(
@@ -176,25 +186,42 @@ def search(agent: str, query: str, *, k: int = 8, curate: bool = True,
         exclude_session=exclude_session,
         value_provider=memstore.ValueStore(st.index_db),
         log=_log())
-    refmap = {}
+    refmap: dict = {}
     if hits:
         conn = _conn()
         try:
             marks = ",".join("?" * len(hits))
             for r in conn.execute(
-                f"SELECT id, legacy_id, src_id FROM units WHERE id IN ({marks})",
+                f"SELECT id, source, conversation_id, turn_key, title,"
+                f" legacy_id, src_id FROM units WHERE id IN ({marks})",
                 [h.unit_id for h in hits]):
-                refmap[r["id"]] = r["legacy_id"] or r["src_id"] or f"unit:{r['id']}"
+                refmap[r["id"]] = {
+                    "refId": r["legacy_id"] or r["src_id"] or f"unit:{r['id']}",
+                    "source": r["source"],
+                    "conversationId": r["conversation_id"],
+                    "turnKey": r["turn_key"] or "",
+                    "title": r["title"] or "",
+                }
         finally:
             conn.close()
-    dto_hits = [{
-        "tier": 2, "refKind": "trace",
-        "refId": refmap.get(h.unit_id, f"unit:{h.unit_id}"),
-        "score": round(h.score, 4),
-        "snippet": (h.title + " | " if h.title else "") + h.text[:200],
-    } for h in hits]
-    if curate:   # 机械终审（MemOS llmFilterMaxKeep=5 同量级，注入防刷屏；零 LLM）
-        dto_hits = safe_cutoff_hits(dto_hits, max_keep=min(5, max(k, 1)))
+    dto_hits = []
+    for h in hits:
+        m = refmap.get(h.unit_id) or {}
+        dto_hits.append({
+            "tier": 2, "refKind": "trace",
+            "refId": m.get("refId", f"unit:{h.unit_id}"),
+            "score": round(h.score, 4),
+            "snippet": (h.title + " | " if h.title else "") + h.text[:200],
+            # 会话定位（面板点击跳转用）；原子记忆（source='memory'）无会话
+            "source": m.get("source", ""),
+            "conversationId": m.get("conversationId", ""),
+            "turnKey": m.get("turnKey", ""),
+            "title": m.get("title", ""),
+            "atomic": m.get("source") == "memory",
+        })
+    if curate:
+        # 相关度截断（≥0.7×top）但不再硬砍到 5 条，上限放宽到 SEARCH_MAX_HITS
+        dto_hits = safe_cutoff_hits(dto_hits, max_keep=SEARCH_MAX_HITS)
     ctx = "\n".join(f"- {d['snippet'][:160]}" for d in dto_hits[:3])
     return {"hits": dto_hits, "injectedContext": ctx,
             "tierLatencyMs": {"rag": round((time.perf_counter() - t0) * 1000)}}

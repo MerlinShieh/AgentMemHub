@@ -284,6 +284,10 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       <div id="memosHint" class="mt-2 hidden text-[11px] text-muted-foreground"></div>
       <div id="memosOnline" class="mt-3 hidden grid gap-4 lg:grid-cols-2">
         <div>
+          <div class="mb-1.5 flex items-start gap-1.5 text-[10px] text-muted-foreground">
+            <i data-lucide="info" class="mt-0.5 h-3 w-3 shrink-0"></i>
+            <span>此处为<b>语义检索</b>（按相关度找具体轮次，结果可点击跳转）；顶部筛选框是<b>会话级关键字搜索</b>（穷举哪些会话聊过），两者用途不同。</span>
+          </div>
           <div class="relative">
             <i data-lucide="search" class="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"></i>
             <input id="memosKw" type="text" placeholder="语义检索记忆（例：部署、依赖修复…），回车触发"
@@ -487,6 +491,13 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   pre.codeblk { background: color-mix(in srgb, var(--as-foreground) 6%, var(--as-card)); border:1px solid var(--as-border); border-radius:6px; padding:8px 10px; overflow-x:auto; font-family:var(--as-font-mono); font-size:11.5px; line-height:1.5; }
   code.inl { font-family:var(--as-font-mono); font-size:11.5px; background: color-mix(in srgb, var(--as-foreground) 8%, transparent); padding:1px 4px; border-radius:4px; }
   .row-selected { background: color-mix(in srgb, var(--as-primary) 10%, var(--as-card)) !important; }
+  /* R6 记忆排除态双色阶：整会话排除=红（强）、部分轮次排除=橙（弱） */
+  tr.row-excl-whole { background: color-mix(in srgb, var(--state-error) 9%, var(--as-card)); }
+  tr.row-excl-whole:hover { background: color-mix(in srgb, var(--state-error) 15%, var(--as-card)); }
+  tr.row-excl-whole td:first-child { box-shadow: inset 3px 0 0 var(--state-error); }
+  tr.row-excl-partial { background: color-mix(in srgb, var(--state-warning) 8%, var(--as-card)); }
+  tr.row-excl-partial:hover { background: color-mix(in srgb, var(--state-warning) 14%, var(--as-card)); }
+  tr.row-excl-partial td:first-child { box-shadow: inset 3px 0 0 var(--state-warning); }
   .sortable-asc::after { content:" ▲"; opacity:.6; }
   .sortable-desc::after { content:" ▼"; opacity:.6; }
   .nav-btn:disabled { cursor:not-allowed; }
@@ -680,21 +691,57 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       const d = await r.json();
       const hits = d.hits||[];
       if(!hits.length){ box.innerHTML = '<div class="py-2 text-center text-[11px] text-muted-foreground">无命中</div>'; return; }
-      box.innerHTML = hits.map(h=>{
-        const tm = TIER_META[h.tier] || {label:'记忆', color:'#64748B'};
-        const sn = esc((h.snippet||'').slice(0,160));
+      box.innerHTML = hits.map((h,i)=>{
+        const sn = esc((h.snippet||'').slice(0,180));
         const score = (typeof h.score==='number') ? h.score.toFixed(2) : '';
-        return `<div class="rounded-md border border-border bg-background px-2.5 py-1.5 text-xs">
+        const atomic = h.atomic || !h.conversationId;
+        const srcChip = h.source
+          ? `<span class="rounded px-1 text-[10px]" style="background:${(SRC_COLOR()[h.source]||'#64748B')}1f;color:${SRC_COLOR()[h.source]||'#64748B'}">${esc(h.source)}</span>` : '';
+        const loc = atomic
+          ? '<span class="rounded bg-muted px-1 text-[10px] text-muted-foreground">原子记忆</span>'
+          : srcChip;
+        const title = atomic ? '' : esc((h.title||h.conversationId||'').slice(0,42));
+        const clickable = !atomic;
+        return `<div class="mem-hit rounded-md border border-border bg-background px-2.5 py-1.5 text-xs ${clickable?'cursor-pointer hover:bg-muted/50 transition-colors':''}"
+                     data-hit-idx="${i}" title="${clickable?'点击打开该会话并定位到这一轮':'原子记忆（无对应会话）'}">
           <div class="flex items-center gap-1.5">
-            <span class="rounded px-1 text-[10px] font-semibold" style="background:${tm.color}1f;color:${tm.color}">${tm.label}</span>
-            <span class="text-[10px] text-muted-foreground">${esc(h.refKind||'')}</span>
-            <span class="ml-auto tnum text-[10px] text-muted-foreground">${score}</span>
+            ${loc}
+            <span class="tnum text-[10px] text-muted-foreground">#${i+1}</span>
+            <span class="truncate text-[10px] text-muted-foreground">${title}</span>
+            <span class="ml-auto shrink-0 tnum text-[10px] text-muted-foreground">${score}</span>
+            ${clickable?'<i data-lucide="arrow-up-right" class="h-3 w-3 shrink-0 text-muted-foreground"></i>':''}
           </div>
           <div class="mt-0.5 leading-relaxed text-foreground">${sn}</div>
         </div>`;
       }).join('');
+      // 点击命中项 → 打开对应会话抽屉并定位到该轮次
+      box.querySelectorAll('.mem-hit').forEach(elm=>{
+        const h = hits[+elm.dataset.hitIdx];
+        if(h && h.conversationId){
+          elm.onclick = ()=>openHitConversation(h);
+        }
+      });
+      reicons();
     }catch(e){
       box.innerHTML = `<div class="py-2 text-center text-[11px] text-error">检索失败：${esc(e.message||e)}</div>`;
+    }
+  }
+  // 语义检索命中 → 打开会话抽屉并高亮/定位到对应轮次
+  async function openHitConversation(h){
+    const c = CONVS.find(x=>x.source===h.source && x.id===h.conversationId);
+    if(!c){ toast('该会话不在当前列表（可能已被筛选或删除）'); return; }
+    await openDrawer(c);
+    if(h.turnKey) locateTurn(h.turnKey);
+  }
+  // 在抽屉内滚动定位到指定轮次并短暂高亮
+  function locateTurn(tk){
+    const box = document.querySelector(`.turn-ex-chk[data-turn="${CSS.escape(tk)}"]`);
+    if(!box) return;
+    const target = box.closest('label')?.parentElement || box.parentElement;
+    if(target){
+      target.scrollIntoView({behavior:'smooth', block:'center'});
+      target.classList.add('ring-2','ring-primary','rounded');
+      setTimeout(()=>target.classList.remove('ring-2','ring-primary','rounded'), 2200);
     }
   }
   // ---- 数据操作：提取入库 / 推送记忆（后台任务，轮询状态）----
@@ -1218,15 +1265,23 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     $('#emptyState').classList.toggle('flex', filtered.length===0);
     rows.forEach(c=>{
       const key=keyOf(c.source,c.id);
-      const tr=el('tr','cursor-pointer border-b border-border/60 hover:bg-muted/40');
+      // R6 记忆排除态双色阶：整会话排除=红、部分轮次排除=橙
+      const exclCls = c.excl==='whole' ? ' row-excl-whole'
+                    : c.excl==='partial' ? ' row-excl-partial' : '';
+      const tr=el('tr','cursor-pointer border-b border-border/60 hover:bg-muted/40'+exclCls);
       tr.dataset.key=key;
+      const exclBadge = c.excl==='whole'
+        ? '<span class="ml-1.5 shrink-0 rounded bg-error-soft px-1 py-0.5 text-[9px] font-semibold text-error" title="该会话全部内容不写入记忆">不写入</span>'
+        : c.excl==='partial'
+        ? `<span class="ml-1.5 shrink-0 rounded bg-warning-soft px-1 py-0.5 text-[9px] font-semibold text-warning" title="${c.exclTurns||0} 个轮次不写入记忆，其余正常">部分不写入</span>`
+        : '';
       // 修复：行点击不再经 idx 反查（filtered 对象可能无 idx 导致静默失效），
       // 直接闭包传递当前会话对象，点击任意位置（除勾选/编辑/删除按钮）都打开详情抽屉
       tr.onclick=e=>{ if(e.target.closest('input,.edit-btn,.del-btn'))return; openDrawer(c); };
       tr.innerHTML=`
         <td class="px-3 py-2.5"><input type="checkbox" class="row-chk h-3.5 w-3.5 rounded border-border text-primary" data-source="${esc(c.source)}" data-cid="${esc(c.id)}"></td>
         <td class="px-3 py-2.5">${srcTag(c.source)}</td>
-        <td class="px-3 py-2.5 max-w-[280px]"><div class="truncate font-medium text-foreground" title="${esc(c.title)}">${esc(c.title)}</div></td>
+        <td class="px-3 py-2.5 max-w-[280px]"><div class="flex items-center"><span class="truncate font-medium text-foreground" title="${esc(c.title)}">${esc(c.title)}</span>${exclBadge}</div></td>
         <td class="px-3 py-2.5">${c.model?`<span class="chip" style="background:var(--as-muted);color:var(--as-muted-foreground)">${esc(c.model)}</span>`:'—'}</td>
         <td class="px-3 py-2.5 max-w-[180px]"><div class="truncate text-muted-foreground" title="${esc(c.cwd||'')}">${esc(c.cwd||'—')}</div></td>
         <td class="px-3 py-2.5 text-right tnum font-medium text-foreground">${fmtNum(c.eventCount)}</td>
