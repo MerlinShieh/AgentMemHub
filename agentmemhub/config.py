@@ -90,6 +90,20 @@ class Config:
             return None
         return self._resolve(str(raw))
 
+    # -- 记忆后端选择（R3 重构开关）--------------------------------------
+
+    @property
+    def memory_backend(self) -> str:
+        """'rag'（内置 agentmemhub.rag 引擎，默认）| 'memos'（vendored MemOS，回退用）。
+
+        优先级：env AGENTMEMHUB_BACKEND > yaml backend.backend > 默认 'rag'。
+        改回 'memos' 即整体回退旧 HTTP 引擎路径（memOS/ 目录未删，一行回滚）。
+        """
+        raw = (self._env.get("AGENTMEMHUB_BACKEND", "")
+               or str((self._get("backend", {}) or {}).get("backend", "")))
+        v = raw.strip().lower()
+        return v if v in ("rag", "memos") else "rag"
+
     # -- MemOS 记忆引擎 ---------------------------------------------------
 
     @property

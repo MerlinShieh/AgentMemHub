@@ -29,10 +29,122 @@ _HEAD_EVENTS = 88          # 截断时保留前 N 条
 
 class TitleIn(BaseModel):
     title: str
+
+
+class ExclusionIn(BaseModel):
+    """R6 记忆排除：turn_key 省略/空 = 整会话排除。
+
+    sync_peers=True 时，同一 turn_key 在其他源/会话的副本一并排除
+    （同一段对话常被多个 Agent 各自采集，避免漏网副本仍被召回）。
+    """
+    turn_key: str = ""
+    note: str = ""
+    sync_peers: bool = False
+
+
+class ExclusionItem(BaseModel):
+    source: str
+    id: str
+
+
+class ExclusionBatchIn(BaseModel):
+    """批量排除：items=[{source,id}]；turn_key 空 = 整会话。"""
+    items: list[ExclusionItem] = []
+    turn_key: str = ""
+
+
 _SORTABLE = {
     "updated": "updated_at", "created": "created_at",
     "events": "event_count", "title": "title",
 }
+
+
+def _exclusions_map(store) -> dict:
+    """全库排除态映射：(source, id) → {"whole": bool, "turns": int}。
+
+    列表页据此给会话行打「整会话排除（红）/ 部分轮次排除（橙）」标记。
+    """
+    m: dict = {}
+    try:
+        for r in store.list_exclusions():
+            k = (r["source"], r["conversation_id"])
+            e = m.setdefault(k, {"whole": False, "turns": 0})
+            if r["turn_key"]:
+                e["turns"] += 1
+            else:
+                e["whole"] = True
+    except Exception:
+        return {}
+    return m
+
+
+def _index_counts(source: str, cid: str,
+                  turn_keys: Optional[list[str]] = None,
+                  whole: bool = False) -> tuple[int, int]:
+    """(该会话当前已入库单元数, 被排除轮次影响过的单元数)。
+
+    用于面板展示「已写入 N 条 / 已排除影响 M 条」；memos 后端返回 (0, 0)。
+    turn_keys/whole 由调用方从采集库的排除表读出后传入（排除表在采集库，
+    索引库里没有它）。
+    """
+    try:
+        from agentmemhub import memos_daemon
+        if not memos_daemon._backend_is_rag():
+            return 0, 0
+        import sqlite3
+
+        from agentmemhub import rag_bridge
+        db = rag_bridge.settings().index_db
+        conn = sqlite3.connect(f"file:{Path(db).as_posix()}?mode=ro", uri=True)
+        try:
+            indexed = conn.execute(
+                "SELECT COUNT(*) FROM units WHERE source=? AND conversation_id=?",
+                (source, cid)).fetchone()[0]
+            if whole:
+                return indexed, indexed          # 整会话排除：全部已移除
+            turns = [t for t in (turn_keys or []) if t]
+            if not turns:
+                return indexed, 0
+            marks = ",".join("?" * len(turns))
+            removed = conn.execute(
+                f"SELECT COUNT(*) FROM units WHERE source=? AND conversation_id=?"
+                f" AND turn_key IN ({marks})", [source, cid] + turns).fetchone()[0]
+            return indexed, removed
+        finally:
+            conn.close()
+    except Exception:
+        return 0, 0
+
+
+def _purge_index(source: str, cid: str, turn_key: str | None = None) -> int:
+    """索引库级联清理（R6）：会话删除/排除后同步移除派生记忆。
+
+    rag 后端下直接删 units+vec+FTS；memos 回退后端无本地索引，返回 0。
+    失败不抛（面板操作不该因索引异常而整体失败），仅记日志。
+    """
+    try:
+        from agentmemhub import memos_daemon
+        if not memos_daemon._backend_is_rag():
+            return 0
+        from agentmemhub import rag_bridge
+        from agentmemhub.rag.ingest import (
+            delete_units_for_conversation, delete_units_for_turn, open_index)
+
+        conn = open_index(rag_bridge.settings().index_db)
+        try:
+            if turn_key:
+                return delete_units_for_turn(conn, source, cid, turn_key)
+            return delete_units_for_conversation(conn, source, cid)
+        finally:
+            conn.close()
+    except Exception:
+        try:
+            from agentmemhub import logs
+            logs.record(f"索引清理失败 {source}/{cid} turn={turn_key or '-'}",
+                        level="error", actor="web")
+        except Exception:
+            pass
+        return 0
 
 
 def _clip(v: Any, n: int) -> Optional[str]:
@@ -107,6 +219,10 @@ def _run_push_fn(cli, source: str):
     from agentmemhub.store import Store
 
     def _run() -> None:
+        if memos_daemon._backend_is_rag():
+            # rag 后端：会话轨迹由向量化直采源库（push 语义 = 向量化；
+            # 走 bundle 会把 trac_ 轨迹二次落成 memory 单元造成重复）
+            return cli._vectorize_stage(stdout=print)
         store = Store()
         try:
             batches = ([source] if source
@@ -161,6 +277,28 @@ def _run_score_fn(cli, limit: int, dry_run: bool):
     return _do
 
 
+def _run_exclude_fn(items, turn_key: str = ""):
+    """看板「批量排除记忆」后台动作：逐会话落标记 + 清索引（幂等）。"""
+    from agentmemhub.store import Store
+
+    def _run() -> None:
+        st = Store()
+        try:
+            total_removed = 0
+            for it in items:
+                src, cid = it.source, it.id
+                created = st.add_exclusion(src, cid, turn_key)
+                removed = _purge_index(src, cid, turn_key or None)
+                total_removed += removed
+                print(f"[{src}] {cid} → 排除"
+                      f"{'（整会话）' if not turn_key else '（轮次）'} "
+                      f"{'新增' if created else '已存在'}，清理索引 {removed} 条")
+            print(f"完成：{len(items)} 个会话，共清理索引 {total_removed} 条")
+        finally:
+            st.close()
+    return _emit_task(_run)
+
+
 def _run_clean_fn(cli, source: str):
     """看板「清洗数据」后台动作：先打印各源统计再执行删除（重建 FTS/计数）。"""
     from agentmemhub.store import Store
@@ -208,14 +346,19 @@ def _logged_task(name: str, fn) -> Any:
     return _do
 
 
-def _conv_to_dict(c: Any) -> dict[str, Any]:
-    """conversations row → 前端 camelCase 契约字段。"""
+def _conv_to_dict(c: Any, *, excl_map: Optional[dict] = None) -> dict[str, Any]:
+    """conversations row → 前端 camelCase 契约字段。
+
+    excl_map：(source, id) → {"whole": bool, "turns": int}——R6 记忆排除态，
+    供列表页渲染「整会话排除（红）/ 部分轮次排除（橙）」双色阶标记。
+    不传则不带该字段（保持既有调用方形状不变）。
+    """
     import json
     try:
         roles = json.loads(c["roles_json"]) if c["roles_json"] else []
     except Exception:
         roles = []
-    return {
+    d = {
         "source": c["source"],
         "id": c["id"],
         "title": c["title"] or "",
@@ -227,10 +370,22 @@ def _conv_to_dict(c: Any) -> dict[str, Any]:
         "eventCount": c["event_count"] or 0,
         "roles": roles,
     }
+    if excl_map:
+        st = excl_map.get((c["source"], c["id"]))
+        if st and st.get("whole"):
+            d["excl"] = "whole"
+        elif st and st.get("turns"):
+            d["excl"] = "partial"
+            d["exclTurns"] = st["turns"]
+    return d
 
 
-def _event_to_short(e: Any) -> dict[str, Any]:
-    """Event → 前端短键压缩形状（键名与静态快照流水线一致）。"""
+def _event_to_short(e: Any, *, whole: bool = False,
+                    excluded_turns: Optional[set] = None) -> dict[str, Any]:
+    """Event → 前端短键压缩形状（键名与静态快照流水线一致）。
+
+    whole/excluded_turns：R6 记忆排除态——前端据此渲染勾选与灰化。
+    """
     d: dict[str, Any] = {"s": e.seq, "r": e.role}
     if e.time:
         d["t"] = int(e.time)
@@ -272,6 +427,11 @@ def _event_to_short(e: Any) -> dict[str, Any]:
         d["si"] = e.src_id
     if getattr(e, "is_system", None):
         d["sys"] = True
+    # R6 记忆排除态（该事件所属轮次是否被排除；整会话排除时为 True）
+    if whole:
+        d["ex"] = True
+    elif excluded_turns and getattr(e, "turn_key", None) in excluded_turns:
+        d["ex"] = True
     return d
 
 
@@ -317,9 +477,10 @@ def create_app(db_path: Path | None = None):
             source_colors = {s["source"]: s["color"] for s in bundle["stats"]["sources"]}
             role_colors = {r["role"]: r["color"] for r in bundle["stats"]["roles"]}
             models_map = agg.conv_models()   # P2: 从 events 反查补全缺失的 model
+            excl_map = _exclusions_map(store)   # R6: 排除态（列表行双色阶标记）
             convs = []
             for i, c in enumerate(store.list_conversations()):
-                d = _conv_to_dict(c)
+                d = _conv_to_dict(c, excl_map=excl_map)
                 if not d["model"]:
                     d["model"] = models_map.get((d["source"], d["id"]), "") or ""
                 d["idx"] = i
@@ -366,9 +527,10 @@ def create_app(db_path: Path | None = None):
         with _LOCK:
             convs = store.list_conversations(src_filter[0] if len(src_filter) == 1 else None)
             models_map = agg.conv_models()   # P2: 从 events 反查补全缺失的 model
+            excl_map = _exclusions_map(store)   # R6: 排除态
         items = []
         for c in convs:
-            d = _conv_to_dict(c)
+            d = _conv_to_dict(c, excl_map=excl_map)
             if not d["model"]:
                 d["model"] = models_map.get((d["source"], d["id"]), "") or ""
             items.append(d)
@@ -433,13 +595,16 @@ def create_app(db_path: Path | None = None):
             events = store.get_events(source, cid)
         total = len(events)
         page_events = events[offset:offset + limit]
-        shown = [_event_to_short(e) for e in page_events]
+        whole, turns = store.exclusion_state(source, cid)   # R6 排除态
+        shown = [_event_to_short(e, whole=whole, excluded_turns=turns)
+                 for e in page_events]
         return JSONResponse({
             "total": total,
             "offset": offset,
             "limit": limit,
             "capped": total > offset + limit,
             "events": shown,
+            "exclusion": {"whole": whole, "turns": sorted(turns)},
         })
 
     @app.delete("/api/conversations/{source}/{cid}")
@@ -449,6 +614,8 @@ def create_app(db_path: Path | None = None):
                 n = store.delete_conversation(source, cid)
             except KeyError:
                 raise HTTPException(status_code=404, detail="conversation not found")
+            # R6 修复：索引库同步级联清理，否则已删会话仍可被记忆召回
+            _purge_index(source, cid)
             _invalidate()
         return {"deleted": True, "source": source, "id": cid, "eventsRemoved": n}
 
@@ -460,6 +627,76 @@ def create_app(db_path: Path | None = None):
                 raise HTTPException(status_code=404, detail="conversation not found")
             _invalidate()
         return {"updated": True}
+
+    # ------------------------------------------------------------------
+    # R6 记忆排除：控制会话/轮次不写入记忆（意图存采集库，索引即时收敛）
+    # ------------------------------------------------------------------
+
+    @app.get("/api/exclusions/summary")
+    def api_exclusions_summary():
+        """全库排除统计（面板顶部展示「已排除 N 项」）。"""
+        with _LOCK:
+            rows = store.list_exclusions()
+        return {
+            "count": len(rows),
+            "conversations": len({(r["source"], r["conversation_id"]) for r in rows}),
+            "turns": sum(1 for r in rows if r["turn_key"]),
+        }
+
+    @app.get("/api/conversations/{source}/{cid}/memory-exclusion")
+    def api_exclusion_get(source: str, cid: str):
+        """该会话的排除清单 + 已入库记忆规模（抽屉渲染勾选态用）。"""
+        with _LOCK:
+            if store.get_conversation(source, cid) is None:
+                raise HTTPException(status_code=404, detail="conversation not found")
+            rows = store.list_exclusions(source, cid)
+            whole = any(not r["turn_key"] for r in rows)
+            turns = [r["turn_key"] for r in rows if r["turn_key"]]
+            indexed, removed = _index_counts(source, cid, turns, whole)
+            # 每个已排除轮次的跨源副本（提示用户可一并排除）
+            peer_map = {t: [{"source": s2, "id": c2}
+                            for s2, c2 in store.peers_with_turn(source, cid, t)]
+                        for t in turns}
+        return {
+            "whole": whole,
+            "turns": turns,
+            "indexedUnits": indexed,
+            "removedUnits": removed,
+            "peerTurns": peer_map,
+        }
+
+    @app.post("/api/conversations/{source}/{cid}/memory-exclusion")
+    def api_exclusion_add(source: str, cid: str, body: ExclusionIn):
+        """标记不写入：落意图 + 立即从索引移除（历史记忆即刻不再召回）。
+
+        sync_peers：轮次排除时把同一 turn_key 的其他源副本一并排除。
+        """
+        with _LOCK:
+            if store.get_conversation(source, cid) is None:
+                raise HTTPException(status_code=404, detail="conversation not found")
+            created = store.add_exclusion(source, cid, body.turn_key, body.note)
+            removed = _purge_index(source, cid, body.turn_key or None)
+            peers: list[dict] = []
+            if body.sync_peers and body.turn_key:
+                for psrc, pcid in store.peers_with_turn(source, cid, body.turn_key):
+                    store.add_exclusion(psrc, pcid, body.turn_key, body.note)
+                    n = _purge_index(psrc, pcid, body.turn_key)
+                    removed += n
+                    peers.append({"source": psrc, "id": pcid, "unitsRemoved": n})
+            _invalidate()
+        return {"excluded": True, "created": created, "turnKey": body.turn_key,
+                "unitsRemoved": removed, "peers": peers}
+
+    @app.delete("/api/conversations/{source}/{cid}/memory-exclusion")
+    def api_exclusion_remove(source: str, cid: str, turn_key: str = ""):
+        """取消标记。被移除的记忆需下次 sync 重新嵌入才会回到索引。"""
+        with _LOCK:
+            if store.get_conversation(source, cid) is None:
+                raise HTTPException(status_code=404, detail="conversation not found")
+            ok = store.remove_exclusion(source, cid, turn_key)
+            _invalidate()
+        return {"excluded": False, "removed": ok, "turnKey": turn_key,
+                "hint": "下次 sync（向量化）后该内容恢复召回"}
 
     # ------------------------------------------------------------------
     # 记忆引擎（MemOS）网关：不碰本地库，不持 _LOCK；引擎离线时透明降级
@@ -480,32 +717,10 @@ def create_app(db_path: Path | None = None):
         except Exception:
             raise HTTPException(status_code=503, detail="memory engine offline")
 
-    @app.post("/api/memos/start")
-    def api_memos_start():
-        from agentmemhub import memos_daemon
-        from agentmemhub import logs
-        r = memos_daemon.daemon_start()
-        if not (r.get("started") or r.get("online")):
-            logs.record(f"引擎启动失败：{r.get('reason', r)}", level="error")
-            raise HTTPException(status_code=502, detail=r)
-        logs.record(f"引擎启动成功（{'托管' if r.get('managed') else '外部'}）")
-        return JSONResponse(r)
-
-    @app.post("/api/memos/stop")
-    def api_memos_stop():
-        from agentmemhub import memos_daemon
-        from agentmemhub import logs
-        r = memos_daemon.daemon_stop()
-        if not r.get("stopped") and r.get("reason") not in ("not-online",):
-            logs.record(f"引擎停止失败：{r.get('reason', r)}", level="error")
-            raise HTTPException(status_code=502, detail=r)
-        logs.record("引擎已停止")
-        return JSONResponse(r)
-
     @app.get("/api/memos/search")
     def api_memos_search(q: str = Query(default="", min_length=1),
-                         top: int = Query(default=8, ge=1, le=30)):
-        """转发语义检索：返回 hits（tier/refKind/score/snippet）。"""
+                         top: int = Query(default=20, ge=1, le=50)):
+        """语义检索：返回 hits（含会话定位信息，前端可点击跳转）。"""
         import json as _json
         from agentmemhub import memos_daemon
         ov = _require_engine()
@@ -520,7 +735,13 @@ def create_app(db_path: Path | None = None):
         hits = [
             {"tier": h.get("tier"), "refKind": h.get("refKind"),
              "score": h.get("score"), "snippet": h.get("snippet") or "",
-             "refId": h.get("refId")}
+             "refId": h.get("refId"),
+             # 会话定位（点击跳转到对应会话/轮次）
+             "source": h.get("source") or "",
+             "conversationId": h.get("conversationId") or "",
+             "turnKey": h.get("turnKey") or "",
+             "title": h.get("title") or "",
+             "atomic": bool(h.get("atomic"))}
             for h in (res.get("hits") or [])[:top]
         ]
         return JSONResponse({"query": q, "hits": hits,
@@ -646,6 +867,19 @@ def create_app(db_path: Path | None = None):
         name = f"清洗注入数据{'（' + source + '）' if source else ''}"
         job = tasks.submit(name, _logged_task(
             name, _run_clean_fn(cli, source)))
+        if job is None:
+            raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
+        logs.record(f"提交任务：{name}（id={job['id']}）")
+        return JSONResponse({"job": job})
+
+    @app.post("/api/admin/exclude")
+    def api_admin_exclude(body: "ExclusionBatchIn"):
+        """批量设为不写入记忆（后台任务：落标记 + 逐会话清索引）。"""
+        from agentmemhub import logs
+        from agentmemhub.web import tasks
+        name = f"批量排除记忆（{len(body.items)} 个会话）"
+        job = tasks.submit(name, _logged_task(
+            name, _run_exclude_fn(body.items, body.turn_key)))
         if job is None:
             raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
         logs.record(f"提交任务：{name}（id={job['id']}）")

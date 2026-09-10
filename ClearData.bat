@@ -3,7 +3,9 @@ rem =====================================================================
 rem  ClearData.bat - wipe AgentMemHub's own data (fresh-start for the app)
 rem
 rem  Deletes (DESTRUCTIVE - NOT recoverable):
-rem    1. database  (agentmemhub.db / watermarks / scored_traces.json)
+rem    With backend=rag the memory index is database\session_rag.db, so this
+rem    also resets all vectorised memory. Collection DB is removed too.
+rem    1. database  (agentmemhub.db / session_rag.db / watermarks.json / scored_traces.json)
 rem    2. logs and exports (project artifacts)
 rem
 rem  Does NOT touch:

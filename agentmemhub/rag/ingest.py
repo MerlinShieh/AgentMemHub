@@ -1,0 +1,607 @@
+"""摄取管道：源库(只读) → units(文本,模型无关) → vec_<model>(向量,按模型隔离)。
+
+幂等契约：
+- units 主键 UNIQUE(source, conversation_id, seq)，双跑零重复；
+- 批间 keyset 分页按 (source, conversation_id, seq) 全序推进，
+  固定 batch_size → 向量位级可复现（q8 漂移规则见 AGENTS.md 不变量3）。
+溯源：每批日志记录水位、拉取/嵌入/跳过计数、耗时。
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sqlite3
+import time
+from pathlib import Path
+from typing import Iterator
+
+import numpy as np
+import sqlite_vec
+
+from .config import ModelSpec, Settings
+from .embedder import Embedder, OnnxEmbedder
+from .runtime import get_embedder
+from .source import DEFAULT_ROLES, open_source_ro, prep_text, validate_source_schema
+
+_SCHEMA_UNITS = """
+CREATE TABLE IF NOT EXISTS units(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    turn_key TEXT,
+    src_id TEXT,
+    time INTEGER,
+    title TEXT,
+    text TEXT NOT NULL,
+    chars INTEGER NOT NULL,
+    UNIQUE(source, conversation_id, seq)
+);
+CREATE TABLE IF NOT EXISTS ingest_meta(
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"""
+
+# R3：MemOS trace id 兼容别名（legacy_id）与桥接元表（增量补列，幂等）
+_SCHEMA_BRIDGE = """
+CREATE TABLE IF NOT EXISTS conv_scores(
+    source TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    r_task REAL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (source, conversation_id)
+);
+"""
+
+
+def ensure_bridge_schema(conn: sqlite3.Connection) -> None:
+    """units.legacy_id 幂等补列 + 桥接元表（AgentMemHub rag_bridge 启动时调用）。"""
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(units)")]
+    if "legacy_id" not in cols:
+        conn.execute("ALTER TABLE units ADD COLUMN legacy_id TEXT")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_units_legacy"
+                     " ON units(legacy_id) WHERE legacy_id IS NOT NULL")
+    conn.executescript(_SCHEMA_BRIDGE)
+    conn.commit()
+
+
+def open_index(path: Path | str) -> sqlite3.Connection:
+    """打开/创建索引库并加载 sqlite-vec 扩展。"""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(p), timeout=15.0)
+    conn.execute("PRAGMA journal_mode=WAL")
+    # 多进程写并发加固（重构运行模型：面板任务 × MCP save 不同进程）：
+    # 跨进程写互斥靠 busy_timeout + begin immediate 短事务，
+    # 不能依赖 web/tasks.py 的进程内任务锁。
+    conn.execute("PRAGMA busy_timeout=15000")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    # Python 3.12+ 默认 authorizer 拦截 load_extension，须显式放行（仅此处、加载后即关闭）
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    conn.executescript(_SCHEMA_UNITS)
+    return conn
+
+
+def ensure_vec_table(conn: sqlite3.Connection, spec: ModelSpec) -> None:
+    """建（或校验）该模型的向量表。维度与注册表/既有表冲突必须报错。"""
+    t = spec.vec_table
+    meta_key = f"vecdim.{t}"
+    row = conn.execute(
+        "SELECT value FROM ingest_meta WHERE key=?", (meta_key,)
+    ).fetchone()
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t,)
+    ).fetchone()
+    if exists and row is None:
+        raise RuntimeError(f"向量表 {t} 已存在但缺元数据，请用 --rebuild 重建")
+    if row and int(row[0]) != spec.dim:
+        raise RuntimeError(
+            f"注册表 dim={spec.dim} 与既有索引 {t} dim={row[0]} 冲突——"
+            f"同 id 换模型须先 --rebuild"
+        )
+    if not exists:
+        conn.execute(
+            f"CREATE VIRTUAL TABLE {t} USING vec0("
+            f"embedding float[{spec.dim}] distance_metric=cosine)"
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO ingest_meta(key,value) VALUES(?,?)",
+            (meta_key, str(spec.dim)),
+        )
+        conn.commit()
+
+
+def gc_vec_orphans(conn: sqlite3.Connection, vec_table: str) -> int:
+    """清理 units 已不存在的向量孤儿行（vec0 无 FK/触发器，删行后必须显式 GC）。
+
+    vec0 仅稳定支持 rowid 等值删除，故先查孤儿再逐行删。返回删除数。
+    """
+    orphans = [
+        r[0]
+        for r in conn.execute(
+            f"SELECT v.rowid FROM {vec_table} v"
+            " WHERE v.rowid NOT IN (SELECT id FROM units)"
+        )
+    ]
+    for rid in orphans:
+        conn.execute(f"DELETE FROM {vec_table} WHERE rowid = ?", (rid,))
+    if orphans:
+        conn.commit()
+    return len(orphans)
+
+
+def drop_vec_table(conn: sqlite3.Connection, spec: ModelSpec) -> None:
+    conn.execute(f"DROP TABLE IF EXISTS {spec.vec_table}")
+    conn.execute(
+        "DELETE FROM ingest_meta WHERE key IN (?, ?)",
+        (f"vecdim.{spec.vec_table}", f"vecbuilt.{spec.vec_table}"),
+    )
+    conn.commit()
+
+
+def _existing_keys(conn: sqlite3.Connection, vec_table: str | None = None) -> set[tuple]:
+    """已入库的单元键集合（用于摄取去重）。
+
+    vec_table 非空时，判定标准是「units 有该行 **且该模型的向量表里也有对应行」**
+    —— 多模型架构的核心：每个模型各自判断自己的向量是否齐备，
+    否则后跑模型会把前一个模型已入库的单元全当成 "known" 跳过（实测白跑）。
+    """
+    if not vec_table:
+        return {
+            (r[0], r[1], r[2])
+            for r in conn.execute(
+                "SELECT source, conversation_id, seq FROM units")
+        }
+    has_vec = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (vec_table,)).fetchone()
+    if not has_vec:
+        return set()          # 该模型尚无向量表 → 全部视为待嵌入
+    return {
+        (r[0], r[1], r[2])
+        for r in conn.execute(
+            f"SELECT u.source, u.conversation_id, u.seq FROM units u"
+            f" JOIN {vec_table} v ON v.rowid = u.id")
+    }
+
+
+def _iter_candidates(
+    src: sqlite3.Connection,
+    roles: tuple[str, ...],
+    after: tuple[str, str, int] | None,
+    batch_size: int,
+    limit: int | None,
+) -> Iterator[list[sqlite3.Row]]:
+    """源库侧 keyset 分页（全序），每片取 batch_size 行候选。"""
+    fetched = 0
+    cursor = after
+    placeholders = ",".join("?" * len(roles))
+    # R6 排除过滤：源库有 memory_exclusions 表时生效（AgentMemHub 采集库恒有；
+    # 外部/测试源库可能没有——此时视为无排除，保持既有行为）
+    has_excl = src.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table'"
+        " AND name='memory_exclusions'").fetchone() is not None
+    exclusion_clause = """
+              AND NOT EXISTS (
+                    SELECT 1 FROM memory_exclusions x
+                    WHERE x.source = e.source
+                      AND x.conversation_id = e.conversation_id
+                      AND (x.turn_key = '' OR x.turn_key = IFNULL(e.turn_key,''))
+              )""" if has_excl else ""
+    while limit is None or fetched < limit:
+        want = batch_size
+        if limit is not None:
+            want = min(batch_size, limit - fetched)
+        sql = f"""
+            SELECT e.source, e.conversation_id, e.seq, e.role, e.turn_key,
+                   e.src_id, e.time, c.title, e.content
+            FROM events e
+            LEFT JOIN conversations c
+                   ON c.source = e.source AND c.id = e.conversation_id
+            WHERE e.role IN ({placeholders})
+              AND e.content IS NOT NULL AND TRIM(e.content) <> ''
+              AND IFNULL(e.is_system, 0) = 0
+              {exclusion_clause}
+        """
+        args: list = list(roles)
+        if cursor is not None:
+            sql += " AND (e.source, e.conversation_id, e.seq) > (?, ?, ?)"
+            args += list(cursor)
+        sql += " ORDER BY e.source, e.conversation_id, e.seq LIMIT ?"
+        args.append(want)
+        rows = src.execute(sql, args).fetchall()
+        if not rows:
+            return
+        cursor = (rows[-1]["source"], rows[-1]["conversation_id"], rows[-1]["seq"])
+        fetched += len(rows)
+        yield rows
+
+
+def run_ingest(
+    settings: Settings,
+    *,
+    embedder: Embedder | None = None,
+    model_id: str | None = None,
+    source_db: Path | str | None = None,
+    index_db: Path | str | None = None,
+    roles: tuple[str, ...] | None = None,
+    batch_size: int = 32,
+    limit: int | None = None,
+    rebuild: bool = False,
+    log: logging.Logger | None = None,
+) -> dict:
+    """增量摄取（rebuild=True 时清空索引全量重建）。返回汇总统计。
+
+    model_id：指定用哪个模型嵌入（默认 active）。必须与 embedder 匹配——
+    多模型编排（run_ingest_multi）时为每个模型分别指定。
+    """
+    log = log or logging.getLogger("asrag.ingest")
+    spec = settings.model(model_id) if model_id else settings.active_spec
+    src_path = Path(source_db) if source_db else settings.source_db
+    idx_path = Path(index_db) if index_db else settings.index_db
+    roles = tuple(roles or DEFAULT_ROLES)
+    embedder = embedder or get_embedder(spec, batch_size=batch_size, settings=settings)
+
+    idx = open_index(idx_path)
+    try:
+        if rebuild:
+            log.info("rebuild requested: dropping units + %s", spec.vec_table)
+            drop_vec_table(idx, spec)
+            idx.execute("DELETE FROM units")
+            idx.execute("DELETE FROM ingest_meta WHERE key='watermark'")
+            idx.commit()
+        ensure_vec_table(idx, spec)
+
+        src = open_source_ro(src_path)
+        try:
+            validate_source_schema(src)
+            known = _existing_keys(idx, spec.vec_table)
+            cursor = None
+            summary = {
+                "scanned": 0, "embedded": 0, "skipped_known": 0,
+                "skipped_empty": 0, "batches": 0, "seconds": 0.0,
+                "model": spec.id, "limit": limit,
+            }
+            t_all = time.perf_counter()
+            for rows in _iter_candidates(src, roles, cursor, batch_size, limit):
+                fresh: list[sqlite3.Row] = []
+                for r in rows:
+                    key = (r["source"], r["conversation_id"], r["seq"])
+                    if key in known:
+                        summary["skipped_known"] += 1
+                        continue
+                    fresh.append(r)
+                t0 = time.perf_counter()
+                texts = [prep_text(r["content"]) for r in fresh]
+                summary["skipped_empty"] += texts.count(None)
+                kept = [(r, t) for r, t in zip(fresh, texts) if t]
+                if kept:
+                    vecs = embedder.encode_passages([t for _, t in kept])
+                    with idx:
+                        for (r, t), v in zip(kept, vecs):
+                            key = (r["source"], r["conversation_id"], r["seq"])
+                            # 多模型语义：units 是模型无关的文本层，已存在则复用其 id
+                            # （否则第二个模型重插会撞 UNIQUE 约束——实测 bug）
+                            row = idx.execute(
+                                "SELECT id FROM units WHERE source=? AND"
+                                " conversation_id=? AND seq=?", key).fetchone()
+                            if row:
+                                uid = row[0]
+                            else:
+                                uid = idx.execute(
+                                    "INSERT INTO units(source, conversation_id, seq,"
+                                    " role, turn_key, src_id, time, title, text,"
+                                    " chars) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                                    (r["source"], r["conversation_id"], r["seq"],
+                                     r["role"], r["turn_key"], r["src_id"],
+                                     r["time"], r["title"], t, len(t)),
+                                ).lastrowid
+                            idx.execute(
+                                f"INSERT OR REPLACE INTO {spec.vec_table}"
+                                "(rowid, embedding) VALUES(?,?)",
+                                (uid,
+                                 np.ascontiguousarray(v, dtype=np.float32).tobytes()),
+                            )
+                            known.add(key)
+                    summary["embedded"] += len(kept)
+                summary["scanned"] += len(rows)
+                summary["batches"] += 1
+                wm = {
+                    "source": rows[-1]["source"],
+                    "conversation_id": rows[-1]["conversation_id"],
+                    "seq": rows[-1]["seq"],
+                    "at": int(time.time()),
+                }
+                # 必须显式提交：watermark 独立于 units 事务，
+                # 若仅靠隐式事务将在进程退出时丢最后一批（回归测试锁定）
+                with idx:
+                    idx.execute(
+                        "INSERT OR REPLACE INTO ingest_meta(key,value)"
+                        " VALUES('watermark',?)",
+                        (json.dumps(wm, ensure_ascii=False),),
+                    )
+                if limit is not None and summary["scanned"] >= limit:
+                    log.info(
+                        "ingest batch=%d scanned=%d embedded=%d skipped_known=%d "
+                        "limit=%d reached",
+                        summary["batches"], summary["scanned"], summary["embedded"],
+                        summary["skipped_known"], limit,
+                    )
+                    break
+                log.info(
+                    "ingest batch=%d scanned=%d embedded=%d skipped_known=%d "
+                    "batch_ms=%d watermark=%s/%s/%d",
+                    summary["batches"], summary["scanned"], summary["embedded"],
+                    summary["skipped_known"],
+                    int((time.perf_counter() - t0) * 1000),
+                    wm["source"], wm["conversation_id"], wm["seq"],
+                )
+        finally:
+            src.close()
+        gc = gc_vec_orphans(idx, spec.vec_table)
+        if gc:
+            log.info("vec orphan gc table=%s deleted=%d", spec.vec_table, gc)
+        summary["vec_gc"] = gc
+        summary["seconds"] = round(time.perf_counter() - t_all, 2)
+        log.info(
+            "ingest done model=%s scanned=%d embedded=%d skipped_known=%d "
+            "skipped_empty=%d batches=%d secs=%.2f",
+            summary["model"], summary["scanned"], summary["embedded"],
+            summary["skipped_known"], summary["skipped_empty"],
+            summary["batches"], summary["seconds"],
+        )
+        return summary
+    finally:
+        idx.close()
+
+
+def run_reembed(
+    settings: Settings,
+    *,
+    model_id: str | None = None,
+    batch_size: int = 32,
+    log: logging.Logger | None = None,
+) -> dict:
+    """模型切换路径：units(文本)不动，按新模型重建其专属向量表。"""
+    log = log or logging.getLogger("asrag.ingest")
+    spec = settings.model(model_id) if model_id else settings.active_spec
+    embedder = get_embedder(spec, batch_size=batch_size, settings=settings)
+    idx = open_index(settings.index_db)
+    try:
+        n_units = idx.execute("SELECT COUNT(*) FROM units").fetchone()[0]
+        drop_vec_table(idx, spec)
+        ensure_vec_table(idx, spec)
+        t0 = time.perf_counter()
+        done = 0
+        last_id = 0
+        while True:
+            rows = idx.execute(
+                "SELECT id, text FROM units WHERE id > ? ORDER BY id LIMIT ?",
+                (last_id, batch_size),
+            ).fetchall()
+            if not rows:
+                break
+            vecs = embedder.encode_passages([r[1] for r in rows])
+            with idx:
+                for (uid, _), v in zip(rows, vecs):
+                    idx.execute(
+                        f"INSERT OR REPLACE INTO {spec.vec_table}(rowid, embedding)"
+                        " VALUES(?,?)",
+                        (uid, np.ascontiguousarray(v, dtype=np.float32).tobytes()),
+                    )
+            last_id = rows[-1][0]
+            done += len(rows)
+            log.info(
+                "reembed model=%s progress=%d/%d last_unit_id=%d",
+                spec.id, done, n_units, last_id,
+            )
+        idx.execute(
+            "INSERT OR REPLACE INTO ingest_meta(key,value) VALUES(?,?)",
+            (f"vecbuilt.{spec.vec_table}",
+             json.dumps({"units": done, "at": int(time.time())})),
+        )
+        idx.commit()
+        gc = gc_vec_orphans(idx, spec.vec_table)
+        if gc:
+            log.info("reembed vec orphan gc table=%s deleted=%d",
+                     spec.vec_table, gc)
+        secs = round(time.perf_counter() - t0, 2)
+        log.info("reembed done model=%s units=%d secs=%.2f", spec.id, done, secs)
+        return {"model": spec.id, "reembedded": done, "seconds": secs}
+    finally:
+        idx.close()
+
+
+def run_stats(settings: Settings, log: logging.Logger | None = None) -> dict:
+    """索引规模/水位统计（真实库验收依据）。"""
+    spec = settings.active_spec
+    idx = open_index(settings.index_db)
+    try:
+        out: dict = {"model": spec.id, "dim": spec.dim}
+        out["units_total"] = idx.execute("SELECT COUNT(*) FROM units").fetchone()[0]
+        out["by_role"] = dict(idx.execute(
+            "SELECT role, COUNT(*) FROM units GROUP BY role"))
+        out["by_source"] = dict(idx.execute(
+            "SELECT source, COUNT(*) FROM units GROUP BY source ORDER BY 2 DESC"))
+        t = spec.vec_table
+        exists = idx.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t,)
+        ).fetchone()
+        out["vec_total"] = (
+            idx.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] if exists else 0
+        )
+        out["vec_coverage"] = (
+            round(out["vec_total"] / out["units_total"], 4) if out["units_total"] else 0.0
+        )
+        wm = idx.execute(
+            "SELECT value FROM ingest_meta WHERE key='watermark'"
+        ).fetchone()
+        out["watermark"] = json.loads(wm[0]) if wm else None
+        return out
+    finally:
+        idx.close()
+
+
+def delete_units_for_conversation(conn: sqlite3.Connection,
+                                  source: str, conversation_id: str) -> int:
+    """级联删除某会话的全部派生数据（重构运行模型：AgentMemHub 删会话必须同步清索引）。
+
+    units 行删除经 FTS 触发器自动清 units_fts；vec0 无触发器，须逐表显式删。
+    返回删除的单元数。
+    """
+    ids = [r[0] for r in conn.execute(
+        "SELECT id FROM units WHERE source=? AND conversation_id=?",
+        (source, conversation_id))]
+    if not ids:
+        return 0
+    vec_tables = [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'vec_%'")]
+    with conn:
+        conn.execute(
+            "DELETE FROM units WHERE source=? AND conversation_id=?",
+            (source, conversation_id))
+        for t in vec_tables:
+            conn.executemany(f"DELETE FROM {t} WHERE rowid = ?",
+                             [(i,) for i in ids])
+    return len(ids)
+
+
+def delete_units_for_turn(conn: sqlite3.Connection, source: str,
+                          conversation_id: str, turn_key: str) -> int:
+    """级联删除某会话某一轮的派生数据（R6 轮次级排除）。
+
+    与 delete_units_for_conversation 同机制：units 删除经 FTS 触发器自动清
+    units_fts；vec0 无触发器须逐表显式删。返回删除的单元数。
+    """
+    ids = [r[0] for r in conn.execute(
+        "SELECT id FROM units WHERE source=? AND conversation_id=? AND turn_key=?",
+        (source, conversation_id, turn_key))]
+    if not ids:
+        return 0
+    vec_tables = [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'vec_%'")]
+    with conn:
+        conn.execute(
+            "DELETE FROM units WHERE source=? AND conversation_id=? AND turn_key=?",
+            (source, conversation_id, turn_key))
+        for t in vec_tables:
+            conn.executemany(f"DELETE FROM {t} WHERE rowid = ?",
+                             [(i,) for i in ids])
+    return len(ids)
+
+
+def run_ingest_multi(
+    settings: Settings,
+    *,
+    source_db: Path | str | None = None,
+    index_db: Path | str | None = None,
+    roles: tuple[str, ...] | None = None,
+    batch_size: int | None = None,
+    limit: int | None = None,
+    models: list[str] | None = None,
+    fast_first: bool | None = None,
+    on_model_done=None,
+    log: logging.Logger | None = None,
+) -> dict:
+    """多模型向量化编排（配置 rag.write）：小模型先跑完即可用，其余后台并发。
+
+    - 按 settings.write_order 顺序执行；fast_first=True（默认）时，
+      第一个模型完成后立即返回（此时检索已可用），其余模型在后台线程继续；
+    - on_model_done(model_id, summary) 回调用于提示（CLI/面板打印进度）；
+    - 返回 {"completed": [...], "background": [...], "model": <首个>,
+            "summary": <首个汇总>, "background_hint": <提示语>}
+
+    设计依据：小模型（bge-small 130 条/秒）远快于大模型（bge-base 26 条/秒），
+    先跑小模型能让"记忆可检索"提前数分钟达成；大模型补齐后检索质量再提升。
+    """
+    import threading
+
+    log = log or logging.getLogger("asrag.ingest")
+    order = list(models or settings.write_order)
+    if not order:
+        order = [settings.active_model]
+    fast_first = settings.write.get("fast_first", True) if fast_first is None else fast_first
+    hint = settings.write.get("background_hint") or "高精度模型正在后台向量化"
+
+    result: dict = {"completed": [], "background": [], "model": None,
+                    "summary": None, "background_hint": hint}
+
+    def _run_one(mid: str) -> dict:
+        spec = settings.model(mid)
+        emb = get_embedder(spec, batch_size=batch_size, settings=settings)
+        s = run_ingest(settings, embedder=emb, model_id=mid, source_db=source_db,
+                       index_db=index_db, roles=roles,
+                       batch_size=batch_size or settings.embed.get("batch_size", 32),
+                       limit=limit, rebuild=False, log=log)
+        if on_model_done:
+            try:
+                on_model_done(mid, s)
+            except Exception:
+                pass
+        return s
+
+    # 第一个模型：同步跑完（决定"何时可检索"）
+    first = order[0]
+    result["summary"] = _run_one(first)
+    result["model"] = first
+    result["completed"].append(first)
+
+    rest = order[1:]
+    if not rest:
+        return result
+
+    if fast_first:
+        # 其余模型转【独立子进程】后台并发。
+        # 为什么不用线程：daemon 线程随父进程退出即被杀死（实测 CLI 退出后
+        # 后台模型从未完成）；子进程 detached 后可独立跑完。
+        for mid in rest:
+            try:
+                _spawn_background_model(mid, source_db=source_db,
+                                        index_db=index_db, roles=roles,
+                                        batch_size=batch_size, limit=limit,
+                                        log=log)
+                result["background"].append(mid)
+            except Exception as e:
+                log.warning("background spawn failed mid=%s err=%s", mid, e)
+        log.info("multi-ingest: completed=%s background=%s (fast_first, detached)",
+                 result["completed"], result["background"])
+    else:
+        for mid in rest:                     # 全部同步跑完
+            result["completed"].append(mid)
+            result["summary"] = _run_one(mid)
+        log.info("multi-ingest: completed=%s (sync all)", result["completed"])
+    return result
+
+
+def _spawn_background_model(model_id: str, *, source_db=None, index_db=None,
+                            roles=None, batch_size=None, limit=None, log=None):
+    """以独立子进程后台跑单个模型的向量化（父进程退出后仍继续）。
+
+    通过 `python -m agentmemhub.rag.cli ingest --model <id>` 复用既有入口，
+    日志与进度落在同一 logs/ 目录，面板/CLI 可查。
+    """
+    import subprocess
+    import sys as _sys
+
+    args = [_sys.executable, "-m", "agentmemhub.rag.cli", "ingest",
+            "--model", model_id]
+    if batch_size:
+        args += ["--batch-size", str(batch_size)]
+    if limit:
+        args += ["--limit", str(limit)]
+    if roles:
+        args += ["--roles", ",".join(roles)]
+    creation = 0
+    if os.name == "nt":
+        creation = (subprocess.CREATE_NEW_PROCESS_GROUP
+                    | subprocess.DETACHED_PROCESS)
+    with open(os.devnull, "wb") as _null:
+        subprocess.Popen(args, stdin=_null, stdout=_null, stderr=_null,
+                         creationflags=creation, close_fds=True)
+    if log:
+        log.info("background model spawned pid-detached model=%s", model_id)

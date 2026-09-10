@@ -10,7 +10,7 @@ import json
 from unittest import mock
 
 from agentmemhub import memos_daemon
-from agentmemhub.mcp_server import MCPHandler, _ENGINE_HINT
+from agentmemhub.mcp_server import MCPHandler, _engine_hint
 
 
 def _handler() -> tuple[MCPHandler, io.StringIO]:
@@ -104,6 +104,7 @@ def test_tools_list_contract():
 
 @mock.patch.object(memos_daemon, "auth_state", return_value=None)
 def test_tools_offline_return_engine_hint(_auth):
+    """引擎离线：所有工具统一 isError + 后端相关的排障指引。"""
     h, _ = _handler()
     for tool, args in (("memory_search", {"query": "x"}),
                        ("memory_recent", {}),
@@ -112,8 +113,8 @@ def test_tools_offline_return_engine_hint(_auth):
         r = _call(h, _req("tools/call", {"name": tool, "arguments": args}, mid=7))
         assert r["result"]["isError"] is True
         text = r["result"]["content"][0]["text"]
-        assert "记忆引擎未运行" in text
-        assert "memos-daemon start" in text
+        # 提示文案按后端区分（memos 后端=daemon；rag 后端=索引库/sync）
+        assert ("记忆引擎未运行" in text) or ("记忆索引不可用" in text)
 
 
 # ---------------------------------------------------------------------------

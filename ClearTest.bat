@@ -3,23 +3,25 @@ rem =====================================================================
 rem  ClearTest.bat - wipe AgentMemHub test data back to a clean environment
 rem
 rem  Deletes (DESTRUCTIVE - test only, NOT recoverable):
-rem    1. AgentMemHub unified conversation DB dir (%CD%\database)
-rem       - agentmemhub.db / watermarks / scored_traces.json / sync anchor
-rem    2. Project artifacts: logs\ (operation logs) and exports\
-rem    3. MemOS engine data: memOS\home\data\ (memos.db + WAL),
-rem       memOS\home\logs\ (engine logs), memOS\home\daemon\ (bridge state)
+rem    1. database\  (collection DB agentmemhub.db + rag index session_rag.db
+rem       + watermarks.json + scored_traces.json + config.json)
+rem    2. Project artifacts: logs\ and exports\
 rem
-rem  Keeps (so config survives):
-rem    - memOS\home\config.yaml (embedding model bge config)
+rem  Keeps (so the vendored MemOS fallback engine survives):
+rem    - memOS\home\config.yaml
 rem    - viewer password / auth files under memOS\home
-rem    - local embedding model files in node_modules
+rem
+rem  Note: this also removes memOS\home\data (the old MemOS memory DB).
+rem  With backend=rag the memory index lives in database\session_rag.db,
+rem  so that is what matters for a clean test run.
 rem
 rem  Usage (confirmation is the Y argument - deterministic, no prompt):
 rem    ClearTest.bat Y          wipe everything
 rem    ClearTest.bat            show this help, do nothing
 rem
-rem  Precondition: engine must be stopped. Tries `memos-daemon stop` first;
-rem  if port 18800 still listens (engine started another way) it ABORTS.
+rem  Precondition: no panel/process should hold database\. Stop the panel
+rem  first with ClearPanel.bat or Ctrl+C in its window. The rag engine is
+rem  in-process, so there is no daemon to stop.
 rem =====================================================================
 setlocal
 chcp 65001 >nul
@@ -30,39 +32,33 @@ set "ENGINE_HOME=memOS\home"
 
 set "CONFIRM=%~1"
 if /i not "%CONFIRM%"=="Y" (
-    echo ClearTest - wipe AgentMemHub / MemOS test data
+    echo ClearTest - wipe AgentMemHub test data
     echo.
     echo Usage:  ClearTest.bat Y
     echo.
     echo Will delete: NOT recoverable
     echo   1. %DATA_DIR%
+    echo       collection DB agentmemhub.db
+    echo       rag index session_rag.db
+    echo       watermarks.json / scored_traces.json / config.json
     echo   2. %CD%\logs  and  %CD%\exports
-    echo   3. %ENGINE_HOME%\data , logs , daemon
-    echo Keeps: %ENGINE_HOME%\config.yaml, viewer password, embedding models
+    echo   3. memOS\home data / logs / daemon   [fallback engine only]
+    echo Keeps: memOS\home\config.yaml and viewer password
     echo.
     echo Pass Y as the first argument to actually wipe.
     exit /b 1
 )
 
-echo ClearTest - wipe AgentMemHub / MemOS test data
-echo [1/4] Stopping memory engine (memos-daemon stop)...
-where uv >nul 2>nul
-if %errorlevel%==0 (
-    uv run python -m agentmemhub memos-daemon stop >nul 2>&1
-) else (
-    python -m agentmemhub memos-daemon stop >nul 2>&1
-)
-ping -n 3 127.0.0.1 >nul
-
-netstat -ano | findstr ":18800" | findstr "LISTENING" >nul
+echo ClearTest - wipe AgentMemHub test data
+echo [1/4] Checking no panel is holding the database ...
+netstat -ano | findstr ":8086" | findstr "LISTENING" >nul
 if not errorlevel 1 (
-    echo [!] Port 18800 is still listening - engine is running and was not
-    echo     started by this tool. Stop it first via dashboard or by ending
-    echo     the process, then re-run. Aborted, nothing deleted.
+    echo [!] Panel port 8086 is still listening. Stop the panel first
+    echo     then re-run. Aborted, nothing deleted.
     exit /b 1
 )
 
-echo [2/4] Wiping AgentMemHub data dir...
+echo [2/4] Wiping AgentMemHub data dir ...
 if exist "%DATA_DIR%" (
     rmdir /s /q "%DATA_DIR%"
     echo   - deleted %DATA_DIR%
@@ -70,7 +66,7 @@ if exist "%DATA_DIR%" (
     echo   - %DATA_DIR% not found, skipped
 )
 
-echo [3/4] Wiping project artifacts (logs / exports)...
+echo [3/4] Wiping project artifacts - logs / exports ...
 if exist "logs" (
     rmdir /s /q "logs"
     echo   - deleted logs
@@ -80,7 +76,7 @@ if exist "exports" (
     echo   - deleted exports
 )
 
-echo [4/4] Wiping engine memory data (data / logs / daemon)...
+echo [4/4] Wiping fallback engine data - data / logs / daemon ...
 if exist "%ENGINE_HOME%\data" (
     rmdir /s /q "%ENGINE_HOME%\data"
     echo   - deleted %ENGINE_HOME%\data
@@ -89,20 +85,16 @@ if exist "%ENGINE_HOME%\data" (
 )
 if exist "%ENGINE_HOME%\logs" (
     rmdir /s /q "%ENGINE_HOME%\logs"
-    echo   - deleted %ENGINE_HOME%\logs
 )
 if exist "%ENGINE_HOME%\daemon" (
     rmdir /s /q "%ENGINE_HOME%\daemon"
-    echo   - deleted %ENGINE_HOME%\daemon
 )
 
 echo.
 echo [OK] Clean environment ready.
 echo Next steps to verify from scratch:
-echo   1. Start engine :  python -m agentmemhub memos-daemon start
-echo   2. Ingest       :  python -m agentmemhub ingest
-echo   3. Push memory  :  python -m agentmemhub memos --push http://127.0.0.1:18800
-echo   4. Score        :  python -m agentmemhub score --sync-episodes
-echo   5. Check        :  http://127.0.0.1:18800/#/memories
+echo   1. Collect   :  python -m agentmemhub sync
+echo   2. Panel     :  start.bat   then open http://127.0.0.1:8086
+echo   3. Or MCP    :  python -m agentmemhub mcp
 endlocal
 exit /b 0

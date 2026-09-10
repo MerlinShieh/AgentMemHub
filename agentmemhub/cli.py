@@ -257,6 +257,19 @@ def cmd_adapters(args) -> None:
         _stdout(f"[{d['source']}] {d['label']}: {'✓ ' + (d['path'] or '') if d['located'] else '✗ 未找到'}")
 
 
+def cmd_serve(args) -> None:
+    """启动本地 Web 页面加载统一会话库。"""
+    from agentmemhub.web import run_server
+    run_server(port=args.port, open_browser=args.open,
+               db=args.db or None)
+
+
+def cmd_adapters(args) -> None:
+    for a in adapters.all_adapters():
+        d = a.describe()
+        _stdout(f"[{d['source']}] {d['label']}: {'✓ ' + (d['path'] or '') if d['located'] else '✗ 未找到'}")
+
+
 def cmd_memos_daemon(args) -> None:
     """MemOS 记忆引擎 daemon 管理（启动/停止/巡检/日志/配置）。"""
     import json as _json
@@ -399,6 +412,50 @@ def run_memos(*, source: str = "", out: str = "exports/memos_bundle.json",
     _cli_log(f"memos bundle 生成 → {out}（{len(bundle['traces'])} traces）")
 
 
+def _vectorize_stage(*, stdout=None) -> dict:
+    """rag 后端 sync 终点：源库（agentmemhub.db）→ 引擎索引增量嵌入。
+
+    asrag 自带 keyset 水位 + 主键幂等，无需 delta 过滤（全序扫描 <3s）；
+    评分队列不再由本阶段填充——rag 下 scoring 走 unscored 全量 diff。
+    """
+    import time as _t
+    from agentmemhub import rag_bridge
+    from agentmemhub.rag.ingest import run_ingest_multi
+
+    st = _stdout if stdout is None else stdout
+    settings = rag_bridge.settings()
+    t0 = _t.perf_counter()
+    order = settings.write_order
+
+    def _on_done(mid, summ):
+        st("  [%(model)s] 扫描 %(scanned)d / 新嵌入 %(embedded)d / 跳过 %(skipped_known)d"
+           "（%(seconds).1fs）" % summ)
+
+    try:
+        r = run_ingest_multi(settings, on_model_done=_on_done, log=_rag_log())
+    except Exception as e:
+        st(f"向量化失败：{e}")
+        _cli_log(f"vectorize 失败：{e}", level="error")
+        return {"failed": 1, "pushed_ids": []}
+
+    first = r["summary"] or {}
+    st("向量化完成可检索：模型 %s（%.1fs）；多模型顺序：%s"
+       % (r["model"], _t.perf_counter() - t0, " → ".join(order)))
+    if r["background"]:
+        st("提示：%s（%s）" % (r["background_hint"], "、".join(r["background"])))
+    _cli_log("vectorize %s completed=%s background=%s" % (
+        {k: first.get(k) for k in ("scanned", "embedded", "skipped_known", "seconds")},
+        r["completed"], r["background"]))
+    return {"failed": 0, "pushed_ids": [], **first,
+            "completed": r["completed"], "background": r["background"],
+            "background_hint": r["background_hint"]}
+
+
+def _rag_log():
+    import logging
+    return logging.getLogger("asrag.cli-sync")
+
+
 def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
              rebuild_mode: str = "repair", full: bool = False) -> None:
     """增量同步：ingest（会话级增量）→ 清洗 delta 注入事件 → 只推送变更会话。
@@ -407,7 +464,8 @@ def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
     - ingest：list_sessions 对比库内 updated_at，只重读变化会话并 upsert；
     - clean：只清 delta 会话的系统注入事件（--full / oversized 时跳过，
       手动 `clean --apply` 仍为全库清理）；
-    - push：只构建/推送 delta 会话的 traces（trace id 幂等，引擎去重）；
+    - push：rag 后端 = 向量化阶段（源库→session_rag.db 增量嵌入，keyset 水位自带幂等）；
+      memos 后端 = 只构建/推送 delta 会话的 traces（trace id 幂等，引擎去重）；
     - 推送成功的 trace id 入 pending_score 队列，评分入口（score / 面板 / 控制台）
       增量优先消费（sync 不自动评分——LLM 成本由用户显式触发）。
     delta 缺失/oversized 时推送回退全量（幂等兜底）。引擎离线：ingest 照常
@@ -420,15 +478,38 @@ def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
     run_ingest(sources, full=full)
     if not push:
         return
+    rag_backend = memos_daemon._backend_is_rag()
     if memos_daemon.auth_state() is None:
-        _stdout("记忆引擎未运行——ingest 已完成，跳过推送（变更集保留，下次 sync 补推）。")
-        _cli_log("sync 跳过推送（引擎离线）", level="warn")
+        _stdout("记忆引擎未运行——ingest 已完成，跳过%s（变更集保留，下次 sync 补做）。"
+                % ("向量化" if rag_backend else "推送"))
+        _cli_log("sync 跳过%s（引擎不可用）" % ("向量化" if rag_backend else "推送"),
+                 level="warn")
         return
     data_dir = config.config().data_dir
     state = watermarks.load_state(data_dir)
     pending = watermarks.pending_for(state, "push")
     if full:
         pending = None                     # --full 强制全量推送
+
+    if rag_backend:
+        # rag：清洗变更会话（注入事件不入库）→ keyset 水位向量化（自带幂等，
+        # 不依赖 delta）→ 消费登记；评分不自动跑（LLM 成本用户显式触发）
+        store = Store()
+        try:
+            if pending is not None and not full:
+                pairs = [(c["source"], c["id"]) for c in pending]
+                if pairs:
+                    deleted, convs = store.delete_system_events(conversations=pairs)
+                    if deleted:
+                        _stdout(f"已清洗 {deleted} 条注入事件（{convs} 个会话）")
+            _vectorize_stage(stdout=_stdout)
+            watermarks.mark_consumed(state, "push")
+            if pending is not None:
+                watermarks.mark_consumed(state, "clean")
+            watermarks.save_state(data_dir, state)
+        finally:
+            store.close()
+        return
 
     store = Store()
     try:
@@ -461,10 +542,13 @@ def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
             deleted, convs = store.delete_system_events(conversations=pairs)
             if deleted:
                 _stdout(f"已清洗 {deleted} 条注入事件（{convs} 个变更会话）")
-        # 进展实时输出（stdout=_stdout），无需再循环打印 lines
-        r = push_to_memos(store, sources=batches, base_url=push,
-                          no_rebuild=no_rebuild, rebuild_mode=rebuild_mode,
-                          stdout=_stdout, only=only)
+        if memos_daemon._backend_is_rag():
+            r = _vectorize_stage(stdout=_stdout)
+        else:
+            # 进展实时输出（stdout=_stdout），无需再循环打印 lines
+            r = push_to_memos(store, sources=batches, base_url=push,
+                              no_rebuild=no_rebuild, rebuild_mode=rebuild_mode,
+                              stdout=_stdout, only=only)
         # delta 只在【无失败】时标记消费；有失败保留 → 下次 sync 重试失败批次
         if r.get("failed", 0) == 0:
             watermarks.mark_consumed(state, "push")
@@ -485,7 +569,12 @@ def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
 
 
 def cmd_sync(args) -> None:
-    run_sync(source=args.source, push=args.push,
+    push = args.push
+    from agentmemhub import memos_daemon
+    if memos_daemon._backend_is_rag():
+        # rag 后端：向量化即 sync 终点，--push 语义转为开关（"" 显式禁用以跳过）
+        push = "rag" if getattr(args, "no_push", False) is False and not push             else ("" if getattr(args, "no_push", False) else push)
+    run_sync(source=args.source, push=push,
              no_rebuild=args.no_rebuild, rebuild_mode=args.rebuild_mode,
              full=args.full)
 
@@ -709,20 +798,6 @@ def build_parser() -> argparse.ArgumentParser:
     pm.add_argument("--rebuild-mode", default="repair", choices=("repair", "rebuild"),
                     help="embedding rebuild 模式：repair=只补缺失向量（默认），rebuild=全部重算")
 
-    pmd = sub.add_parser("memos-daemon", help="MemOS 记忆引擎管理（start/stop/status/logs）")
-    pmd.add_argument("action", nargs="?", default="status",
-                     choices=("start", "stop", "status", "logs"))
-    pmd.add_argument("--agent", default="hermes", help="daemon 的 agent 标识（决定端口/home）")
-    pmd.add_argument("--plugin-dir", default="",
-                     help="MemOS 插件目录（默认走 MEMOS_PLUGIN_DIR 或常见位置探测）")
-    pmd.add_argument("--set-dir", default="",
-                     help="持久化 MemOS 插件目录到 <数据目录>/config.json 后退出")
-    pmd.add_argument("--set-password", default="",
-                     help="保存 MemOS viewer 密码（引擎设了密码时网关自动登录）后退出")
-    pmd.add_argument("--lightweight", choices=("on", "off"), default=None,
-                     help="开关 MemOS 轻量记忆模式（off=完整进化链；写托管配置，重启引擎生效）")
-    pmd.add_argument("--lines", type=int, default=40, help="logs 动作显示的行数")
-
     pmc = sub.add_parser("mcp", help="启动 MCP 记忆网关（stdio 默认；--http 转 Streamable HTTP 常驻）")
     pmc.add_argument("--http", action="store_true",
                      help="以 Streamable HTTP 模式常驻（默认 stdio 由 Agent 拉起）")
@@ -733,6 +808,8 @@ def build_parser() -> argparse.ArgumentParser:
     psy = sub.add_parser("sync", help="增量同步：ingest 增量 → 清洗变更会话 → 增量 push MemOS → 补向量")
     psy.add_argument("--source", default="")
     psy.add_argument("--push", default="", help="MemOS base URL；非空则推送到引擎（幂等，离线自动跳过）")
+    psy.add_argument("--no-push", action="store_true",
+                     help="仅 ingest，跳过向量化/推送阶段（rag 后端默认为会向量化）")
     psy.add_argument("--no-rebuild", action="store_true",
                      help="push 后不触发 embedding rebuild（默认自动补向量）")
     psy.add_argument("--rebuild-mode", default="repair", choices=("repair", "rebuild"))
@@ -775,7 +852,7 @@ def main() -> None:
         "ingest": cmd_ingest, "list": cmd_list, "show": cmd_show,
         "search": cmd_search, "export": cmd_export, "stats": cmd_stats,
         "adapters": cmd_adapters, "memos": cmd_memos, "folders": cmd_folders,
-        "serve": cmd_serve, "memos-daemon": cmd_memos_daemon, "mcp": cmd_mcp,
+        "serve": cmd_serve, "mcp": cmd_mcp,
         "sync": cmd_sync, "clean": cmd_clean, "score": cmd_score, "rebuild": cmd_rebuild,
     }
     fn = handlers.get(args.command)

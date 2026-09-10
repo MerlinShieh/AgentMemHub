@@ -59,3 +59,17 @@ CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
     patch_diff,
     tokenize = 'unicode61 remove_diacritics 2'
 );
+-- 记忆排除表（R6）：控制哪些会话/轮次不写入记忆索引。
+-- 独立于 conversations/events，避免 replace_source 整源重建时被冲掉。
+-- turn_key = '' → 整会话排除；非空 → 仅该轮排除。
+CREATE TABLE IF NOT EXISTS memory_exclusions (
+    source          TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    turn_key        TEXT NOT NULL DEFAULT '',
+    created_at      INTEGER NOT NULL,
+    note            TEXT,
+    PRIMARY KEY (source, conversation_id, turn_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mem_excl_conv
+    ON memory_exclusions(source, conversation_id);

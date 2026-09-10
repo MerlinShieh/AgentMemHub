@@ -51,10 +51,22 @@ SERVER_INFO = {"name": "agentmemhub-mcp", "version": "0.1.0"}
 #: 引擎记忆空间的 agent 标识（与 web 网关 /api/memos/* 口径一致）
 _AGENT = "hermes"
 
-_ENGINE_HINT = ("记忆引擎未运行——先启动：`agentmemhub memos-daemon start`，"
-                "或看板「记忆引擎 → 启动」，或手动 `npm run bridge:daemon` 后重试")
-_AUTH_HINT = ("引擎已设密码且网关未登录：先运行 `agentmemhub memos-daemon "
-              "--set-password <密码>` 保存密码后重试")
+def _engine_hint() -> str:
+    """引擎不可用时的提示（按后端区分：rag 进程内无守护，memos 才有 daemon）。"""
+    from agentmemhub import memos_daemon
+    if memos_daemon._backend_is_rag():
+        return ("记忆索引不可用——检查 database/session_rag.db 与 models/ 是否就绪；"
+                "首次使用先跑 `agentmemhub sync` 建立索引")
+    return ("记忆引擎未运行——先启动：`agentmemhub memos-daemon start`，"
+            "或看板「记忆引擎 → 启动」后重试")
+
+
+def _auth_hint() -> str:
+    from agentmemhub import memos_daemon
+    if memos_daemon._backend_is_rag():
+        return "记忆索引无鉴权面；若持续失败请检查索引库权限"
+    return ("引擎已设密码且网关未登录：先运行 `agentmemhub memos-daemon "
+            "--set-password <密码>` 保存密码后重试")
 
 
 class _ToolError(Exception):
@@ -92,7 +104,7 @@ def _search(args: dict) -> str:
         except Exception:
             pass
     except memos_daemon.EngineAuthError:
-        raise _ToolError(_AUTH_HINT)
+        raise _ToolError(_auth_hint())
     except Exception as e:
         raise _ToolError(f"引擎检索失败：{e}")
 
@@ -115,7 +127,7 @@ def _recent(args: dict) -> str:
         res = memos_daemon.engine_request(
             "GET", f"/api/v1/traces?limit={limit}&offset=0&groupByTurn=1", timeout=15)
     except memos_daemon.EngineAuthError:
-        raise _ToolError(_AUTH_HINT)
+        raise _ToolError(_auth_hint())
     except Exception as e:
         raise _ToolError(f"引擎读取失败：{e}")
 
@@ -142,7 +154,7 @@ def _recent(args: dict) -> str:
 def _stats(args: dict) -> str:
     st = memos_daemon.daemon_status()
     if not st["online"]:
-        raise _ToolError(_ENGINE_HINT)
+        raise _ToolError(_engine_hint())
     lines = [f"记忆引擎：在线（{st['base_url']}）"]
     s = st.get("summary") or {}
     lines.append(f"- 记忆总量：episodes={s.get('episodes')}，traces={s.get('traces')}")
@@ -182,7 +194,7 @@ def _save(args: dict) -> str:
             from agentmemhub.memos import push_bundle
             resp = push_bundle(bundle, memos_daemon.base_url())
         except memos_daemon.EngineAuthError:
-            raise _ToolError(_AUTH_HINT)
+            raise _ToolError(_auth_hint())
         except Exception as e:
             if attempt == 2:
                 raise _ToolError(f"记忆写入失败：{e}")
@@ -227,7 +239,7 @@ def _score(args: dict) -> str:
                   "magnitude": 1.0, "traceId": tid},
             timeout=30)
     except memos_daemon.EngineAuthError:
-        raise _ToolError(_AUTH_HINT)
+        raise _ToolError(_auth_hint())
     except Exception as e:
         raise _ToolError(f"评分失败（trace 不存在或引擎异常）：{e}")
     try:
@@ -392,7 +404,7 @@ class MCPHandler:
             raise LookupError(f"unknown tool: {name}")
         # 引擎未运行时所有工具统一返回明确指引（网关不代管引擎生命周期）
         if memos_daemon.auth_state() is None:
-            raise _ToolError(_ENGINE_HINT)
+            raise _ToolError(_engine_hint())
         return {"content": [{"type": "text", "text": fn(args)}]}
 
 

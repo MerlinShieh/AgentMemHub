@@ -1,0 +1,216 @@
+# 召回评测集：query 用同义转述（与标题/原文不同形），保证全文档路与向量路公平对比。
+# expect_any：top-k 任一结果的 text 或 title 含其中任一关键词 → 该用例命中。
+cases:
+  - id: desktop-assistant
+    query: 在 Windows 上做一个能听能说的全局智能助手怎么实现
+    expect_any: [桌面AI助手, 全局AI助手, 桌宠]
+  - id: mobile-autotest
+    query: 手机上应用自动化测试工程怎么搭
+    expect_any: [AutoTest, 自动化测试, 自动测试]
+  - id: whisper-install
+    query: 本地语音识别模型 faster whisper 装好了吗
+    expect_any: [faster-whisper, faster_whisper]
+  - id: starship-prompt
+    query: 终端提示字体的美化工具怎么启用
+    expect_any: [Starship, starship]
+  - id: tts-config
+    query: 文字转语音朗读功能配置在哪里
+    expect_any: [语音, TTS, 朗读]
+  - id: qwen-gguf
+    query: 千问的大模型 GGUF 权重文件放到本地怎么用
+    expect_any: [Qwen, qwen, GGUF, gguf]
+  - id: tencentdb-analysis
+    query: 腾讯那个数据库的智能体记忆项目帮我分析一下
+    expect_any: [TencentDB, Tencent, 记忆]
+  - id: clash-proxy-dl
+    query: 挂梯子从国外站点下载共享会话文件
+    expect_any: [Clash, 代理, 7897]
+  - id: opencode-notfound
+    query: 命令行里敲那个开源编码工具说命令不认识
+    expect_any: [opencode, 不认识, not rec]
+  - id: opencode-import
+    query: 把旧编辑器的配置搬到现在的桌面客户端里
+    expect_any: [opencode, 配置, zcode, zCode]
+  - id: complaint-analysis
+    query: 客户投诉打标签然后出统计报告的思路
+    expect_any: [客诉, 投诉, 标签]
+  - id: resume-markdown
+    query: 求职简历用标记语言重新排版
+    expect_any: [简历]
+  - id: tv-black-screen
+    query: 电视机画面突然没了或者卡住怎么自动检测
+    expect_any: [黑屏, 卡顿, 电视]
+  - id: tampermonkey-script
+    query: 浏览器插件批量注册显卡官网账号的脚本
+    expect_any: [篡改猴, Tampermonkey, NVIDIA, 批量注册]
+  - id: ffmpeg-split
+    query: 把视频里的声音和画面拆开分别保存
+    expect_any: [FFmpeg, ffmpeg, 音视频分离]
+  - id: desktop-pet
+    query: 屏幕上一个叫蕾米的小动物程序开发
+    expect_any: [蕾米, 桌宠]
+  - id: bash-loading-hang
+    query: shell 命令执行界面一直转圈不动了排查
+    expect_any: [loading, 卡住, bash]
+  - id: hermes-export
+    query: 把智能体的聊天历史导出来给另一个工具读
+    expect_any: [Hermes, hermes, 导入, 导出]
+  - id: zcode-runtime-structure
+    query: 那个桌面客户端的安装目录和运行时文件是怎么组织的
+    expect_any: [ZCode, Electron, 运行时]
+  - id: opencode-skill-audit
+    query: 查查看开源编码工具现在装了哪些技能
+    expect_any: [技能, 已装, 检查]
+  - id: skill-mcp-doc
+    query: 技能和MCP服务器怎么添加，有没有说明
+    expect_any: [MCP, mcp, Skills]
+  - id: side-chat-selection
+    query: 选中文字旁边弹出聊天小窗的功能
+    expect_any: [Selection, side chat, 选中]
+  - id: voice-wake-assistant
+    query: 喊一声或者按快捷键就能唤醒的电脑助手
+    expect_any: [语音唤醒, 组合键, 全局]
+  - id: backup-restore-chat
+    query: 用目录里的存档把先前聊天记录找回来
+    expect_any: [备份, 恢复]
+  - id: opencode-model-config
+    query: 那套编码工具接的什么模型，查它的配置
+    expect_any: [OpenCode, 大模型配置, 模型]
+  - id: promo-video-script
+    query: 给记忆项目做宣传视频的解说稿子
+    expect_any: [口播, 视频]
+  - id: tts-price-compat
+    query: 阿里的语音合成接口多少钱、支持哪些
+    expect_any: [百炼, 千问, TTS, 价格]
+  - id: agent-identity
+    query: 问智能体它的来历和身份
+    expect_any: [自我介绍, 我是, Nous]
+  - id: suspicious-paths
+    query: 检查电脑里有没有可疑的可执行文件位置
+    expect_any: [可疑, 排查]
+  - id: rom-compat-fix
+    query: 手机刷机后真机兼容问题怎么修
+    expect_any: [ROM, 真机, 兼容]
+  - id: timeout-dead-field
+    query: 一个超时参数不起作用被修掉了
+    expect_any: [timeout_seconds, 死字段]
+  - id: github-file-access
+    query: 智能体能不能直接读代码托管仓库上的文件
+    expect_any: [github, GitHub]
+  - id: log-error-analysis
+    query: 把日志路径贴过去让它分析报错原因
+    expect_any: [日志, 报错]
+  - id: cli-subcommand
+    query: 给命令行工具新加一个子命令
+    expect_any: [CLI, 子命令]
+  - id: harness-plugin-guide
+    query: DeepSeek那个harness的插件开发流程文档
+    expect_any: [Harness, 插件]
+  - id: retry-terminal-state
+    query: 重试状态没做成终态的缺陷修复
+    expect_any: [RETRYING, 终态]
+  - id: session-dashboard
+    query: 会话记录做成能实时刷新查看的网页看板
+    expect_any: [看板, live artifact]
+  - id: adb-wrapper
+    query: 把安卓调试桥命令封装成工具函数
+    expect_any: [ADB, adb]
+  - id: github-multi-account
+    query: 本机git多账号配置删掉只留令牌登录
+    expect_any: [多账户, Token, 令牌]
+  - id: phone-mcp-research
+    query: 研究一下手机控制MCP那个开源仓库
+    expect_any: [phone-mcp, phone]
+  - id: voice-studio-deploy
+    query: 一个语音工作台项目怎么本地化部署
+    expect_any: [VoiceStudio, 语音]
+  - id: qwen-code-new-model
+    query: 给终端编码工具换一个模型服务地址
+    expect_any: [base_url, 大模型]
+  - id: local-models-launch
+    query: 看看本地模型文件夹里配置的启动逻辑
+    expect_any: [localModels, config.ini, 启动]
+  - id: sms-read-capability
+    query: 让助手实现自动读取验证码短信
+    expect_any: [短信, 验证码]
+  - id: html-tutorial-visual
+    query: 教程页面的代码演示改成可视化示例
+    expect_any: [HTML, 教程, 可视化]
+  - id: memos-plugin-deepdive
+    query: 深入分析记忆插件仓库那套的实现
+    expect_any: [MemOS, memos]
+  - id: agentmemhub-source-probe
+    query: 调查采集库数据库里存了什么结构
+    expect_any: [agentmemh, AgentMemHub]
+  - id: bash-hang-rootcause
+    query: 终端命令一直转圈不返回的根本原因
+    expect_any: [根因, 卡loading]
+  - id: opencode-slim-install
+    query: 精简版编码工具增强包的安装配置
+    expect_any: [oh-my-opencode, slim]
+  - id: llamacpp-desktop-project
+    query: llama推理的桌面版项目分析
+    expect_any: [llamacpp, llama, desktop]
+  - id: system-llm-closed-loop
+    query: 把操作系统的各种能力接给大模型形成执行闭环
+    expect_any: [系统能力, 闭环]
+  - id: hermes-new-model
+    query: 给 hermes 那个智能体接入一个新的大模型
+    expect_any: [hermes, 大模型]
+  - id: remiel-character
+    query: 一个叫做蕾米埃尔的角色的对话内容
+    expect_any: [蕾米埃尔]
+  - id: fork-tencentdb
+    query: 分叉那份腾讯数据库记忆项目的分析
+    expect_any: [Fork, 克隆]
+  - id: zcode-data-location
+    query: 桌面客户端的运行数据放在用户目录哪里
+    expect_any: [AppData, ZCode]
+  - id: resume-investigation
+    query: 接着上次没查完的桌面应用继续排查
+    expect_any: [继续, 调查]
+  - id: opencode-data-format
+    query: 那个开源工具的会话文件长什么样结构
+    expect_any: [会话数据格式, opencode]
+  - id: legacy-issues-verify
+    query: 之前遗留的几个问题挨个核实掉
+    expect_any: [遗留问题, 核实]
+  - id: batch-low-prio-fix
+    query: 低优先级的一批小毛病集中处理
+    expect_any: [低优先级, 批量修复]
+  - id: popup-conservative
+    query: 弹窗行为往保守方向做的优化实施
+    expect_any: [弹窗, 保守]
+  - id: coding-plan-delete
+    query: 把阿里那个编程订阅配置从工具里删掉
+    expect_any: [coding plan, 阿里]
+  - id: codenomad-stt
+    query: 编程工具里语音转文字功能的研究配置
+    expect_any: [CodeNomad, 语音转文字]
+  - id: issue5-followup-fix
+    query: 第五个问题的收尾修复继续完成
+    expect_any: [问题5, 修复]
+  - id: cleartest-wipe-script
+    query: 用来擦除测试数据的批处理脚本
+    expect_any: [ClearTest]
+  - id: wal-growth-slowdown
+    query: 数据库日志附属文件越写越大把写入拖慢了
+    expect_any: [WAL, 检查点, checkpoint]
+  - id: ssl-urlopen-error
+    query: 直连接口时 TLS 握手被中断的报错排查
+    expect_any: [urlopen, SSL, 握手]
+  - id: pushplus-wechat
+    query: 任务办完后往微信推一条通知的机制
+    expect_any: [pushplus, 微信, 推送]
+  - id: viewer-password-mech
+    query: 查看器页面的密码保护机制
+    expect_any: [viewer, 密码]
+  - id: episode-rtask-sync
+    query: 面板一直显示待评分要同步 episode 的任务奖励字段
+    expect_any: [r_task, 待评分]
+  - id: import-array-field-bug
+    query: 导入接口因为一个数组类型的字段全军覆没
+    expect_any: [agentThinking, imported]
+  - id: resume-download-verify
+    query: 大文件下载要断点续传加尺寸校验的脚本
+    expect_any: [resume_download, 断点续传, Content-Length]
