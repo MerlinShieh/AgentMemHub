@@ -11,9 +11,9 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
+sys.path.insert(0, str(PROJECT_ROOT))
 
-from asrag.eval import load_cases  # noqa: E402
+from agentmemhub.rag.eval import load_cases  # noqa: E402
 
 
 def like_hit(conn: sqlite3.Connection, kw: str) -> int:

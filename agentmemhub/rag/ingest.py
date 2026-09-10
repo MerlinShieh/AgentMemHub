@@ -20,6 +20,7 @@ import sqlite_vec
 
 from .config import ModelSpec, Settings
 from .embedder import Embedder, OnnxEmbedder
+from .runtime import get_embedder
 from .source import DEFAULT_ROLES, open_source_ro, prep_text, validate_source_schema
 
 _SCHEMA_UNITS = """
@@ -48,8 +49,13 @@ def open_index(path: Path | str) -> sqlite3.Connection:
     """打开/创建索引库并加载 sqlite-vec 扩展。"""
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(p))
+    conn = sqlite3.connect(str(p), timeout=15.0)
     conn.execute("PRAGMA journal_mode=WAL")
+    # 多进程写并发加固（重构运行模型：面板任务 × MCP save 不同进程）：
+    # 跨进程写互斥靠 busy_timeout + begin immediate 短事务，
+    # 不能依赖 web/tasks.py 的进程内任务锁。
+    conn.execute("PRAGMA busy_timeout=15000")
+    conn.execute("PRAGMA synchronous=NORMAL")
     # Python 3.12+ 默认 authorizer 拦截 load_extension，须显式放行（仅此处、加载后即关闭）
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
@@ -147,6 +153,7 @@ def _iter_candidates(
                    ON c.source = e.source AND c.id = e.conversation_id
             WHERE e.role IN ({placeholders})
               AND e.content IS NOT NULL AND TRIM(e.content) <> ''
+              AND IFNULL(e.is_system, 0) = 0
         """
         args: list = list(roles)
         if cursor is not None:
@@ -180,7 +187,7 @@ def run_ingest(
     src_path = Path(source_db) if source_db else settings.source_db
     idx_path = Path(index_db) if index_db else settings.index_db
     roles = tuple(roles or DEFAULT_ROLES)
-    embedder = embedder or OnnxEmbedder(spec, batch_size=batch_size, log=log)
+    embedder = embedder or get_embedder(spec, batch_size=batch_size)
 
     idx = open_index(idx_path)
     try:
@@ -296,7 +303,7 @@ def run_reembed(
     """模型切换路径：units(文本)不动，按新模型重建其专属向量表。"""
     log = log or logging.getLogger("asrag.ingest")
     spec = settings.model(model_id) if model_id else settings.active_spec
-    embedder = OnnxEmbedder(spec, batch_size=batch_size, log=log)
+    embedder = get_embedder(spec, batch_size=batch_size)
     idx = open_index(settings.index_db)
     try:
         n_units = idx.execute("SELECT COUNT(*) FROM units").fetchone()[0]
@@ -371,3 +378,27 @@ def run_stats(settings: Settings, log: logging.Logger | None = None) -> dict:
         return out
     finally:
         idx.close()
+
+
+def delete_units_for_conversation(conn: sqlite3.Connection,
+                                  source: str, conversation_id: str) -> int:
+    """级联删除某会话的全部派生数据（重构运行模型：AgentMemHub 删会话必须同步清索引）。
+
+    units 行删除经 FTS 触发器自动清 units_fts；vec0 无触发器，须逐表显式删。
+    返回删除的单元数。
+    """
+    ids = [r[0] for r in conn.execute(
+        "SELECT id FROM units WHERE source=? AND conversation_id=?",
+        (source, conversation_id))]
+    if not ids:
+        return 0
+    vec_tables = [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'vec_%'")]
+    with conn:
+        conn.execute(
+            "DELETE FROM units WHERE source=? AND conversation_id=?",
+            (source, conversation_id))
+        for t in vec_tables:
+            conn.executemany(f"DELETE FROM {t} WHERE rowid = ?",
+                             [(i,) for i in ids])
+    return len(ids)

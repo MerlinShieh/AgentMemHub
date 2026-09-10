@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from asrag.ext import (
+from agentmemhub.rag.ext import (
     BOOST_CAP,
     DictValueProvider,
     LLMFinalJudge,
@@ -14,8 +14,8 @@ from asrag.ext import (
     decayed_value,
     safe_cutoff,
 )
-from asrag.embedder import OnnxEmbedder
-from asrag.search import Hit, hybrid_search
+from agentmemhub.rag.embedder import OnnxEmbedder
+from agentmemhub.rag.search import Hit, hybrid_search
 
 _qlog = logging.getLogger("asrag.test.ext")
 _qlog.addHandler(logging.NullHandler())
@@ -127,7 +127,7 @@ def test_hybrid_with_value_provider_drops_low(project_settings, embedder,
     """端到端：provider 判负的单元在 hybrid 结果里消失，include_low_value 找回。"""
     import dataclasses
 
-    from asrag.ingest import open_index, run_ingest
+    from agentmemhub.rag.ingest import open_index, run_ingest
 
     idx = tmp_path / "rag.db"
     run_ingest(project_settings, embedder=embedder,
@@ -156,8 +156,8 @@ def test_hybrid_with_judge_safe_cutoff(project_settings, embedder,
                                        fixture_source_db, tmp_path):
     import dataclasses
 
-    from asrag.ext import safe_cutoff
-    from asrag.ingest import run_ingest
+    from agentmemhub.rag.ext import safe_cutoff
+    from agentmemhub.rag.ingest import run_ingest
 
     idx = tmp_path / "rag.db"
     run_ingest(project_settings, embedder=embedder,

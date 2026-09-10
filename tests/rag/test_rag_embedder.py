@@ -11,7 +11,7 @@ import logging
 import numpy as np
 import pytest
 
-from asrag.embedder import OnnxEmbedder
+from agentmemhub.rag.embedder import OnnxEmbedder
 
 GOLDEN_TEXT = "会话向量化的核心是把对话嵌入为向量"
 # 首 8 维基准（float32）

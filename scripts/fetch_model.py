@@ -107,11 +107,11 @@ def main(argv: list[str] | None = None) -> int:
     sizes = fetch(args.repo, model_dir, args.base, args.proxy)
 
     # 冒烟：用本项目 Embedder 实测维度（注册表 dim 以此为准）
-    sys.path.insert(0, str(PROJECT_ROOT / "src"))
+    sys.path.insert(0, str(PROJECT_ROOT))
     import logging
 
-    from asrag.config import ModelSpec
-    from asrag.embedder import OnnxEmbedder
+    from agentmemhub.rag.config import ModelSpec
+    from agentmemhub.rag.embedder import OnnxEmbedder
 
     cfg = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
     dim = int(cfg["hidden_size"])

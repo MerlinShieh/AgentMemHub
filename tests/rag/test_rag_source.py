@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from asrag.source import (
+from agentmemhub.rag.source import (
     MAX_CHARS,
     open_source_ro,
     prep_text,

@@ -16,7 +16,7 @@ def tmp_log_dir(tmp_path):
 @pytest.fixture(scope="module")
 def project_settings():
     """真实项目注册表（只读访问 models.json/models/）。"""
-    from asrag.config import load_settings
+    from agentmemhub.rag.config import load_settings
 
     return load_settings()
 
@@ -57,6 +57,7 @@ _FIXTURE_EVENTS = [
     ("zcode", "conv-d", 1, "user", "孤儿会话事件没有元数据行", "1", "msg:30", None, None),
     # P0-2 精确标识符通道用例（高熵串，正文唯一持有者）
     ("zcode", "conv-e", 1, "user", "修复 retry_handler_v2_max 这个死字段", "1", "msg:40", None, None),
+    # R1：系统注入事件（is_system=1）永不入库——用单独 INSERT 携带该列
 ]
 
 # 可嵌入单元：role∈{user,assistant} 且内容非空白
@@ -84,6 +85,12 @@ def fixture_source_db(tmp_path):
         "INSERT INTO conversations(source, id, title) VALUES(?,?,?)",
         sorted(convs),
     )
+    # R1 回归：注入型 user 消息（is_system=1）必须被摄取层挡下
+    conn.execute(
+        "INSERT INTO events(source, conversation_id, seq, role, content,"
+        " turn_key, src_id, is_system) VALUES(?,?,?,?,?,?,?,1)",
+        ("zcode", "conv-f", 1, "user", "系统注入的伪用户消息不应入库",
+         "1", "msg:50"))
     conn.commit()
     conn.close()
     return p

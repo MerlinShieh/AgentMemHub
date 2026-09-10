@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 
-from asrag.logkit import get_logger
+from agentmemhub.rag.logkit import get_logger
 
 
 def test_logger_writes_per_component_file(tmp_log_dir):

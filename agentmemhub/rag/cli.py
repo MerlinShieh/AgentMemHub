@@ -94,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         log = get_logger("search", settings.log_dir, console=False)
         path = args.file or (settings.root / "eval" / "queries.yaml")
         cases = load_cases(path)
-        emb = OnnxEmbedder(settings.active_spec, log=log)
+        emb = get_embedder(settings.active_spec)
         lat = []
         for c in cases:
             t0 = _t.perf_counter()

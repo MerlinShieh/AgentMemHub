@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from asrag.config import Settings, load_settings
+from agentmemhub.rag.config import Settings, load_settings
 
 
 def test_active_spec_wellformed(project_settings):

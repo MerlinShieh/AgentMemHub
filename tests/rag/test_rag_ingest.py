@@ -9,14 +9,14 @@ import logging
 
 import pytest
 
-from asrag.embedder import OnnxEmbedder
-from asrag.ingest import (
+from agentmemhub.rag.embedder import OnnxEmbedder
+from agentmemhub.rag.ingest import (
     ensure_vec_table,
     open_index,
     run_ingest,
     run_stats,
 )
-from asrag.source import DEFAULT_ROLES
+from agentmemhub.rag.source import DEFAULT_ROLES
 from conftest import ELIGIBLE_COUNT
 
 _qlog = logging.getLogger("asrag.test.ingest")
@@ -172,3 +172,63 @@ def test_vec_dim_conflict_guard(project_settings, tmp_path):
             ensure_vec_table(idx, bad)
     finally:
         idx.close()
+
+
+def test_is_system_events_never_ingested(
+    project_settings, embedder, fixture_source_db, tmp_path
+):
+    """R1 回归：源库 is_system=1 的注入消息不得进入向量索引。"""
+    idx = tmp_path / "rag.db"
+    _ingest(project_settings, embedder, fixture_source_db, idx)
+    st = run_stats(dataclasses.replace(project_settings, index_db=idx), log=_qlog)
+    assert st["units_total"] == ELIGIBLE_COUNT
+    conn = open_index(idx)
+    assert conn.execute("SELECT COUNT(*) FROM units WHERE conversation_id='conv-f'"
+                        ).fetchone()[0] == 0
+    conn.close()
+
+
+def test_delete_units_for_conversation_cascade(
+    project_settings, embedder, fixture_source_db, tmp_path
+):
+    """R1 级联删除：units+vec+fts 一处清光，且与幂等摄取共存（删后可重嵌）。"""
+    from agentmemhub.rag.ingest import delete_units_for_conversation
+    import sqlite3
+
+    from agentmemhub.rag.search import ensure_search_schema
+
+    idx = tmp_path / "rag.db"
+    _ingest(project_settings, embedder, fixture_source_db, idx)
+    vt = project_settings.active_spec.vec_table
+    conn = open_index(idx)
+    ensure_search_schema(conn, log=_qlog)  # 触发器路径需要 FTS 结构在场
+    n = conn.execute("SELECT COUNT(*) FROM units WHERE conversation_id='conv-b'"
+                     ).fetchone()[0]
+    assert n == 3
+    deleted = delete_units_for_conversation(conn, "hermes", "conv-b")
+    assert deleted == 3
+    assert conn.execute("SELECT COUNT(*) FROM units WHERE conversation_id='conv-b'"
+                        ).fetchone()[0] == 0
+    # fts 经触发器同步清空
+    assert conn.execute(
+        "SELECT COUNT(*) FROM units_fts WHERE rowid NOT IN (SELECT id FROM units)"
+    ).fetchone()[0] == 0
+    # 所有 vec 表无残留
+    assert conn.execute(f"SELECT COUNT(*) FROM {vt} WHERE rowid NOT IN"
+                        " (SELECT id FROM units)").fetchone()[0] == 0
+    conn.close()
+    # 重摄取会自我修复（幂等 known 集重新拉入）——这里源数据还在
+    s2 = _ingest(project_settings, embedder, fixture_source_db, idx)
+    assert s2["embedded"] == 3
+    st = run_stats(dataclasses.replace(project_settings, index_db=idx), log=_qlog)
+    assert st["vec_coverage"] == 1.0
+
+
+def test_open_index_busy_timeout(project_settings, tmp_path):
+    """R1 并发加固：多进程写依赖 busy_timeout（面板×MCP 不同进程）。"""
+    conn = open_index(tmp_path / "rag.db")
+    try:
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 15000
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    finally:
+        conn.close()

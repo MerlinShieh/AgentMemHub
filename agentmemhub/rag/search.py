@@ -25,6 +25,7 @@ import numpy as np
 
 from .config import Settings
 from .embedder import Embedder, OnnxEmbedder
+from .runtime import get_embedder
 from .ingest import open_index
 
 if TYPE_CHECKING:
@@ -363,7 +364,7 @@ def hybrid_search(
     t0 = time.perf_counter()
     conn = open_index(settings.index_db)
     conn.row_factory = sqlite3.Row
-    embedder = embedder or OnnxEmbedder(spec, log=log)
+    embedder = embedder or get_embedder(spec)
     try:
         ensure_search_schema(conn, log=log)
         excl = _excl_ids(conn, exclude_session)

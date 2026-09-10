@@ -24,6 +24,7 @@ import yaml
 
 from .config import Settings
 from .embedder import Embedder, OnnxEmbedder
+from .runtime import get_embedder
 from .search import hybrid_search
 
 
@@ -86,7 +87,7 @@ def run_eval(
 ) -> dict:
     log = log or logging.getLogger("asrag.eval")
     spec = settings.active_spec
-    embedder = embedder or OnnxEmbedder(spec, log=log)
+    embedder = embedder or get_embedder(spec)
     gold_map = {c.id: gold_conversations(settings.index_db, c) for c in cases}
     report: dict = {
         "model": spec.id, "dim": spec.dim, "k": k,

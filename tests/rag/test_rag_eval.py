@@ -6,10 +6,10 @@ import logging
 
 import pytest
 
-from asrag.embedder import OnnxEmbedder
-from asrag.eval import EvalCase, first_hit_rank, format_report, load_cases, run_eval
-from asrag.ingest import run_ingest
-from asrag.search import Hit
+from agentmemhub.rag.embedder import OnnxEmbedder
+from agentmemhub.rag.eval import EvalCase, first_hit_rank, format_report, load_cases, run_eval
+from agentmemhub.rag.ingest import run_ingest
+from agentmemhub.rag.search import Hit
 
 _qlog = logging.getLogger("asrag.test.eval")
 _qlog.addHandler(logging.NullHandler())

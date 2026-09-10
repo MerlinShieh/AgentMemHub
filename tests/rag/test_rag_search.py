@@ -6,9 +6,9 @@ import logging
 
 import pytest
 
-from asrag.embedder import OnnxEmbedder
-from asrag.ingest import open_index, run_ingest
-from asrag.search import (
+from agentmemhub.rag.embedder import OnnxEmbedder
+from agentmemhub.rag.ingest import open_index, run_ingest
+from agentmemhub.rag.search import (
     _query_chunks,
     ensure_search_schema,
     expand_turn,
@@ -311,7 +311,7 @@ def test_turn_expansion(rag_db, embedder):
 
 def test_search_logs_traceability(rag_db, embedder, tmp_log_dir):
     """溯源：日志必须能回放查询、两路命中与融合结果。"""
-    from asrag.logkit import get_logger
+    from agentmemhub.rag.logkit import get_logger
     log = get_logger("search", tmp_log_dir, console=False)
     hits = hybrid_search(rag_db, "水位推进幂等", embedder=embedder, k=3, log=log)
     for h in log.handlers:
