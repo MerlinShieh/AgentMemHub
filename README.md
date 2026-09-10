@@ -81,30 +81,33 @@ uv run python scripts/fetch_model.py Xenova/bge-base-zh-v1.5
 ```
 AgentMemHub/
 ├── agentmemhub/                  # 核心包
-│   ├── cli.py                    # 命令行入口（无参数进控制台）
-│   ├── console.py                # 交互式控制台（环境检测/提取/检索/看板/记忆推送）
+│   ├── cli.py / console.py       # 命令行入口 / 交互式控制台
 │   ├── config.py                 # 统一配置体系（YAML + 环境变量 + 默认）
 │   ├── store.py + schema.sql     # SQLite 会话库（conversations/events/events_fts）
 │   ├── watermarks.py             # 增量同步水位/变更集（delta）状态
-│   ├── rag/                      # ★ 内置记忆引擎（config/embedder/ingest/search/memstore）
-│   ├── rag_bridge.py             # ★ 引擎接缝：原 MemOS 端点语义的进程内实现
-│   ├── memos.py                  # 回退路径：bundle 构建与推送（backend=memos 时启用）
-│   ├── memos_daemon.py           # 回退路径：上游引擎托管（同上）
+│   ├── rag/                      # ★ 内置记忆引擎（v2.0）
+│   │                             #   config/embedder/ingest/search/memstore/runtime
+│   ├── rag_bridge.py             # ★ 引擎接缝：MCP/面板/cli 的统一调用入口
+│   ├── mcp_server.py             # MCP 记忆网关（stdio / Streamable HTTP）
+│   ├── scoring.py                # LLM 三轴评分（策略层，与引擎的存值层分工）
 │   ├── adapters/                 # 8 个 Agent 数据源适配器（src_id/turn_key/注入识别）
-│   └── web/                      # FastAPI 记忆面板 + 前端 + /api/memos 记忆网关
-├── models/                       # 嵌入模型（自带 bge-small；更大模型按需下载）
-├── agentmemhub.yaml              # 统一配置（模型/分桶/召回/后端开关）
-├── memOS/                        # 回退用上游引擎（gitignore，默认不参与运行）
-├── database/                     # 默认数据目录（gitignore）：SQLite 会话库 / watermarks / 评分状态
-├── agentmemhub.yaml(.example)    # 统一配置文件（复制 example 修改；yaml 本体 gitignore）
-├── exports/                      # 导出产物（gitignore）
-├── scripts/                      # 工具脚本（download_embedding_model 模型恢复 /
-│                                #   cleanup_empty_traces 空trace清理 / sensitive_scan 敏感扫描）
-├── tests/                        # pytest（121 项）
-├── AGENTS.md                     # Agent 协作约定（记忆保存纪律硬规则 + 项目约束速查）
-├── ClearData.bat                 # 清空应用数据（database/+logs/exports；不动引擎与 Agent 源）
-├── ClearTest.bat                 # 测试环境重置（应用数据+引擎数据；保留配置与嵌入模型）
-└── start.bat                     # Windows 一键入口（双击进控制台）
+│   ├── web/                      # FastAPI 记忆面板 + 前端 + /api/memos 网关
+│   └── memos.py / memos_daemon.py # 回退路径（backend=memos 时启用，默认不参与）
+├── models/                       # 嵌入模型（自带 bge-small 开箱即用）
+├── agentmemhub.yaml(.example)    # 统一配置（模型/分桶/召回/后端开关；本体 gitignore）
+├── database/                     # 数据目录（gitignore）：采集库 + 索引库 + 水位 + 评分状态
+├── scripts/                      # 工具脚本（仅列常用）
+│   ├── fetch_model.py            #   下载更大嵌入模型并登记到配置
+│   ├── check_eval_grounding.py   #   召回评测集落地校验
+│   ├── sensitive_scan.py         #   推送前敏感信息扫描
+│   └── e2e/                      #   浏览器级端到端测试
+├── eval/                         # 召回评测集（71 题）+ 基准
+├── tests/                        # pytest（261 项）
+├── docs/                         # 设计文档（架构/迁移/召回融合等）
+├── memOS/                        # 回退用的上游引擎（gitignore，默认不参与运行）
+├── start.bat                     # 启动控制台（Windows）
+├── ClearData.bat / ClearTest.bat # 清空数据 / 恢复干净测试环境
+└── AGENTS.md / ARCHITECTURE.md   # 协作约定 / 架构说明
 ```
 
 **数据流（三阶段闭环）**
@@ -197,10 +200,12 @@ python -m agentmemhub sync
 
 | 内容 | 默认位置 | 覆盖方式 |
 |---|---|---|
-| 数据目录（db / watermarks / 评分状态） | 项目内 `database/` | 环境变量 `AGENTMEM_HUB_DATA_DIR` 或 yaml `data_dir` |
-| SQLite 数据库 | `database/agentmemhub.db` | 环境变量 `AGENTMEMHUB_DB` |
-| 导出目录 | 项目下 `exports/` | `--out` 参数 |
-| MemOS bundle | `exports/memos_bundle.json` | `--out` 参数 |
+| 数据目录（所有本地状态） | 项目内 `database/` | 环境变量 `AGENTMEM_HUB_DATA_DIR` 或 yaml `data_dir` |
+| **采集库**（统一事件流） | `database/agentmemhub.db` | 环境变量 `AGENTMEMHUB_DB` |
+| **记忆索引库**（向量 + 全文 + 评分） | `database/session_rag.db` | 随数据目录 |
+| 增量水位 / 评分记账 | `database/watermarks.json` · `scored_traces.json` | 随数据目录 |
+| 嵌入模型 | `models/` | 自带 bge-small；`scripts/fetch_model.py` 下载更多 |
+| 导出目录 | `exports/` | `--out` 参数 |
 
 > **默认数据已收进项目内 `database/`**（已 gitignore，随项目走，备份/整机迁移只需带走项目目录）。
 > **从旧版 `~/.agentmemhub` 迁移**：把旧目录内容整体复制到 `database/` 即可
@@ -214,6 +219,14 @@ python -m agentmemhub sync
 - `events_fts` — FTS5 全文索引（英文检索）
 
 ![本地 SQLite 数据库结构 — conversations / events / events_fts 三张核心表](./docs/images/local-database.png)
+
+**记忆索引库**（`database/session_rag.db`，由内置引擎管理）：
+
+- `units` — 记忆单元（消息级文本，模型无关；含 `turn_key` 轮次锚与 `legacy_id` 旧系统别名）
+- `vec_<model>` — 每模型独立的向量表（sqlite-vec，维度建表时固定）
+- `units_fts` — trigram 全文索引（中文友好，与标题列联合）
+- `unit_values` / `unit_feedback` — 价值评分与反馈明细（引擎存值，打分策略在 Hub 侧）
+- `memory_exclusions` — 位于采集库：记录哪些会话/轮次**不写入记忆**
 
 > `exports/` 已加入 `.gitignore`，含真实对话的导出不会进入仓库。
 
@@ -472,29 +485,62 @@ uv run python -m agentmemhub serve       # 启动记忆面板 http://127.0.0.1:8
 所有路径/端口默认采用官方默认；需要覆盖时创建 `agentmemhub.yaml`（模板见 `agentmemhub.yaml.example`）。优先级：环境变量 > 配置文件 > 内置默认。
 
 ```yaml
-data_dir: "database"                  # 本地库/水位/评分/托管状态（默认项目内 database/）
-db_path: ""                           # 会话库 SQLite（默认 <data_dir>/agentmemhub.db）
+data_dir: database                    # 本地状态根目录（采集库/索引/水位/评分）
+db_path: ""                           # 采集库 SQLite（留空 = <data_dir>/agentmemhub.db）
+
+backend:
+  backend: rag                        # rag（内置引擎，默认）| memos（回退）
+
+rag:
+  active: bge-small-zh-v1.5           # 检索用模型（随仓库分发，开箱即用）
+  write:
+    order: [bge-small-zh-v1.5]        # 向量化顺序；可加更多模型
+    fast_first: true                  # 首个模型完成即返回可检索，其余后台并发
+    background_hint: "高精度模型正在后台向量化，稍后自动生效"
+  embed:
+    batch_size: 32
+    bucketing: true                   # 按文本长度分桶批处理（性能关键）
+    bucket_caps: [64, 128, 256, 384]  # 分桶边界（字符）
+  retrieval:
+    models: [bge-small-zh-v1.5]       # 参与召回融合的模型（多路 RRF）
+    candidate_k: 30                   # 每路候选数
+    threshold_floor: 0.2              # 相对阈值（×top）
+    max_per_conversation: 2           # 同会话限席（原子记忆不受限）
+    search_max_hits: 20               # 面板检索返回上限
+  models:                             # 模型注册表（新增模型在此登记）
+    bge-small-zh-v1.5:
+      path: models/bge-small-zh-v1.5
+      dim: 512
+      pooling: cls
+      quantized: true
+      maxTokens: 512
+
 agents:
   zcode: ""                           # 各 harness 会话位置；留空=官方默认自动发现
-  hermes: ""                          # 例：系统盘不在 C: 时指向 D 盘镜像数据
-  ...
-memos:
-  repo_dir: ""                        # MemOS 项目根（默认 <项目根>/memOS）
-  plugin_dir: ""                      # 留空自动推导 <repo_dir>/apps/memos-local-plugin
-  home: ""                            # 引擎数据目录（默认 <repo_dir>/home）
+  hermes: ""
+memos:                                # 仅 backend=memos 时参与
   base_url: "http://127.0.0.1:18800"
-  password: ""                        # caller viewer 密码（自动登录用）
-  lightweight: ""                     # true/false 强制；留空=引擎自身配置
+  repo_dir: ""
+
 web:
   port: 8086
+
+llm:                                  # 评分用（可选）
+  endpoint: ""
+  api_key: ""
+  model: ""
 ```
 
 相对路径相对项目根解析，`~` 展开为用户目录。
 
 ## 需求
 
-- Python 3.10+
-- `pip install zstandard`（仅 DSH 需要）
+- **Python 3.10+**（推荐用 [uv](https://docs.astral.sh/uv/) 管理：`uv sync` 即可装齐依赖）
+- 核心依赖：`onnxruntime`（嵌入推理）、`tokenizers`、`numpy`、`sqlite-vec`（向量检索）、
+  `pyyaml`（配置）、`zstandard`（DSH 数据源解压）
+- Web 面板另需：`fastapi`、`uvicorn`（`uv sync --extra web`）
+- 内存/磁盘：嵌入模型 23MB 起（自带 bge-small）；索引库随会话量增长
+  （约 18k 记忆单元 ≈ 150MB，含向量）
 
 ## Web 页面（可选）
 
@@ -563,7 +609,7 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 - [x] LLM 批量自动评分（score：三轴评估写价值分、跳过已评、面板进度条）
 - [x] 统一日志（`<程序根>/logs/`：web/cli/engine/tasks 分文件，面板可查历史）
 - [x] MCP 写后即评（memory_score 工具 + save-memory Skill 独立仓：触发纪律/生效前提/逻辑归属）
-- [x] 导入数据质量（meta 幽灵轮剔除、纯工具轮标题兜底、恢复环境整源丢失修复、cleanup_empty_traces 清理脚本）
+- [x] 导入数据质量（meta 幽灵轮剔除、纯工具轮标题兜底、恢复环境整源丢失修复）
 - [x] 增量同步架构（会话级清单对比 → upsert → watermarks 变更集贯通 clean/push；评分增量优先·定点读零全量枚举；cap 超限回退全量；默认数据目录收进项目内 database/）
 ### v2.0（2026-09-10）记忆引擎自研内核
 
