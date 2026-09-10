@@ -598,6 +598,17 @@ def create_app(db_path: Path | None = None):
     # R6 记忆排除：控制会话/轮次不写入记忆（意图存采集库，索引即时收敛）
     # ------------------------------------------------------------------
 
+    @app.get("/api/exclusions/summary")
+    def api_exclusions_summary():
+        """全库排除统计（面板顶部展示「已排除 N 项」）。"""
+        with _LOCK:
+            rows = store.list_exclusions()
+        return {
+            "count": len(rows),
+            "conversations": len({(r["source"], r["conversation_id"]) for r in rows}),
+            "turns": sum(1 for r in rows if r["turn_key"]),
+        }
+
     @app.get("/api/conversations/{source}/{cid}/memory-exclusion")
     def api_exclusion_get(source: str, cid: str):
         """该会话的排除清单 + 已入库记忆规模（抽屉渲染勾选态用）。"""
