@@ -403,7 +403,11 @@ def hybrid_search(
         if diversity:
             pool = ranked[: max(k * 4, k)]
             metas = _fetch_units(conn, [i for i, _ in pool])
-            conv_of = {i: (m["source"], m["conversation_id"])
+            # 会话限席只约束会话轨迹；原子记忆（source='memory'）同属伪会话
+            # (memory/mcp)，每条独立成席，否则一批记忆互相挤占 top-k
+            conv_of = {i: (m["source"],
+                           f"u{i}" if m["source"] == "memory"
+                           else m["conversation_id"])
                        for i, m in metas.items()}
             emb_of: dict[int, np.ndarray] = {}
             if pool:

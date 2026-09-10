@@ -185,3 +185,55 @@ class _FakeStore:
 
     def close(self):
         pass
+
+
+# ── R5.1 验收修复回归 ──────────────────────────────────────────────────
+
+def test_search_curate_caps_like_memos_max_keep(rag_env):
+    """机械终审：≤5 且 ≥0.7×top（MemOS llmFilterMaxKeep 同量级），curate=False 关闭。"""
+    rag_bridge.import_bundle([
+        {"id": f"mcp_c{i}", "userText": f"终审验证条目 编号{i} 内容递增一点点{i * 7}",
+         "ts": 100 + i} for i in range(8)])
+    all_hits = rag_bridge.search("h", "终审验证条目", k=8, curate=False)["hits"]
+    curated = rag_bridge.search("h", "终审验证条目", k=8, curate=True)["hits"]
+    assert len(all_hits) == 8
+    assert 1 <= len(curated) <= 5
+    top = curated[0]["score"]
+    assert all(h["score"] >= 0.7 * top - 1e-9 for h in curated)
+
+
+def test_safe_cutoff_hits_rules():
+    hits = [{"score": s} for s in (1.0, 0.9, 0.71, 0.69, 0.5, 0.4)]
+    kept = rag_bridge.safe_cutoff_hits(hits, max_keep=5)
+    assert [h["score"] for h in kept] == [1.0, 0.9, 0.71]
+    assert rag_bridge.safe_cutoff_hits([]) == []
+    one = [{"score": 1.0}, {"score": 0.01}]
+    assert rag_bridge.safe_cutoff_hits(one) == one[:1]
+
+
+def test_web_push_button_vectorizes_not_bundles(rag_env, monkeypatch):
+    """面板「推送记忆」按钮在 rag 后端必须转向量化（走 bundle 会重复落 memory 单元）。"""
+    from agentmemhub.web import app
+
+    calls = {"vectorize": 0, "push": 0}
+
+    class CliStub:
+        @staticmethod
+        def _vectorize_stage(*, stdout=None):
+            calls["vectorize"] += 1
+            return {"failed": 0}
+
+        @staticmethod
+        def push_to_memos(*a, **k):
+            calls["push"] += 1
+            return {}
+
+    do = app._run_push_fn(CliStub, "zcode")
+    do(lambda line: None, {"id": "t1", "name": "push"})
+    assert calls == {"vectorize": 1, "push": 0}
+
+
+def test_llm_availability_probe_honest(rag_env, monkeypatch):
+    monkeypatch.delenv("NOPE", raising=False)
+    v = rag_bridge._scoring_llm_available()
+    assert isinstance(v, bool)     # 读不到配置就是 False，不装样子

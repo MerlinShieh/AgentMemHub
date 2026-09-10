@@ -107,6 +107,10 @@ def _run_push_fn(cli, source: str):
     from agentmemhub.store import Store
 
     def _run() -> None:
+        if memos_daemon._backend_is_rag():
+            # rag 后端：会话轨迹由向量化直采源库（push 语义 = 向量化；
+            # 走 bundle 会把 trac_ 轨迹二次落成 memory 单元造成重复）
+            return cli._vectorize_stage(stdout=print)
         store = Store()
         try:
             batches = ([source] if source

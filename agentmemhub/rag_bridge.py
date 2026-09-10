@@ -154,9 +154,19 @@ _SELECT_TRACE = (
     " FROM units u LEFT JOIN unit_values v ON v.unit_id = u.id")
 
 
+def safe_cutoff_hits(hits: list[dict], *, max_keep: int = 5,
+                     floor_ratio: float = 0.7) -> list[dict]:
+    """机械终审（dict 版 ext.safe_cutoff 同规则）：≥0.7×top 且 ≤max_keep，至少保 1。"""
+    if not hits:
+        return []
+    top = max(h["score"] for h in hits[:1]) or 0.0
+    kept = [h for h in hits[:max_keep] if h["score"] >= floor_ratio * top]
+    return kept or [hits[0]]
+
+
 # ── 端点语义实现 ───────────────────────────────────────────────────────
 
-def search(agent: str, query: str, *, k: int = 8,
+def search(agent: str, query: str, *, k: int = 8, curate: bool = True,
            exclude_session: tuple[str, str] | None = None) -> dict:
     """POST /api/v1/memory/search 的 rag 实现（hits 形状对齐 RetrievalResultDTO）。"""
     t0 = time.perf_counter()
@@ -183,8 +193,9 @@ def search(agent: str, query: str, *, k: int = 8,
         "score": round(h.score, 4),
         "snippet": (h.title + " | " if h.title else "") + h.text[:200],
     } for h in hits]
-    ctx = "\n".join(f"- [{h.title or h.conversation_id}] {h.text[:160]}"
-                    for h in hits[:3])
+    if curate:   # 机械终审（MemOS llmFilterMaxKeep=5 同量级，注入防刷屏；零 LLM）
+        dto_hits = safe_cutoff_hits(dto_hits, max_keep=min(5, max(k, 1)))
+    ctx = "\n".join(f"- {d['snippet'][:160]}" for d in dto_hits[:3])
     return {"hits": dto_hits, "injectedContext": ctx,
             "tierLatencyMs": {"rag": round((time.perf_counter() - t0) * 1000)}}
 
@@ -353,12 +364,30 @@ def overview() -> dict:
                 "policies": 0, "worldModels": 0,
                 "embedder": {"available": units == 0 or vecs > 0,
                              "model": st.active_model},
-                "llm": {"available": False},   # 策略在 Hub 侧，引擎不判值
+                "llm": {"available": _scoring_llm_available()},  # 探测 Hub 侧评分 LLM 配置
                 "uptimeMs": 0,
                 "rag": {"units": units, "vectors": vecs, "model": st.active_model,
                         "coverage": round(vecs / units, 4) if units else 1.0}}
     finally:
         conn.close()
+
+
+_LLM_PROBE: tuple = (None, 0.0)
+
+
+def _scoring_llm_available() -> bool:
+    """评分 LLM 配置可用性（60s 缓存）：策略在 Hub 侧，stats 面板如实展示。"""
+    global _LLM_PROBE
+    now = time.time()
+    if _LLM_PROBE[0] is not None and now - _LLM_PROBE[1] < 60:
+        return _LLM_PROBE[0]
+    try:
+        from agentmemhub import scoring
+        ok = bool(scoring.read_engine_llm())
+    except Exception:
+        ok = False
+    _LLM_PROBE = (ok, now)
+    return ok
 
 
 def probe() -> dict:
