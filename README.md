@@ -37,7 +37,45 @@ uv run python -m asrag eval --model <新id>             # A/B 召回对比
 # 满意后改 models.json 的 active 一行即完成切换（新老向量表共存，随时可回退）
 ```
 
-## 当前验收状态（2026-09-10 定稿）
+## 外置接线接口（`asrag.ext`，引擎零 LLM/零评分依赖）
+
+P2 契约——召回质量的"大脑"永远由调用方注入，引擎只提供插口：
+
+```python
+from asrag.search import hybrid_search
+from asrag.ext import LLMFinalJudge, DictValueProvider, safe_cutoff
+
+hits = hybrid_search(settings, query,
+    exclude_session=(source, conv_id),      # P1-3 防重复注入当前会话
+    judge=LLMFinalJudge(backend=...),       # P2-1 终审：调用方实现 complete_json；
+                                            #      失败自动退 safe_cutoff（fail-closed）
+    value_provider=DictValueProvider(...),  # P2-2 价值 join：{unit_id: value}，
+                                            #      ≤0.3 有界 boost + 30d 半衰期 + value<=0 过滤
+    include_low_value=True)                 # 复盘模式放开负值（MemOS repair 入口思想）
+```
+
+## 当前验收状态（2026-09-10 P1/P2 定稿）
+
+**active 模型已终选为 `bge-base-zh-v1.5`**（768 维）——71 题评测 recall 0.930 vs
+small 0.887，p95 延迟仅 +14ms（175.8ms），质量优先且延迟近乎免费。
+
+评测集 71 题（新增 20 题真实主题，grounding 71/71），双口径（keyword 可达 +
+自动金集会话级），k=10：
+
+| model/mode | recall@10 | conv-recall | precision@10 | MRR |
+|---|---|---|---|---|
+| **base-hybrid** | **0.930** | 0.218 | 0.726 | 0.692 |
+| small-hybrid | 0.887 | 0.225 | 0.741 | 0.677 |
+| base-vector | 0.901 | 0.204 | 0.723 | 0.702 |
+| base-fts | 0.817 | 0.188 | 0.744 | 0.620 |
+
+延迟 bench（71 题 warm）：small p50=120/p95=162ms；base p50=143/p95=176ms。
+conv-recall 偏低是自动金集口径严苛所致（泛关键词落点会话多），作诊断不作主指标。
+
+（历史）P0 时点数据：51 题 base-hybrid 0.980——扩充难题集后回落至 0.930 属正常，
+说明 51 题时存在轻度过拟合，这正是 P1-4 扩充的动机。
+
+## 原始验收（M1-M4，2026-09-10）
 
 - 真实库全量摄取：**17,720 单元**（user 2,232 / assistant 15,488），
   向量覆盖 1.0，增量重跑 `embedded=0 vec_gc=0`（幂等，1.8s），

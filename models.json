@@ -1,5 +1,5 @@
 {
-  "active": "bge-small-zh-v1.5",
+  "active": "bge-base-zh-v1.5",
   "models": {
     "bge-small-zh-v1.5": {
       "path": "models/bge-small-zh-v1.5",
@@ -23,7 +23,7 @@
       "language": "zh",
       "queryPrefix": "",
       "source": "Xenova/bge-base-zh-v1.5 (HF, quantized ONNX)",
-      "verified": "smoke ok dim=768"
+      "verified": "2026-09-10 71 题 eval：hybrid recall 0.930 最优，p95=175.8ms；经 reembed+eval+回归后置 active"
     }
   }
 }

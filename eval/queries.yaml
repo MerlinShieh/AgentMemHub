@@ -154,3 +154,63 @@ cases:
   - id: system-llm-closed-loop
     query: 把操作系统的各种能力接给大模型形成执行闭环
     expect_any: [系统能力, 闭环]
+  - id: hermes-new-model
+    query: 给 hermes 那个智能体接入一个新的大模型
+    expect_any: [hermes, 大模型]
+  - id: remiel-character
+    query: 一个叫做蕾米埃尔的角色的对话内容
+    expect_any: [蕾米埃尔]
+  - id: fork-tencentdb
+    query: 分叉那份腾讯数据库记忆项目的分析
+    expect_any: [Fork, 克隆]
+  - id: zcode-data-location
+    query: 桌面客户端的运行数据放在用户目录哪里
+    expect_any: [AppData, ZCode]
+  - id: resume-investigation
+    query: 接着上次没查完的桌面应用继续排查
+    expect_any: [继续, 调查]
+  - id: opencode-data-format
+    query: 那个开源工具的会话文件长什么样结构
+    expect_any: [会话数据格式, opencode]
+  - id: legacy-issues-verify
+    query: 之前遗留的几个问题挨个核实掉
+    expect_any: [遗留问题, 核实]
+  - id: batch-low-prio-fix
+    query: 低优先级的一批小毛病集中处理
+    expect_any: [低优先级, 批量修复]
+  - id: popup-conservative
+    query: 弹窗行为往保守方向做的优化实施
+    expect_any: [弹窗, 保守]
+  - id: coding-plan-delete
+    query: 把阿里那个编程订阅配置从工具里删掉
+    expect_any: [coding plan, 阿里]
+  - id: codenomad-stt
+    query: 编程工具里语音转文字功能的研究配置
+    expect_any: [CodeNomad, 语音转文字]
+  - id: issue5-followup-fix
+    query: 第五个问题的收尾修复继续完成
+    expect_any: [问题5, 修复]
+  - id: cleartest-wipe-script
+    query: 用来擦除测试数据的批处理脚本
+    expect_any: [ClearTest]
+  - id: wal-growth-slowdown
+    query: 数据库日志附属文件越写越大把写入拖慢了
+    expect_any: [WAL, 检查点, checkpoint]
+  - id: ssl-urlopen-error
+    query: 直连接口时 TLS 握手被中断的报错排查
+    expect_any: [urlopen, SSL, 握手]
+  - id: pushplus-wechat
+    query: 任务办完后往微信推一条通知的机制
+    expect_any: [pushplus, 微信, 推送]
+  - id: viewer-password-mech
+    query: 查看器页面的密码保护机制
+    expect_any: [viewer, 密码]
+  - id: episode-rtask-sync
+    query: 面板一直显示待评分要同步 episode 的任务奖励字段
+    expect_any: [r_task, 待评分]
+  - id: import-array-field-bug
+    query: 导入接口因为一个数组类型的字段全军覆没
+    expect_any: [agentThinking, imported]
+  - id: resume-download-verify
+    query: 大文件下载要断点续传加尺寸校验的脚本
+    expect_any: [resume_download, 断点续传, Content-Length]

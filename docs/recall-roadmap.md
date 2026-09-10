@@ -19,6 +19,11 @@ vector 0.882~0.902 · fts 0.725；延迟实测 87~337ms（q8 CPU）。
 P0 验收：grounding 51/51 保持；pytest 全绿；base-hybrid recall ≥ 0.922 非劣，
 顽题转绿 ≥2；每查询延迟 P95 < 500ms（bench 命令入 CLI）。
 
+## P1 排序结构对齐 ✅ 已完成（2026-09-10：候选级融合+阈值旁路、71 题双口径金集、exclude_session、active 终选 bge-base）
+
+## P2 接线层 ✅ 已完成（2026-09-10：`asrag.ext` 外置接口——Judge 终审协议 fail-closed、
+ValueProvider 读侧价值 join、AGENTS.md 接线契约固化。P2-3 episode rollup 按约定推迟：写侧沉淀物出现前无分层素材）
+
 ## P1 排序结构对齐（中型改造）
 
 | # | 事项 | 说明 |

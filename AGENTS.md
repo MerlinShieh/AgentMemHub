@@ -1,5 +1,19 @@
 # AgentSessionRag — 项目规约（AGENTS.md）
 
+## 接线契约（P2 外置接口，`asrag.ext`）
+
+召回质量的"大脑"由调用方注入，引擎本体保持零 LLM、零评分依赖：
+
+- `Judge`：终审阶段（`LLMFinalJudge(backend=...)`）。后端只需实现
+  `complete_json(prompt)->{"keep":[序号],"sufficient":bool}`（AgentMemHub 注入自己的
+  LLM 客户端）；任何异常 fail-closed 退 `safe_cutoff`（≥0.7×top、≤5、至少 1 条）。
+- `ValueProvider`：读侧价值 join（`DictValueProvider({unit_id: value})`）。
+  引擎施加 ≤0.3 有界 boost（30d 半衰期，用 units.time 现场重算）+ value≤0 硬过滤
+  （`include_low_value=True` 放开，对应复盘语义）。评分的存储与演化永远在 AgentMemHub，
+  引擎只在读取瞬间使用。
+- `exclude_session=(source, conversation_id)`：三路通道统一排除当前会话（防重复注入）。
+- 禁止：在 `src/asrag/` 内 import 任何 LLM SDK 或建评分表——发现即违规。
+
 ## 项目定位与边界
 
 独立预研项目：不依赖 MemOS，用通用 RAG 向量化技术实现**会话向量化**与**记忆召回**两个核心能力。
