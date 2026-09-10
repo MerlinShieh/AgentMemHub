@@ -39,13 +39,22 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-k", type=int, default=10)
     p.add_argument("--model", default=None, help="A/B 对比：指定注册表中的模型 id")
 
-    p = sub.add_parser("search", help="混合召回（向量+trigram 全文，RRF 融合）")
+    p = sub.add_parser("search", help="混合召回（三路通道 + 阈值闸门 + 多样性）")
     p.add_argument("query")
     p.add_argument("--model", default=None, help="指定模型 id（默认 active）")
     p.add_argument("-k", type=int, default=10)
     p.add_argument("--mode", choices=("hybrid", "vector", "fts"), default="hybrid")
     p.add_argument("--no-expand", action="store_true", help="不做轮次上下文展开")
+    p.add_argument("--exclude", default=None, metavar="SOURCE/CONV_ID",
+                   help="排除的当前会话（P1-3，防重复注入自己）")
+    p.add_argument("--safe-cutoff", action="store_true",
+                   help="机械终审（≥0.7×top 且 ≤5 条；LLM Judge 的确定性替身）")
     p.add_argument("--json", action="store_true", help="输出 JSON（eval 用）")
+
+    p = sub.add_parser("bench", help="召回延迟 p50/p95（用评测集查询，embedder 预热）")
+    p.add_argument("--file", default=None)
+    p.add_argument("-k", type=int, default=10)
+    p.add_argument("--model", default=None)
 
     args = ap.parse_args(argv)
     settings = load_settings()
@@ -74,13 +83,53 @@ def main(argv: list[str] | None = None) -> int:
         cases = load_cases(path)
         report = run_eval(settings, cases, k=args.k, log=log)
         print(format_report(report))
+    elif args.cmd == "bench":
+        from .eval import load_cases
+        from .embedder import OnnxEmbedder
+        import time as _t
+
+        if getattr(args, "model", None):
+            settings.model(args.model)
+            settings = dataclasses.replace(settings, active_model=args.model)
+        log = get_logger("search", settings.log_dir, console=False)
+        path = args.file or (settings.root / "eval" / "queries.yaml")
+        cases = load_cases(path)
+        emb = OnnxEmbedder(settings.active_spec, log=log)
+        lat = []
+        for c in cases:
+            t0 = _t.perf_counter()
+            hybrid_search(settings, c.query, embedder=emb, k=args.k,
+                          expand_turns=False, log=log)
+            lat.append((_t.perf_counter() - t0) * 1000)
+        s = sorted(lat)
+        print(json.dumps({
+            "queries": len(s), "mode": "hybrid", "k": args.k,
+            "model": settings.active_model,
+            "p50_ms": round(s[len(s) // 2], 1),
+            "p95_ms": round(s[int(len(s) * 0.95)], 1),
+            "max_ms": round(s[-1], 1),
+        }, ensure_ascii=False, indent=2))
     elif args.cmd == "search":
         if getattr(args, "model", None):
             settings.model(args.model)
             settings = dataclasses.replace(settings, active_model=args.model)
         log = get_logger("search", settings.log_dir, console=False)
+        exclude = None
+        if args.exclude and "/" in args.exclude:
+            src, _, cid = args.exclude.partition("/")
+            exclude = (src, cid)
+        judge = None
+        if args.safe_cutoff:
+            from .ext import safe_cutoff
+
+            class _SafeJudge:
+                def filter(self, q, hs):
+                    return safe_cutoff(hs)
+
+            judge = _SafeJudge()
         hits = hybrid_search(settings, args.query, k=args.k, mode=args.mode,
-                             expand_turns=not args.no_expand, log=log)
+                             expand_turns=not args.no_expand,
+                             exclude_session=exclude, judge=judge, log=log)
         if args.json:
             print(json.dumps([{
                 "unit_id": h.unit_id, "source": h.source,

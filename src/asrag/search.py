@@ -1,12 +1,16 @@
-"""混合召回：向量 + trigram 全文(正文/标题) + 精确标识符 → RRF 融合 → 多样性选择 → 轮次展开。
+"""混合召回（P1 结构，参照 MemOS core/retrieval 机制分析）：
 
-设计依据（docs/recall-roadmap.md，参照 MemOS core/retrieval 机制分析）：
-- P0-1 标题通道：units_fts 含 title 列（标题权重 2.0），解"关键词只在标题"盲区；
-- P0-2 标识符通道：高熵串（≥12 字符含分隔/数字）精确 LIKE，命中固定强分；
-- P0-3 滑动窗口 + 噪音过滤：3 字滑窗（步长1）全词覆盖，纯噪音块剔除（MemOS CJK 噪音表思路）；
-- P0-4 多样性：同会话限席 + 简化 MMR（用已存向量算冗余，零额外推理）。
+候选级通道融合：
+    relevance = best_channel_score          # 各通道拉到同一 (0,1] 尺度取最好
+              + RRF_WEIGHT · Σ 1/(RRF_K+rank)   # 多通道一致命中的投票 lift
+    → 价值偏置（可选 ValueProvider，≤0.3 有界 + 30d 半衰期，P2-2 外置）
+    → 相对阈值 ×floor（多通道强信号可 bypass）
+    → 会话限席 + MMR（P0-4）
+    → 终审（可选 Judge，P2-1 外置；fail-closed 归调用方约定）
 
-溯源要求：查询文本、各路命中 id、融合结果 id、耗时全部入日志。
+通道：vec（余弦相似=1-距离）、fts（trigram 正文+标题，名次倒数）、
+ident（高熵串精确匹配，强证据恒 1.0）。
+溯源：查询、三路 id、旁路/过滤计数、耗时全部入日志。
 """
 from __future__ import annotations
 
@@ -15,6 +19,7 @@ import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Sequence
 
 import numpy as np
 
@@ -22,14 +27,21 @@ from .config import Settings
 from .embedder import Embedder, OnnxEmbedder
 from .ingest import open_index
 
-# trigram 分词器要求查询串 ≥3 字符；更短走 LIKE 兜底
+if TYPE_CHECKING:
+    from .ext import Judge, ValueProvider
+
 TRIGRAM_MIN_LEN = 3
 CHUNK_CAP = 16
 IDENT_CAP = 5
-# MemOS keyword.ts:36 同源噪音表：纯疑问/代词块匹配海量文档，只会灌噪声
+RRF_K = 60
+RRF_WEIGHT = 0.4
+THRESHOLD_FLOOR = 0.2      # MemOS 同源默认（ranker.ts:120）
+STRONG_BYPASS_SCORE = 0.35  # bypass 需 ≥2 通道且其中最好通道分达此线
+# MemOS keyword.ts:36 同源噪音表
 _CJK_NOISE = set("我你他她它的了呢吗么还记得是有想请问谁哪帮")
-# 高熵标识符：长度≥12 且含 数字/_/-/:/.  或 纯小写长串≥16（timeout_seconds 类）
 _IDENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_\-:.]{11,}")
+
+ChannelHits = list[tuple[int, float]]  # [(unit_id, score 越大越好)]
 
 
 @dataclass
@@ -47,17 +59,62 @@ class Hit:
     vec_rank: int | None = None
     fts_rank: int | None = None
     ident_rank: int | None = None
+    bypassed: bool = False
     turn_context: list[tuple[str, str]] = field(default_factory=list)
 
 
-# ── FTS schema：懒建 + 单列→双列迁移 + 存量回填 + 触发器同步 ────────────────
+# ── 候选级融合与闸门（纯函数，直接断言） ─────────────────────────────────
+
+def fuse_channels(channels: dict[str, ChannelHits]) -> dict[int, dict[str, tuple[int, float]]]:
+    """{channel: [(id,score)]} → {unit_id: {channel: (rank1起, score)}}"""
+    cand: dict[int, dict[str, tuple[int, float]]] = {}
+    for name, hits in channels.items():
+        for rank, (uid, score) in enumerate(hits, 1):
+            cand.setdefault(uid, {})[name] = (rank, score)
+    return cand
+
+
+def relevance_of(entry: dict[str, tuple[int, float]],
+                 *, rrf_weight: float = RRF_WEIGHT, rrf_k: int = RRF_K) -> float:
+    best = max(s for _, s in entry.values())
+    rrf = sum(1.0 / (rrf_k + rank) for rank, _ in entry.values())
+    return best + rrf_weight * rrf
+
+
+def threshold_filter(
+    rel: dict[int, float], cand: dict[int, dict[str, tuple[int, float]]],
+    *, floor: float = THRESHOLD_FLOOR, strong: float = STRONG_BYPASS_SCORE,
+) -> tuple[dict[int, float], set[int]]:
+    """相对阈值：rel < floor×top 剔除；≥2 通道且最好通道分 ≥ strong 可旁路
+    （防"纯关键词 rank-0 命中被 cosine 尺度绞杀"，MemOS ranker.ts:462 同源思想）。
+    返回 (存活, 旁路id集)。"""
+    if not rel:
+        return {}, set()
+    top = max(rel.values())
+    keep: dict[int, float] = {}
+    bypassed: set[int] = set()
+    for uid, r in rel.items():
+        entry = cand[uid]
+        best = max(s for _, s in entry.values())
+        if r >= floor * top:
+            keep[uid] = r
+        elif len(entry) >= 2 and best >= strong:
+            keep[uid] = r
+            bypassed.add(uid)
+    return keep, bypassed
+
+
+def rank_by_relevance(rel: dict[int, float]) -> list[tuple[int, float]]:
+    return sorted(rel.items(), key=lambda x: (-x[1], x[0]))
+
+
+# ── FTS schema（懒建/迁移/回填/触发器） ─────────────────────────────────
 
 def _fts_columns(conn: sqlite3.Connection) -> list[str]:
     return [r[1] for r in conn.execute("PRAGMA table_info(units_fts)")]
 
 
 def ensure_search_schema(conn: sqlite3.Connection, log: logging.Logger | None = None) -> None:
-    """建立/校验 trigram FTS（text+title 双列）与触发器，回填存量。幂等，含旧版迁移。"""
     log = log or logging.getLogger("asrag.search")
     has_fts = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='units_fts'"
@@ -76,8 +133,8 @@ def ensure_search_schema(conn: sqlite3.Connection, log: logging.Logger | None = 
             "CREATE VIRTUAL TABLE units_fts USING fts5("
             "text, title, tokenize='trigram')"
         )
-        # 本机 SQLite 3.53.1 的 FTS5 特殊 'delete' 命令不可用（实测必报
-        # SQL logic error）；普通 FTS5 表直接 DELETE rowid 即由 FTS5 自维护索引。
+        # 本机 SQLite 3.53.1 的 FTS5 特殊 'delete' 命令不可用；
+        # 普通 FTS5 表直接 DELETE rowid 由 FTS5 自维护索引（实测坑）。
         conn.executescript("""
             CREATE TRIGGER units_ai_fts AFTER INSERT ON units BEGIN
                 INSERT INTO units_fts(rowid, text, title)
@@ -99,8 +156,7 @@ def ensure_search_schema(conn: sqlite3.Connection, log: logging.Logger | None = 
     ).fetchall()
     if missing:
         conn.executemany(
-            "INSERT INTO units_fts(rowid, text, title) VALUES(?,?,?)", missing
-        )
+            "INSERT INTO units_fts(rowid, text, title) VALUES(?,?,?)", missing)
         conn.commit()
         log.info("units_fts backfilled rows=%d", len(missing))
     conn.commit()
@@ -112,8 +168,12 @@ def _fts_escape(term: str) -> str:
     return term.replace('"', '""')
 
 
+def _like_esc(q: str) -> str:
+    return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _query_chunks(query: str, cap: int = CHUNK_CAP) -> list[str]:
-    """3 字滑动窗口（步长 1），剔除全噪音块；返回去重有序列表。"""
+    """3 字滑动窗口（步长 1），全噪音块剔除、去重有序。"""
     out: list[str] = []
     seen: set[str] = set()
     for i in range(max(0, len(query) - TRIGRAM_MIN_LEN + 1)):
@@ -130,39 +190,50 @@ def _query_chunks(query: str, cap: int = CHUNK_CAP) -> list[str]:
 
 
 def extract_identifiers(query: str) -> list[str]:
-    """抽取高熵标识符（MemOS keyword.ts:29 思路）：含数字/分隔符的 ≥12 串，
-    或纯小写 ≥16 长串（retry_handler_v2_max、timeout_seconds）。"""
+    """高熵标识符：≥12 且含 数字/_-:. 分隔，或纯字母数字长串 ≥16。"""
     out: list[str] = []
     for m in _IDENT_RE.finditer(query):
         tok = m.group(0)
-        strong = re.search(r"[0-9_\-:.]", tok) or len(tok) >= 16
-        if strong and tok not in out:
-            out.append(tok)
+        if re.search(r"[0-9_\-:.]", tok) or len(tok) >= 16:
+            if tok not in out:
+                out.append(tok)
     return out[:IDENT_CAP]
 
 
-# ── 三路检索 ────────────────────────────────────────────────────────────
+# ── 三路通道（均支持 exclude_session） ─────────────────────────────────
 
-def vector_search(
-    conn: sqlite3.Connection, vec_table: str, qvec: np.ndarray, k: int
-) -> list[tuple[int, float]]:
-    """返回 [(unit_id, cosine_distance)]，按距离升序。"""
+def _excl_ids(conn: sqlite3.Connection, exclude: tuple[str, str] | None) -> set[int]:
+    if not exclude:
+        return set()
+    return {r[0] for r in conn.execute(
+        "SELECT id FROM units WHERE source=? AND conversation_id=?", exclude)}
+
+
+def vector_search(conn: sqlite3.Connection, vec_table: str, qvec: np.ndarray,
+                  k: int, *, exclude_ids: set[int] | None = None) -> ChannelHits:
+    """余弦相似 = 1-距离，裁剪到 (0,1]。exclude 通过超采样后滤除近似实现。"""
+    fetch = k * 3 if exclude_ids else k
     rows = conn.execute(
         f"SELECT rowid, distance FROM {vec_table}"
         " WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-        (qvec.astype(np.float32).tobytes(), k),
+        (qvec.astype(np.float32).tobytes(), fetch),
     ).fetchall()
-    return [(r[0], r[1]) for r in rows]
+    out: ChannelHits = []
+    for rid, dist in rows:
+        if exclude_ids and rid in exclude_ids:
+            continue
+        out.append((rid, max(1.0 - float(dist), 0.0)))
+        if len(out) >= k:
+            break
+    return out
 
 
-def fts_search(
-    conn: sqlite3.Connection, query: str, k: int
-) -> list[tuple[int, float]]:
-    """trigram 全文检索（正文+标题，标题权重 2.0）；<3 字符走 LIKE 兜底。
-    返回 [(unit_id, bm25)]（bm25 越小越相关）。"""
+def fts_search(conn: sqlite3.Connection, query: str, k: int,
+               *, exclude_ids: set[int] | None = None) -> ChannelHits:
     q = query.strip()
     if not q:
         return []
+    excl = exclude_ids or set()
     chunks = _query_chunks(q) if len(q) >= TRIGRAM_MIN_LEN else []
     if chunks:
         match = " OR ".join(f'"{_fts_escape(c)}"' for c in chunks)
@@ -170,28 +241,27 @@ def fts_search(
             "SELECT rowid, bm25(units_fts, 1.0, 2.0) FROM units_fts"
             " WHERE units_fts MATCH ?"
             " ORDER BY bm25(units_fts, 1.0, 2.0) LIMIT ?",
-            (match, k),
+            (match, k + len(excl)),
         ).fetchall()
+        scored = [(r, 1.0 / (i + 1)) for i, (r, _bm) in enumerate(rows)
+                  if r not in excl][:k]
     else:
+        like = f"%{_like_esc(q)}%"
         rows = conn.execute(
-            "SELECT u.id, 0 FROM units u"
-            " WHERE u.text LIKE ? ESCAPE '\\' OR IFNULL(u.title,'') LIKE ? ESCAPE '\\'"
+            "SELECT u.id FROM units u"
+            " WHERE (u.text LIKE ? ESCAPE '\\' OR IFNULL(u.title,'') LIKE ? ESCAPE '\\')"
             " ORDER BY u.id LIMIT ?",
-            ("%" + _like_esc(q) + "%", "%" + _like_esc(q) + "%", k),
+            (like, like, k + len(excl)),
         ).fetchall()
-    return [(r[0], r[1]) for r in rows]
+        scored = [(r[0], 1.0) for r in rows if r[0] not in excl][:k]
+    return scored
 
 
-def _like_esc(q: str) -> str:
-    return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
-def identifier_search(
-    conn: sqlite3.Connection, idents: list[str], k: int
-) -> list[int]:
-    """精确标识符通道：命中数降序、同数按 id 升序（确定性）。返回 unit_id 列表。"""
+def identifier_search(conn: sqlite3.Connection, idents: list[str], k: int,
+                      *, exclude_ids: set[int] | None = None) -> ChannelHits:
     if not idents:
         return []
+    excl = exclude_ids or set()
     counts: dict[int, int] = {}
     for ident in idents:
         like = f"%{_like_esc(ident)}%"
@@ -200,34 +270,19 @@ def identifier_search(
             " WHERE text LIKE ? ESCAPE '\\' OR IFNULL(title,'') LIKE ? ESCAPE '\\'",
             (like, like),
         ).fetchall():
-            counts[uid] = counts.get(uid, 0) + 1
-    return [i for i, _ in sorted(counts.items(), key=lambda x: (-x[1], x[0]))[:k]]
+            if uid not in excl:
+                counts[uid] = counts.get(uid, 0) + 1
+    ordered = sorted(counts.items(), key=lambda x: (-x[1], x[0]))[:k]
+    return [(uid, 1.0) for uid, _ in ordered]  # 精确匹配恒强证据
 
 
-def rrf_fuse(
-    ranked_lists: list[list[int]], *, k: int = 60
-) -> list[tuple[int, float]]:
-    """Reciprocal Rank Fusion：score = Σ 1/(k+rank)，rank 从 1 起。返回按分数降序。"""
-    scores: dict[int, float] = {}
-    for ranks in ranked_lists:
-        for i, unit_id in enumerate(ranks):
-            scores[unit_id] = scores.get(unit_id, 0.0) + 1.0 / (k + i + 1)
-    return sorted(scores.items(), key=lambda x: (-x[1], x[0]))
+# ── 多样性选择（P0-4） ─────────────────────────────────────────────────
 
-
-# ── 多样性选择（P0-4：同会话限席 + 简化 MMR，向量已 L2 归一） ───────────────
-
-def select_diverse(
-    fused: list[tuple[int, float]],
-    conv_of: dict[int, tuple[str, str]],
-    emb_of: dict[int, np.ndarray],
-    *,
-    k: int,
-    max_per_conversation: int = 2,
-    lam: float = 0.7,
-) -> list[tuple[int, float]]:
-    """从融合池选 k 个：贪心 MMR（λ·rel − (1−λ)·maxCos），同 (source,conv) 限席。
-    池空即返回不足额（无兜底注水）。"""
+def select_diverse(fused: list[tuple[int, float]],
+                   conv_of: dict[int, tuple[str, str]],
+                   emb_of: dict[int, np.ndarray], *,
+                   k: int, max_per_conversation: int = 2,
+                   lam: float = 0.7) -> list[tuple[int, float]]:
     if not fused:
         return []
     top_score = fused[0][1]
@@ -250,7 +305,7 @@ def select_diverse(
             if val > best_val:
                 best_i, best_val = i, val
         if best_i < 0:
-            break  # 剩余全部被限席
+            break
         uid, score = pool.pop(best_i)
         picked.append((uid, score))
         conv = conv_of.get(uid)
@@ -262,7 +317,7 @@ def select_diverse(
     return picked
 
 
-# ── 结果组装 ─────────────────────────────────────────────────────────────
+# ── 结果组装 ────────────────────────────────────────────────────────────
 
 def _fetch_units(conn: sqlite3.Connection, ids: list[int]) -> dict[int, sqlite3.Row]:
     if not ids:
@@ -270,23 +325,18 @@ def _fetch_units(conn: sqlite3.Connection, ids: list[int]) -> dict[int, sqlite3.
     marks = ",".join("?" * len(ids))
     rows = conn.execute(
         f"SELECT id, source, conversation_id, seq, role, turn_key, time, title, text"
-        f" FROM units WHERE id IN ({marks})", ids
-    )
+        f" FROM units WHERE id IN ({marks})", ids)
     return {r["id"]: r for r in rows}
 
 
-def expand_turn(
-    conn: sqlite3.Connection, source: str, conversation_id: str, turn_key: str | None
-) -> list[tuple[str, str]]:
-    """同轮上下文展开（(role, text) 按 seq 升序）。turn_key 空则不展开。"""
+def expand_turn(conn: sqlite3.Connection, source: str, conversation_id: str,
+                turn_key: str | None) -> list[tuple[str, str]]:
     if not turn_key:
         return []
     rows = conn.execute(
         "SELECT role, text FROM units"
-        " WHERE source=? AND conversation_id=? AND turn_key=?"
-        " ORDER BY seq",
-        (source, conversation_id, turn_key),
-    ).fetchall()
+        " WHERE source=? AND conversation_id=? AND turn_key=? ORDER BY seq",
+        (source, conversation_id, turn_key)).fetchall()
     return [(r["role"], r["text"]) for r in rows]
 
 
@@ -298,9 +348,14 @@ def hybrid_search(
     k: int = 10,
     candidate_k: int = 30,
     expand_turns: bool = True,
-    mode: str = "hybrid",           # hybrid | vector | fts
+    mode: str = "hybrid",            # hybrid | vector | fts
     diversity: bool = True,
     max_per_conversation: int = 2,
+    exclude_session: tuple[str, str] | None = None,   # P1-3 (source, conv_id)
+    value_provider: "ValueProvider | None" = None,    # P2-2 读侧价值 join
+    include_low_value: bool = False,                  # 复盘模式放开 value<=0
+    judge: "Judge | None" = None,                     # P2-1 终审
+    threshold_floor: float = THRESHOLD_FLOOR,
     log: logging.Logger | None = None,
 ) -> list[Hit]:
     log = log or logging.getLogger("asrag.search")
@@ -311,65 +366,92 @@ def hybrid_search(
     embedder = embedder or OnnxEmbedder(spec, log=log)
     try:
         ensure_search_schema(conn, log=log)
-        vec_ids: list[int] = []
-        fts_ids: list[int] = []
+        excl = _excl_ids(conn, exclude_session)
         idents = extract_identifiers(query) if mode == "hybrid" else []
-        ident_ids = identifier_search(conn, idents, candidate_k) if mode == "hybrid" else []
+
+        channels: dict[str, ChannelHits] = {}
         if mode in ("hybrid", "vector"):
             qvec = embedder.encode_query(query)
-            vec_ids = [i for i, _ in vector_search(conn, spec.vec_table, qvec, candidate_k)]
+            channels["vec"] = vector_search(conn, spec.vec_table, qvec,
+                                            candidate_k, exclude_ids=excl)
         if mode in ("hybrid", "fts"):
-            fts_ids = [i for i, _ in fts_search(conn, query, candidate_k)]
+            channels["fts"] = fts_search(conn, query, candidate_k, exclude_ids=excl)
+        if mode == "hybrid" and idents:
+            channels["ident"] = identifier_search(conn, idents, candidate_k,
+                                                  exclude_ids=excl)
 
-        if mode == "hybrid":
-            fused = rrf_fuse([lst for lst in (vec_ids, fts_ids, ident_ids) if lst])
+        cand = fuse_channels(channels)
+        rel = {uid: relevance_of(e) for uid, e in cand.items()}
+
+        dropped_low: list[int] = []
+        if value_provider is not None and rel:
+            from .ext import apply_value_boost
+
+            meta = {uid: (m["time"],) for uid, m in
+                    _fetch_units(conn, list(rel)).items()}
+            values = value_provider.values(list(rel))
+            rel, dropped_low = apply_value_boost(
+                rel, meta, values, include_low_value=include_low_value)
+
+        if mode == "hybrid" and rel:
+            rel, bypassed = threshold_filter(rel, cand, floor=threshold_floor)
         else:
-            fused = [(i, 1.0) for i in (vec_ids if mode == "vector" else fts_ids)]
+            bypassed = set()
 
-        if diversity and mode == "hybrid":
-            pool = fused[: max(k * 4, k)]
+        ranked = rank_by_relevance(rel)
+        if diversity:
+            pool = ranked[: max(k * 4, k)]
             metas = _fetch_units(conn, [i for i, _ in pool])
-            conv_of = {i: (m["source"], m["conversation_id"]) for i, m in metas.items()}
+            conv_of = {i: (m["source"], m["conversation_id"])
+                       for i, m in metas.items()}
             emb_of: dict[int, np.ndarray] = {}
             if pool:
                 marks = ",".join("?" * len(pool))
                 for rid, blob in conn.execute(
                     f"SELECT rowid, embedding FROM {spec.vec_table}"
-                    f" WHERE rowid IN ({marks})", [i for i, _ in pool]
-                ):
+                    f" WHERE rowid IN ({marks})", [i for i, _ in pool]):
                     emb_of[rid] = np.frombuffer(blob, dtype=np.float32)
-            top = select_diverse(fused, conv_of, emb_of,
+            top = select_diverse(ranked, conv_of, emb_of,
                                  k=k, max_per_conversation=max_per_conversation)
         else:
-            top = fused[:k]
+            top = ranked[:k]
 
         by_id = _fetch_units(conn, [i for i, _ in top])
-        vr = {i: r + 1 for r, i in enumerate(vec_ids)}
-        fr = {i: r + 1 for r, i in enumerate(fts_ids)}
-        ir = {i: r + 1 for r, i in enumerate(ident_ids)}
+        first_rank = {ch: {uid: i for i, (uid, _) in enumerate(hits, 1)}
+                      for ch, hits in channels.items()}
         hits: list[Hit] = []
         for unit_id, score in top:
             r = by_id.get(unit_id)
             if r is None:
                 continue
+            entry = cand.get(unit_id, {})
             hit = Hit(
                 unit_id=unit_id, source=r["source"],
                 conversation_id=r["conversation_id"], seq=r["seq"],
                 role=r["role"], turn_key=r["turn_key"], time=r["time"],
                 title=r["title"], text=r["text"], score=score,
-                vec_rank=vr.get(unit_id), fts_rank=fr.get(unit_id),
-                ident_rank=ir.get(unit_id),
+                vec_rank=entry.get("vec", (None,))[0],
+                fts_rank=entry.get("fts", (None,))[0],
+                ident_rank=entry.get("ident", (None,))[0],
+                bypassed=unit_id in bypassed,
             )
             if expand_turns:
                 hit.turn_context = expand_turn(
                     conn, hit.source, hit.conversation_id, hit.turn_key)
             hits.append(hit)
+
+        if judge is not None:
+            before = len(hits)
+            hits = judge.filter(query, hits)
+            log.info("judge applied in=%d out=%d", before, len(hits))
+
         log.info(
-            "search q=%r mode=%s k=%d idents=%s vec_ids=%s fts_ids=%s ident_ids=%s"
-            " fused_ids=%s cost_ms=%d",
-            query, mode, k, idents, vec_ids[:15], fts_ids[:15], ident_ids[:10],
-            [i for i, _ in top], int((time.perf_counter() - t0) * 1000),
-        )
+            "search q=%r mode=%s k=%d idents=%s vec_n=%d fts_n=%d ident_n=%d"
+            " dropped_low=%d bypassed=%d excl=%d fused_ids=%s cost_ms=%d",
+            query, mode, k, idents, len(channels.get("vec", [])),
+            len(channels.get("fts", [])), len(channels.get("ident", [])),
+            len(dropped_low), len(bypassed), len(excl),
+            [i for i, _ in top], int((time.perf_counter() - t0) * 1000))
         return hits
     finally:
         conn.close()

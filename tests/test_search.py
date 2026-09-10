@@ -14,10 +14,13 @@ from asrag.search import (
     expand_turn,
     extract_identifiers,
     fts_search,
+    fuse_channels,
     hybrid_search,
     identifier_search,
-    rrf_fuse,
+    rank_by_relevance,
+    relevance_of,
     select_diverse,
+    threshold_filter,
     vector_search,
 )
 
@@ -151,8 +154,10 @@ def test_identifier_channel_hits_exact(rag_db):
         idents = extract_identifiers("retry_handler_v2_max 是什么东西")
         hits = identifier_search(conn, idents, 10)
         assert hits, "标识符通道必须命中"
+        uid, score = hits[0]
+        assert score == 1.0, "精确匹配恒强证据"
         text = conn.execute(
-            "SELECT text FROM units WHERE id=?", (hits[0],)).fetchone()[0]
+            "SELECT text FROM units WHERE id=?", (uid,)).fetchone()[0]
         assert "retry_handler_v2_max" in text
     finally:
         conn.close()
@@ -204,26 +209,53 @@ def test_hybrid_diversity_cap_real(rag_db, embedder):
     assert cc.get("conv-b", 0) <= 2
 
 
-# ── RRF 纯函数 ─────────────────────────────────────────────────────────
+# ── P1-1 候选级通道纯函数 ──────────────────────────────────────────────
 
-def test_rrf_scores_and_order():
-    fused = rrf_fuse([[10, 20, 30], [20, 10]], k=60)
-    ids = [i for i, _ in fused]
-    scores = dict(fused)
-    assert ids[0] == 20 or ids[0] == 10  # 两路共有的高分
-    s20 = 1 / (60 + 2) + 1 / (60 + 1)
-    assert scores[20] == pytest.approx(s20)
-    assert scores[30] == pytest.approx(1 / 63)
-    # 只有单路命中的必须排在双路命中之后
-    assert ids[:2] == sorted(ids[:2], key=lambda x: -scores[x])
+def test_fuse_and_relevance_best_channel_plus_rrf_lift():
+    cand = fuse_channels({
+        "vec": [(1, 0.60), (2, 0.55)],
+        "fts": [(2, 1.0), (3, 0.5)],
+        "ident": [(2, 1.0)],
+    })
+    assert cand[2] == {"vec": (2, 0.55), "fts": (1, 1.0), "ident": (1, 1.0)}
+    r2 = relevance_of(cand[2])
+    # best=1.0 + 0.4·(1/62 + 1/61 + 1/61)
+    assert r2 == pytest.approx(1.0 + 0.4 * (1 / 62 + 1 / 61 + 1 / 61))
+    r1 = relevance_of(cand[1])
+    assert r1 == pytest.approx(0.60 + 0.4 * (1 / 61))
+    assert r2 > r1, "三通道一致命中必须明显 lift"
+    # 关键词 rank-0（1.0）与 cosine 同尺度起跑线
+    assert r1 < relevance_of({"fts": (1, 1.0)})
 
 
-def test_rrf_deterministic_tiebreak():
-    a = rrf_fuse([[1, 2], [2, 1]])
-    b = rrf_fuse([[1, 2], [2, 1]])
-    assert a == b
-    # 平分则按 unit_id 升序（tie-break 稳定，检索可回放）
-    assert [i for i, _ in a] == [1, 2]
+def test_threshold_floor_with_multichannel_bypass():
+    cand = {
+        1: {"vec": (1, 0.62), "fts": (1, 1.0)},   # 强双通道（top）
+        2: {"vec": (7, 0.05)},                    # 弱单通道 → 剔除（<0.2×top）
+        3: {"vec": (20, 0.10), "ident": (1, 1.0)},  # ident 强证据自保
+    }
+    rel = {i: relevance_of(e) for i, e in cand.items()}
+    assert 0.2 * max(rel.values()) > rel[2], "前提：2 确实低于阈值线"
+    keep, bypassed = threshold_filter(rel, cand, floor=0.2, strong=0.35)
+    assert 1 in keep and 2 not in keep and 3 in keep
+
+    # bypass 机制本体：人为拉高 floor 使"弱但多通道一致"的候选落入线下
+    cand2 = {
+        1: {"vec": (1, 0.95), "fts": (1, 1.0)},       # top ≈ 1.013
+        9: {"vec": (20, 0.40), "fts": (9, 0.10)},     # rel≈0.413 < 0.8×top，但双通道且 best≥0.35
+        8: {"vec": (21, 0.30)},                        # 双通道不满足 → 仍被剔
+    }
+    rel2 = {i: relevance_of(e) for i, e in cand2.items()}
+    keep2, byp2 = threshold_filter(rel2, cand2, floor=0.8, strong=0.35)
+    assert 9 in keep2 and 9 in byp2, "多通道强信号必须旁路阈值"
+    assert 8 not in keep2
+    ordered = rank_by_relevance(rel)
+    assert [i for i, _ in ordered] == [1, 3, 2], "按 rel 降序 + id 升序破平分"
+
+
+def test_threshold_rank_deterministic():
+    a = [(1, 0.5), (2, 0.5)]
+    assert rank_by_relevance({1: 0.5, 2: 0.5}) == a, "平分按 id 升序，可回放"
 
 
 # ── 端到端 ─────────────────────────────────────────────────────────────
@@ -235,7 +267,24 @@ def test_hybrid_end_to_end(rag_db, embedder):
     top = hits[0]
     joined = " ".join(h.text for h in hits[:3])
     assert ("批处理" in joined) or ("括号" in joined)
-    assert 0 < top.score <= (1 / 61 + 1 / 61)  # 双路 rank1 的最高 RRF 分
+    # relevance 尺度：best-channel ≤1.0 + rrf lift ≤0.4·3/61
+    assert 0 < top.score <= 1.0 + 0.4 * 3 / 61 + 1e-6
+
+
+def test_exclude_session(rag_db, embedder):
+    """P1-3：接线必备——当前会话（防重复注入自己）从三路全部消失。"""
+    q = "批处理括号报错怎么解决"
+    baseline = hybrid_search(rag_db, q, embedder=embedder, k=7,
+                             mode="hybrid", log=_qlog)
+    assert any(h.source == "zcode" and h.conversation_id == "conv-a"
+               for h in baseline), "对照：不排除时应命中 conv-a"
+    hits = hybrid_search(rag_db, q, embedder=embedder, k=7, mode="hybrid",
+                         exclude_session=("zcode", "conv-a"), log=_qlog)
+    assert not any(h.source == "zcode" and h.conversation_id == "conv-a"
+                   for h in hits), "被排除会话不得出现在任何通道"
+    hits_v = hybrid_search(rag_db, q, embedder=embedder, k=7, mode="vector",
+                           exclude_session=("zcode", "conv-a"), log=_qlog)
+    assert not any(h.conversation_id == "conv-a" for h in hits_v)
 
 
 def test_hybrid_modes(rag_db, embedder):
@@ -268,7 +317,7 @@ def test_search_logs_traceability(rag_db, embedder, tmp_log_dir):
     for h in log.handlers:
         h.flush()
     content = (tmp_log_dir / "asrag-search.log").read_text(encoding="utf-8")
-    assert "search q=" in content and "vec_ids=" in content
+    assert "search q=" in content and "vec_n=" in content
     assert "fused_ids=" in content
     if hits:
         assert str(hits[0].unit_id) in content

@@ -29,7 +29,9 @@ _null.addHandler(logging.NullHandler())
 
 @pytest.fixture(scope="module")
 def embedder(project_settings):
-    return OnnxEmbedder(project_settings.active_spec, log=_null)
+    """Golden 回归按模型固定：本文件断言的是 bge-small-zh-v1.5 的向量指纹，
+    不随 active 切换漂移（新模型上线时为其另建 golden 用例，而不是改动这里的）。"""
+    return OnnxEmbedder(project_settings.model("bge-small-zh-v1.5"), log=_null)
 
 
 def test_golden_vector_regression(embedder):

@@ -123,11 +123,13 @@ def test_bitwise_determinism_same_batching(
     a, b = tmp_path / "a.db", tmp_path / "b.db"
     _ingest(project_settings, embedder, fixture_source_db, a)
     _ingest(project_settings, embedder, fixture_source_db, b)
-    # 读 vec0 虚表必须走 open_index（连接需加载 sqlite-vec 扩展）
+    # 读 vec0 虚表必须走 open_index（连接需加载 sqlite-vec 扩展）；
+    # 表名从 active spec 派生——测试自身也遵守"禁止硬编码模型 id"规约
+    vt = project_settings.active_spec.vec_table
     ca = open_index(a).execute(
-        "SELECT embedding FROM vec_bge_small_zh_v1_5 ORDER BY rowid").fetchall()
+        f"SELECT embedding FROM {vt} ORDER BY rowid").fetchall()
     cb = open_index(b).execute(
-        "SELECT embedding FROM vec_bge_small_zh_v1_5 ORDER BY rowid").fetchall()
+        f"SELECT embedding FROM {vt} ORDER BY rowid").fetchall()
     assert ca and ca == cb, "同批次同序必须逐字节可复现"
 
 
@@ -152,8 +154,9 @@ def test_vec_orphan_gc_after_row_deletion(
     assert st["vec_total"] == ELIGIBLE_COUNT
     assert st["vec_coverage"] == 1.0
     conn = open_index(idx)
+    vt = project_settings.active_spec.vec_table
     assert not conn.execute(
-        "SELECT 1 FROM vec_bge_small_zh_v1_5 WHERE rowid=?", (victim,)
+        f"SELECT 1 FROM {vt} WHERE rowid=?", (victim,)
     ).fetchone(), "旧孤儿行必须已删除"
     conn.close()
 
