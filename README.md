@@ -321,6 +321,52 @@ score（增量优先：队列非空只评队列·定点读引擎库，队列空�
 `ClearData.bat Y` 一键清空应用数据重新开始（不动引擎与 Agent 源数据）；
 旧版数据在 `~/.agentmemhub`，整体复制进 `database/` 即完成迁移。
 
+## Agent 协作配置（装完必做）
+
+记忆能力要真正用起来，需要三步配置。**只配 MCP 不配另两项，记忆不会自动沉淀**——
+Agent 不会自觉保存，必须靠规则约束。
+
+### 步骤 1：注册 MCP server（能力）
+
+见下节「MCP 记忆网关 → 注册配置」。配好后 Agent 才能调用 `memory_save` / `memory_search`。
+
+### 步骤 2：安装 save-memory Skill（流程）
+
+```bash
+git clone https://github.com/MerlinShieh/Agent-skill-save-memory.git   ~/.zcode/skills/save-memory          # ZCode；其他 Harness 放对应 skills 目录
+```
+
+Skill 定义**何时保存、按什么顺序保存+评分**（写后即评）。它不含存储实现，
+强绑定本项目的 MCP 工具，无降级路径。
+
+### 步骤 3：把记忆纪律写进 AGENTS.md（触发保障）⚠️ 最容易漏
+
+Skill 的触发依赖模型自觉，长对话/高负载下**会漏触发**。必须把下面这条硬规则
+加入**当前项目的 `AGENTS.md`** 或 **Harness 的全局指令文件**
+（如 `~/.zcode/AGENTS.md`、`~/.config/opencode/AGENTS.md`、`~/.qwen/QWEN.md`）：
+
+<!-- 下面这段复制到你的 AGENTS.md（标题层级按需调整） -->
+    ## 记忆保存纪律（硬性规则）
+
+    长期记忆存在本地记忆索引（AgentMemHub 内置引擎 agentmemhub.rag），
+    通过 agentmemhub MCP 工具读写。任务收尾时自查：本次是否产出了可复用结论
+    （问题解决步骤 / 踩坑解法 / 架构决策 / 关键配置变更）？命中必须：
+
+    1. memory_stats 探活——不可用时告知用户建立索引
+       （AgentMemHub 项目内 uv run python -m agentmemhub sync；内置引擎无守护进程，
+       没有"启动引擎"这个动作），不硬写；
+    2. memory_save 写入自包含结论（背景一句话 + 结论/做法）；
+    3. 对刚写入的 id 立即 memory_score（多数应 positive）。
+
+    ⚠️ 只写 Agent 自己的本地会话记忆不算完成——必须落到记忆索引。
+    需要历史经验时主动 memory_search，与保存流程互相独立。
+
+> **本项目仓库内已含 `AGENTS.md`**（见根目录），可直接参考；跨项目使用时把上面这段
+> 复制到你自己的项目或全局指令文件。
+>
+> **为什么必须做这步**：没有这条规则，Skill 只是"能力"而非"义务"，
+> 会在最需要它的时候被遗忘——这是实践中反复验证的结论。
+
 ## MCP 记忆网关（实时记忆读写）
 
 把内置记忆引擎（`agentmemhub.rag`）的语义检索/写入包装成 **MCP server**，挂在 ZCode / OpenCode /
@@ -331,19 +377,19 @@ Claude Code 等支持 MCP 的 Agent harness 上——模型在会话进行中即
 
 | 工具 | 说明 |
 |---|---|
-| `memory_search(query, topK)` | 语义检索历史记忆（转发引擎 `/api/v1/memory/search`），返回命中条目 + 注入上下文 |
+| `memory_search(query, topK)` | 语义检索历史记忆（三路混合召回），返回命中条目 + 注入上下文 |
 | `memory_recent(limit)` | 最近写入的记忆时间线，快速了解近期积累 |
-| `memory_stats()` | 引擎在线状态 / 记忆总量 / 语义检索与 LLM 评分可用性 / 记忆模式 |
+| `memory_stats()` | 索引就绪状态 / 记忆总量 / 嵌入模型与 LLM 评分可用性 |
 | `memory_save(content)` | 写一条记忆（即时入库并补向量，写后验证 imported，失败明确报错不伪装）|
-| `memory_score(trace_id, polarity)` | 对刚写入/任意一条记忆写后即评（feedback → 引擎即时重算 value/priority，检索排序生效）|
+| `memory_score(trace_id, polarity)` | 对刚写入/任意一条记忆写后即评（反馈 → 引擎即时重算 value/priority，检索排序生效）|
 
 ```bash
-# 0. 先常驻记忆引擎（网关绝不代管其生命周期）：
-python -m agentmemhub memos-daemon start
+# 0. 确保记忆索引已建立（v2.0 起引擎内置，无需启动任何服务）：
+uv run python -m agentmemhub sync
 
 # 用法一：本地个人（stdio，Agent 拉起子进程）——见下方「注册配置」
 # 用法二：团队共享（Streamable HTTP，一台机器常驻网关）：
-python -m agentmemhub mcp --http --bind 0.0.0.0 --port 9100
+uv run python -m agentmemhub mcp --http --bind 0.0.0.0 --port 9100
 
 # 验证：在 Agent 会话里调用 memory_stats / memory_search
 ```
