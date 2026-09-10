@@ -163,6 +163,18 @@ def _iter_candidates(
     fetched = 0
     cursor = after
     placeholders = ",".join("?" * len(roles))
+    # R6 排除过滤：源库有 memory_exclusions 表时生效（AgentMemHub 采集库恒有；
+    # 外部/测试源库可能没有——此时视为无排除，保持既有行为）
+    has_excl = src.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table'"
+        " AND name='memory_exclusions'").fetchone() is not None
+    exclusion_clause = """
+              AND NOT EXISTS (
+                    SELECT 1 FROM memory_exclusions x
+                    WHERE x.source = e.source
+                      AND x.conversation_id = e.conversation_id
+                      AND (x.turn_key = '' OR x.turn_key = IFNULL(e.turn_key,''))
+              )""" if has_excl else ""
     while limit is None or fetched < limit:
         want = batch_size
         if limit is not None:
@@ -176,6 +188,7 @@ def _iter_candidates(
             WHERE e.role IN ({placeholders})
               AND e.content IS NOT NULL AND TRIM(e.content) <> ''
               AND IFNULL(e.is_system, 0) = 0
+              {exclusion_clause}
         """
         args: list = list(roles)
         if cursor is not None:
@@ -420,6 +433,30 @@ def delete_units_for_conversation(conn: sqlite3.Connection,
         conn.execute(
             "DELETE FROM units WHERE source=? AND conversation_id=?",
             (source, conversation_id))
+        for t in vec_tables:
+            conn.executemany(f"DELETE FROM {t} WHERE rowid = ?",
+                             [(i,) for i in ids])
+    return len(ids)
+
+
+def delete_units_for_turn(conn: sqlite3.Connection, source: str,
+                          conversation_id: str, turn_key: str) -> int:
+    """级联删除某会话某一轮的派生数据（R6 轮次级排除）。
+
+    与 delete_units_for_conversation 同机制：units 删除经 FTS 触发器自动清
+    units_fts；vec0 无触发器须逐表显式删。返回删除的单元数。
+    """
+    ids = [r[0] for r in conn.execute(
+        "SELECT id FROM units WHERE source=? AND conversation_id=? AND turn_key=?",
+        (source, conversation_id, turn_key))]
+    if not ids:
+        return 0
+    vec_tables = [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'vec_%'")]
+    with conn:
+        conn.execute(
+            "DELETE FROM units WHERE source=? AND conversation_id=? AND turn_key=?",
+            (source, conversation_id, turn_key))
         for t in vec_tables:
             conn.executemany(f"DELETE FROM {t} WHERE rowid = ?",
                              [(i,) for i in ids])

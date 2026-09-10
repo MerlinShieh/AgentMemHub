@@ -271,6 +271,76 @@ class Store:
         return cur.rowcount > 0
 
     # ------------------------------------------------------------------
+    # 记忆排除（R6）：控制哪些会话/轮次不写入记忆索引
+    # 意图真相源——独立表，不随 replace_source/整源重建被清空
+    # ------------------------------------------------------------------
+
+    def add_exclusion(self, source: str, conversation_id: str,
+                      turn_key: str = "", note: str = "") -> bool:
+        """落排除标记。turn_key='' 表示整会话。返回是否新建（False=已存在）。"""
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO memory_exclusions"
+                "(source, conversation_id, turn_key, created_at, note)"
+                " VALUES(?,?,?,?,?)",
+                (source, conversation_id, turn_key or "", int(time.time()),
+                 note or None))
+        return cur.rowcount > 0
+
+    def remove_exclusion(self, source: str, conversation_id: str,
+                         turn_key: str = "") -> bool:
+        """取消排除标记。返回是否有行被删。"""
+        with self.conn:
+            cur = self.conn.execute(
+                "DELETE FROM memory_exclusions WHERE source=? AND conversation_id=?"
+                " AND turn_key=?", (source, conversation_id, turn_key or ""))
+        return cur.rowcount > 0
+
+    def list_exclusions(self, source: Optional[str] = None,
+                        conversation_id: Optional[str] = None
+                        ) -> list[sqlite3.Row]:
+        """排除清单（不传参 = 全库；供面板渲染勾选态与统计）。"""
+        q = ("SELECT source, conversation_id, turn_key, created_at, note"
+             " FROM memory_exclusions")
+        where, params = [], []
+        if source:
+            where.append("source=?")
+            params.append(source)
+        if conversation_id:
+            where.append("conversation_id=?")
+            params.append(conversation_id)
+        if where:
+            q += " WHERE " + " AND ".join(where)
+        q += " ORDER BY source, conversation_id, turn_key"
+        return self.conn.execute(q, params).fetchall()
+
+    def exclusion_state(self, source: str, conversation_id: str
+                        ) -> tuple[bool, set[str]]:
+        """返回 (整会话是否排除, 被排除的 turn_key 集合)。"""
+        rows = self.list_exclusions(source, conversation_id)
+        whole = any(not r["turn_key"] for r in rows)
+        turns = {r["turn_key"] for r in rows if r["turn_key"]}
+        return whole, turns
+
+    def peers_with_turn(self, source: str, conversation_id: str,
+                        turn_key: str) -> list[tuple[str, str]]:
+        """找出同源同会话之外、含该 turn_key 的其他 (source, conversation_id) 副本。
+
+        现实场景：同一段对话可能被多个 Agent 各自采集（如 opencode 原生
+        与 zcode 的导入副本），turn_key 相同但 source 不同。轮次排除若只作用
+        于当前会话，副本仍会被召回——面板据此提示「同步排除 N 个副本」。
+        """
+        if not turn_key:
+            return []
+        return [
+            (r["source"], r["conversation_id"])
+            for r in self.conn.execute(
+                "SELECT DISTINCT source, conversation_id FROM events"
+                " WHERE turn_key=? AND NOT (source=? AND conversation_id=?)",
+                (turn_key, source, conversation_id))
+        ]
+
+    # ------------------------------------------------------------------
     # 记忆清洗：系统注入事件（is_system）统计/删除
     # ------------------------------------------------------------------
 
