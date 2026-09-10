@@ -269,3 +269,56 @@ def test_ingest_works_without_exclusion_table(project_settings, embedder,
     idx = tmp_path / "rag.db"
     s = _ingest(project_settings, embedder, fixture_source_db, idx)
     assert s["embedded"] > 0
+
+
+# ── 层级语义（2026-09-10 用户反馈修复） ─────────────────────────────────
+
+def test_whole_exclusion_overrides_turn_exclusions(tmp_path):
+    """整会话排除是父级：必须覆盖并清除所有轮次排除。
+
+    否则残留的轮次标记会在将来取消整会话排除时继续暗中生效
+    （用户以为已全部恢复，实际仍被局部排除）。
+    """
+    st = Store(tmp_path / "hub.db")
+    try:
+        st.add_exclusion("z", "c1", "tkA")
+        st.add_exclusion("z", "c1", "tkB")
+        whole, turns = st.exclusion_state("z", "c1")
+        assert whole is False and turns == {"tkA", "tkB"}
+
+        st.add_exclusion("z", "c1")            # 父级排除
+        whole, turns = st.exclusion_state("z", "c1")
+        assert whole is True, "整会话应被排除"
+        assert turns == set(), f"子级轮次标记必须被清除，实际残留 {turns}"
+    finally:
+        st.close()
+
+
+def test_remove_whole_restores_everything(tmp_path):
+    """取消整会话排除 = 彻底恢复：同时清除所有轮次排除，不留残留。"""
+    st = Store(tmp_path / "hub.db")
+    try:
+        st.add_exclusion("z", "c1", "tkA")
+        st.add_exclusion("z", "c1")            # 父级（会清 tkA）
+        st.add_exclusion("z", "c1", "tkC")     # 父级之后又加的子级
+        st.remove_exclusion("z", "c1")         # 取消父级
+        whole, turns = st.exclusion_state("z", "c1")
+        assert whole is False and turns == set(), (
+            f"应彻底恢复，实际 whole={whole} turns={turns}")
+
+        # 全库无残留
+        assert st.list_exclusions("z", "c1") == []
+    finally:
+        st.close()
+
+
+def test_turn_exclusion_independent_of_parent_absent(tmp_path):
+    """没有父级时，轮次排除各自独立（不影响其他轮）。"""
+    st = Store(tmp_path / "hub.db")
+    try:
+        st.add_exclusion("z", "c1", "tkA")
+        st.remove_exclusion("z", "c1", "tkA")
+        whole, turns = st.exclusion_state("z", "c1")
+        assert whole is False and turns == set()
+    finally:
+        st.close()

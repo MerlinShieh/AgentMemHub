@@ -277,8 +277,19 @@ class Store:
 
     def add_exclusion(self, source: str, conversation_id: str,
                       turn_key: str = "", note: str = "") -> bool:
-        """落排除标记。turn_key='' 表示整会话。返回是否新建（False=已存在）。"""
+        """落排除标记。turn_key='' 表示整会话。返回是否新建（False=已存在）。
+
+        层级语义（2026-09-10 修复）：**整会话排除是父级，覆盖并清除所有轮次排除**。
+        否则残留的轮次标记会在将来取消整会话排除时继续暗中生效
+        （用户以为已全部恢复，实际仍被局部排除）。
+        """
         with self.conn:
+            if not turn_key:
+                # 父级排除：清掉该会话所有子级（轮次）标记
+                self.conn.execute(
+                    "DELETE FROM memory_exclusions WHERE source=?"
+                    " AND conversation_id=? AND turn_key<>''",
+                    (source, conversation_id))
             cur = self.conn.execute(
                 "INSERT OR IGNORE INTO memory_exclusions"
                 "(source, conversation_id, turn_key, created_at, note)"
@@ -289,11 +300,21 @@ class Store:
 
     def remove_exclusion(self, source: str, conversation_id: str,
                          turn_key: str = "") -> bool:
-        """取消排除标记。返回是否有行被删。"""
+        """取消排除标记。返回是否有行被删。
+
+        层级语义：取消整会话排除时，**同时清除该会话所有轮次排除**——
+        即"整个会话恢复写入"意味着彻底恢复，不留任何残留子级标记。
+        """
         with self.conn:
-            cur = self.conn.execute(
-                "DELETE FROM memory_exclusions WHERE source=? AND conversation_id=?"
-                " AND turn_key=?", (source, conversation_id, turn_key or ""))
+            if not turn_key:
+                cur = self.conn.execute(
+                    "DELETE FROM memory_exclusions WHERE source=?"
+                    " AND conversation_id=?", (source, conversation_id))
+            else:
+                cur = self.conn.execute(
+                    "DELETE FROM memory_exclusions WHERE source=?"
+                    " AND conversation_id=? AND turn_key=?",
+                    (source, conversation_id, turn_key))
         return cur.rowcount > 0
 
     def list_exclusions(self, source: Optional[str] = None,

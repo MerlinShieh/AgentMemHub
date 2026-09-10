@@ -232,3 +232,19 @@ def test_search_hits_carry_location(client, monkeypatch):
     h = r.json()["hits"][0]
     assert h["source"] == "zcode" and h["conversationId"] == "sess_x"
     assert h["turnKey"] == "tk1" and h["title"] == "标题"
+
+
+def test_api_whole_exclusion_overrides_turns(client, store):
+    """层级语义（用户反馈修复）：整会话排除必须清除其下所有轮次排除。"""
+    base = "/api/conversations/zcode/sess_x/memory-exclusion"
+    client.post(base, json={"turn_key": "tkA"})
+    client.post(base, json={"turn_key": "tkB"})
+    assert set(client.get(base).json()["turns"]) == {"tkA", "tkB"}
+
+    client.post(base, json={})                 # 整会话（父级）
+    d = client.get(base).json()
+    assert d["whole"] is True and d["turns"] == [], "父级必须清除子级"
+
+    client.delete(base)                        # 取消父级
+    d = client.get(base).json()
+    assert d["whole"] is False and d["turns"] == [], "取消父级应彻底恢复"
