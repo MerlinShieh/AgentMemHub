@@ -44,6 +44,28 @@ CREATE TABLE IF NOT EXISTS ingest_meta(
 );
 """
 
+# R3：MemOS trace id 兼容别名（legacy_id）与桥接元表（增量补列，幂等）
+_SCHEMA_BRIDGE = """
+CREATE TABLE IF NOT EXISTS conv_scores(
+    source TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    r_task REAL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (source, conversation_id)
+);
+"""
+
+
+def ensure_bridge_schema(conn: sqlite3.Connection) -> None:
+    """units.legacy_id 幂等补列 + 桥接元表（AgentMemHub rag_bridge 启动时调用）。"""
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(units)")]
+    if "legacy_id" not in cols:
+        conn.execute("ALTER TABLE units ADD COLUMN legacy_id TEXT")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_units_legacy"
+                     " ON units(legacy_id) WHERE legacy_id IS NOT NULL")
+    conn.executescript(_SCHEMA_BRIDGE)
+    conn.commit()
+
 
 def open_index(path: Path | str) -> sqlite3.Connection:
     """打开/创建索引库并加载 sqlite-vec 扩展。"""

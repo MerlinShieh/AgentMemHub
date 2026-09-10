@@ -20,9 +20,16 @@ import json
 import os
 import subprocess
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional
+
+
+def _backend_is_rag() -> bool:
+    from agentmemhub import config
+    # getattr 兜底：替身 config 缺该属性时按 memos 语义（属性不存在=早于本特性的桩）
+    return getattr(config.config(), "memory_backend", "memos") == "rag"
 
 #: 常见插件目录探测列表（相对 HOME，均为惯例布局而非个人绝对路径）
 _PLUGIN_DIR_CANDIDATES = (
@@ -190,13 +197,52 @@ def _login(base: Optional[str] = None) -> bool:
     return bool(_COOKIE_CACHE)
 
 
+def _rag_dispatch(method: str, path: str, body: Optional[dict]) -> dict:
+    """backend=rag：把 MemOS 端点语义派发到进程内 rag_bridge（R3 唯一接缝）。
+
+    返回与旧 HTTP 端点同形状的 dict；调用方（mcp/web/cli）零改动。
+    未知路径抛异常（配置/版本漂移早暴露），不回退 HTTP。
+    """
+    from agentmemhub import rag_bridge
+    p = path.split("?", 1)
+    route, qs = p[0], (p[1] if len(p) > 1 else "")
+    body = body or {}
+    if route == "/api/v1/memory/search" and method == "POST":
+        return rag_bridge.search(str(body.get("agent", "")), str(body.get("query", "")))
+    if route == "/api/v1/overview" and method == "GET":
+        return rag_bridge.overview()
+    if route == "/api/v1/traces" and method == "GET":
+        q = urllib.parse.parse_qs(qs)
+        return rag_bridge.traces_list(
+            limit=int((q.get("limit") or ["20"])[0]),
+            offset=int((q.get("offset") or ["0"])[0]))
+    if route == "/api/v1/import" and method == "POST":
+        return rag_bridge.import_bundle(list(body.get("traces") or []))
+    if route == "/api/v1/feedback" and method == "POST":
+        return rag_bridge.feedback(
+            str(body.get("traceId", "")), str(body.get("polarity", "")),
+            magnitude=float(body.get("magnitude", 1.0) or 1.0),
+            channel=str(body.get("channel", "explicit")))
+    if route == "/api/v1/embeddings/rebuild" and method == "POST":
+        return rag_bridge.rebuild_embeddings(
+            mode=str(body.get("mode", "repair")))
+    if route == "/api/v1/auth/status" and method == "GET":
+        # rag 无鉴权面：恒就绪（在线性由 probe 承载）
+        return {"enabled": False, "needsSetup": False, "authenticated": True,
+                "backend": "rag"}
+    raise RuntimeError(f"rag 后端未实现该引擎端点：{method} {route}")
+
+
 def engine_request(method: str, path: str, body: Optional[dict] = None,
                    timeout: float = 30, retries: int = 1,
                    base: Optional[str] = None) -> dict:
     """带自动登录的引擎 HTTP 请求（AgentMemHub 网关统一出口）。
 
     base=None 用统一配置地址；传入显式地址时登录/请求都指向该地址。
+    backend=rag（默认）时进程内派发至 rag_bridge，不发 HTTP。
     """
+    if _backend_is_rag():
+        return _rag_dispatch(method, path, body)
     root = (base or base_url()).rstrip("/")
     url = root + path
     data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
@@ -218,7 +264,15 @@ def engine_request(method: str, path: str, body: Optional[dict] = None,
 
 
 def auth_state() -> Optional[dict]:
-    """引擎鉴权状态（/api/v1/auth/status 是公开端点）。离线返回 None。"""
+    """引擎鉴权状态（/api/v1/auth/status 是公开端点）。离线返回 None。
+
+    rag 后端：无鉴权面，probe 在线即视为已鉴权（离线返回 None，同 HTTP 语义）。
+    """
+    if _backend_is_rag():
+        from agentmemhub import rag_bridge
+        p = rag_bridge.probe()
+        return ({"enabled": False, "authenticated": True}
+                if p.get("online") else None)
     try:
         with urllib.request.urlopen(base_url() + "/api/v1/auth/status", timeout=2.5) as r:
             return json.loads(r.read().decode("utf-8"))
@@ -290,8 +344,21 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
+def _no_daemon_under_rag() -> None:
+    if _backend_is_rag():
+        raise RuntimeError(
+            "内置 rag 引擎为进程内直调，无独立守护可管理；"
+            "向量化请用 `agentmemhub sync`（含向量阶段）或面板向量化任务")
+
+
 def daemon_status() -> dict[str, Any]:
-    """巡检：在线状态 + 鉴权状态 + 归属（本工具启动 / 外部）+ 引擎摘要。"""
+    """巡检：在线状态 + 鉴权状态 + 归属（本工具启动 / 外部）+ 引擎摘要。
+
+    rag 后端：无常驻 daemon，进程内引擎在线即就绪；pid/plugin/engine_home
+    等 MemOS 守护字段返回中性值（面板/CLI 消费端据此降级展示）。
+    """
+    if _backend_is_rag():
+        return _rag_daemon_status()
     ast = auth_state()
     online = ast is not None          # 公开端点可达即在线（不依赖鉴权）
     ov = _overview() if online else None
@@ -332,6 +399,33 @@ def daemon_status() -> dict[str, Any]:
             "embedding_ready": emb.get("available"),
             "embedding_model": emb.get("model"),
             "llm_available": (ov.get("llm") or {}).get("available"),
+        }
+    return result
+
+
+def _rag_daemon_status() -> dict[str, Any]:
+    """rag 后端状态：在线由 probe 判定，摘要直接取 rag.overview。"""
+    from agentmemhub import rag_bridge
+    p = rag_bridge.probe()
+    online = bool(p.get("online"))
+    ov = p.get("summary") or {}
+    result: dict[str, Any] = {
+        "online": online, "backend": "rag",
+        "auth": {"enabled": False, "authenticated": online} if online else None,
+        "auth_required": False, "pid": None, "managed": False,
+        "base_url": "in-process://rag", "plugin_dir": None, "repo_dir": None,
+        "engine_home": None, "lightweight": None,
+    }
+    if online:
+        emb = ov.get("embedder") or {}
+        result["summary"] = {
+            "episodes": ov.get("episodes"),
+            "traces": ov.get("traces"),
+            "embedding_ready": emb.get("available"),
+            "embedding_model": emb.get("model"),
+            "llm_available": (ov.get("llm") or {}).get("available"),
+            "coverage": (ov.get("rag") or {}).get("coverage"),
+            "memory_units": ov.get("memory_units"),
         }
     return result
 
@@ -425,6 +519,10 @@ def daemon_start(agent: str = "hermes",
                  plugin_dir: Optional[str] = None,
                  wait_s: int = _START_TIMEOUT_S) -> dict[str, Any]:
     """拉起 daemon（已在线则幂等返回）。返回 {started, online, ...}。"""
+    if _backend_is_rag():
+        return {"started": False, "reason": "rag-in-process",
+                "hint": "内置 rag 引擎随进程启动，无需守护；向量化用 `agentmemhub sync`",
+                **daemon_status()}
     if auth_state() is not None:
         return {"started": False, "reason": "already-online", **daemon_status()}
     d = find_plugin_dir(plugin_dir)

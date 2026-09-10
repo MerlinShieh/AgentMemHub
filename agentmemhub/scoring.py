@@ -231,6 +231,10 @@ def _parse_verdict(content: str) -> str:
     return "neutral"
 
 
+def _backend_is_rag() -> bool:
+    return memos_daemon._backend_is_rag()
+
+
 def _engine_db_path() -> Path:
     home = memos_daemon.engine_home()
     if home is None:
@@ -244,7 +248,11 @@ def list_all_traces() -> list[dict[str, Any]]:
     引擎 listTraces 在 repo 层把 fetch 窗口钳到最新 500 行（clampLimit 500），
     超过 500 条时 API 分页取不到更早的 trace——评分需要全量，故只读直连
     引擎 SQLite 枚举（仅 SELECT，不修改引擎数据；feedback 写入仍走 API）。
+    rag 后端：改走 rag_bridge.all_traces（轮次视图，id 为可回指的锚点）。
     """
+    if _backend_is_rag():
+        from agentmemhub import rag_bridge
+        return rag_bridge.all_traces()
     import sqlite3
     db = _engine_db_path()
     if not db.exists():
@@ -261,6 +269,9 @@ def list_all_traces() -> list[dict[str, Any]]:
 
 def list_trace_ids() -> list[str]:
     """只读枚举引擎库全部 trace id（不取正文，廉价）——增量评分先筛 id 再定点读。"""
+    if _backend_is_rag():
+        from agentmemhub import rag_bridge
+        return rag_bridge.turn_refs()
     import sqlite3
     db = _engine_db_path()
     if not db.exists():
@@ -276,8 +287,11 @@ def list_traces_by_ids(ids: set[str]) -> list[dict[str, Any]]:
     """定点只读指定 trace id（增量评分路径：零全量枚举，500/批防变量数上限）。
 
     与 list_all_traces 同口径（id/userText/agentText）；不存在的 id 不报错，
-    由调用方 diff 出 missing。
+    由调用方 diff 出 missing。rag 后端走 rag_bridge.traces_by_ids（含轮次展开）。
     """
+    if _backend_is_rag():
+        from agentmemhub import rag_bridge
+        return rag_bridge.traces_by_ids(ids)
     import sqlite3
     id_list = sorted({str(i) for i in ids if i})
     if not id_list:
@@ -323,6 +337,10 @@ def sync_episode_r_task(*, trace_ids: Optional[list[str]] = None,
     已评记忆显示为「待评分」。引擎零改动（直接写 episodes 表）；引擎自身
     reward 管线若日后运行会覆盖，本库无 rewardDirty 不触发、可接受。
     """
+    if _backend_is_rag():
+        # rag：conv_scores 已在 feedback 写入时滚动更新，此处触发全量重建保持一致
+        from agentmemhub import rag_bridge
+        return int(rag_bridge.sync_conv_scores().get("conversations", 0))
     import sqlite3
     db = _engine_db_path()
     if not db.exists():
