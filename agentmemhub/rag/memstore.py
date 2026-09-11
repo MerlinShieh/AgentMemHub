@@ -172,6 +172,76 @@ def set_manual_value(
     return {"unit_id": unit_id, "manual_value": value, "effective": final}
 
 
+def set_user_feedback(
+    conn: sqlite3.Connection,
+    unit_id: int,
+    polarity: str | None,
+    *,
+    magnitude: float = 1.0,
+    channel: str = "explicit",
+    ts: int | None = None,
+) -> dict:
+    """面板用户反馈（**状态式、可撤销**）：一个 unit 在同一 channel 只保留一条。
+
+    polarity=None → 取消（删除既有反馈后重算）。
+
+    与 put_feedback 的语义差异（两者并存、各司其职）：
+    - put_feedback：**历史累加**（MemOS 同源：多条证据累积取有符号均值），
+      MCP memory_score / 批量评分沿用——同一条多个 harness 反复表态是证据；
+    - set_user_feedback：**当前表态**（面板 👍/👎）。反复点不应叠加稀释
+      （均值会越点越钝），取消即干净回退——按钮态与库内状态一一对应。
+
+    value 重算：仍有反馈 → 有符号均值；无任何反馈 → 回来源初始分
+    （蒸馏 0.3 / Agent 主动写入 0.6）且 r_human 清空。
+    manual_value（用户 ⭐ 锁定）永不由此函数改动。
+    """
+    if polarity is not None and polarity not in POLARITY_SIGN:
+        raise ValueError(f"非法 polarity: {polarity!r}")
+    ensure_memstore_schema(conn)
+    row = conn.execute("SELECT role FROM units WHERE id=?", (unit_id,)).fetchone()
+    if row is None:
+        raise KeyError(f"unit 不存在: {unit_id}")
+    role = row[0]
+    mag = min(max(float(magnitude), 0.0), 1.0)
+    now = int(ts if ts is not None else time.time())
+    with conn:
+        conn.execute("DELETE FROM unit_feedback WHERE unit_id=? AND channel=?",
+                     (unit_id, channel))
+        if polarity is not None:
+            conn.execute(
+                "INSERT INTO unit_feedback(unit_id, channel, polarity, magnitude,"
+                " created_at) VALUES(?,?,?,?,?)",
+                (unit_id, channel, polarity, mag, now))
+        agg = conn.execute(
+            "SELECT SUM(magnitude * CASE polarity"
+            "        WHEN 'positive' THEN 1.0 WHEN 'negative' THEN -1.0 ELSE 0.0 END),"
+            "       SUM(magnitude), COUNT(*) FROM unit_feedback WHERE unit_id=?",
+            (unit_id,)).fetchone()
+        signed, total, n = agg[0] or 0.0, agg[1] or 0.0, agg[2] or 0
+        old = conn.execute("SELECT priority FROM unit_values WHERE unit_id=?",
+                           (unit_id,)).fetchone()
+        old_prio = old[0] if old else 0.0
+        if n:
+            value = max(min(signed / total, 1.0), -1.0)
+            r_human = value
+            priority = max(old_prio or 0.0, abs(value))
+        else:
+            # 无反馈 → 回来源初始分（与 ensure_base_value 同口径）
+            base = (BASE_VALUE_DISTILLED if role == "distilled"
+                    else BASE_VALUE_AGENT_WRITE)
+            value, r_human, priority = base, None, max(old_prio or 0.0, base)
+        conn.execute(
+            "INSERT INTO unit_values(unit_id, value, r_human, priority, updated_at)"
+            " VALUES(?,?,?,?,?)"
+            " ON CONFLICT(unit_id) DO UPDATE SET value=excluded.value,"
+            " r_human=excluded.r_human, priority=excluded.priority,"
+            " updated_at=excluded.updated_at",     # 注意：不动 manual_value
+            (unit_id, value, r_human, priority, now))
+    return {"unit_id": unit_id, "value": value, "r_human": r_human,
+            "priority": priority, "polarity": polarity,
+            "feedback_count": n, "revoked": polarity is None}
+
+
 def put_feedback(
     conn: sqlite3.Connection,
     unit_id: int,

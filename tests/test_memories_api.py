@@ -187,3 +187,34 @@ def test_memories_sort_by_value(memories_env):
     assert nums == sorted(nums, reverse=True)
     assert d["items"][0]["content"] == "会话一的事实记录"   # manual 1.0 居首
     assert d["items"][-1]["unit_id"] is None               # 无分沉底
+
+
+def test_memories_conversation_flag_and_feedback_state(memories_env, monkeypatch):
+    """has_conversation：MCP 原子记忆（占位会话 mcp）不得可点为会话链接（404 根因）；
+    fb_polarity + 状态式反馈：点赞可高亮、再点同极性=取消、干净回退初始分。
+
+    feedback 端点走 engine_request → 本用例显式 opt-in rag 后端（进程内直调）。
+    """
+    monkeypatch.setenv("AGENTMEMHUB_BACKEND", "rag")
+    client, _ = memories_env
+    d = client.get("/api/memories", params={"status": "all"}).json()
+    by = {i["content"]: i for i in d["items"]}
+    assert by["会话一的蒸馏结论"]["has_conversation"] is True
+    assert by["Agent 手动写入的记忆"]["has_conversation"] is False
+    assert all(i["fb_polarity"] is None for i in d["items"])
+
+    uid = by["会话一的蒸馏结论"]["unit_id"]
+    r = client.post("/api/memos/feedback",
+                    params={"traceId": f"unit:{uid}", "polarity": "positive"})
+    assert r.status_code == 200, r.text
+    d2 = client.get("/api/memories", params={"status": "all"}).json()
+    m2 = {i["content"]: i for i in d2["items"]}["会话一的蒸馏结论"]
+    assert m2["fb_polarity"] == "positive" and m2["value"] == 1.0
+
+    r2 = client.post("/api/memos/feedback",
+                     params={"traceId": f"unit:{uid}", "revoke": True})
+    assert r2.status_code == 200, r2.text
+    d3 = client.get("/api/memories", params={"status": "all"}).json()
+    m3 = {i["content"]: i for i in d3["items"]}["会话一的蒸馏结论"]
+    assert m3["fb_polarity"] is None
+    assert m3["value"] == 0.3, "取消后回蒸馏来源初始分"

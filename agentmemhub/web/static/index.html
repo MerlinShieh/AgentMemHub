@@ -674,6 +674,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   const MEM_TYPE_LABEL = {decision:'决策', fact:'事实', preference:'偏好',
     lesson:'教训', manual:'手动'};
   const MEM_STATUS_LABEL = {new:'新型', similar:'相似', merged:'已合并', duplicate:'重复'};
+  let memOpBusy=false;                 // 记忆操作进行中（防连点 + 按钮置灰）
 
   const keyOf=(source,id)=>source+'\u241F'+id;   // ␟ 分隔符不可见于常规内容
 
@@ -740,29 +741,50 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       hint.classList.remove('hidden');
     }
   }
-  async function setWeight(unitRef, value){
+  // ⭐ 加权（两态：加权 1.0 ↔ 取消）。锁定值优先于自动聚合且不随时间衰减。
+  // 成功后只改本地对象并重建 DOM——不重拉列表（不闪、不丢滚动与筛选位置）。
+  async function setWeight(unitRef, value, rowKey){
     if(!lastEngineOnline){ toast('记忆索引不可用，无法加权'); return; }
+    if(memOpBusy) return;
+    memOpBusy=true; renderMemTable();
     try{
       const q = value==='' ? '' : `&value=${value}`;
       const r=await fetchWithTimeout(`/api/memos/weight?traceId=${encodeURIComponent(unitRef)}${q}`,{method:'POST'},10000);
       const d=await r.json().catch(()=>({}));
       if(!r.ok){ toast(typeof d.detail==='string'?d.detail:'加权失败'); return; }
-      toast(value===''?'已清除手动权重（回到自动演化）':'已锁定权重 '+Number(value).toFixed(1)+'（不衰减）');
-      loadMemories({silent:true});
+      const it = rowKey ? MEMF.items.find(x=>memKey(x)===rowKey) : null;
+      if(it) it.manual_value = (value==='' ? null : Number(value));
+      toast(value==='' ? '已取消手动加权（回到自动演化）'
+                       : `已加权 ${Number(value).toFixed(1)}（锁定不衰减，再点取消）`);
     }catch(e){ toast('加权失败：'+(e.message||e)); }
+    finally{ memOpBusy=false; renderMemTable(); }
   }
-  async function scoreMemos(unitRef, polarity){
+  // 👍/👎 状态式反馈：再点同极性 = 取消（干净回退来源初始分）。
+  async function scoreMemos(unitRef, polarity, rowKey){
     if(!lastEngineOnline){ toast('记忆索引不可用，无法打分'); return; }
+    if(memOpBusy) return;
+    const it = rowKey ? MEMF.items.find(x=>memKey(x)===rowKey) : null;
+    const revoke = !!(it && it.fb_polarity === polarity);
+    memOpBusy=true; renderMemTable();
     try{
-      const r=await fetchWithTimeout(`/api/memos/feedback?traceId=${encodeURIComponent(unitRef)}&polarity=${polarity}`,{method:'POST'},10000);
+      const u = `/api/memos/feedback?traceId=${encodeURIComponent(unitRef)}`
+              + (revoke ? '&revoke=1' : `&polarity=${polarity}`);
+      const r=await fetchWithTimeout(u,{method:'POST'},10000);
       const d=await r.json().catch(()=>({}));
       if(!r.ok){ toast(typeof d.detail==='string'?d.detail:'打分失败'); return; }
-      toast(polarity==='positive'?'已标记为有用':'已标记为无用');
-      loadMemories({silent:true});               // 刷新列表（价值分已重算）
+      if(it){
+        it.fb_polarity = revoke ? null : polarity;
+        const fb = d.feedback || {};
+        if(typeof fb.value==='number') it.value = fb.value;   // 重算后的值
+      }
+      toast(revoke ? '已取消（回来源初始分）'
+                   : (polarity==='positive' ? '已点赞（再点取消）' : '已点踩（再点取消）'));
     }catch(e){ toast('打分失败：'+(e.message||e)); }
+    finally{ memOpBusy=false; renderMemTable(); }
   }
   async function memosSearch(q){
     const box = $('#memosHits');
+    box.classList.remove('hidden');           // 结果容器随检索展开（改造时曾漏掉，导致有结果看不见）
     box.innerHTML = '<div class="py-2 text-center text-[11px] text-muted-foreground">检索中…</div>';
     try{
       const r = await fetch('/api/memos/search?q='+encodeURIComponent(q));
@@ -942,9 +964,11 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     // 行内操作（事件委托）：⭐加权 / 👍👎反馈 / 跳会话 / 行点击展开详情
     $('#memTbody').addEventListener('click', e=>{
       const w=e.target.closest('button[data-weight]');
-      if(w){ if(w.dataset.unit) setWeight('unit:'+w.dataset.unit, w.dataset.weight); return; }
+      if(w){ const tr=w.closest('tr[data-memrow]');
+             if(w.dataset.unit) setWeight('unit:'+w.dataset.unit, w.dataset.weight, tr && tr.dataset.memrow); return; }
       const btn=e.target.closest('button[data-score]');
-      if(btn){ if(btn.dataset.unit) scoreMemos('unit:'+btn.dataset.unit, btn.dataset.score); return; }
+      if(btn){ const tr=btn.closest('tr[data-memrow]');
+               if(btn.dataset.unit) scoreMemos('unit:'+btn.dataset.unit, btn.dataset.score, tr && tr.dataset.memrow); return; }
       const go=e.target.closest('[data-goconv]');
       if(go){ e.preventDefault(); gotoConversation(go.dataset.source, go.dataset.convid, go.dataset.turn||''); return; }
       const tr=e.target.closest('tr[data-memrow]');
@@ -1007,26 +1031,40 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         : `<span class="tnum text-[11px] font-semibold ${eff>=0.6?'text-emerald-500':(eff>0.3?'text-foreground':'text-muted-foreground')}">${eff.toFixed(2)}</span>`
           + (mv!=null?'<span class="ml-0.5 text-[9px] text-amber-500" title="手动锁定（不衰减）">★</span>':'');
       const canWeight = it.unit_id != null;
-      // 三档循环：无星 → ⭐0.6 → ⭐⭐1.0 → 清除（传空=清除，勿把 null 档也传空）
-      const starVal = mv==null ? '0.6' : (mv<1 ? '1.0' : '');
+      const busy = memOpBusy ? ' pointer-events-none opacity-50' : '';
+      // ⭐ 两态：未加权 → 点=1.0；已加权 → 点=取消（首点即生效，无中间档歧义）
+      const starVal = mv==null ? '1.0' : '';
       const starBtn = canWeight
-        ? `<button class="rounded p-0.5 transition-colors ${mv==null?'text-muted-foreground hover:text-amber-500':'text-amber-500'}"
-             title="${mv==null?'手动加权：锁定该记忆的价值（不衰减）':'当前手动权重 '+Number(mv).toFixed(1)+'，点击切档/清除'}"
-             data-unit="${it.unit_id}" data-weight="${starVal}"><i data-lucide="star" class="h-3.5 w-3.5"></i></button>`
+        ? `<button class="rounded p-0.5 transition-colors${busy} ${mv==null?'text-muted-foreground hover:text-amber-500':'text-amber-500'}"
+             title="${mv==null?'手动加权（锁定价值，不随时间衰减）':'已加权 '+Number(mv).toFixed(1)+'（点击取消）'}"
+             data-unit="${it.unit_id}" data-weight="${starVal}">${
+               mv==null ? '<i data-lucide="star" class="h-3.5 w-3.5"></i>'
+                        : `<span class="tnum text-[9px] font-bold">${mv>=1?'★★':'★'}</span>`}</button>`
         : '<button class="cursor-not-allowed rounded p-0.5 text-muted-foreground/40" disabled title="该条未投影到召回面（归档条目），无法加权"><i data-lucide="star" class="h-3.5 w-3.5"></i></button>';
+      // 👍/👎 状态式：当前态高亮；再点同极性 = 取消
+      const fb = it.fb_polarity || null;
+      const upCls = fb==='positive' ? 'bg-emerald-500/15 text-emerald-500' : 'text-muted-foreground hover:text-emerald-500';
+      const dnCls = fb==='negative' ? 'bg-error-soft text-error' : 'text-muted-foreground hover:text-error';
       const scoreBtns = canWeight
-        ? `<button class="rounded p-0.5 text-muted-foreground transition-colors hover:text-emerald-500" title="标记有用（正向评分）" data-unit="${it.unit_id}" data-score="positive"><i data-lucide="thumbs-up" class="h-3.5 w-3.5"></i></button>
-           <button class="rounded p-0.5 text-muted-foreground transition-colors hover:text-error" title="标记无用（负向评分）" data-unit="${it.unit_id}" data-score="negative"><i data-lucide="thumbs-down" class="h-3.5 w-3.5"></i></button>`
+        ? `<button class="rounded p-0.5 transition-colors${busy} ${upCls}" title="${fb==='positive'?'已点赞（点击取消）':'点赞（标记有用）'}" data-unit="${it.unit_id}" data-score="positive"><i data-lucide="thumbs-up" class="h-3.5 w-3.5"></i></button>
+           <button class="rounded p-0.5 transition-colors${busy} ${dnCls}" title="${fb==='negative'?'已点踩（点击取消）':'点踩（标记无用）'}" data-unit="${it.unit_id}" data-score="negative"><i data-lucide="thumbs-down" class="h-3.5 w-3.5"></i></button>`
         : `<button class="cursor-not-allowed rounded p-0.5 text-muted-foreground/40" disabled><i data-lucide="thumbs-up" class="h-3.5 w-3.5"></i></button>
            <button class="cursor-not-allowed rounded p-0.5 text-muted-foreground/40" disabled><i data-lucide="thumbs-down" class="h-3.5 w-3.5"></i></button>`;
       const confChip = it.confidence
         ? `<span class="text-[10px] font-semibold ${it.confidence==='high'?'text-emerald-500':(it.confidence==='medium'?'text-amber-500':'text-muted-foreground')}">${{high:'高',medium:'中',low:'低'}[it.confidence]||esc(it.confidence)}</span>`
         : '<span class="text-[10px] text-muted-foreground/50">—</span>';
       const statusChip = `<span class="rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold ${it.status==='new'?'text-primary':(it.status==='similar'?'text-muted-foreground':'text-muted-foreground/70')}">${MEM_STATUS_LABEL[it.status]||esc(it.status)}</span>`;
-      const convCell = it.conversation_id
+      // 来源会话：仅在采集库确有该会话时可点（MCP 原子记忆的占位会话 'mcp'
+      // 无真实会话，点击会 404——必须不可点）
+      const convCell = (it.conversation_id && it.has_conversation)
         ? `<a href="#" data-goconv="1" data-source="${esc(it.source)}" data-convid="${esc(it.conversation_id)}" data-turn="${esc(it.turn_key||'')}"
               class="text-primary hover:underline" title="${esc(it.conversation_title||it.conversation_id)}${it.turn_key?'（点击打开会话并定位该轮）':''}">${esc((it.conversation_title||it.conversation_id).slice(0,24))}${it.turn_key?' <span class="text-[9px] text-muted-foreground">↗</span>':''}</a>`
-        : '<span class="text-[10px] text-muted-foreground">（原子记忆）</span>';
+        : (it.source==='memory'
+            ? '<span class="text-[10px] text-muted-foreground" title="Agent 通过 MCP 主动写入的原子记忆，无原始会话">（MCP 写入 · 无会话）</span>'
+            : '<span class="text-[10px] text-muted-foreground">（无对应会话）</span>');
+      const srcCell = it.source==='memory'
+        ? '<span class="chip" style="background:#8B5CF61f;color:#8B5CF6" title="Agent 通过 MCP 主动写入">MCP</span>'
+        : srcTag(it.source);
       const content = esc((it.content||'').replace(/\s+/g,' ').slice(0,150));
       const topic = it.topic ? `<span class="font-semibold text-foreground">${esc(it.topic)}</span><span class="mx-1 text-muted-foreground/40">·</span>` : '';
       const tr=el('tr','cursor-pointer border-b border-border/60 hover:bg-muted/40'+(MEMF.expanded.has(key)?' mem-row-expand':''));
@@ -1036,7 +1074,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         <td class="px-3 py-2.5 max-w-[520px]"><div class="truncate" title="${esc((it.content||'').slice(0,300))}">${topic}<span class="text-foreground">${content}</span></div></td>
         <td class="px-3 py-2.5 whitespace-nowrap">${confChip}</td>
         <td class="px-3 py-2.5 whitespace-nowrap">${statusChip}</td>
-        <td class="px-3 py-2.5 whitespace-nowrap">${srcTag(it.source)}</td>
+        <td class="px-3 py-2.5 whitespace-nowrap">${srcCell}</td>
         <td class="px-3 py-2.5 max-w-[210px]"><div class="truncate">${convCell}</div></td>
         <td class="px-3 py-2.5 whitespace-nowrap text-muted-foreground" title="${fmtTime(it.created_at)}">${relTime(it.created_at)}</td>
         <td class="px-3 py-2.5 whitespace-nowrap text-right">${vChip}</td>
@@ -1053,7 +1091,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
               ${it.topic?`<span>主题 <b class="text-foreground">${esc(it.topic)}</b></span>`:''}
               <span>置信 <b class="text-foreground">${esc(it.confidence||'—')}</b></span>
               <span>状态 <b class="text-foreground">${MEM_STATUS_LABEL[it.status]||esc(it.status)}</b></span>
-              <span>来源 <b class="text-foreground">${esc(it.source)}</b></span>
+              <span>来源 <b class="text-foreground">${it.source==='memory'?'MCP 写入':esc(it.source)}</b></span>
               ${it.model?`<span>蒸馏模型 <b class="text-foreground">${esc(it.model)}</b></span>`:''}
               <span>创建 <b class="text-foreground">${fmtTime(it.created_at)}</b></span>
               ${it.unit_id!=null?`<span>召回单元 <b class="text-foreground">unit:${it.unit_id}</b></span>`:'<span class="text-warning">未投影（不在召回面）</span>'}
@@ -1062,7 +1100,8 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
             </div>
             ${it.turn_key?`<div class="mt-1.5 text-[10.5px] text-muted-foreground">轮次锚 <span class="mono">${esc(it.turn_key)}</span></div>`:''}
             <div class="mt-2.5 flex flex-wrap gap-2">
-              ${it.conversation_id?`<button class="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-foreground transition-colors hover:bg-muted" data-goconv="1" data-source="${esc(it.source)}" data-convid="${esc(it.conversation_id)}" data-turn="${esc(it.turn_key||'')}"><i data-lucide="messages-square" class="h-3 w-3 text-primary"></i>打开原始会话${it.turn_key?'（定位该轮）':''}</button>`:''}
+              ${(it.conversation_id && it.has_conversation)?`<button class="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-foreground transition-colors hover:bg-muted" data-goconv="1" data-source="${esc(it.source)}" data-convid="${esc(it.conversation_id)}" data-turn="${esc(it.turn_key||'')}"><i data-lucide="messages-square" class="h-3 w-3 text-primary"></i>打开原始会话${it.turn_key?'（定位该轮）':''}</button>`
+                :(it.source==='memory'?'<span class="text-[10.5px] text-muted-foreground">Agent 通过 MCP 主动写入的原子记忆，无原始会话</span>':'<span class="text-[10.5px] text-muted-foreground">原始会话已不在采集库（可能已删除）</span>')}
             </div>
           </div></td>`;
         tb.appendChild(dtr);

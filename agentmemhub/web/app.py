@@ -782,22 +782,25 @@ def create_app(db_path: Path | None = None):
 
     @app.post("/api/memos/feedback")
     def api_memos_feedback(traceId: str = Query(...),
-                           polarity: str = Query(..., pattern="^(positive|negative|neutral)$"),
+                           polarity: str = Query(default="neutral", pattern="^(positive|negative|neutral)$"),
                            magnitude: float = Query(default=1.0),
-                           channel: str = Query(default="explicit")):
-        """记忆打分（正/负反馈）。
+                           channel: str = Query(default="explicit"),
+                           state: bool = Query(default=True, description="状态式（面板默认）：一个 unit 一条当前表态，反复点不叠加"),
+                           revoke: bool = Query(default=False, description="state=1 时取消该条反馈（干净回退到初始分）")):
+        """记忆打分（面板 👍/👎）。
 
-        转发引擎 POST /api/v1/feedback 并带 traceId——引擎会立即按反馈
-        极性/幅度重算该条记忆的 value/rHuman/priority（无需 LLM）。
-        channel 必须是引擎约束的 explicit|implicit（面板人工评分=explicit）。
+        state=true（面板默认）：**状态式可撤销**——同一 unit 只保留一条当前
+        表态；再次点击同极性 = revoke 取消，回退到来源初始分（蒸馏 0.3 /
+        Agent 写入 0.6）。这解决"反复点赞只是历史均值被稀释、且无法取消"。
+        state=false：历史累加语义（MemOS 同源，MCP memory_score 走它）。
         """
         from agentmemhub import logs, memos_daemon
+        body = {"channel": channel, "polarity": polarity,
+                "magnitude": magnitude, "traceId": traceId,
+                "state": state, "revoke": revoke}
         try:
             res = memos_daemon.engine_request(
-                "POST", "/api/v1/feedback",
-                body={"channel": channel, "polarity": polarity,
-                      "magnitude": magnitude, "traceId": traceId},
-                timeout=15)
+                "POST", "/api/v1/feedback", body=body, timeout=15)
         except memos_daemon.EngineAuthError as e:
             raise HTTPException(status_code=503, detail=str(e))
         except Exception as e:
@@ -808,7 +811,9 @@ def create_app(db_path: Path | None = None):
             mark_scored(traceId)
         except Exception:
             pass
-        logs.record(f"记忆打分：trace={traceId} {polarity}（幅度 {magnitude}）")
+        logs.record(f"记忆打分：trace={traceId} "
+                    + ("取消反馈" if revoke else polarity)
+                    + f"（状态式={state}，幅度 {magnitude}）")
         return JSONResponse({"ok": True, "traceId": traceId, "feedback": res})
 
     @app.get("/api/memories")
@@ -939,11 +944,26 @@ def create_app(db_path: Path | None = None):
                     f"SELECT t.source, COUNT(*) FROM {union} t{wsql}"
                     " GROUP BY t.source ORDER BY COUNT(*) DESC", args).fetchall()),
             }
+            # 反馈状态（面板 👍/👎 高亮）与"有无真实会话"标记：
+            # MCP 写入的原子记忆 conversation_id='mcp'（占位、无采集库会话），
+            # 前端不得渲染成可点会话链接（否则跳转 404）
+            uids = [it["unit_id"] for it in items
+                    if it.get("unit_id") is not None]
+            fb_map: dict = {}
+            if uids:
+                marks = ",".join("?" * len(uids))
+                fb_map = {r[0]: r[1] for r in idx.execute(
+                    "SELECT unit_id, polarity FROM unit_feedback"
+                    " WHERE channel='explicit' AND id IN ("
+                    "  SELECT MAX(id) FROM unit_feedback WHERE channel='explicit'"
+                    f"   AND unit_id IN ({marks}) GROUP BY unit_id)", uids)}
             for it in items:
-                uid_, title_ = titles.get(
-                    f"{it['source']}/{it['conversation_id']}", (None, ""))
+                key = f"{it['source']}/{it['conversation_id']}"
+                uid_, title_ = titles.get(key, (None, ""))
                 it["session_uid"] = uid_
                 it["conversation_title"] = title_
+                it["has_conversation"] = key in titles
+                it["fb_polarity"] = fb_map.get(it.get("unit_id"))
         finally:
             idx.close()
             src.close()

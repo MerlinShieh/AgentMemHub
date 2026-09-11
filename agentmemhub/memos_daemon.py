@@ -222,7 +222,9 @@ def _rag_dispatch(method: str, path: str, body: Optional[dict]) -> dict:
         return rag_bridge.feedback(
             str(body.get("traceId", "")), str(body.get("polarity", "")),
             magnitude=float(body.get("magnitude", 1.0) or 1.0),
-            channel=str(body.get("channel", "explicit")))
+            channel=str(body.get("channel", "explicit")),
+            state=bool(body.get("state", False)),
+            revoke=bool(body.get("revoke", False)))
     if route == "/api/v1/embeddings/rebuild" and method == "POST":
         return rag_bridge.rebuild_embeddings(
             mode=str(body.get("mode", "repair")))

@@ -27,6 +27,7 @@ from agentmemhub.rag.memstore import (
     content_anchor,
     ensure_memstore_schema,
     put_feedback,
+    set_user_feedback,
 )
 from agentmemhub.rag.runtime import get_active_embedder
 from agentmemhub.rag.search import Hit, hybrid_search
@@ -309,15 +310,25 @@ def import_bundle(traces: list[dict], *, embedder=None) -> dict:
 
 
 def feedback(trace_id: str, polarity: str, *, magnitude: float = 1.0,
-             channel: str = "explicit") -> dict:
-    """POST /api/v1/feedback 的 rag 实现 + 会话级 r_task 滚动聚合。"""
+             channel: str = "explicit", state: bool = False,
+             revoke: bool = False) -> dict:
+    """POST /api/v1/feedback 的 rag 实现 + 会话级 r_task 滚动聚合。
+
+    state=True：**面板状态式反馈**（先清后写；revoke=True 表示仅清除取消）——
+    一个 unit 一条当前表态，反复点不叠加、可干净回退；
+    默认 False：**历史累加**语义（MemOS 同源，MCP memory_score / 批量评分沿用）。
+    """
     conn = _conn()
     try:
         uid = resolve_unit_id(conn, trace_id)
         if uid is None:
             raise KeyError(f"trace 不存在: {trace_id}")
-        out = put_feedback(conn, uid, polarity, magnitude=magnitude,
-                           channel=channel)
+        if state:
+            out = set_user_feedback(conn, uid, None if revoke else polarity,
+                                    magnitude=magnitude, channel=channel)
+        else:
+            out = put_feedback(conn, uid, polarity, magnitude=magnitude,
+                               channel=channel)
         src, cid = conn.execute(
             "SELECT source, conversation_id FROM units WHERE id=?",
             (uid,)).fetchone()
