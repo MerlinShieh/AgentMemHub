@@ -1348,3 +1348,28 @@ def test_appending_to_single_slice_conversation(distill_env, monkeypatch):
     st2 = run_distill(distill_env, only={("zcode", "conv-b")})
     assert st2["skipped_done"] == 0, "单片会话内容变了 → 需重蒸"
     assert st2["distilled"] == 1
+
+
+def test_project_time_uses_origin_turn_time(idx_conn, real_settings):
+    """时间语义：蒸馏记忆的 units.time = **知识产生的时间**（原轮次事件时间），
+    不是蒸馏时刻——否则全部历史记忆显得"刚写入"，时间衰减与新旧区分失效。"""
+    from agentmemhub.rag.ingest import open_index as _oi
+    # 造一个原始 unit（属于旧会话，时间是 90 天前）
+    old_ts = int(real_settings and 0) or 1
+    import time as _time
+    old_ts = int(_time.time()) - 90 * 86400
+    cur = idx_conn.execute(
+        "INSERT INTO units(source, conversation_id, seq, role, turn_key,"
+        " src_id, time, title, text, chars) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        ("zcode", "conv-t", 1, "user", "tk-old", "src-orig", old_ts,
+         None, "原始轮次内容", 6))
+    idx_conn.commit()
+
+    m = _add_memory(idx_conn, content="关于旧会话的蒸馏结论", cid="conv-t")
+    m["turn_key"] = "tk-old"
+    m["created_at"] = int(_time.time())            # 蒸馏发生在今天
+    project_memories(idx_conn, real_settings, [m])
+
+    row = idx_conn.execute(
+        "SELECT time FROM units WHERE role=?", (DISTILLED_ROLE,)).fetchone()
+    assert row[0] == old_ts, f"应取原轮次时间 {old_ts}，实得 {row[0]}"

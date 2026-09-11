@@ -132,14 +132,18 @@ def apply_value_boost(
     weight_cap: float = BOOST_CAP,
     half_life_days: float = HALF_LIFE_DAYS,
     include_low_value: bool = False,
+    no_decay: set[int] | None = None,
 ) -> tuple[dict[int, float], list[int]]:
     """对 {unit_id: relevance} 施加价值偏置。
 
     units_meta: {id: (time_epoch, None占位) } —— 引擎自带的事件时间戳用于衰减。
-    返回 (新 relevance, 被硬过滤掉的 id)。value<=0 默认剔除
-    （对应 MemOS priority>0 闸门；include_low_value=True 保留，供复盘场景）。
+    no_decay：用户手动加权的 unit 集合——锁定的价值**不随时间衰减**
+    （用户意志优先于新陈代谢）。返回 (新 relevance, 被硬过滤掉的 id)。
+    value<=0 默认剔除（对应 MemOS priority>0 闸门；include_low_value=True
+    保留，供复盘场景）。
     """
     now = now if now is not None else time.time()
+    nd = no_decay or set()
     out: dict[int, float] = {}
     dropped: list[int] = []
     for uid, rel in relevance.items():
@@ -152,7 +156,8 @@ def apply_value_boost(
             continue
         ts = units_meta.get(uid, (None,))[0]
         age = (now - ts) if ts else 0.0
-        boost = weight_cap * max(decayed_value(max(v, 0.0), age,
-                                               half_life_days), 0.0)
+        eff = max(v, 0.0) if uid in nd else max(
+            decayed_value(max(v, 0.0), age, half_life_days), 0.0)
+        boost = weight_cap * eff
         out[uid] = rel + min(boost, weight_cap)
     return out, dropped

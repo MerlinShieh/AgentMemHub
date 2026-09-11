@@ -33,6 +33,7 @@ import numpy as np
 # 话题边界检测复用 FTS 侧的分词口径（3-gram 步长 1 + 中文噪音表），
 # 保证"切片看到的话题"与"检索命中时看到的话题"是同一套词法。
 from agentmemhub.rag.search import TRIGRAM_MIN_LEN, _CJK_NOISE
+from agentmemhub.rag.memstore import BASE_VALUE_DISTILLED, ensure_base_value
 
 #: 记忆类型枚举（LLM 输出受限，避免自由发挥导致分类不可用）
 MEMORY_TYPES = ("decision", "fact", "preference", "lesson")
@@ -951,7 +952,7 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
         "memories_new": 0, "sanitized": 0, "dropped": 0,
         "merged": 0, "merge_skipped": 0, "merge_failed": 0, "merge_seconds": 0.0,
         "projected": 0, "similar": 0, "duplicate": 0,
-        "purged_stale": 0,
+        "purged_stale": 0, "backfilled": 0,
         "seconds": 0.0, "dry_run": dry_run, "prompt_ver": prompt_ver,
         "model": client.cfg.model, "samples": [],
     }
@@ -960,6 +961,11 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
     idx = open_index(settings.index_db)
     try:
         ensure_distill_schema(idx)
+        # 老数据自愈：补齐缺失的来源初始分（幂等，有记录的不动）
+        backfill = backfill_base_values(idx)
+        if backfill:
+            stats["backfilled"] = backfill
+            emit(f"补齐来源初始分 {backfill} 条")
         # 提示词升版 → 先作废旧版产物（否则新旧两版记忆同时留在召回面上）
         if not dry_run:
             stale = purge_stale_memories(idx, settings, prompt_ver, log=log)
@@ -1115,6 +1121,34 @@ def _memory_id_by_anchor(idx: sqlite3.Connection, src_id: str | None) -> int | N
     return row[0] if row else None
 
 
+def backfill_base_values(idx: sqlite3.Connection) -> int:
+    """给缺价值记录的既有记忆补来源初始分（幂等自愈，老数据迁移）。
+
+    覆盖两类：蒸馏投影（0.3）与 Agent 主动写入（0.6）。有记录的条目
+    （含反馈演化结果）绝不触碰。
+    """
+    from agentmemhub.rag.memstore import (
+        BASE_VALUE_AGENT_WRITE, ensure_memstore_schema)
+    ensure_distill_schema(idx)
+    ensure_memstore_schema(idx)     # 全新库可能还没有 unit_values 表（幂等建+迁移）
+    n = 0
+    for role, base in ((DISTILLED_ROLE, BASE_VALUE_DISTILLED),
+                       (None, BASE_VALUE_AGENT_WRITE)):
+        if role is None:
+            rows = idx.execute(
+                "SELECT u.id FROM units u WHERE u.source='memory' AND NOT EXISTS"
+                " (SELECT 1 FROM unit_values v WHERE v.unit_id=u.id)").fetchall()
+        else:
+            rows = idx.execute(
+                "SELECT u.id FROM units u WHERE u.role=? AND NOT EXISTS"
+                " (SELECT 1 FROM unit_values v WHERE v.unit_id=u.id)",
+                (role,)).fetchall()
+        for (uid,) in rows:
+            ensure_base_value(idx, uid, base)
+            n += 1
+    return n
+
+
 def purge_stale_memories(idx: sqlite3.Connection, settings, prompt_ver: int,
                          *, log: logging.Logger | None = None) -> int:
     """作废旧 prompt_ver 的蒸馏产物及其 units 投影（提示词升版后调用）。
@@ -1161,24 +1195,44 @@ def _project_one(idx: sqlite3.Connection, m: dict, vec: np.ndarray,
     text = m["content"]
     body = f"{topic}：{text}" if topic and topic not in text else text
     title = m.get("title") or None
+    # 时间语义：蒸馏记忆的 time = **知识产生的时间**（原轮次事件时间），
+    # 不是蒸馏/整理时刻。用蒸馏时刻会让全部历史记忆显得"刚写入"，
+    # 时间衰减与"新记忆 vs 整理记忆"的区分全部失效。
+    origin_time = _origin_time(idx, m)
     existing = idx.execute("SELECT id FROM units WHERE src_id=?", (src_id,)).fetchone()
     if existing:
         uid = int(existing[0])
         idx.execute(
-            "UPDATE units SET text=?, chars=?, title=?, turn_key=? WHERE id=?",
-            (body, len(body), title, m.get("turn_key"), uid))
+            "UPDATE units SET text=?, chars=?, title=?, turn_key=?, time=? WHERE id=?",
+            (body, len(body), title, m.get("turn_key"), origin_time, uid))
+        # 自愈：旧版本投影的记忆可能缺来源初始分（列后加/逻辑后补），幂等补上
+        ensure_base_value(idx, uid, BASE_VALUE_DISTILLED)
     else:
         uid = int(idx.execute(
             "INSERT INTO units(source, conversation_id, seq, role, turn_key,"
             " src_id, time, title, text, chars) VALUES(?,?,?,?,?,?,?,?,?,?)",
             (m["source"], m["conversation_id"], -abs(int(m["id"])),
-             DISTILLED_ROLE, m.get("turn_key"), src_id,
-             int(m.get("created_at") or time.time()), title, body,
-             len(body))).lastrowid)
+             DISTILLED_ROLE, m.get("turn_key"), src_id, origin_time, title,
+             body, len(body))).lastrowid)
+    # 来源初始置信度：离线蒸馏默认中等（Agent 主动写入的更高，见 memstore 常量）
+    ensure_base_value(idx, uid, BASE_VALUE_DISTILLED)
     idx.execute(
         f"INSERT OR REPLACE INTO {spec.vec_table}(rowid, embedding) VALUES(?,?)",
         (uid, np.ascontiguousarray(vec, dtype=np.float32).tobytes()))
     return uid
+
+
+def _origin_time(idx: sqlite3.Connection, m: dict) -> int:
+    """原轮次事件时间：同 (source, conversation_id, turn_key) 的原始 unit 时间。"""
+    tk = m.get("turn_key")
+    if tk:
+        r = idx.execute(
+            "SELECT MIN(time) FROM units WHERE source=? AND conversation_id=?"
+            " AND turn_key=? AND role<>'distilled' AND time IS NOT NULL",
+            (m["source"], m["conversation_id"], tk)).fetchone()
+        if r and r[0]:
+            return int(r[0])
+    return int(m.get("created_at") or time.time())
 
 
 def _pending_projection(idx: sqlite3.Connection) -> list[dict]:

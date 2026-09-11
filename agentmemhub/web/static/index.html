@@ -652,12 +652,21 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         const vChip = v===null ? '' : `<span class="rounded px-1 text-[10px] font-semibold ${v>0?'bg-emerald-500/10 text-emerald-500':(v<0?'bg-error-soft text-error':'bg-muted text-muted-foreground')}">${v>0?'+':''}${v.toFixed(1)}</span>`;
         const ts = t.ts ? new Date(t.ts).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '';
         const u = esc((t.userText||'（无用户输入）').slice(0,90));
+        // 手动加权三档循环：清除 → ⭐(0.6) → ⭐⭐(1.0) → 清除。
+        // 锁定后优先于自动聚合值且不随时间衰减（用户意志优先于新陈代谢）。
+        const mw = (typeof t.manualValue==='number') ? t.manualValue : null;
+        const star = mw===null
+          ? '<i data-lucide="star" class="h-3 w-3"></i>'
+          : `<span class="tnum text-[9px] font-bold text-amber-500">${mw>=1?'★★':'★'}</span>`;
+        const starBtn = `<button class="rounded p-0.5 transition-colors ${mw===null?'text-muted-foreground hover:text-amber-500':'text-amber-500'}"
+            title="${mw===null?'手动加权：锁定该记忆的价值（不衰减）':'当前手动权重 '+mw.toFixed(1)+'，点击切档/清除'}"
+            data-weight="${mw===null?'':(mw<1?'1.0':'')}" data-trace="${esc(t.id)}">${star}</button>`;
         // 打分（正/负反馈）：引擎立即重算该条价值分
-        const scoreBtns = `<span class="ml-auto flex items-center gap-0.5">${vChip}
+        const scoreBtns = `<span class="ml-auto flex items-center gap-0.5">${vChip}${starBtn}
           <button class="rounded p-0.5 text-muted-foreground hover:text-emerald-500 transition-colors" title="标记有用（正向评分）" data-score="positive" data-trace="${esc(t.id)}"><i data-lucide="thumbs-up" class="h-3 w-3"></i></button>
           <button class="rounded p-0.5 text-muted-foreground hover:text-error transition-colors" title="标记无用（负向评分）" data-score="negative" data-trace="${esc(t.id)}"><i data-lucide="thumbs-down" class="h-3 w-3"></i></button>
         </span>`;
-        return `<div class="rounded-md border border-border bg-background px-2.5 py-1.5 text-xs">
+        return `<div class="rounded-md border border-border bg-background px-2.5 py-1.5 text-xs ${mw!==null?'border-amber-500/40':''}">
           <div class="flex items-center gap-2"><span class="tnum text-[10px] text-muted-foreground">${ts}</span>${scoreBtns}</div>
           <div class="mt-0.5 truncate text-foreground" title="${esc(t.userText||'')}">${u}</div>
         </div>`;
@@ -666,6 +675,17 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     }catch(e){
       box.innerHTML = '<div class="py-3 text-center text-[11px] text-muted-foreground">记忆列表加载失败</div>';
     }
+  }
+  async function setWeight(traceId, value){
+    if(!lastEngineOnline){ toast('记忆索引不可用，无法加权'); return; }
+    try{
+      const q = value==='' ? '' : `&value=${value}`;
+      const r=await fetchWithTimeout(`/api/memos/weight?traceId=${encodeURIComponent(traceId)}${q}`,{method:'POST'},10000);
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok){ toast(typeof d.detail==='string'?d.detail:'加权失败'); return; }
+      toast(value===''?'已清除手动权重（回到自动演化）':'已锁定权重 '+Number(value).toFixed(1)+'（不衰减）');
+      loadMemosRecent();
+    }catch(e){ toast('加权失败：'+(e.message||e)); }
   }
   async function scoreMemos(traceId, polarity){
     if(!lastEngineOnline){ toast('记忆索引不可用，无法打分'); return; }
@@ -1106,6 +1126,8 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     $('#logsRefreshBtn').onclick=loadLogs;
     // 记忆评分（正/负反馈）：事件委托（内联 onclick 无法访问 IIFE 内函数）
     $('#memosRecent').addEventListener('click', e=>{
+      const w=e.target.closest('button[data-weight]');
+      if(w){ setWeight(w.dataset.trace, w.dataset.weight); return; }
       const btn=e.target.closest('button[data-score]');
       if(!btn) return;
       scoreMemos(btn.dataset.trace, btn.dataset.score);

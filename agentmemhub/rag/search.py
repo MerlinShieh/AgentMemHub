@@ -19,7 +19,7 @@ import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Callable, Sequence
 
 import numpy as np
 
@@ -354,6 +354,8 @@ def hybrid_search(
     max_per_conversation: int = 2,
     exclude_session: tuple[str, str] | None = None,   # P1-3 (source, conv_id)
     value_provider: "ValueProvider | None" = None,    # P2-2 读侧价值 join
+    no_decay_ids: "Callable[[Sequence[int]], set[int]] | None" = None,
+    # 手动加权的 unit 集合查询器：锁定的价值不随时间衰减
     include_low_value: bool = False,                  # 复盘模式放开 value<=0
     judge: "Judge | None" = None,                     # P2-1 终审
     threshold_floor: float = THRESHOLD_FLOOR,
@@ -392,7 +394,8 @@ def hybrid_search(
                     _fetch_units(conn, list(rel)).items()}
             values = value_provider.values(list(rel))
             rel, dropped_low = apply_value_boost(
-                rel, meta, values, include_low_value=include_low_value)
+                rel, meta, values, include_low_value=include_low_value,
+                no_decay=(no_decay_ids(list(rel)) if no_decay_ids else None))
 
         if mode == "hybrid" and rel:
             rel, bypassed = threshold_filter(rel, cand, floor=threshold_floor)

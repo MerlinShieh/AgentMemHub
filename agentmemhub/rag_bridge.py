@@ -132,6 +132,7 @@ def _rows_to_traces(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
         agents = [r for r in g if r["role"] == "assistant"]
         anchor = users[0] if users else g[0]
         vals = [r["value"] for r in g if r["value"] is not None]
+        manuals = [r["manual_value"] for r in g if r["manual_value"] is not None]
         out.append({
             "id": anchor["legacy_id"] or anchor["src_id"] or f"unit:{anchor['id']}",
             "ts": int(anchor["time"] or 0) * 1000,
@@ -140,7 +141,9 @@ def _rows_to_traces(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
             "userText": "\n".join(r["text"] for r in users),
             "agentText": "\n".join(r["text"] for r in agents),
             "summary": (anchor["title"] or "")[:200],
-            "value": vals[0] if vals else 0.0,
+            # 手动加权优先于自动聚合值（与 ValueStore.values 的读取口径一致）
+            "value": manuals[0] if manuals else (vals[0] if vals else 0.0),
+            "manualValue": manuals[0] if manuals else None,
             "source": anchor["source"],
             "conversationId": anchor["conversation_id"],
         })
@@ -150,7 +153,7 @@ def _rows_to_traces(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
 
 _SELECT_TRACE = (
     "SELECT u.id, u.source, u.conversation_id, u.seq, u.role, u.turn_key,"
-    " u.time, u.title, u.src_id, u.legacy_id, u.text, v.value"
+    " u.time, u.title, u.src_id, u.legacy_id, u.text, v.value, v.manual_value"
     " FROM units u LEFT JOIN unit_values v ON v.unit_id = u.id")
 
 
@@ -181,10 +184,12 @@ def search(agent: str, query: str, *, k: int = SEARCH_MAX_HITS,
     """
     t0 = time.perf_counter()
     st = settings()
+    vstore = memstore.ValueStore(st.index_db)
     hits = hybrid_search(
         st, query, k=k, candidate_k=max(k * 4, 30), expand_turns=False,
         exclude_session=exclude_session,
-        value_provider=memstore.ValueStore(st.index_db),
+        value_provider=vstore,
+        no_decay_ids=vstore.no_decay_ids,
         log=_log())
     refmap: dict = {}
     if hits:

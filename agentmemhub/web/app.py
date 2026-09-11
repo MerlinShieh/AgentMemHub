@@ -809,6 +809,38 @@ def create_app(db_path: Path | None = None):
         logs.record(f"记忆打分：trace={traceId} {polarity}（幅度 {magnitude}）")
         return JSONResponse({"ok": True, "traceId": traceId, "feedback": res})
 
+    @app.post("/api/memos/weight")
+    def api_memos_weight(traceId: str = Query(...),
+                         value: float | None = Query(default=None,
+                                                     ge=0.0, le=1.0)):
+        """手动加权：用户锁定某条记忆的价值分（0~1；不传=清除手动设定）。
+
+        锁定后的分**优先于自动聚合值，且不随时间衰减**——用户意志优先于
+        新陈代谢。value 与记忆来源初始分（Agent 主动写入 0.6 / 蒸馏 0.3）
+        的关系：初始分只是起点，手动加权是用户对起点的覆盖。
+        """
+        import sqlite3 as _sq
+
+        from agentmemhub import logs, memos_daemon
+        from agentmemhub.rag import memstore
+        from agentmemhub import rag_bridge
+        if memos_daemon.auth_state() is None:
+            raise HTTPException(
+                status_code=503,
+                detail="记忆索引不可用（检查 database/session_rag.db 与 models/）")
+        st = rag_bridge.settings()
+        conn = _sq.connect(str(st.index_db), timeout=15.0)
+        try:
+            uid = rag_bridge.resolve_unit_id(conn, traceId)
+            if uid is None:
+                raise HTTPException(status_code=404, detail=f"记忆不存在：{traceId}")
+            r = memstore.set_manual_value(conn, uid, value)
+        finally:
+            conn.close()
+        logs.record(f"记忆加权：trace={traceId} → "
+                    + ("清除手动设定" if value is None else f"锁定 {value}"))
+        return JSONResponse({"ok": True, "traceId": traceId, **r})
+
     @app.get("/api/memos/traces")
     def api_memos_traces(limit: int = Query(default=8, ge=1, le=50),
                          offset: int = Query(default=0, ge=0)):
@@ -827,7 +859,8 @@ def create_app(db_path: Path | None = None):
             {"id": t.get("id"), "ts": t.get("ts"),
              "userText": (t.get("userText") or "")[:200],
              "agentText": (t.get("agentText") or "")[:200],
-             "value": t.get("value"), "episodeId": t.get("episodeId")}
+             "value": t.get("value"), "episodeId": t.get("episodeId"),
+             "manualValue": t.get("manualValue")}
             for t in (res.get("traces") or [])
         ]
         return JSONResponse({"total": res.get("total"), "offset": offset,
