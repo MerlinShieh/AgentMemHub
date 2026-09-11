@@ -20,7 +20,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 #: 记忆蒸馏默认配置（yaml distillation 段逐键覆盖；嵌套子段各自合并）
 DEFAULT_DISTILL = {
     "enabled": True,
-    "prompt_ver": 1,
+    # prompt_ver：留空（None）= 跟随代码里的 PROMPT_VER 常量（提示词一改就自动
+    # 触发重蒸）；显式给整数则覆盖之（用于强制重蒸，如临时排查）。
+    # 不设默认数字：否则改提示词易忘记同步，旧结果永不更新。
+    "prompt_ver": None,
     "slice": {
         "max_chars": 24000,        # 单片字符预算（上下文保险）
         "max_turns": 16,           # 单片轮数预算；单轮巨会话走字符硬切

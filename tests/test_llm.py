@@ -203,3 +203,37 @@ def test_bad_json_raises_value_error_not_retried():
     with pytest.raises(ValueError):
         c.complete_json("s", "u")
     assert opener.calls == 1
+
+
+# ── 截断抢救（推理模型被 max_tokens 截断时，保住已完整的条目）──
+
+def test_extract_json_salvages_truncated_output():
+    """JSON 写到一半被截断 → 抢救出前面完整的条目（而非整片丢弃）。"""
+    truncated = ('{"memories": ['
+                 '{"type": "fact", "topic": "甲", "content": "完整的一条", "confidence": "high"},'
+                 '{"type": "decision", "topic": "乙", "content": "另一条完整", "confidence": "medium"},'
+                 '{"type": "fact", "topic": "丙", "content": "这条被截断在中间没有闭合')
+    out = extract_json(truncated)
+    assert len(out["memories"]) == 2
+    assert out["memories"][0]["content"] == "完整的一条"
+    assert out["memories"][1]["topic"] == "乙"
+
+
+def test_extract_json_salvages_when_array_unclosed():
+    """数组未闭合但对象完整（尾部缺 ]}）→ 同样抢救。"""
+    truncated = ('{"memories": ['
+                 '{"type": "fact", "topic": "甲", "content": "唯一完整条目", "confidence": "high"}')
+    out = extract_json(truncated)
+    assert out["memories"][0]["content"] == "唯一完整条目"
+
+
+def test_extract_json_no_salvage_when_nothing_complete():
+    """首条就不完整 → 无可抢救，仍报错（不能返回空结果掩盖问题）。"""
+    with pytest.raises(ValueError):
+        extract_json('{"memories": [{"type": "fact", "content": "截断在')
+
+
+def test_extract_json_salvage_does_not_mask_other_shapes():
+    """非 memories 结构且不可解析 → 仍报错（抢救逻辑不误伤）。"""
+    with pytest.raises(ValueError):
+        extract_json("完全是自然语言，没有 JSON")

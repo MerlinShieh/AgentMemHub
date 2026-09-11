@@ -43,6 +43,9 @@ _FILTER_HINTS = ("1301", "contentFilter", "敏感内容", "不安全")
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.I)
 
+#: 模块日志器（截断抢救等运行期告警）
+_LOG = logging.getLogger("agentmemhub.llm")
+
 
 def build_opener() -> urllib.request.OpenerDirector:
     """LLM 专用 opener：默认强制直连；AGENTMEMHUB_LLM_PROXY 可显式指定代理。"""
@@ -71,10 +74,44 @@ def is_content_filter(code: int, body: str) -> bool:
     return any(h in body for h in _FILTER_HINTS)
 
 
+def _salvage_memories(text: str) -> dict | None:
+    """从被截断的蒸馏输出中抢救已完整的 memories 条目。
+
+    推理模型的输出可能被 max_tokens 截断（JSON 写到一半结束）。此时整片丢弃
+    代价太大——前面的条目其实是完整有效的。用 json.raw_decode 逐个解出完整
+    对象，遇到不完整的就地停止，其余丢弃。
+    """
+    ki = text.find('"memories"')
+    if ki < 0:
+        return None
+    ai = text.find("[", ki)
+    if ai < 0:
+        return None
+    dec = json.JSONDecoder()
+    items: list = []
+    pos = ai + 1
+    while True:
+        while pos < len(text) and text[pos] in " \t\r\n,":
+            pos += 1
+        if pos >= len(text) or text[pos] != "{":
+            break
+        try:
+            obj, end = dec.raw_decode(text, pos)
+        except json.JSONDecodeError:
+            break                       # 对象不完整 → 就地停止
+        items.append(obj)
+        pos = end
+    if not items:
+        return None
+    _LOG.warning("输出疑似被截断，已抢救出 %d 条完整记忆", len(items))
+    return {"memories": items}
+
+
 def extract_json(content: str) -> dict:
     """从模型输出提取 JSON 对象，容忍 ``` 围栏与前后解释文字。
 
-    失败抛 ValueError（调用方决定重试或跳过）。
+    依次尝试：围栏内容 → 整体 → 首个 { 到末个 } → **截断抢救**
+    （末项针对被 max_tokens 截断的输出）。全失败抛 ValueError。
     """
     if not content or not content.strip():
         raise ValueError("模型返回空内容")
@@ -98,6 +135,10 @@ def extract_json(content: str) -> dict:
                 return obj
         except json.JSONDecodeError:
             pass
+    # 再退一步：抢救被截断输出中已完整的条目
+    salvaged = _salvage_memories(text)
+    if salvaged is not None:
+        return salvaged
     raise ValueError(f"无法从模型输出解析 JSON：{text[:200]!r}")
 
 
@@ -111,7 +152,11 @@ class LLMConfig:
     timeout: float = 60.0
     max_retries: int = 2          # 仅对瞬态错误生效
     backoff_base: float = 1.5     # 退避基数（秒）：base * 2^attempt
-    max_tokens: int = 2048
+    max_tokens: int = 8192
+    # 默认 8192（而非 2048）：推理模型（如 deepseek-flash）先消耗 reasoning
+    # token 再产出正文，上限过小时 JSON 会被静默截断——实测 2048 下 69% 的
+    # 蒸馏输出不完整，8192 降至 13%（再配合提示词输出长度约束）。
+    # 按生成量计费，截断重试反而更贵，留足更划算。
     temperature: float = 0.0      # 蒸馏/抽取类任务恒 0，保证可复现
     #: provider 特定的额外请求头（配置驱动，不硬编码在客户端里）。
     #: 实测 OpenCode Go（opencode.ai/zen/go）需要 User-Agent（过 Cloudflare 1010）
@@ -141,7 +186,7 @@ class LLMConfig:
             timeout=float(d.get("timeout") or 60.0),
             max_retries=int(d.get("max_retries") if d.get("max_retries") is not None else 2),
             backoff_base=float(d.get("backoff_base") or 1.5),
-            max_tokens=int(d.get("max_tokens") or 2048),
+            max_tokens=int(d.get("max_tokens") or 8192),
             temperature=float(d.get("temperature") if d.get("temperature") is not None else 0.0),
             headers={str(k): str(v) for k, v in headers.items()} if isinstance(headers, dict) else {},
         )

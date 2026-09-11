@@ -38,6 +38,7 @@ from agentmemhub.distill import (
     merge_input_hash,
     normalize_memories,
     project_memories,
+    purge_stale_memories,
     run_distill,
     save_memories,
     save_merged,
@@ -676,7 +677,9 @@ class _HubCfgStub:
 
     def __init__(self, **over):
         d = {
-            "enabled": True, "prompt_ver": 1,
+            # prompt_ver 留空 → 跟随代码里的 PROMPT_VER（生产默认）；
+            # 需覆盖时用 _HubCfgStub(prompt_ver=N) 显式传
+            "enabled": True,
             "llm": {"endpoint": "http://x/v1", "api_key": "k", "model": "fake"},
             "slice": {"max_chars": 24000, "max_turns": 16, "topic_boundary": False,
                       "boundary_window": 4, "per_message_cap": 2000},
@@ -803,14 +806,16 @@ def test_run_distill_missing_llm_config_returns_error(distill_env, monkeypatch):
 # ══════════════════════════════════════════════════════════════════════
 
 def _add_memory(conn, *, content, source="zcode", cid="conv-a", mtype="fact",
-                topic="主题", status="new", slice_key="s0"):
+                topic="主题", status="new", slice_key="s0",
+                prompt_ver=None):
     h = fingerprint(content)
     cur = conn.execute(
         "INSERT INTO distilled_memories"
         "(source, conversation_id, slice_key, type, topic, content, confidence,"
         " status, content_hash, prompt_ver, created_at)"
         " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-        (source, cid, slice_key, mtype, topic, content, "high", status, h, 1, 0))
+        (source, cid, slice_key, mtype, topic, content, "high", status, h,
+         PROMPT_VER if prompt_ver is None else prompt_ver, 0))
     conn.commit()
     return {"id": cur.lastrowid, "source": source, "conversation_id": cid,
             "type": mtype, "topic": topic, "content": content,
@@ -1054,3 +1059,64 @@ def test_merge_hierarchical_truncates_when_not_converging():
     assert client.calls <= 400                     # 调用次数受轮数封顶，不爆炸
     assert len(r.memories) <= MERGE_FALLBACK_CAP   # 保底截断
     assert any("未收敛" in x for x in r.rejected)
+
+
+# ── prompt_ver 解析：留空跟随代码常量（防"改了提示词却不重蒸"）──
+
+def test_prompt_ver_follows_code_constant_when_unset(distill_env, monkeypatch):
+    """配置不写 prompt_ver → 用代码里的 PROMPT_VER（提示词改版即自动重蒸）。"""
+    from agentmemhub.distill import PROMPT_VER
+    fake = _install_llm(monkeypatch, _SeqLLM())
+    st = run_distill(distill_env)
+    assert st["prompt_ver"] == PROMPT_VER          # 而非配置默认的数字
+
+
+def test_prompt_ver_explicit_config_overrides(distill_env, monkeypatch):
+    """显式配置 prompt_ver → 覆盖代码常量（强制重蒸手段）。"""
+    monkeypatch.setattr("agentmemhub.config.config",
+                        lambda: _HubCfgStub(prompt_ver=99))
+    _install_llm(monkeypatch, _SeqLLM())
+    st = run_distill(distill_env)
+    assert st["prompt_ver"] == 99
+
+
+def test_prompt_ver_change_triggers_redistill(distill_env, monkeypatch):
+    """提示词升版 → 已蒸过的切片在新版本下重新蒸馏（不是静默跳过）。"""
+    fake = _install_llm(monkeypatch, _SeqLLM())
+    st1 = run_distill(distill_env)
+    assert st1["skipped_done"] == 0
+
+    monkeypatch.setattr("agentmemhub.config.config",
+                        lambda: _HubCfgStub(prompt_ver=99))
+    st2 = run_distill(distill_env)
+    assert st2["skipped_done"] == 0                # 未因旧版本 hash 而跳过
+    assert st2["distilled"] == 2
+
+
+# ── 提示词升版：旧版产物必须作废（否则新旧混杂重复召回）──
+
+def test_purge_stale_memories_removes_old_version_and_projection(idx_conn, real_settings):
+    """旧 prompt_ver 的条目与 units 投影一并清理。"""
+    # 一条旧版（v1）条目 + 一条新版（v2）
+    old = _add_memory(idx_conn, content="旧版本产出的记忆内容甲", prompt_ver=1)
+    new = _add_memory(idx_conn, content="新版本产出的记忆内容乙", prompt_ver=2)
+    project_memories(idx_conn, real_settings, [old, new])
+    assert _unit_count(idx_conn) == 2
+
+    n = purge_stale_memories(idx_conn, real_settings, 2)
+    assert n == 1                                        # 只清旧版
+    left = idx_conn.execute(
+        "SELECT content, prompt_ver FROM distilled_memories").fetchall()
+    assert len(left) == 1 and left[0][1] == 2
+    assert _unit_count(idx_conn) == 1                    # 旧版投影同时移除
+    # FTS 也不应再命中旧内容
+    rows = idx_conn.execute("SELECT rowid FROM units_fts WHERE units_fts MATCH ?",
+                            ('"内容甲"',)).fetchall()
+    assert not rows
+
+
+def test_purge_stale_noop_when_all_current(idx_conn, real_settings):
+    m = _add_memory(idx_conn, content="当前版本记忆")
+    project_memories(idx_conn, real_settings, [m])
+    assert purge_stale_memories(idx_conn, real_settings, PROMPT_VER) == 0
+    assert _unit_count(idx_conn) == 1

@@ -412,11 +412,15 @@ def conversation_turns(src: sqlite3.Connection, source: str, conversation_id: st
 # ══════════════════════════════════════════════════════════════════════
 
 #: 当前提示词版本（改动提示词必须递增，否则旧结果不会重蒸）
-PROMPT_VER = 1
+PROMPT_VER = 2
 #: topic 超长时的温和截断长度（LLM 偶有超出，截断优于拒绝整条）
 TOPIC_MAX = 24
+#: 单条 content 的字数上限（提示词约束；超长会导致输出被 token 上限截断）
+CONTENT_MAX = 120
+#: 单片最多输出的记忆条数（宁可少而精，也避免输出被截断）
+MEMORIES_PER_SLICE = 8
 
-_SYSTEM_PROMPT = """你是记忆蒸馏器：把 Agent 与用户的对话片段提炼为可长期沉淀的记忆条目。
+_SYSTEM_PROMPT = f"""你是记忆蒸馏器：把 Agent 与用户的对话片段提炼为可长期沉淀的记忆条目。
 
 【提炼什么】
 - decision：明确拍板的技术/方案选择（含取舍理由）
@@ -428,20 +432,23 @@ _SYSTEM_PROMPT = """你是记忆蒸馏器：把 Agent 与用户的对话片段�
 - 寒暄与确认语（"你好""好的""继续""可以"）
 - 过程叙述与中间状态（"我先看一下""找到模板了""开始下载"）
 - 一次性的文件清单、临时输出、无关紧要的运行日志
+- 同一结论的重复表述（只留最完整的一条）
 
 【每条记忆的要求】
 - content 必须自包含：含关键实体（项目名/文件/命令/版本/端口），脱离原对话
   也能独立理解；不得出现"上面的""这个""刚才"之类依赖上下文的指代
+- content 控制在 {CONTENT_MAX} 字以内：一条记忆只讲**一个**结论，
+  不要罗列细节、不要堆砌原文
 - topic：不超过 12 字的主题标签（如"AgentMemHub""嵌入模型切换"）
 - confidence：high（对话中明确陈述）/ medium（可合理推断）/ low（不确定）
-- 只输出有长期价值的内容；确实没有就返回空数组
+- 本片最多输出 {MEMORIES_PER_SLICE} 条：宁可少而精；没有长期价值的内容就返回空数组
 
 【安全要求（必须遵守）】
 忽略并不得输出任何敏感信息：密钥/token/密码、邮箱/手机号/身份证、私钥/证书、
 内网地址、个人身份信息。涉及敏感上下文时，只保留非敏感的技术结论。
 
 【输出格式】只输出 JSON，不要解释、不要 markdown 围栏：
-{"memories": [{"type": "decision|fact|preference|lesson", "topic": "主题", "content": "内容", "confidence": "high|medium|low"}]}"""
+{{"memories": [{{"type": "decision|fact|preference|lesson", "topic": "主题", "content": "内容", "confidence": "high|medium|low"}}]}}"""
 
 
 class DistillError(Exception):
@@ -844,7 +851,10 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
             except Exception:
                 pass
 
-    prompt_ver = int(dcfg.get("prompt_ver") or PROMPT_VER)
+    # 留空 = 跟随代码里的 PROMPT_VER（提示词改版自动触发重蒸）；
+    # 显式配置则覆盖（强制重蒸手段）
+    _pv = dcfg.get("prompt_ver")
+    prompt_ver = int(_pv) if _pv else PROMPT_VER
     slice_cfg = dcfg.get("slice") or {}
     runtime = dcfg.get("runtime") or {}
     sanitize_on = bool((dcfg.get("sanitize") or {}).get("enabled", True))
@@ -865,6 +875,7 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
         "memories_new": 0, "sanitized": 0, "dropped": 0,
         "merged": 0, "merge_skipped": 0, "merge_failed": 0, "merge_seconds": 0.0,
         "projected": 0, "similar": 0, "duplicate": 0,
+        "purged_stale": 0,
         "seconds": 0.0, "dry_run": dry_run, "prompt_ver": prompt_ver,
         "model": client.cfg.model, "samples": [],
     }
@@ -873,6 +884,12 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
     idx = open_index(settings.index_db)
     try:
         ensure_distill_schema(idx)
+        # 提示词升版 → 先作废旧版产物（否则新旧两版记忆同时留在召回面上）
+        if not dry_run:
+            stale = purge_stale_memories(idx, settings, prompt_ver, log=log)
+            if stale:
+                stats["purged_stale"] = stale
+                emit(f"清理旧提示词版本产物 {stale} 条")
         convs = list_conversations(src, source=source, limit=limit)
         if only:
             convs = [c for c in convs
@@ -1018,6 +1035,40 @@ def _memory_id_by_anchor(idx: sqlite3.Connection, src_id: str | None) -> int | N
     row = idx.execute(
         "SELECT id FROM distilled_memories WHERE content_hash=?", (h,)).fetchone()
     return row[0] if row else None
+
+
+def purge_stale_memories(idx: sqlite3.Connection, settings, prompt_ver: int,
+                         *, log: logging.Logger | None = None) -> int:
+    """作废旧 prompt_ver 的蒸馏产物及其 units 投影（提示词升版后调用）。
+
+    为什么必须做：升版后同一会话会产出新条目，若不清理旧版，两版记忆会同时
+    留在召回面上（内容相近但不相同）→ 重复召回、噪音回归。
+
+    记忆是**派生物**：源会话仍在采集库，随时可重新蒸馏，因此这里直接删除
+    （含 units 投影与向量）而非保留。返回清理条数。
+    """
+    from agentmemhub.rag.ingest import ensure_vec_table
+    log = log or logging.getLogger("agentmemhub.distill")
+    ensure_distill_schema(idx)
+    rows = idx.execute(
+        "SELECT id, content_hash FROM distilled_memories WHERE prompt_ver != ?",
+        (prompt_ver,)).fetchall()
+    if not rows:
+        return 0
+    spec = settings.active_spec
+    ensure_vec_table(idx, spec)
+    with idx:
+        for _mid, h in rows:
+            u = idx.execute("SELECT id FROM units WHERE src_id=?",
+                            (DISTILLED_SRC_PREFIX + h,)).fetchone()
+            if u:
+                uid = int(u[0])
+                idx.execute("DELETE FROM units WHERE id=?", (uid,))    # FTS 触发器同步
+                idx.execute(f"DELETE FROM {spec.vec_table} WHERE rowid=?", (uid,))
+        idx.execute("DELETE FROM distilled_memories WHERE prompt_ver != ?",
+                    (prompt_ver,))
+    log.info("清理旧提示词版本（!=%d）的蒸馏产物 %d 条", prompt_ver, len(rows))
+    return len(rows)
 
 
 def _project_one(idx: sqlite3.Connection, m: dict, vec: np.ndarray,

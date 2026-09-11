@@ -96,7 +96,8 @@ def test_distillation_defaults(tmp_path):
     c = _cfg(env={}, path=tmp_path / "none.yaml")
     d = c.distillation
     assert d["enabled"] is True
-    assert d["prompt_ver"] == 1
+    # prompt_ver 默认留空（None）→ 跟随代码常量，避免改提示词后忘同步版本号
+    assert d["prompt_ver"] is None
     assert d["slice"]["max_chars"] == 24000
     assert d["slice"]["max_turns"] == 16
     assert d["slice"]["topic_boundary"] is True
