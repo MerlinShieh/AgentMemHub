@@ -354,7 +354,7 @@ Agent 不会自觉保存，必须靠规则约束。
 git clone https://github.com/MerlinShieh/Agent-skill-save-memory.git   ~/.zcode/skills/save-memory          # ZCode；其他 Harness 放对应 skills 目录
 ```
 
-Skill 定义**何时保存、按什么顺序保存+评分**（写后即评）。它不含存储实现，
+Skill 定义**何时保存**（写入即完成，不自动评分——价值分由真实使用演化）。它不含存储实现，
 强绑定本项目的 MCP 工具，无降级路径。
 
 ### 步骤 3：把记忆纪律写进 AGENTS.md（触发保障）⚠️ 最容易漏
@@ -374,7 +374,7 @@ Skill 的触发依赖模型自觉，长对话/高负载下**会漏触发**。必
        （AgentMemHub 项目内 uv run python -m agentmemhub sync；内置引擎无守护进程，
        没有"启动引擎"这个动作），不硬写；
     2. memory_save 写入自包含结论（背景一句话 + 结论/做法）；
-    3. 对刚写入的 id 立即 memory_score（多数应 positive）。
+    3. 写入后不自动评分——价值分由真实使用演化（面板 👍/👎，或按需 memory_score）。
 
     ⚠️ 只写 Agent 自己的本地会话记忆不算完成——必须落到记忆索引。
     需要历史经验时主动 memory_search，与保存流程互相独立。
@@ -399,7 +399,7 @@ Claude Code 等支持 MCP 的 Agent harness 上——模型在会话进行中即
 | `memory_recent(limit)` | 最近写入的记忆时间线，快速了解近期积累 |
 | `memory_stats()` | 索引就绪状态 / 记忆总量 / 嵌入模型与 LLM 评分可用性 |
 | `memory_save(content)` | 写一条记忆（即时入库并补向量，写后验证 imported，失败明确报错不伪装）|
-| `memory_score(trace_id, polarity)` | 对刚写入/任意一条记忆写后即评（反馈 → 引擎即时重算 value/priority，检索排序生效）|
+| `memory_score(trace_id, polarity)` | 按需对任意一条记忆打分（反馈 → 引擎即时重算 value/priority；**写后即评流程已废除**，仅用户明确要求加权时使用）|
 
 ```bash
 # 0. 确保记忆索引已建立（v2.0 起引擎内置，无需启动任何服务）：
