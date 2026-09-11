@@ -114,22 +114,44 @@ def clear_scored() -> None:
 
 
 def read_engine_llm() -> dict[str, Any]:
-    """读引擎 config.yaml 的 LLM 配置（endpoint/model/apiKey；key 只读不打印）。"""
+    """读 LLM 配置（**与蒸馏同源**）：优先 agentmemhub.yaml 的 `llm` 段。
+
+    评分与蒸馏共用同一份 LLM 接入（换模型/换服务商只改一处）；
+    该段缺项时回退 MemOS 引擎 config.yaml（backend=memos 的旧环境兼容）。
+    key 只读不打印。
+    """
+    from agentmemhub import config as hub_config
+    llm = hub_config.config().llm or {}
+    endpoint = str(llm.get("endpoint") or "")
+    api_key = str(llm.get("api_key") or "")
+    model = str(llm.get("model") or "")
+    if endpoint and api_key and model:
+        return {"endpoint": endpoint, "api_key": api_key, "model": model,
+                "headers": dict(llm.get("headers") or {})}
+    return _read_memos_engine_llm()
+
+
+def _read_memos_engine_llm() -> dict[str, Any]:
+    """[回退] 读 MemOS 引擎 config.yaml 的 LLM 配置（backend=memos 旧环境）。"""
     import yaml
     home = memos_daemon.engine_home()
     if home is None:
-        raise RuntimeError("未找到引擎 home（先配置 memos.home 或确认引擎默认位置）")
+        raise RuntimeError(
+            "LLM 未配置：在 agentmemhub.yaml 的 llm 段填 endpoint/api_key/model"
+            "（或 scripts/sync_llm_from_zcode.py 一键同步）")
     p = home / "config.yaml"
     if not p.exists():
-        raise RuntimeError(f"引擎配置不存在：{p}")
+        raise RuntimeError(
+            f"LLM 未配置：agentmemhub.yaml 的 llm 段为空，且引擎配置不存在（{p}）")
     cfg = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
     llm = cfg.get("llm") or {}
     endpoint = llm.get("endpoint") or ""
     api_key = llm.get("apiKey") or ""
     model = llm.get("model") or ((llm.get("models") or {}).get("summary") if isinstance(llm.get("models"), dict) else "")
     if not endpoint or not api_key or not model:
-        raise RuntimeError("引擎 config.yaml 的 llm 段不完整（endpoint/apiKey/model）")
-    return {"endpoint": endpoint, "api_key": api_key, "model": model}
+        raise RuntimeError(
+            "LLM 未配置：agentmemhub.yaml 的 llm 段为空，引擎 config.yaml 的 llm 段也不完整")
+    return {"endpoint": endpoint, "api_key": api_key, "model": model, "headers": {}}
 
 
 def _llm_opener() -> urllib.request.OpenerDirector:
@@ -196,7 +218,9 @@ def evaluate_trace(trace: dict, llm_cfg: dict, timeout: float = 45) -> str:
         llm_cfg["endpoint"],
         data=json.dumps(body).encode("utf-8"),
         headers={"Content-Type": "application/json",
-                 "Authorization": f"Bearer {llm_cfg['api_key']}"},
+                 "Authorization": f"Bearer {llm_cfg['api_key']}",
+                 # provider 特定请求头（与蒸馏同源配置；多数 provider 为空）
+                 **dict(llm_cfg.get("headers") or {})},
         method="POST")
     try:
         with _llm_opener().open(req, timeout=timeout) as r:

@@ -565,3 +565,55 @@ def test_llm_opener_direct_by_default(monkeypatch):
     phs = _proxy_handlers(scoring._llm_opener())
     assert len(phs) == 1 and phs[0].proxies == {
         "http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"}
+
+
+def test_read_engine_llm_prefers_hub_yaml(monkeypatch):
+    """评分与蒸馏共用 LLM 配置：优先 agentmemhub.yaml 的 llm 段（含 headers）。"""
+    from agentmemhub import config as hub_config
+    from agentmemhub import scoring
+
+    class _Stub:
+        llm = {"endpoint": "https://api.example.com/v1/chat/completions",
+               "api_key": "sk-test-placeholder-0000", "model": "m1",
+               "headers": {"User-Agent": "AgentMemHub/1.0"}}
+
+    monkeypatch.setattr(hub_config, "config", lambda: _Stub())
+    cfg = scoring.read_engine_llm()
+    assert cfg["endpoint"] == "https://api.example.com/v1/chat/completions"
+    assert cfg["model"] == "m1" and cfg["api_key"].startswith("sk-test")
+    assert cfg["headers"] == {"User-Agent": "AgentMemHub/1.0"}
+
+
+def test_read_engine_llm_falls_back_to_memos_engine(monkeypatch, tmp_path):
+    """agentmemhub.yaml 的 llm 段为空时，回退 MemOS 引擎 config.yaml（旧环境兼容）。"""
+    from agentmemhub import config as hub_config
+    from agentmemhub import scoring
+
+    class _Empty:
+        llm = {}
+
+    monkeypatch.setattr(hub_config, "config", lambda: _Empty())
+    home = tmp_path / "engine_home"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        "llm:\n  endpoint: https://engine.example/v1\n  apiKey: ek-test\n  model: em\n",
+        encoding="utf-8")
+    monkeypatch.setattr(scoring.memos_daemon, "engine_home", lambda: home)
+    cfg = scoring.read_engine_llm()
+    assert cfg["endpoint"] == "https://engine.example/v1"
+    assert cfg["api_key"] == "ek-test" and cfg["model"] == "em"
+
+
+def test_read_engine_llm_raises_with_clear_hint_when_unconfigured(monkeypatch):
+    """两处都没配 → 报错文案要指路 agentmemhub.yaml 的 llm 段。"""
+    from agentmemhub import config as hub_config
+    from agentmemhub import scoring
+    import pytest
+
+    class _Empty:
+        llm = {}
+
+    monkeypatch.setattr(hub_config, "config", lambda: _Empty())
+    monkeypatch.setattr(scoring.memos_daemon, "engine_home", lambda: None)
+    with pytest.raises(RuntimeError, match="agentmemhub.yaml"):
+        scoring.read_engine_llm()

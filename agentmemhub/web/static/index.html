@@ -451,10 +451,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
                   class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
             <i data-lucide="upload" class="h-3.5 w-3.5 text-primary"></i>写入记忆
           </button>
-          <button id="adminScoreBtn" title="LLM 三轴批量评估记忆并写入价值分（需已配置 LLM）"
-                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
-            <i data-lucide="star" class="h-3.5 w-3.5 text-primary"></i>自动评分
-          </button>
+          <!-- 自动评分入口已隐藏（蒸馏置信度 + 👍/👎 已覆盖质量把关；CLI: python -m agentmemhub score） -->
           <span class="ml-auto flex items-center gap-1.5">
             <span id="memosDot" class="h-2 w-2 rounded-full bg-muted-foreground"></span>
             <span id="memosState" class="text-xs text-muted-foreground">检测中…</span>
@@ -1280,7 +1277,6 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     $('#adminIngestBtn').disabled = busy;
     $('#adminDistillBtn').disabled = busy || !lastEngineOnline;
     $('#adminPushBtn').disabled = busy || !lastEngineOnline;
-    $('#adminScoreBtn').disabled = busy || !lastEngineOnline;
     $('#adminCleanBtn').disabled = busy;
     warn.classList.add('hidden');
     if(!j){
@@ -1383,7 +1379,6 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       const s=await r.json();
       lastEngineOnline=!!(s.online && !s.auth_required);
       $('#adminPushBtn').disabled = !lastEngineOnline;     // 索引不可用时写入/评分按钮置灰
-      $('#adminScoreBtn').disabled = !lastEngineOnline;
       const sig=JSON.stringify([s.online, s.auth_required, (s.summary||{}).traces]);
       if(sig===lastMemosSig) return;                       // 无变化不重绘（避免闪烁）
       lastMemosSig=sig;
@@ -1598,7 +1593,6 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       adminSubmit('/api/admin/distill');
     };
     $('#adminPushBtn').onclick=()=>adminSubmit('/api/admin/push');
-    $('#adminScoreBtn').onclick=()=>adminSubmit('/api/admin/score');   // LLM 批量自动评分
     // 清洗数据：破坏性操作，先弹确认
     $('#adminCleanBtn').onclick=()=>{
       showModal({

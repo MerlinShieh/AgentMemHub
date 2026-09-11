@@ -126,13 +126,15 @@ MENU = """
   [2] 清洗数据（删除系统注入事件，先预览后确认）
   [3] 蒸馏记忆（LLM 提炼原始会话为结构化记忆）
   [4] 写入记忆（向量化采集库会话到记忆索引）
-  [5] 自动评分（LLM 三轴批量补价值分，跳过已评）
   ── 日常查询与看板 ──────────────────────────────
-  [6] 检索关键字（跨 Agent 全文搜索）
-  [7] 启动网页看板（后台运行，菜单不阻塞）
-  [8] 停止网页看板（结束占用看板端口的服务进程）
-  [9] 状态总览（数据源 / 本地库 / 记忆索引）
+  [5] 检索关键字（跨 Agent 全文搜索）
+  [6] 启动网页看板（后台运行，菜单不阻塞）
+  [7] 停止网页看板（结束占用看板端口的服务进程）
+  [8] 状态总览（数据源 / 本地库 / 记忆索引）
   [0] 退出
+
+  提示：自动评分（LLM 三轴补价值分）入口已隐藏——蒸馏的置信度标注与
+  面板 👍/👎 已覆盖质量把关；确需批量评分用 CLI：python -m agentmemhub score
 """
 
 
@@ -268,7 +270,11 @@ def action_clean() -> None:
 
 
 def action_score() -> None:
-    """自动评分：LLM 三轴评估记忆并写入价值分（增量优先，4 worker 并发）。"""
+    """自动评分：LLM 三轴评估记忆并写入价值分（增量优先，4 worker 并发）。
+
+    **入口已从菜单隐藏**（蒸馏置信度 + 面板 👍/👎 已覆盖质量把关，且批量
+    评分实测多为 neutral/全跳过）；函数保留供 CLI `score` 与将来恢复使用。
+    """
     from agentmemhub.scoring import run_score_incremental
     limit_raw = _ask("  最多评分条数（回车=全部）> ", "0")
     try:
@@ -341,11 +347,11 @@ ACTIONS = {
     "2": ("清洗数据", action_clean),
     "3": ("蒸馏记忆", action_distill),
     "4": ("写入记忆", action_memos),
-    "5": ("自动评分", action_score),
-    "6": ("检索关键字", action_search),
-    "7": ("启动网页看板", action_dashboard),
-    "8": ("停止网页看板", action_dashboard_stop),
-    "9": ("状态总览", action_status),
+    # 「自动评分」入口已隐藏（action_score 保留，供 CLI score 与将来恢复）
+    "5": ("检索关键字", action_search),
+    "6": ("启动网页看板", action_dashboard),
+    "7": ("停止网页看板", action_dashboard_stop),
+    "8": ("状态总览", action_status),
 }
 
 

@@ -1,4 +1,4 @@
-"""AgentMemHub 统一配置体系。
+﻿"""AgentMemHub 统一配置体系。
 
 原则：所有路径/端口默认采用官方默认；用户可在配置文件里覆盖（优先最小化配置）。
 优先级（高 → 低）：
@@ -224,7 +224,9 @@ class Config:
         优先级：env（AGENTMEMHUB_LLM_ENDPOINT / _API_KEY / _MODEL）> yaml `llm` 段。
         空值表示未配置，由调用方决定报错或降级。api_key 只读不打印。
 
-        headers：provider 特定请求头（如 OpenCode Go 需 x-opencode-session）。
+        **使用方**：记忆蒸馏（distill.py）与批量评分（scoring.read_engine_llm）
+        共用本段——换模型/换服务商只改这一处；蒸馏如需单独覆盖写 distillation.llm。
+        headers：provider 特定请求头（部分服务商有硬性要求）。
         """
         sec = self._get("llm", {}) or {}
         if not isinstance(sec, dict):

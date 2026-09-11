@@ -131,7 +131,8 @@ AgentMemHub/
 uv run python -m agentmemhub
 ```
 
-菜单涵盖：环境检测 → 提取入库 → 清洗数据 → **写入记忆（向量化）** → 自动评分 → 检索 → 看板启停 → 状态总览。
+菜单涵盖：提取入库 → 清洗数据 → **蒸馏记忆** → 写入记忆（向量化）→ 检索 → 看板启停 → 状态总览。
+（自动评分入口已隐藏，见下方「命令行」表格备注）
 
 **方式 B — 命令行**
 
@@ -152,7 +153,7 @@ uv run python -m agentmemhub export --format markdown --out exports_md/
 # 5. 写入记忆：采集 + 向量化（小模型先跑完即可检索，大模型后台并发补齐）
 uv run python -m agentmemhub sync
 
-# 6. LLM 批量评分（可选，给记忆打价值分以优化排序）
+# 6. LLM 批量评分（⚠️ 当前不生效：实测多为 neutral/全跳过；命令保留备查）
 uv run python -m agentmemhub score
 ```
 
@@ -278,7 +279,7 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 | `rebuild [--mode repair\|rebuild]` | 补齐缺失向量（repair）/ 全量重算 |
 | `memos [--source] [--out]` | 回退路径：生成 MemOS bundle（backend=memos 时用）|
 | `clean [--source x] [--apply]` | 记忆清洗：删除系统注入事件（默认预览，`--apply` 才执行并重建 FTS/计数；sync 会自动只清变更会话）|
-| `score [--pending] [--limit N] [--dry-run] [--workers N] [--ids id1,id2] [--unscored-count] [--sync-episodes]` | LLM 批量自动评分历史记忆（**增量优先**：pending_score 队列非空只评队列·定点读零全量枚举，队列空则先筛未评 id 再读正文；`--pending` 仅评队列，`--ids` 只评指定条（写后即评），`--unscored-count` 统计未评条数（只读 id），`--sync-episodes` 回填 episode.r_task；**三档 verdict 均记入跳过清单**——positive/negative 写 value、neutral 不写值但仍标记「已评」避免下次重评（dry-run 一律不记录）；网关**内容审核拒评（如智谱 1301）自动归 neutral 并记账**，不再每次卡该条报错；LLM 调用**强制直连**、不受系统代理影响，确需代理设 `AGENTMEMHUB_LLM_PROXY`）|
+| `score [--pending] [--limit N] [--dry-run] [--workers N] [--ids id1,id2] [--unscored-count] [--sync-episodes]` | ⚠️ **当前不生效**（入口已从控制台/面板隐藏；实测评为 neutral 居多且跑批全跳过，质量把关由蒸馏置信度 + 面板 👍/👎 承担）——命令保留备查。原功能：LLM 批量自动评分历史记忆（**增量优先**：pending_score 队列非空只评队列·定点读零全量枚举，队列空则先筛未评 id 再读正文；`--pending` 仅评队列，`--ids` 只评指定条（写后即评），`--unscored-count` 统计未评条数（只读 id），`--sync-episodes` 回填 episode.r_task；**三档 verdict 均记入跳过清单**——positive/negative 写 value、neutral 不写值但仍标记「已评」避免下次重评（dry-run 一律不记录）；网关**内容审核拒评（如智谱 1301）自动归 neutral 并记账**，不再每次卡该条报错；LLM 调用**强制直连**、不受系统代理影响，确需代理设 `AGENTMEMHUB_LLM_PROXY`）|
 | `rebuild [--mode repair\|rebuild]` | 补向量：触发引擎 embedding rebuild（导入记忆后修复语义检索）|
 | `stats` / `adapters` | 统计 / adapter 状态 |
 
@@ -527,7 +528,7 @@ AgentMemHub/
 
 ```bash
 uv run python -m agentmemhub sync        # 采集 + 向量化写入记忆索引（首次必跑）
-uv run python -m agentmemhub score       # LLM 批量评分（优化检索排序）
+uv run python -m agentmemhub score       # LLM 批量评分（⚠️ 当前不生效，见命令行表格备注）
 uv run python -m agentmemhub stats       # 索引规模统计
 uv run python -m agentmemhub serve       # 启动记忆面板 http://127.0.0.1:8086
 ```
@@ -700,7 +701,8 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 - 来源列区分 **`MCP`**（Agent 主动写入的原子记忆，无原始会话、会话列不可点）与采集来源；
   每行标注「召回单元」与「有无原始会话」，避免误点失效链接
 - **语义检索**框（向量+全文混合评分召回，结果可点开原始会话）
-- 「记忆操作」工具栏：**提取会话入库 → 清洗数据 → 蒸馏记忆 → 写入记忆 → 自动评分**，
+- 「记忆操作」工具栏：**提取会话入库 → 清洗数据 → 蒸馏记忆 → 写入记忆**，
+  （自动评分按钮已隐藏——蒸馏置信度 + 👍/👎 已覆盖质量把关）
   全部为后台任务；**全局进度条**（两页可见，按百分比分级配色、结果实时回显、同一时刻只允许一个任务）
 
 > 记忆排除（会话级/轮次级「不写入记忆」）的**后端能力保留**（`memory_exclusions` 表、
@@ -740,7 +742,7 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 - [x] 统一配置体系（agentmemhub.yaml：全路径可配置）
 - [x] MCP 记忆网关（stdio / Streamable HTTP 双传输，供 ZCode/OpenCode 等 harness 检索/写入记忆）
 - [x] 记忆清洗（clean：删除系统注入事件，预览→执行并重建 FTS/计数）
-- [x] LLM 批量自动评分（score：三轴评估写价值分、跳过已评、面板进度条）
+- [x] ~~LLM 批量自动评分~~（score：三轴评估写价值分——**入口已隐藏**：实测多为 neutral/全跳过，质量把关改由蒸馏置信度 + 面板 👍/👎 承担；命令保留备查）
 - [x] 统一日志（`<程序根>/logs/`：web/cli/engine/tasks 分文件，面板可查历史）
 - [x] MCP 写后即评（memory_score 工具 + save-memory Skill 独立仓：触发纪律/生效前提/逻辑归属）
 - [x] 导入数据质量（meta 幽灵轮剔除、纯工具轮标题兜底、恢复环境整源丢失修复）

@@ -1,4 +1,4 @@
-# AgentMemHub 架构
+﻿# AgentMemHub 架构
 
 ## 定位
 
@@ -51,7 +51,7 @@ AgentMemHub/
 │   ├── distill.py              # ★ 记忆蒸馏全链（切片/蒸馏/合并/去重/投影）
 │   ├── llm.py                  # OpenAI 兼容 LLM 客户端（重试/截断抢救/代理策略）
 │   ├── sanitize.py             # 脱敏（凭据/PII 扫描与剥离；has_substance 门限）
-│   ├── scoring.py              # LLM 三轴评分（增量优先、队列消费、跳过已评）
+│   ├── scoring.py              # LLM 三轴评分（入口已隐藏；与蒸馏共用 llm 段）
 │   ├── mcp_server.py           # MCP 记忆网关（stdio / Streamable HTTP）
 │   ├── memos_daemon.py         # 引擎派发层（backend=rag 走 rag_bridge）
 │   ├── memos.py                # [回退] MemOS bundle 生成/推送
