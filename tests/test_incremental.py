@@ -42,11 +42,11 @@ def test_upsert_add_then_unchanged():
     try:
         sess = _sess("zcode", "s1", 100.0, ["第一问", "答一"])
         r = s.upsert_sessions("zcode", [sess])
-        assert r == {"added": 1, "updated": 0, "unchanged": 0, "events": 2}
+        assert r == {"added": 1, "updated": 0, "unchanged": 0, "tombstoned": 0, "events": 2}
 
         # 幂等：同 updated_at 同事件数 → unchanged，事件不重复
         r2 = s.upsert_sessions("zcode", [_sess("zcode", "s1", 100.0, ["第一问", "答一"])])
-        assert r2 == {"added": 0, "updated": 0, "unchanged": 1, "events": 0}
+        assert r2 == {"added": 0, "updated": 0, "unchanged": 1, "tombstoned": 0, "events": 0}
         assert s.stats()["events"] == 2
     finally:
         s.close()
@@ -58,7 +58,7 @@ def test_upsert_updated_rewrites_and_fts():
         s.upsert_sessions("zcode", [_sess("zcode", "s1", 100.0, ["旧内容甲"])])
         # updated_at 前进 + 换内容
         r = s.upsert_sessions("zcode", [_sess("zcode", "s1", 200.0, ["新内容乙", "追问"])])
-        assert r == {"added": 0, "updated": 1, "unchanged": 0, "events": 2}
+        assert r == {"added": 0, "updated": 1, "unchanged": 0, "tombstoned": 0, "events": 2}
 
         conv = s.get_conversation("zcode", "s1")
         assert conv["updated_at"] == 200.0
@@ -103,7 +103,7 @@ def test_upsert_force_rewrites_unchanged():
     try:
         s.upsert_sessions("zcode", [_sess("zcode", "s1", 100.0, ["a"])])
         r = s.upsert_sessions("zcode", [_sess("zcode", "s1", 100.0, ["a"])], force=True)
-        assert r == {"added": 0, "updated": 1, "unchanged": 0, "events": 1}
+        assert r == {"added": 0, "updated": 1, "unchanged": 0, "tombstoned": 0, "events": 1}
     finally:
         s.close()
 

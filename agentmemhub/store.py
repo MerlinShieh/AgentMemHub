@@ -1,4 +1,4 @@
-﻿"""AgentMemHub 核心存储层。
+"""AgentMemHub 核心存储层。
 
 SQLite 存储：conversations（会话元数据）+ events（全量事件流）+ events_fts（FTS5 全文搜索）。
 
@@ -9,6 +9,7 @@ SQLite 存储：conversations（会话元数据）+ events（全量事件流）+
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import hashlib
 import os
@@ -72,8 +73,54 @@ class Store:
             if col not in ev_cols:
                 conn.execute(ddl)
         cv_cols = {r[1] for r in conn.execute("PRAGMA table_info(conversations)")}
-        if "session_key" not in cv_cols:
-            conn.execute("ALTER TABLE conversations ADD COLUMN session_key TEXT")
+        for col, ddl in (
+            ("session_key", "ALTER TABLE conversations ADD COLUMN session_key TEXT"),
+            # 全局唯一会话 ID：递增、只增不减（删除会话的 uid 经墓碑保留不复用）。
+            # 记忆报表 ↔ 统一会话报表的绑定键。
+            ("session_uid", "ALTER TABLE conversations ADD COLUMN session_uid INTEGER"),
+            # 用户改过标题的标记：ingest 重写会话时保留用户标题，不被源端覆盖
+            ("title_custom", "ALTER TABLE conversations ADD COLUMN title_custom"
+                             " INTEGER DEFAULT 0"),
+        ):
+            if col not in cv_cols:
+                conn.execute(ddl)
+        # 删除会话墓碑：ingest 重写/增量时不复活用户明确删除的会话
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS deleted_conversations(
+                   source       TEXT NOT NULL,
+                   id           TEXT NOT NULL,
+                   session_uid  INTEGER,
+                   title        TEXT,
+                   deleted_at   INTEGER NOT NULL,
+                   PRIMARY KEY(source, id))""")
+        self._backfill_session_uid(conn)
+
+    @staticmethod
+    def _backfill_session_uid(conn: sqlite3.Connection) -> None:
+        """给缺 session_uid 的存量会话回填全局递增 ID（幂等）。
+
+        分配基准取 conversations 与墓碑表的最大值——保证 uid 只增不减，
+        已删除会话的 uid 永不复用。
+        """
+        rows = conn.execute(
+            "SELECT rowid FROM conversations WHERE session_uid IS NULL"
+            " ORDER BY rowid").fetchall()
+        if not rows:
+            return
+        base = conn.execute(
+            "SELECT MAX(m) FROM (SELECT COALESCE(MAX(session_uid),0) AS m"
+            " FROM conversations UNION ALL SELECT COALESCE(MAX(session_uid),0)"
+            " FROM deleted_conversations)").fetchone()[0]
+        for i, r in enumerate(rows, 1):
+            conn.execute("UPDATE conversations SET session_uid=? WHERE rowid=?",
+                         (base + i, r[0]))
+
+    def _alloc_session_uid(self, conn: sqlite3.Connection) -> int:
+        """分配下一个全局会话 uid（含墓碑占用，保证不复用）。事务内调用。"""
+        return conn.execute(
+            "SELECT MAX(m) FROM (SELECT COALESCE(MAX(session_uid),0) AS m"
+            " FROM conversations UNION ALL SELECT COALESCE(MAX(session_uid),0)"
+            " FROM deleted_conversations)").fetchone()[0] + 1
 
     def close(self) -> None:
         if self._conn:
@@ -90,6 +137,24 @@ class Store:
     # 写入
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _snap_assets(conn: sqlite3.Connection, source: str,
+                     cids: Optional[list[str]] = None) -> dict[str, tuple]:
+        """采集用户资产快照：(session_uid, title_custom, title) by cid。
+
+        在 DELETE/重写**之前**采集；_insert_session 据此保留 uid 与用户标题。
+        """
+        sql = ("SELECT id, session_uid, title_custom, title FROM conversations"
+               " WHERE source=?")
+        args: list = [source]
+        if cids is not None:
+            if not cids:
+                return {}
+            sql += f" AND id IN ({','.join('?' * len(cids))})"
+            args += cids
+        return {r["id"]: (r["session_uid"], r["title_custom"] or 0, r["title"])
+                for r in conn.execute(sql, args)}
+
     def replace_source(
         self,
         source: str,
@@ -102,37 +167,66 @@ class Store:
         session: {source, id, title, cwd, created_at, updated_at, model,
                   meta, events: [Event]}
         返回写入的事件总数。
+
+        用户修改保护（2026-09-11）：
+        · 墓碑会话（用户已删除）不复活；
+        · 会话 session_uid 与用户改过的标题经资产快照原样保留。
         """
         conn = self.conn
         with conn:
+            assets = self._snap_assets(conn, source)
+            tomb = {r["id"] for r in conn.execute(
+                "SELECT id FROM deleted_conversations WHERE source=?", (source,))}
+            kept = [s for s in sessions
+                    if str(s.get("id", "")) not in tomb]
+            skipped = len(sessions) - len(kept)
+            if skipped:
+                logging.getLogger("agentmemhub.store").info(
+                    "replace_source(%s)：跳过 %d 个已删除会话（墓碑）",
+                    source, skipped)
+
             # 清空旧数据
             conn.execute("DELETE FROM events_fts WHERE source = ?", (source,))
             conn.execute("DELETE FROM events WHERE source = ?", (source,))
             conn.execute("DELETE FROM conversations WHERE source = ?", (source,))
 
             event_total = 0
-            for sess in sessions:
+            for sess in kept:
                 event_total += self._insert_session(conn, source, sess,
-                                                    signature=signature)
+                                                    signature=signature,
+                                                    assets=assets)
         return event_total
 
     def _insert_session(self, conn: sqlite3.Connection, source: str,
-                        sess: dict[str, Any], *, signature: str = "") -> int:
+                        sess: dict[str, Any], *, signature: str = "",
+                        assets: Optional[dict[str, tuple]] = None) -> int:
         """写单个会话（conversations + events + FTS 行）。返回写入事件数。
 
         须在调用方事务内执行（不自行开启/提交事务）。
+        assets：用户资产快照（_snap_assets 采集）——保留 session_uid 与用户
+        改过的标题；无快照且是新会话时分配全局递增 session_uid。
         """
         events = sess.get("events") or []
         cid = str(sess.get("id", ""))
         roles = [e.role for e in events]
 
+        snap = (assets or {}).get(cid)
+        if snap and snap[0] is not None:
+            session_uid = snap[0]                       # 存量会话：uid 原样保留
+        else:
+            session_uid = self._alloc_session_uid(conn)  # 新会话：分配递增 uid
+        title_custom = (snap[1] if snap else 0) or 0
+        title = (snap[2] if (title_custom and snap and snap[2])
+                 else sess.get("title", ""))
+
         conn.execute(
             """INSERT OR REPLACE INTO conversations
                (source, id, title, cwd, model, created_at, updated_at,
-                event_count, roles_json, meta_json, signature, session_key)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                event_count, roles_json, meta_json, signature, session_key,
+                session_uid, title_custom)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                source, cid, sess.get("title", ""), sess.get("cwd", ""),
+                source, cid, title, sess.get("cwd", ""),
                 sess.get("model", ""),
                 sess.get("created_at") or 0,
                 sess.get("updated_at") or 0,
@@ -141,6 +235,8 @@ class Store:
                 json.dumps(sess.get("meta") or {}, ensure_ascii=False),
                 signature,
                 sess.get("session_key") or None,
+                session_uid,
+                title_custom,
             ),
         )
 
@@ -191,14 +287,24 @@ class Store:
         未变化跳过；force=True 忽略对比全部重写（源级新鲜度信号触发整源重扫）。
 
         与 replace_source 的差异：不删除「源端已消失」的会话（历史保全），
-        单事务，增量粒度 = 会话。返回 {"added", "updated", "unchanged", "events"}。
+        单事务，增量粒度 = 会话。返回 {"added", "updated", "unchanged",
+        "tombstoned", "events"}。
         """
         conn = self.conn
         added = updated = unchanged = 0
+        tombstoned = 0
         events_total = 0
         with conn:
+            cids = [str(s.get("id", "")) for s in sessions]
+            assets = self._snap_assets(conn, source, cids)
+            tomb = {r["id"] for r in conn.execute(
+                "SELECT id FROM deleted_conversations WHERE source=?", (source,))}
             for sess in sessions:
                 cid = str(sess.get("id", ""))
+                if cid in tomb:
+                    # 用户明确删除的会话：源端仍在也不复活（墓碑语义）
+                    tombstoned += 1
+                    continue
                 events = sess.get("events") or []
                 new_updated = sess.get("updated_at") or 0
                 row = conn.execute(
@@ -218,9 +324,10 @@ class Store:
                 else:
                     added += 1
                 events_total += self._insert_session(conn, source, sess,
-                                                     signature=signature)
-        return {"added": added, "updated": updated,
-                "unchanged": unchanged, "events": events_total}
+                                                     signature=signature,
+                                                     assets=assets)
+        return {"added": added, "updated": updated, "unchanged": unchanged,
+                "tombstoned": tombstoned, "events": events_total}
 
     def delete_source(self, source: str) -> None:
         conn = self.conn
@@ -230,16 +337,26 @@ class Store:
             conn.execute("DELETE FROM conversations WHERE source = ?", (source,))
 
     def delete_conversation(self, source: str, conversation_id: str) -> int:
-        """删除单个会话（事务级联 conversations/events/FTS）。返回删除的事件数。"""
+        """删除单个会话（事务级联 conversations/events/FTS）。返回删除的事件数。
+
+        同时写**删除墓碑**：ingest 的整源重写/增量路径会跳过墓碑会话，
+        保证用户删除不会被源端数据复活。uid 随墓碑保留、永不复用。
+        """
         conn = self.conn
         with conn:
-            exists = conn.execute(
-                "SELECT 1 FROM conversations WHERE source=? AND id=?",
+            row = conn.execute(
+                "SELECT session_uid, title FROM conversations"
+                " WHERE source=? AND id=?",
                 (source, conversation_id),
             ).fetchone()
-            if exists is None:
+            if row is None:
                 raise KeyError(f"conversation not found: {source}/{conversation_id}")
             n_events = self._delete_conversation_rows(conn, source, conversation_id)
+            conn.execute(
+                "INSERT OR REPLACE INTO deleted_conversations"
+                "(source, id, session_uid, title, deleted_at) VALUES(?,?,?,?,?)",
+                (source, conversation_id, row["session_uid"], row["title"],
+                 int(time.time())))
         return n_events
 
     @staticmethod
@@ -262,10 +379,11 @@ class Store:
         return n_events
 
     def update_title(self, source: str, conversation_id: str, title: str) -> bool:
-        """更新会话标题。返回该会话是否存在。"""
+        """更新会话标题并置 title_custom 标记——ingest 重写会话时保留用户标题。"""
         with self.conn:
             cur = self.conn.execute(
-                "UPDATE conversations SET title=? WHERE source=? AND id=?",
+                "UPDATE conversations SET title=?, title_custom=1"
+                " WHERE source=? AND id=?",
                 (title.strip(), source, conversation_id),
             )
         return cur.rowcount > 0
