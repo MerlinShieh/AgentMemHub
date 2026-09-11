@@ -100,9 +100,10 @@ AgentMemHub/
 │   ├── fetch_model.py            #   下载更大嵌入模型并登记到配置
 │   ├── check_eval_grounding.py   #   召回评测集落地校验
 │   ├── sensitive_scan.py         #   推送前敏感信息扫描
+│   ├── web_verify.py             #   面板前后端接口联调自检（对运行中的服务）
 │   └── e2e/                      #   浏览器级端到端测试
 ├── eval/                         # 召回评测集（71 题）+ 基准
-├── tests/                        # pytest（261 项）
+├── tests/                        # pytest（262 项）
 ├── docs/                         # 设计文档（架构/迁移/召回融合等）
 ├── memOS/                        # 回退用的上游引擎（gitignore，默认不参与运行）
 ├── start.bat                     # 启动控制台（Windows）

@@ -115,8 +115,9 @@ TraceDTO：`{id, episodeId, sessionId, ts, userText, agentText, summary, toolCal
 
 ```bash
 python -m agentmemhub ingest            # 提取全部 adapter 并入库
+python -m agentmemhub sync              # 增量同步 + 向量化写入记忆索引（日常入口）
 python -m agentmemhub search "登录"     # 搜索
 python -m agentmemhub show zcode <id>   # 查看会话 (Markdown)
 python -m agentmemhub export --format jsonl --out exports/   # 全量导出
-python -m agentmemhub memos --out bundle.json --push http://127.0.0.1:18800  # MemOS 导入
+python -m agentmemhub memos --push http://127.0.0.1:18800   # [回退] 导出/推送 MemOS bundle
 ```

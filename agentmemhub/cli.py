@@ -480,8 +480,12 @@ def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
         return
     rag_backend = memos_daemon._backend_is_rag()
     if memos_daemon.auth_state() is None:
-        _stdout("记忆引擎未运行——ingest 已完成，跳过%s（变更集保留，下次 sync 补做）。"
-                % ("向量化" if rag_backend else "推送"))
+        if rag_backend:
+            _stdout("记忆索引不可用（检查 database/session_rag.db 与 models/）——"
+                    "ingest 已完成，跳过向量化。")
+        else:
+            _stdout("外部记忆引擎未运行——ingest 已完成，跳过推送"
+                    "（变更集保留，下次 sync 补做）。")
         _cli_log("sync 跳过%s（引擎不可用）" % ("向量化" if rag_backend else "推送"),
                  level="warn")
         return
@@ -630,16 +634,21 @@ def cmd_clean(args) -> None:
 
 
 def cmd_rebuild(args) -> None:
-    """补向量：触发引擎 embedding rebuild（默认 repair 只补缺失向量）。"""
+    """补向量：repair=只给缺向量的记忆补嵌（rag 内置引擎）。
+
+    rag 后端下写入即嵌入，全量重算由 `reembed --model` 负责；rebuild 模式
+    在本引擎里等价于 repair（无历史向量需重算）。
+    """
     from agentmemhub import memos_daemon
     from agentmemhub.memos import rebuild_embeddings
     if memos_daemon.auth_state() is None:
-        _stdout("记忆引擎未运行（启动后重试）")
+        _stdout("记忆索引不可用——检查 database/session_rag.db 与 models/ 是否就绪")
         return
 
     def _emit(s: str) -> None:
         _stdout(f"  {s}")
-    _stdout(f"补向量（{args.mode}，本地计算可能耗时数分钟）…")
+    backend = "内置引擎" if memos_daemon._backend_is_rag() else "外部引擎"
+    _stdout(f"补向量（{args.mode}，{backend}）…")
     r = rebuild_embeddings(base_url=memos_daemon.base_url(),
                            mode=args.mode, on_progress=_emit)
     _stdout(f"完成: {r}")
@@ -789,7 +798,7 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--open", action=argparse.BooleanOptionalAction, default=True,
                     help="启动后自动打开浏览器（默认开启；用 --no-open 关闭）")
 
-    pm = sub.add_parser("memos", help="生成/推送 MemOS 导入 bundle")
+    pm = sub.add_parser("memos", help="[回退/迁移用] 生成 MemOS 导入 bundle（rag 后端下不需要）")
     pm.add_argument("--source", default="")
     pm.add_argument("--out", default="exports/memos_bundle.json")
     pm.add_argument("--push", default="", help="MemOS base URL，例如 http://127.0.0.1:18800；非空则 POST")
@@ -805,13 +814,13 @@ def build_parser() -> argparse.ArgumentParser:
     pmc.add_argument("--bind", default="127.0.0.1",
                      help="HTTP 监听地址（默认仅本机；团队共享用 0.0.0.0）")
 
-    psy = sub.add_parser("sync", help="增量同步：ingest 增量 → 清洗变更会话 → 增量 push MemOS → 补向量")
+    psy = sub.add_parser("sync", help="增量同步：ingest 增量 → 清洗变更会话 → 向量化写入记忆索引")
     psy.add_argument("--source", default="")
-    psy.add_argument("--push", default="", help="MemOS base URL；非空则推送到引擎（幂等，离线自动跳过）")
+    psy.add_argument("--push", default="", help="[回退] MemOS base URL（rag 后端下忽略）")
     psy.add_argument("--no-push", action="store_true",
-                     help="仅 ingest，跳过向量化/推送阶段（rag 后端默认为会向量化）")
+                    help="仅 ingest，跳过向量化/推送阶段")
     psy.add_argument("--no-rebuild", action="store_true",
-                     help="push 后不触发 embedding rebuild（默认自动补向量）")
+                    help="[回退] push 后不触发 embedding rebuild")
     psy.add_argument("--rebuild-mode", default="repair", choices=("repair", "rebuild"))
     psy.add_argument("--full", action="store_true",
                      help="强制全量同步（默认按 watermarks 变更集增量推送）")
@@ -836,7 +845,7 @@ def build_parser() -> argparse.ArgumentParser:
     psc.add_argument("--sync-episodes", action="store_true",
                      help="只把各 episode 的 r_task 同步为受评 traces 的平均 value（让 viewer 评分标签显示真实分），不做 LLM 评估")
 
-    prb = sub.add_parser("rebuild", help="补向量：触发引擎 embedding rebuild（repair=只补缺失，rebuild=全部重算）")
+    prb = sub.add_parser("rebuild", help="补向量：给缺向量的记忆补嵌（repair；rag 写入即嵌入）")
     prb.add_argument("--mode", default="repair", choices=("repair", "rebuild"))
     return p
 

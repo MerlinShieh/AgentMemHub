@@ -344,7 +344,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       <div class="flex flex-wrap items-center gap-2">
         <i data-lucide="scroll-text" class="h-4 w-4 text-primary"></i>
         <h2 class="text-sm font-semibold text-foreground">操作日志</h2>
-        <span class="text-[11px] text-muted-foreground">统一日志目录 &lt;程序根&gt;/logs/：web.log（面板操作）/ cli.log（终端操作）/ engine.log（引擎 daemon）/ tasks/&lt;任务id&gt;.log（任务完整输出）</span>
+        <span class="text-[11px] text-muted-foreground">统一日志目录 &lt;程序根&gt;/logs/：web.log（面板操作）/ cli.log（终端操作）/ tasks/&lt;任务id&gt;.log（任务完整输出）</span>
         <button id="logsRefreshBtn"
                 class="ml-auto inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted transition-colors">
           <i data-lucide="refresh-cw" class="h-3.5 w-3.5"></i>刷新
@@ -664,7 +664,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     }
   }
   async function scoreMemos(traceId, polarity){
-    if(!lastEngineOnline){ toast('记忆引擎未运行，无法打分'); return; }
+    if(!lastEngineOnline){ toast('记忆索引不可用，无法打分'); return; }
     try{
       const r=await fetchWithTimeout(`/api/memos/feedback?traceId=${encodeURIComponent(traceId)}&polarity=${polarity}`,{method:'POST'},10000);
       const d=await r.json().catch(()=>({}));
@@ -678,7 +678,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     box.innerHTML = '<div class="py-2 text-center text-[11px] text-muted-foreground">检索中…</div>';
     try{
       const r = await fetch('/api/memos/search?q='+encodeURIComponent(q));
-      if(r.status===503) throw new Error('引擎离线');
+      if(r.status===503) throw new Error('记忆索引不可用');
       if(!r.ok) throw new Error('HTTP '+r.status);
       const d = await r.json();
       const hits = d.hits||[];
@@ -856,7 +856,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       adminPoll();
     }catch(e){ toast('提交失败：'+(e.message||e)); }
   }
-  // 引擎状态自动轮询（外部启停/崩溃也能反映到看板）
+  // 记忆索引状态自动轮询（索引不可用时按钮置灰、状态行变灰）
   let lastMemosSig='', lastEngineOnline=false;
   async function memosPollStatus(){
     try{
@@ -864,7 +864,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       if(!r.ok) return;
       const s=await r.json();
       lastEngineOnline=!!(s.online && !s.auth_required);
-      $('#adminPushBtn').disabled = !lastEngineOnline;     // 引擎离线时推送/评分按钮置灰
+      $('#adminPushBtn').disabled = !lastEngineOnline;     // 索引不可用时写入/评分按钮置灰
       $('#adminScoreBtn').disabled = !lastEngineOnline;
       const sig=JSON.stringify([s.online, s.auth_required, (s.summary||{}).traces]);
       if(sig===lastMemosSig) return;                       // 无变化不重绘（避免闪烁）
@@ -1072,7 +1072,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     };
     $('#prevPage').onclick=()=>{if(page>1){page--;renderTable();}};
     $('#nextPage').onclick=()=>{if(page*pageSize<filtered.length){page++;renderTable();}};
-    // 记忆引擎板块
+    // 记忆索引板块
     $('#memosKw').addEventListener('keydown',e=>{ if(e.key==='Enter'){ const q=e.target.value.trim(); if(q) memosSearch(q); } });
     // 数据操作：提取入库 / 写入记忆（提交后台任务并轮询状态）
     $('#adminIngestBtn').onclick=()=>adminSubmit('/api/admin/ingest');

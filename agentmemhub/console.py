@@ -1,23 +1,22 @@
 """AgentMemHub 交互式控制台（新用户入口）。
 
-零依赖交互菜单：环境检测 → 提取入库 → 关键字检索 → 网页看板 → 记忆推送 → 状态总览。
-复用 cli.py 的共享 helper（run_ingest / run_search_text / run_memos），不含业务逻辑。
+零依赖交互菜单：环境检测 → 提取入库 → 关键字检索 → 网页看板 → 写入记忆 → 状态总览。
+复用 cli.py 的共享 helper（run_ingest / run_search_text / _vectorize_stage），不含业务逻辑。
 
 去耦约定：
 - 不出现任何绝对路径：数据位置走 Store 默认解析（HOME / 环境变量），
-  MemOS 地址走 MEMOS_BASE_URL 环境变量（默认 http://127.0.0.1:18800），
   看板端口走 AGENTMEMHUB_PORT（默认 8086）。
+- 引擎状态一律经 memos_daemon.daemon_status() 获取（rag 后端为进程内直调，
+  不发 HTTP、无守护进程可启停）。
 - 不 import web 模块本身（看板用独立子进程启动，避免阻塞菜单）。
 
 入口：`python -m agentmemhub`（无参数）或 start.bat。
 """
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
-import urllib.request
 from typing import Optional
 
 from agentmemhub import adapters
@@ -32,28 +31,9 @@ def _out(s: str) -> None:
     print(s)
 
 
-def memos_base_url() -> str:
-    from agentmemhub import config
-    return config.config().memos_base_url
-
-
 def dashboard_port() -> int:
     from agentmemhub import config
     return config.config().web_port
-
-
-def memos_probe(base_url: Optional[str] = None, timeout: float = 1.5) -> Optional[dict]:
-    """探测 MemOS 是否在线（公开端点 /api/v1/auth/status，设密码也通）；离线返回 None。
-
-    不要用 /api/v1/overview——它需鉴权，引擎设密码后无 cookie 会 401，
-    被误判为"未在线"。
-    """
-    try:
-        url = (base_url or memos_base_url()) + "/api/v1/auth/status"
-        with urllib.request.urlopen(url, timeout=timeout) as r:
-            return json.loads(r.read().decode("utf-8"))
-    except Exception:
-        return None
 
 
 def _store_stats_safe() -> Optional[dict]:
@@ -67,13 +47,15 @@ def _store_stats_safe() -> Optional[dict]:
 
 
 def env_snapshot() -> dict:
-    """环境快照：各 Agent 数据源状态 + 本地库规模 + MemOS 引擎状态。"""
+    """环境快照：各 Agent 数据源状态 + 本地库规模 + 记忆索引状态。
+
+    引擎状态只取 daemon_status() 一处真相（rag 后端下它是进程内直调，
+    不探 18800）；不再额外发 HTTP 二次探测。
+    """
     from agentmemhub import memos_daemon
     return {
         "adapters": [a.describe() for a in adapters.all_adapters()],
         "stats": _store_stats_safe(),
-        "memos": memos_probe() is not None,
-        "memos_url": memos_base_url(),
         "engine": memos_daemon.daemon_status(),
     }
 
@@ -91,15 +73,30 @@ def _render_snapshot(s: dict) -> str:
     else:
         lines.append("  本地库: （空 —— 建议先执行 [1] 提取入库）")
     eng = s.get("engine") or {}
+    summ = eng.get("summary") or {}
+    if eng.get("backend") == "rag":
+        # 内置引擎：随进程启动，无守护/无端口；就绪即可 [3] 写入
+        if eng.get("online"):
+            traces = summ.get("traces")
+            model = summ.get("embedding_model")
+            cov = summ.get("coverage")
+            detail = "，".join(x for x in (
+                f"{traces} 条记忆" if traces is not None else "",
+                f"模型 {model}" if model else "",
+                f"向量覆盖 {(cov * 100):.0f}%" if cov is not None else "",
+            ) if x)
+            lines.append("  记忆索引: 就绪（内置引擎）" + (f" · {detail}" if detail else ""))
+        else:
+            lines.append("  记忆索引: 不可用 —— 检查 database/session_rag.db 与 models/")
+        return "\n".join(lines)
     if eng.get("online"):
         managed = "，本工具托管" if eng.get("managed") else ""
         pid = f" PID {eng['pid']}" if eng.get("pid") else ""
-        summ = eng.get("summary") or {}
         traces = summ.get("traces")
         extra = f"，{traces} 条记忆" if traces is not None else ""
-        lines.append(f"  记忆引擎: 运行中{pid}{managed}{extra}（{s['memos_url']}）")
+        lines.append(f"  记忆引擎: 运行中{pid}{managed}{extra}（{eng.get('base_url') or ''}）")
     else:
-        lines.append(f"  记忆引擎: 已停止（[10] 启动；{s['memos_url']}）")
+        lines.append("  记忆引擎: 已停止（backend=memos 回退模式，需外部引擎）")
     return "\n".join(lines)
 
 
@@ -297,7 +294,8 @@ def action_memos() -> None:
 
 
 def action_status() -> None:
-    _out(_render_snapshot(env_snapshot()))
+    """状态总览：主循环已在下一次迭代重探并渲染，这里不再重复打印。"""
+    return
 
 
 ACTIONS = {
@@ -314,13 +312,15 @@ ACTIONS = {
 
 def run_console() -> None:
     _out(BANNER)
+    snap: Optional[dict] = None
     while True:
-        try:
-            snap = env_snapshot()
-        except Exception:
-            snap = {"adapters": [], "stats": None, "memos": False,
-                    "memos_url": memos_base_url()}
-        _out(_render_snapshot(snap))
+        # 首屏渲染一次；此后只在需要时重探（[8] 复用同一次快照，不重复打印）
+        if snap is None:
+            try:
+                snap = env_snapshot()
+            except Exception:
+                snap = {"adapters": [], "stats": None, "engine": {}}
+            _out(_render_snapshot(snap))
         _out(MENU)
         try:
             choice = input("  选择> ").strip()
@@ -341,3 +341,4 @@ def run_console() -> None:
         except Exception as e:
             _out(f"  ⚠ 执行出错: {e}")
         _out("")
+        snap = None                          # 操作可能改变库/引擎状态，下轮重探

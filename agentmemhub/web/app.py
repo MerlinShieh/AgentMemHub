@@ -699,7 +699,8 @@ def create_app(db_path: Path | None = None):
                 "hint": "下次 sync（向量化）后该内容恢复召回"}
 
     # ------------------------------------------------------------------
-    # 记忆引擎（MemOS）网关：不碰本地库，不持 _LOCK；引擎离线时透明降级
+    # 记忆索引网关：rag 后端为进程内直调（经 engine_request 派发），
+    # 不碰本地采集库、不持 _LOCK；不可用时透明降级并回 503
     # ------------------------------------------------------------------
 
     @app.get("/api/memos/status")
@@ -805,8 +806,8 @@ def create_app(db_path: Path | None = None):
                              "traces": traces})
 
     # ------------------------------------------------------------------
-    # 数据操作后台任务（ingest / memos push）：耗时操作放后台线程，
-    # 前端轮询状态；同一时刻只允许一个任务（避免并发写库）
+    # 数据操作后台任务（ingest / 写入记忆 / 评分 / 清洗 / 补向量）：耗时
+    # 操作放后台线程，前端轮询状态；同一时刻只允许一个任务（避免并发写库）
     # ------------------------------------------------------------------
 
     @app.post("/api/admin/ingest")
@@ -825,12 +826,13 @@ def create_app(db_path: Path | None = None):
 
     @app.post("/api/admin/push")
     def api_admin_push(source: str = Query(default="")):
+        """写入记忆：把采集库会话向量化写入记忆索引（后台任务）。"""
         from agentmemhub import cli, memos_daemon
         from agentmemhub import logs
         from agentmemhub.web import tasks
         if memos_daemon.auth_state() is None:
-            raise HTTPException(status_code=503, detail="记忆引擎未运行，无法推送")
-        name = f"推送记忆到 MemOS{'（' + source + '）' if source else ''}"
+            raise HTTPException(status_code=503, detail="记忆索引不可用（检查 database/session_rag.db 与 models/）")
+        name = f"写入记忆索引{'（' + source + '）' if source else ''}"
         job = tasks.submit(name, _logged_task(name, _run_push_fn(cli, source)))
         if job is None:
             raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
@@ -845,11 +847,11 @@ def create_app(db_path: Path | None = None):
     @app.post("/api/admin/score")
     def api_admin_score(limit: int = Query(default=0, ge=0),
                         dryRun: bool = Query(default=False)):
-        """LLM 批量自动评分历史记忆（后台任务，实时进度）。需引擎在线且已配置 LLM。"""
+        """LLM 批量自动评分历史记忆（后台任务，实时进度）。需记忆索引可用且已配置 LLM。"""
         from agentmemhub import cli, logs, memos_daemon
         from agentmemhub.web import tasks
         if memos_daemon.auth_state() is None:
-            raise HTTPException(status_code=503, detail="记忆引擎未运行，无法评分")
+            raise HTTPException(status_code=503, detail="记忆索引不可用（检查 database/session_rag.db 与 models/）")
         name = f"自动评分历史记忆{'（上限 ' + str(limit) + ' 条）' if limit else ''}"
         job = tasks.submit(name, _logged_task(
             name, _run_score_fn(cli, limit, dryRun)))
@@ -888,11 +890,11 @@ def create_app(db_path: Path | None = None):
     @app.post("/api/admin/rebuild")
     def api_admin_rebuild(mode: str = Query(default="repair",
                                             pattern="^(repair|rebuild)$")):
-        """补向量：触发引擎 embedding rebuild（后台任务，逐轮进度）。需引擎在线。"""
+        """补向量：给缺向量的记忆补嵌（后台任务，逐轮进度）。"""
         from agentmemhub import logs, memos_daemon
         from agentmemhub.web import tasks
         if memos_daemon.auth_state() is None:
-            raise HTTPException(status_code=503, detail="记忆引擎未运行，无法补向量")
+            raise HTTPException(status_code=503, detail="记忆索引不可用（检查 database/session_rag.db 与 models/）")
         name = f"补向量（{mode}）"
         job = tasks.submit(name, _logged_task(name, _run_rebuild_fn(mode)))
         if job is None:

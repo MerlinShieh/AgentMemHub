@@ -26,19 +26,64 @@ def test_dashboard_pid_no_listening():
         assert _dashboard_pid(8086) is None
 
 
-def test_memos_probe_uses_public_auth_status_endpoint():
-    """在线探测必须用公开端点（/api/v1/auth/status）——设密码后 overview 会 401 误判离线。"""
-    from agentmemhub.console import memos_probe
-    with mock.patch("urllib.request.urlopen") as mu:
-        mu.return_value = mock.MagicMock()
-        mu.return_value.__enter__.return_value.read.return_value = b'{"enabled": true}'
-        r = memos_probe("http://127.0.0.1:19800")
-    assert r == {"enabled": True}
-    url = mu.call_args[0][0]
-    assert url == "http://127.0.0.1:19800/api/v1/auth/status"
+def test_render_snapshot_rag_backend_shows_internal_index():
+    """rag 后端状态总览：只说「记忆索引（内置引擎）」，不得出现 18800 / [10] 启动等 MemOS 遗留。"""
+    from agentmemhub.console import _render_snapshot
+    s = {
+        "adapters": [{"source": "zcode", "located": True}],
+        "stats": {"conversations": 12, "events": 345},
+        "engine": {
+            "online": True, "backend": "rag", "base_url": "in-process://rag",
+            "summary": {"traces": 99, "embedding_model": "bge-small-zh-v1.5",
+                        "coverage": 0.987},
+        },
+    }
+    out = _render_snapshot(s)
+    assert "记忆索引: 就绪（内置引擎）" in out
+    assert "99 条记忆" in out
+    assert "bge-small-zh-v1.5" in out
+    assert "18800" not in out
+    assert "[10]" not in out
+    assert "MemOS" not in out
 
 
-def test_memos_probe_returns_none_when_offline():
-    from agentmemhub.console import memos_probe
-    with mock.patch("urllib.request.urlopen", side_effect=OSError("connect refused")):
-        assert memos_probe("http://127.0.0.1:19800") is None
+def test_render_snapshot_rag_backend_offline():
+    """rag 索引不可用：给出可执行的排查线索，不提示去启动外部守护。"""
+    from agentmemhub.console import _render_snapshot
+    s = {
+        "adapters": [],
+        "stats": None,
+        "engine": {"online": False, "backend": "rag", "summary": {}},
+    }
+    out = _render_snapshot(s)
+    assert "记忆索引: 不可用" in out
+    assert "session_rag.db" in out
+    assert "18800" not in out
+
+
+def test_render_snapshot_memos_fallback_backend():
+    """memos 回退后端：仍显示外部引擎地址（该模式下才有守护可启停）。"""
+    from agentmemhub.console import _render_snapshot
+    s = {
+        "adapters": [],
+        "stats": {"conversations": 1, "events": 2},
+        "engine": {"online": True, "backend": "memos",
+                   "base_url": "http://127.0.0.1:18800",
+                   "summary": {"traces": 7}},
+    }
+    out = _render_snapshot(s)
+    assert "记忆引擎: 运行中" in out
+    assert "http://127.0.0.1:18800" in out
+
+
+def test_env_snapshot_uses_daemon_status_single_source():
+    """引擎状态只取 daemon_status 一处真相，不再二次 HTTP 探测 18800。"""
+    from agentmemhub import console
+    fake = {"online": True, "backend": "rag", "summary": {"traces": 1}}
+    with mock.patch("agentmemhub.memos_daemon.daemon_status", return_value=fake), \
+         mock.patch("agentmemhub.console._store_stats_safe", return_value=None), \
+         mock.patch("urllib.request.urlopen") as mu:
+        snap = console.env_snapshot()
+    assert snap["engine"] is fake
+    assert snap["stats"] is None
+    mu.assert_not_called()          # 无 18800 探测

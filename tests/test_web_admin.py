@@ -99,7 +99,7 @@ def test_admin_push_offline_503():
     with mock.patch("agentmemhub.memos_daemon.auth_state", return_value=None):
         r = c.post("/api/admin/push")
     assert r.status_code == 503
-    assert "记忆引擎未运行" in r.json()["detail"]
+    assert "记忆索引不可用" in r.json()["detail"]
     assert c.get("/api/admin/job").json()["job"] is None     # 未提交任务
 
 
@@ -250,7 +250,7 @@ def test_admin_rebuild_offline_503():
     with mock.patch("agentmemhub.memos_daemon.auth_state", return_value=None):
         r = c.post("/api/admin/rebuild")
     assert r.status_code == 503
-    assert "记忆引擎未运行" in r.json()["detail"]
+    assert "记忆索引不可用" in r.json()["detail"]
 
 
 def test_admin_rebuild_job_runs():
