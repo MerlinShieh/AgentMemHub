@@ -87,3 +87,130 @@ def test_env_snapshot_uses_daemon_status_single_source():
     assert snap["engine"] is fake
     assert snap["stats"] is None
     mu.assert_not_called()          # 无 18800 探测
+
+
+# ---------------------------------------------------------------------------
+# action 层收尾日志：曾因裸调未导入的 cli._cli_log 在业务跑完后抛 NameError
+# （2026-09-11 实机报障：[3] 蒸馏后 "name '_cli_log' is not defined"）。
+# 各 action 一律经 console._action_log 记录，此处逐个执行验证。
+# ---------------------------------------------------------------------------
+
+def test_action_distill_completes_and_logs(capsys):
+    from agentmemhub import console
+    fake = {"conversations": 3, "slices": 5, "skipped_done": 2, "failed": 0,
+            "memories_new": 6, "merged": 1, "projected": 6, "duplicate": 0,
+            "seconds": 1.5, "model": "deepseek-flash", "error": None}
+    logs: list[str] = []
+    with mock.patch("agentmemhub.console._confirm", return_value=True), \
+         mock.patch("agentmemhub.rag_bridge.settings", return_value=None), \
+         mock.patch("agentmemhub.distill.run_distill", return_value=fake), \
+         mock.patch("agentmemhub.cli._cli_log",
+                    side_effect=lambda m, level="info": logs.append(m)):
+        console.action_distill()          # 不得抛异常
+    out = capsys.readouterr().out
+    assert "✓ 会话 3 · 切片 5" in out
+    assert logs and "蒸馏记忆（控制台）" in logs[0]
+
+
+def test_action_distill_error_result_returns_quietly(capsys):
+    """run_distill 返回 error 字典：提示后正常返回，不再走后面的统计行。"""
+    from agentmemhub import console
+    with mock.patch("agentmemhub.console._confirm", return_value=True), \
+         mock.patch("agentmemhub.rag_bridge.settings", return_value=None), \
+         mock.patch("agentmemhub.distill.run_distill",
+                    return_value={"error": "LLM 未配置完整"}):
+        console.action_distill()
+    out = capsys.readouterr().out
+    assert "蒸馏未执行" in out
+
+
+def test_action_memos_completes_and_logs(capsys):
+    from agentmemhub import console
+    logs: list[str] = []
+    with mock.patch("agentmemhub.console._confirm", return_value=True), \
+         mock.patch("agentmemhub.cli._vectorize_stage",
+                    return_value={"embedded": 7, "failed": 0}), \
+         mock.patch("agentmemhub.cli._cli_log",
+                    side_effect=lambda m, level="info": logs.append(m)):
+        console.action_memos()
+    out = capsys.readouterr().out
+    assert "已写入可检索（7 条新嵌入）" in out
+    assert logs and "写入记忆（控制台）→ 7 条" in logs[0]
+
+
+def test_action_clean_completes_and_logs(capsys):
+    from agentmemhub import console
+    logs: list[str] = []
+    fake_store = mock.Mock()
+    fake_store.system_event_counts.return_value = [
+        {"source": "zcode", "n": 3, "convs": 1}]
+    fake_store.delete_system_events.return_value = (3, 1)
+    with mock.patch("agentmemhub.store.Store", return_value=fake_store), \
+         mock.patch("agentmemhub.console._confirm", return_value=True), \
+         mock.patch("agentmemhub.cli._cli_log",
+                    side_effect=lambda m, level="info": logs.append(m)):
+        console.action_clean()
+    out = capsys.readouterr().out
+    assert "已删除 3 条注入事件" in out
+    assert logs and "clean（控制台）" in logs[0]
+    fake_store.close.assert_called_once()
+
+
+def test_action_score_completes_and_logs(capsys):
+    from agentmemhub import console
+    logs: list[str] = []
+    fake = {"evaluated": 2, "skipped": 1, "positive": 1, "neutral": 1,
+            "negative": 0, "errors": 0, "dryRun": False, "mode": "incremental"}
+    with mock.patch("agentmemhub.console._ask", return_value="0"), \
+         mock.patch("agentmemhub.console._confirm", return_value=True), \
+         mock.patch("agentmemhub.scoring.run_score_incremental",
+                    return_value=fake), \
+         mock.patch("agentmemhub.cli._cli_log",
+                    side_effect=lambda m, level="info": logs.append(m)):
+        console.action_score()
+    out = capsys.readouterr().out
+    assert "evaluated=2" in out
+    assert logs and "score（控制台）" in logs[0]
+
+
+def test_no_undefined_global_names_in_package():
+    """静态扫描：包内不得出现「引用但作用域内无定义」的全局名（NameError 温床）。
+
+    覆盖同类历史缺陷：console.action_distill/action_memos 裸调 _cli_log、
+    rag.cli bench 分支裸调 get_embedder。
+    """
+    import builtins
+    import symtable
+    from pathlib import Path
+
+    pkg = Path(__file__).resolve().parents[1] / "agentmemhub"
+    # 模块级隐式名（解释器注入），非缺陷
+    implicit = {"__file__", "__name__", "__doc__", "__package__", "__spec__",
+                "__loader__", "__builtins__", "__debug__", "__path__", "__all__"}
+    known_builtins = set(dir(builtins)) | implicit
+
+    problems: list[str] = []
+
+    def scan(py: Path) -> None:
+        # utf-8-sig：部分文件带 BOM，symtable 直接解析会报非法字符
+        src = py.read_text(encoding="utf-8-sig")
+        top = symtable.symtable(src, str(py), "exec")
+        module_bound = {s.get_name() for s in top.get_symbols()
+                        if s.is_assigned() or s.is_imported()
+                        or s.is_namespace()} | known_builtins
+
+        def walk(table, scope: str) -> None:
+            for sym in table.get_symbols():
+                name = sym.get_name()
+                if (sym.is_referenced() and sym.is_global()
+                        and not sym.is_assigned() and name not in module_bound):
+                    problems.append(
+                        f"{py.relative_to(pkg.parent)}::{scope or '<module>'}::{name}")
+            for child in table.get_children():
+                walk(child, f"{scope}.{child.get_name()}" if scope else child.get_name())
+
+        walk(top, "")
+
+    for py in sorted(pkg.rglob("*.py")):
+        scan(py)
+    assert not problems, "未定义的全局引用（运行时 NameError 风险）：\n" + "\n".join(problems)

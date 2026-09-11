@@ -1,7 +1,8 @@
 """AgentMemHub 交互式控制台（新用户入口）。
 
 零依赖交互菜单：环境检测 → 提取入库 → 关键字检索 → 网页看板 → 写入记忆 → 状态总览。
-复用 cli.py 的共享 helper（run_ingest / run_search_text / _vectorize_stage），不含业务逻辑。
+复用 cli.py 的共享 helper（run_ingest / run_search_text / _vectorize_stage），不含业务逻辑；
+action 收尾日志统一走本模块 _action_log（延迟导入 cli._cli_log，未导入即静默）。
 
 去耦约定：
 - 不出现任何绝对路径：数据位置走 Store 默认解析（HOME / 环境变量），
@@ -29,6 +30,19 @@ def _out(s: str) -> None:
     except Exception:
         pass
     print(s)
+
+
+def _action_log(msg: str) -> None:
+    """控制台操作落盘（logs/cli.log，复用 cli 实现，延迟导入防循环依赖）。
+
+    日志绝不影响交互：导入失败/写盘失败都静默跳过（cli._cli_log 内部亦已
+    兜异常）。各 action 必须经此记录，不得直接裸调 cli._cli_log。
+    """
+    try:
+        from agentmemhub.cli import _cli_log
+    except Exception:
+        return
+    _cli_log(msg)
 
 
 def dashboard_port() -> int:
@@ -248,15 +262,13 @@ def action_clean() -> None:
             return
         deleted, convs = store.delete_system_events()
         _out(f"  ✓ 已删除 {deleted} 条注入事件（{convs} 个会话受影响）")
-        from agentmemhub.cli import _cli_log
-        _cli_log(f"clean（控制台）→ 删除 {deleted} 条")
+        _action_log(f"clean（控制台）→ 删除 {deleted} 条")
     finally:
         store.close()
 
 
 def action_score() -> None:
     """自动评分：LLM 三轴评估记忆并写入价值分（增量优先，4 worker 并发）。"""
-    from agentmemhub.cli import _cli_log
     from agentmemhub.scoring import run_score_incremental
     limit_raw = _ask("  最多评分条数（回车=全部）> ", "0")
     try:
@@ -274,7 +286,7 @@ def action_score() -> None:
          f"positive={r['positive']} neutral={r['neutral']} "
          f"negative={r['negative']} errors={r['errors']}"
          + ("（dry-run）" if r["dryRun"] else ""))
-    _cli_log(f"score（控制台）→ {r}")
+    _action_log(f"score（控制台）→ {r}")
 
 
 def action_distill() -> None:
@@ -299,7 +311,7 @@ def action_distill() -> None:
     _out(f"    产出记忆 {r['memories_new']} 条 · 合并 {r['merged']} 会话 · "
          f"投影 {r['projected']}（判重 {r['duplicate']}）")
     _out(f"    耗时 {r['seconds']}s · 模型 {r['model']}")
-    _cli_log(f"蒸馏记忆（控制台）→ {r}")
+    _action_log(f"蒸馏记忆（控制台）→ {r}")
 
 
 def action_memos() -> None:
@@ -316,7 +328,7 @@ def action_memos() -> None:
         if r.get("background"):
             _out(f"    提示：{r.get('background_hint', '')}")
             _out(f"    后台继续：{', '.join(r['background'])}")
-    _cli_log(f"写入记忆（控制台）→ {r.get('embedded')} 条")
+    _action_log(f"写入记忆（控制台）→ {r.get('embedded')} 条")
 
 
 def action_status() -> None:

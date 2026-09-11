@@ -94,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         print(format_report(report))
     elif args.cmd == "bench":
         from .eval import load_cases
-        from .embedder import OnnxEmbedder
+        from .runtime import get_embedder
         import time as _t
 
         if getattr(args, "model", None):
@@ -103,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
         log = get_logger("search", settings.log_dir, console=False)
         path = args.file or (settings.root / "eval" / "queries.yaml")
         cases = load_cases(path)
-        emb = get_embedder(settings.active_spec)
+        emb = get_embedder(settings.active_spec, settings=settings)
         lat = []
         for c in cases:
             t0 = _t.perf_counter()
