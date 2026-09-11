@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from agentmemhub.rag.config import Settings, load_settings
+from agentmemhub.rag.config import PROJECT_ROOT, Settings, load_settings
 
 YAML_M1 = """rag:
   active: m1
@@ -146,3 +146,35 @@ def test_model_files_missing_raises(tmp_path):
         }), encoding="utf-8")
     with pytest.raises(FileNotFoundError, match="缺少文件"):
         load_settings(tmp_path)
+
+
+# ── 沙箱隔离：AGENTMEM_HUB_DATA_DIR 覆盖数据目录 ─────────────────────────
+
+def test_env_override_switches_both_dbs(monkeypatch, tmp_path):
+    """无参调用时环境变量生效：一个开关同时切换采集库与索引库（沙箱语义）。"""
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    monkeypatch.setenv("AGENTMEM_HUB_DATA_DIR", str(sandbox))
+    s = load_settings()
+    assert s.source_db == sandbox / "agentmemhub.db"
+    assert s.index_db == sandbox / "session_rag.db"
+    # 日志不跟随沙箱——既定语义是统一 <程序根>/logs（logs.py 注释）
+    assert s.log_dir == PROJECT_ROOT / "logs"
+
+
+def test_explicit_root_ignores_env(monkeypatch, tmp_path):
+    """显式传 root 时不受环境变量干扰（测试隔离契约：调用方指定根即完整隔离）。"""
+    monkeypatch.setenv("AGENTMEM_HUB_DATA_DIR", str(tmp_path / "elsewhere"))
+    _mk_model(tmp_path, "m1", 384)
+    (tmp_path / "agentmemhub.yaml").write_text(YAML_M1, encoding="utf-8")
+    s = load_settings(tmp_path)
+    assert s.source_db == tmp_path / "database" / "agentmemhub.db"
+    assert s.index_db == tmp_path / "database" / "session_rag.db"
+
+
+def test_no_env_falls_back_to_project_database(monkeypatch, tmp_path):
+    """无环境变量时回退项目内 database/（生产默认）。"""
+    monkeypatch.delenv("AGENTMEM_HUB_DATA_DIR", raising=False)
+    s = load_settings()
+    assert s.source_db == PROJECT_ROOT / "database" / "agentmemhub.db"
+    assert s.index_db == PROJECT_ROOT / "database" / "session_rag.db"

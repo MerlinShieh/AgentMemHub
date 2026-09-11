@@ -23,6 +23,9 @@ UserData/
 # 项目内默认数据目录（真实会话数据，严禁入库）
 database/
 
+# 蒸馏实验沙箱（生产数据快照副本，体积大且含真实会话，严禁入库）
+database_distill_test/
+
 # 旧增量分支沙箱目录（已废弃，可删）
 temp_path/
 
