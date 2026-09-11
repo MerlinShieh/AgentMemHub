@@ -83,3 +83,7 @@ _e2e_tmp/
 # 配置备份（含时间戳的 .bak 一律不入库；本机配置本体已由 agentmemhub.yaml 规则覆盖）
 agentmemhub.yaml.bak*
 *.bak-*
+
+# 私有评测集与基线（含个人会话主题，不入库；仓库只带 queries.example.yaml）
+eval/queries.yaml
+eval/*.json

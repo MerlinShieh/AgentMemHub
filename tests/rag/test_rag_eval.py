@@ -1,4 +1,4 @@
-"""eval 模块测试：yaml 解析、命中判定纯函数、小库端到端报表结构。"""
+﻿"""eval 模块测试：yaml 解析、命中判定纯函数、小库端到端报表结构。"""
 from __future__ import annotations
 
 import dataclasses
@@ -85,6 +85,7 @@ def test_run_eval_report_shape(mini_rag):
 
 
 def test_shipped_queries_yaml_parses(project_settings):
-    cases = load_cases(project_settings.root / "eval" / "queries.yaml")
+    """仓库自带的示例评测集必须可解析（私有 queries.yaml 不入库）。"""
+    cases = load_cases(project_settings.root / "eval" / "queries.example.yaml")
     assert len(cases) >= 15
     assert all(c.query != c.id and c.expect_any for c in cases)

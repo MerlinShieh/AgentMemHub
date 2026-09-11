@@ -107,7 +107,7 @@ AgentMemHub/
 │   ├── sensitive_scan.py         #   推送前敏感信息扫描
 │   ├── web_verify.py             #   面板前后端接口联调自检（对运行中的服务）
 │   └── e2e/                      #   浏览器级端到端测试
-├── eval/                         # 召回评测集（71 题）+ 基准
+├── eval/                         # 召回评测示例集（queries.example.yaml；私有集不入库）
 ├── tests/                        # pytest（262 项）
 ├── docs/                         # 设计文档（架构/迁移/召回融合等）
 ├── memOS/                        # 回退用的上游引擎（gitignore，默认不参与运行）
@@ -224,7 +224,7 @@ python -m agentmemhub sync
 - `events` — 全量事件流（role / content / tool / reasoning / patch / shell，含 `raw_json` 原始保底）
 - `events_fts` — FTS5 全文索引（英文检索）
 
-![本地 SQLite 数据库结构 — conversations / events / events_fts 三张核心表](./docs/images/local-database.png)
+![记忆报表页 — 状态/类型/置信/来源筛选、表头排序、展开溯源与 ⭐ 加权](./docs/images/memory-report.png)
 
 **记忆索引库**（`database/session_rag.db`，由内置引擎管理）：
 

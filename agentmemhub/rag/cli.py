@@ -1,4 +1,4 @@
-"""asrag 命令行入口：ingest / stats / reembed / search / eval。"""
+﻿"""asrag 命令行入口：ingest / stats / reembed / search / eval。"""
 from __future__ import annotations
 
 import argparse
@@ -11,6 +11,12 @@ from .ingest import run_ingest, run_reembed, run_stats
 from .logkit import get_logger
 from .search import hybrid_search
 from .source import DEFAULT_ROLES
+
+
+def _default_eval_path(root):
+    """评测集默认路径：私有 eval/queries.yaml 优先，缺失则用仓库自带示例集。"""
+    p = root / "eval" / "queries.yaml"
+    return p if p.exists() else (root / "eval" / "queries.example.yaml")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -39,7 +45,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--batch-size", type=int, default=32)
 
     p = sub.add_parser("eval", help="评测集 recall@k（vector/fts/hybrid 三档对比）")
-    p.add_argument("--file", default=None, help="评测集 yaml（默认 eval/queries.yaml）")
+    p.add_argument("--file", default=None,
+                   help="评测集 yaml（默认 eval/queries.yaml，缺失则用 queries.example.yaml）")
     p.add_argument("-k", type=int, default=10)
     p.add_argument("--model", default=None, help="A/B 对比：指定注册表中的模型 id")
 
@@ -88,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
             settings.model(args.model)  # 未注册即报错
             settings = dataclasses.replace(settings, active_model=args.model)
         log = get_logger("eval", settings.log_dir, console=False)
-        path = args.file or (settings.root / "eval" / "queries.yaml")
+        path = args.file or _default_eval_path(settings.root)
         cases = load_cases(path)
         report = run_eval(settings, cases, k=args.k, log=log)
         print(format_report(report))
@@ -101,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
             settings.model(args.model)
             settings = dataclasses.replace(settings, active_model=args.model)
         log = get_logger("search", settings.log_dir, console=False)
-        path = args.file or (settings.root / "eval" / "queries.yaml")
+        path = args.file or _default_eval_path(settings.root)
         cases = load_cases(path)
         emb = get_embedder(settings.active_spec, settings=settings)
         lat = []
