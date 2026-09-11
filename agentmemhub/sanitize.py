@@ -114,10 +114,12 @@ def is_clean(text: str | None, *, include_pii: bool = True) -> bool:
     return not scan(text, include_pii=include_pii)
 
 
-def has_substance(text: str | None, *, min_chars: int = 8) -> bool:
+def has_substance(text: str | None, *, min_chars: int = 4) -> bool:
     """剥离后是否仍有实质内容：去掉占位符与空白后达到最小长度。
 
     用于"剥空了就丢弃整条"的判定，避免入库一条只剩 [已脱敏] 的空壳。
+    阈值取 4：中文信息密度高（"采用 RRF 融合"即可独立成条），
+    英文短词（"ok"/"yes"）仍会被正确判为无实质。
     """
     if not text:
         return False

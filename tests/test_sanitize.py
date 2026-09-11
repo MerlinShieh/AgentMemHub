@@ -129,6 +129,15 @@ def test_has_substance_detects_empty_shell():
     assert not has_substance("")
 
 
+def test_has_substance_accepts_short_chinese_conclusion():
+    """中文信息密度高：4 个有效字符即可独立成条（阈值曾误设 8 导致误丢）。"""
+    assert has_substance("采用 RRF 融合")
+    assert has_substance("维度钉死 384")
+    # 英文短回应仍视为无实质
+    assert not has_substance("ok")
+    assert not has_substance(PLACEHOLDER + "ok")
+
+
 def test_empty_input_safe():
     assert scan("") == [] and scan(None) == []
     assert redact("") == ("", [])

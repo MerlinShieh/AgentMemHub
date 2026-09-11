@@ -14,14 +14,24 @@ from agentmemhub.distill import (
     DISTILLED_SRC_PREFIX,
     MEMORY_STATUSES,
     MEMORY_TYPES,
+    PROMPT_VER,
     SLICE_WHOLE,
+    TOPIC_MAX,
+    DistillError,
+    DistillResult,
     Slice,
     Turn,
     build_slices,
     check_memory_fields,
     conversation_turns,
+    distill_slice,
     ensure_distill_schema,
     fingerprint,
+    mark_slice_done,
+    normalize_memories,
+    run_distill,
+    save_memories,
+    slice_done,
     turns_from_events,
 )
 
@@ -412,3 +422,358 @@ def test_slices_end_to_end_from_source(src_conn):
     assert slices[0].slice_key == SLICE_WHOLE
     assert "问题一" in slices[0].text and "问题二" in slices[0].text
     assert "注入的伪消息" not in slices[0].text
+
+
+# ══════════════════════════════════════════════════════════════════════
+# S1 段级蒸馏
+# ══════════════════════════════════════════════════════════════════════
+
+class _FakeLLM:
+    """假 LLM 客户端：按序返回预设响应（dict=成功；Exception=抛出）。"""
+
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.calls = 0
+        self.cfg = type("Cfg", (), {"model": "fake-model"})()
+
+    def complete_json(self, system: str, user: str, **kw) -> dict:
+        self.calls += 1
+        r = self.responses.pop(0) if self.responses else RuntimeError("无预设响应")
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+
+def _mem(mtype="decision", content="用户决定采用 RRF 融合", confidence="high",
+         topic="检索"):
+    return {"type": mtype, "topic": topic, "content": content,
+            "confidence": confidence}
+
+
+def _slice(key: str = "s0", *, text: str = "对话内容", turns=("t1",)) -> Slice:
+    from agentmemhub.distill import fingerprint as fp
+    return Slice(source="zcode", conversation_id="conv-a", slice_key=key,
+                 turn_first=turns[0] if turns else None,
+                 turn_last=turns[-1] if turns else None,
+                 chars=len(text), content_hash=fp(text), text=text, turns=turns)
+
+
+# ── normalize_memories ────────────────────────────────────────────────
+
+def test_normalize_accepts_valid():
+    mems, rejected = normalize_memories({"memories": [_mem()]})
+    assert len(mems) == 1 and rejected == []
+    assert mems[0]["type"] == "decision" and mems[0]["topic"] == "检索"
+
+
+def test_normalize_drops_invalid_entries_but_keeps_valid():
+    """非法条目逐条丢弃，不毁掉整片产出。"""
+    raw = {"memories": [
+        _mem(),
+        _mem(mtype="bogus"),
+        _mem(confidence="very-sure"),
+        _mem(content="   "),
+        "不是对象",
+    ]}
+    mems, rejected = normalize_memories(raw)
+    assert len(mems) == 1
+    assert len(rejected) == 4
+    assert any("type 非法" in r for r in rejected)
+    assert any("confidence 非法" in r for r in rejected)
+    assert any("content 为空" in r for r in rejected)
+    assert any("不是对象" in r for r in rejected)
+
+
+def test_normalize_handles_bad_shapes():
+    assert normalize_memories([])[1] == ["顶层不是对象：list"]
+    assert normalize_memories({})[1] == ["缺少 memories 字段"]
+    assert "不是数组" in normalize_memories({"memories": {}})[1][0]
+
+
+def test_normalize_empty_array_is_valid_skip():
+    """空数组 = LLM 明确说没内容（合法的"无可沉淀"出口）。"""
+    mems, rejected = normalize_memories({"memories": []})
+    assert mems == [] and rejected == []
+
+
+def test_normalize_truncates_overlong_topic():
+    mems, _ = normalize_memories({"memories": [_mem(topic="主" * 100)]})
+    assert len(mems[0]["topic"]) == TOPIC_MAX
+
+
+# ── distill_slice ─────────────────────────────────────────────────────
+
+def test_distill_slice_success():
+    client = _FakeLLM({"memories": [_mem()]})
+    r = distill_slice(client, _slice(), title="标题")
+    assert len(r.memories) == 1 and r.rejected == []
+    assert client.calls == 1
+
+
+def test_distill_slice_retries_once_on_parse_failure():
+    """解析失败重试一次（网关偶发截断常见）。"""
+    client = _FakeLLM(ValueError("无法解析"), {"memories": [_mem()]})
+    r = distill_slice(client, _slice())
+    assert len(r.memories) == 1
+    assert client.calls == 2
+
+
+def test_distill_slice_raises_after_two_parse_failures():
+    client = _FakeLLM(ValueError("bad"), ValueError("bad"))
+    with pytest.raises(DistillError, match="无法解析"):
+        distill_slice(client, _slice())
+    assert client.calls == 2
+
+
+def test_distill_slice_raises_when_all_entries_invalid():
+    """有输出但全非法 → 视为失败（不登记 hash，重跑可补）。"""
+    client = _FakeLLM({"memories": [_mem(mtype="bogus")]})
+    with pytest.raises(DistillError, match="全部非法"):
+        distill_slice(client, _slice())
+    assert client.calls == 1
+
+
+def test_distill_slice_llm_error_propagates():
+    """LLM 网络/审核错误向上抛，由编排层 fail-open 处理。"""
+    client = _FakeLLM(RuntimeError("boom"))
+    with pytest.raises(RuntimeError):
+        distill_slice(client, _slice())
+
+
+# ── 幂等（distill_hashes）─────────────────────────────────────────────
+
+def test_slice_done_and_mark(conn):
+    sl = _slice()
+    assert not slice_done(conn, sl, prompt_ver=1)
+    mark_slice_done(conn, sl, prompt_ver=1, model="m")
+    assert slice_done(conn, sl, prompt_ver=1)
+    mark_slice_done(conn, sl, prompt_ver=1, model="m")     # 重复登记安全
+    n = conn.execute("SELECT COUNT(*) FROM distill_hashes").fetchone()[0]
+    assert n == 1
+
+
+def test_slice_done_distinguishes_prompt_ver(conn):
+    sl = _slice()
+    mark_slice_done(conn, sl, prompt_ver=1)
+    assert slice_done(conn, sl, prompt_ver=1)
+    assert not slice_done(conn, sl, prompt_ver=2)          # 升版 → 需重蒸
+
+
+def test_slice_done_distinguishes_content_change(conn):
+    mark_slice_done(conn, _slice(text="原文"), prompt_ver=1)
+    assert not slice_done(conn, _slice(text="改过的内容"), prompt_ver=1)
+
+
+# ── save_memories ─────────────────────────────────────────────────────
+
+def _result(*mems):
+    return DistillResult(memories=list(mems), rejected=[])
+
+
+def test_save_memories_inserts_and_registers(conn):
+    sl = _slice()
+    st = save_memories(conn, sl, _result(_mem()), model="m", created_at=1)
+    assert st == {"inserted": 1, "sanitized": 0, "dropped": 0}
+    assert slice_done(conn, sl, prompt_ver=PROMPT_VER)
+    row = conn.execute(
+        "SELECT source, conversation_id, turn_key, type, topic, status"
+        " FROM distilled_memories").fetchone()
+    assert row == ("zcode", "conv-a", "t1", "decision", "检索", "new")
+
+
+def test_save_memories_dedupes_identical_content(conn):
+    """同会话同内容重复出现 → 只落一条（条目级 hash 去重）。"""
+    st1 = save_memories(conn, _slice(), _result(_mem()), created_at=1)
+    st2 = save_memories(conn, _slice("s1"), _result(_mem()), created_at=1)
+    assert st1["inserted"] == 1 and st2["inserted"] == 0
+    assert conn.execute("SELECT COUNT(*) FROM distilled_memories").fetchone()[0] == 1
+
+
+def test_save_memories_redacts_secrets(conn):
+    """脱敏兜底：命中敏感内容 → 剥离后入库，计数上报。"""
+    sl = _slice()
+    st = save_memories(conn, sl,
+                       _result(_mem(content="配置里的 key 是 sk-abcdef0123456789ABC")),
+                       created_at=1)
+    assert st["sanitized"] == 1 and st["dropped"] == 0
+    saved = conn.execute("SELECT content FROM distilled_memories").fetchone()[0]
+    assert "sk-abcdef0123456789ABC" not in saved
+    assert "已脱敏" in saved
+
+
+def test_save_memories_drops_pure_secret(conn):
+    """整条都是敏感内容 → 剥空后丢弃（不留空壳记忆）。"""
+    sl = _slice()
+    st = save_memories(conn, sl, _result(_mem(content="sk-abcdef0123456789ABC")),
+                       created_at=1)
+    assert st["dropped"] == 1 and st["inserted"] == 0
+    assert conn.execute("SELECT COUNT(*) FROM distilled_memories").fetchone()[0] == 0
+
+
+def test_save_memories_sanitize_can_be_disabled(conn):
+    sl = _slice()
+    st = save_memories(conn, sl,
+                       _result(_mem(content="key sk-abcdef0123456789ABC")),
+                       sanitize_enabled=False, created_at=1)
+    assert st["sanitized"] == 0 and st["inserted"] == 1
+
+
+def test_save_memories_records_prompt_ver_and_model(conn):
+    save_memories(conn, _slice(), _result(_mem()), prompt_ver=3, model="deepseek-flash",
+                  created_at=1)
+    row = conn.execute(
+        "SELECT prompt_ver, model FROM distilled_memories").fetchone()
+    assert row == (3, "deepseek-flash")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 编排：run_distill（幂等 / fail-open / dry-run）
+# ══════════════════════════════════════════════════════════════════════
+
+class _CfgStub:
+    model = "fake-model"
+
+    def complete(self) -> bool:
+        return True
+
+    def missing_hint(self) -> str:
+        return ""
+
+
+class _SeqLLM:
+    """按调用序号产出不同内容（避免条目级去重掩盖统计）。"""
+
+    def __init__(self, *, always_fail: bool = False):
+        self.calls = 0
+        self.always_fail = always_fail
+        self.cfg = _CfgStub()
+
+    def complete_json(self, system: str, user: str, **kw) -> dict:
+        self.calls += 1
+        if self.always_fail:
+            raise RuntimeError("模拟 LLM 故障")
+        return {"memories": [{"type": "fact", "topic": "切片", "confidence": "high",
+                              "content": f"第 {self.calls} 条蒸馏结论"}]}
+
+
+class _HubCfgStub:
+    """替身统一配置：只提供 run_distill 需要的 distillation 段。"""
+
+    def __init__(self, **over):
+        d = {
+            "enabled": True, "prompt_ver": 1,
+            "llm": {"endpoint": "http://x/v1", "api_key": "k", "model": "fake"},
+            "slice": {"max_chars": 24000, "max_turns": 16, "topic_boundary": False,
+                      "boundary_window": 4, "per_message_cap": 2000},
+            "sanitize": {"enabled": True},
+            "runtime": {"max_concurrent": 2, "timeout": 10},
+        }
+        d.update(over)
+        self.distillation = d
+
+
+@pytest.fixture()
+def distill_env(tmp_path, monkeypatch):
+    """临时源库 + 索引库路径 + 替身配置（不触网）。"""
+    from types import SimpleNamespace
+
+    src_path = tmp_path / "agentmemhub.db"
+    c = sqlite3.connect(str(src_path))
+    c.executescript(_SRC_DDL)
+    c.executemany(
+        "INSERT INTO events(source, conversation_id, seq, role, content,"
+        " turn_key, is_system) VALUES(?,?,?,?,?,?,?)",
+        [("zcode", "conv-a", i, "user" if i % 2 else "assistant",
+          f"会话A第{i}轮的内容，讨论记忆蒸馏与切片预算", f"t{i}", 0)
+         for i in range(1, 5)] +
+        [("zcode", "conv-b", i, "user",
+          f"会话B第{i}轮的内容，讨论召回融合与去重阈值", f"t{i}", 0)
+         for i in range(1, 3)])
+    c.commit()
+    c.close()
+
+    monkeypatch.setattr("agentmemhub.config.config", _HubCfgStub)
+    return SimpleNamespace(source_db=src_path, index_db=tmp_path / "session_rag.db")
+
+
+def _install_llm(monkeypatch, fake):
+    monkeypatch.setattr("agentmemhub.llm.LLMClient", lambda cfg, **kw: fake)
+    return fake
+
+
+def _count_memories(idx_path) -> int:
+    c = sqlite3.connect(str(idx_path))
+    try:
+        return c.execute("SELECT COUNT(*) FROM distilled_memories").fetchone()[0]
+    finally:
+        c.close()
+
+
+def test_run_distill_end_to_end(distill_env, monkeypatch):
+    fake = _install_llm(monkeypatch, _SeqLLM())
+    st = run_distill(distill_env)
+    assert st["conversations"] == 2
+    assert st["slices"] == 2 and st["skipped_done"] == 0
+    assert st["distilled"] == 2 and st["failed"] == 0
+    assert st["memories_new"] == 2
+    assert _count_memories(distill_env.index_db) == 2
+
+
+def test_run_distill_idempotent_second_pass(distill_env, monkeypatch):
+    """幂等：同内容重跑 → 全部跳过、零新增、零 LLM 调用。"""
+    fake = _install_llm(monkeypatch, _SeqLLM())
+    run_distill(distill_env)
+    calls_after_first = fake.calls
+    st2 = run_distill(distill_env)
+    assert st2["skipped_done"] == st2["slices"] == 2
+    assert st2["memories_new"] == 0 and st2["distilled"] == 0
+    assert fake.calls == calls_after_first          # 未再调用 LLM
+    assert _count_memories(distill_env.index_db) == 2
+
+
+def test_run_distill_fail_open_then_recover(distill_env, monkeypatch):
+    """fail-open：失败不登记 hash → 换可用客户端重跑即补齐（不丢记忆）。"""
+    _install_llm(monkeypatch, _SeqLLM(always_fail=True))
+    st1 = run_distill(distill_env)
+    assert st1["failed"] == 2 and st1["distilled"] == 0
+    assert st1["memories_new"] == 0
+    assert _count_memories(distill_env.index_db) == 0
+
+    _install_llm(monkeypatch, _SeqLLM())            # 故障恢复后重跑
+    st2 = run_distill(distill_env)
+    assert st2["skipped_done"] == 0                 # 失败片未被登记
+    assert st2["distilled"] == 2 and st2["memories_new"] == 2
+
+
+def test_run_distill_dry_run_does_not_persist(distill_env, monkeypatch):
+    fake = _install_llm(monkeypatch, _SeqLLM())
+    st = run_distill(distill_env, dry_run=True)
+    assert st["distilled"] == 2 and st["samples"]
+    assert _count_memories(distill_env.index_db) == 0     # 未落库
+
+    st2 = run_distill(distill_env, dry_run=True)
+    assert st2["skipped_done"] == 0                       # 也未登记 hash
+    assert fake.calls == 4
+
+
+def test_run_distill_limit_and_only(distill_env, monkeypatch):
+    _install_llm(monkeypatch, _SeqLLM())
+    st = run_distill(distill_env, limit=1)
+    assert st["conversations"] == 1
+
+    _install_llm(monkeypatch, _SeqLLM())
+    st2 = run_distill(distill_env, only={("zcode", "conv-b")})
+    assert st2["conversations"] == 1
+
+
+def test_run_distill_disabled_returns_error(distill_env, monkeypatch):
+    monkeypatch.setattr("agentmemhub.config.config",
+                        lambda: _HubCfgStub(enabled=False))
+    assert "未启用" in run_distill(distill_env)["error"]
+
+
+def test_run_distill_missing_llm_config_returns_error(distill_env, monkeypatch):
+    monkeypatch.setattr("agentmemhub.config.config",
+                        lambda: _HubCfgStub(llm={"endpoint": "", "api_key": "",
+                                                 "model": ""}))
+    assert "未配置完整" in run_distill(distill_env)["error"]
