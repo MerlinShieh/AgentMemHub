@@ -15,6 +15,7 @@ from agentmemhub.distill import (
     DISTILLED_SRC_PREFIX,
     MEMORY_STATUSES,
     MEMORY_TYPES,
+    MERGE_FALLBACK_CAP,
     MERGE_SLICE_KEY,
     PROMPT_VER,
     SLICE_WHOLE,
@@ -23,6 +24,7 @@ from agentmemhub.distill import (
     DistillResult,
     Slice,
     Turn,
+    _batch_entries,
     build_slices,
     check_memory_fields,
     conversation_turns,
@@ -32,6 +34,7 @@ from agentmemhub.distill import (
     load_conversation_memories,
     mark_slice_done,
     merge_entries,
+    merge_hierarchical,
     merge_input_hash,
     normalize_memories,
     project_memories,
@@ -988,3 +991,66 @@ def test_project_needs_units_table_and_vec(idx_conn, real_settings):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert real_settings.active_spec.vec_table in names
     assert "units_fts" in names
+
+
+# ── 合并输入保护（巨会话实测：110 片 → 段级上百条）──────────────────
+
+def test_batch_entries_respects_budget():
+    """按字符预算分批：不超预算、不丢条目。"""
+    entries = [{"content": "字" * 100} for _ in range(10)]
+    batches = _batch_entries(entries, max_chars=500)
+    assert len(batches) > 1
+    assert sum(len(b) for b in batches) == 10          # 不丢
+    for b in batches:
+        cost = sum(len(str(e["content"])) + 60 for e in b)
+        # 单条自身即超预算时允许独占一批
+        assert cost <= 500 or len(b) == 1
+
+
+def test_batch_entries_single_batch_when_small():
+    assert len(_batch_entries([{"content": "短"}], max_chars=10000)) == 1
+    assert _batch_entries([], max_chars=1000) == []
+
+
+def test_merge_hierarchical_single_call_when_small():
+    """输入未超预算 → 单次调用（与原语义一致）。"""
+    client = _FakeLLM({"memories": [_mem(content="合并结果")]})
+    r = merge_hierarchical(client, [{"type": "fact", "confidence": "high",
+                                     "content": "甲"}], max_chars=10000)
+    assert len(r.memories) == 1 and client.calls == 1
+
+
+def test_merge_hierarchical_batches_then_converges():
+    """输入超预算 → 分批调用 + 收敛轮，总调用数 < 盲目一次性。"""
+    entries = [{"type": "fact", "confidence": "high", "content": "条目" * 100}
+               for _ in range(20)]
+    # 每批 → 返回固定 2 条，保证能收敛到单批
+    client = _FakeLLM(*[{"memories": [_mem(content=f"收敛{i}") for i in range(2)]}
+                        for _ in range(20)])
+    r = merge_hierarchical(client, entries, max_chars=2000, max_rounds=3)
+    assert client.calls > 1                            # 确实分批了
+    assert len(r.memories) <= 4                        # 收敛后条数很少
+
+
+def test_merge_hierarchical_empty_input_no_llm_call():
+    client = _FakeLLM()
+    r = merge_hierarchical(client, [])
+    assert r.memories == [] and client.calls == 0
+
+
+def test_merge_hierarchical_truncates_when_not_converging():
+    """LLM 不去重（每批原样等量返回）→ 轮数用尽后保底截断，不无限调用。"""
+    long_text = "内容" * 200                      # 400 字符/条 → 每批仅装 2 条
+    entries = [{"type": "fact", "confidence": "high", "content": long_text}
+               for _ in range(400)]
+    # 每批返回等量同长度条目（不收敛）；两轮各约 200 批
+    responses = []
+    for i in range(200):
+        responses.append({"memories": [
+            {"type": "fact", "topic": "t", "confidence": "high",
+             "content": f"{long_text}-{i}-{j}"} for j in range(2)]})
+    client = _FakeLLM(*(responses * 2))
+    r = merge_hierarchical(client, entries, max_chars=1000, max_rounds=2)
+    assert client.calls <= 400                     # 调用次数受轮数封顶，不爆炸
+    assert len(r.memories) <= MERGE_FALLBACK_CAP   # 保底截断
+    assert any("未收敛" in x for x in r.rejected)

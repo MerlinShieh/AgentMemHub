@@ -653,6 +653,64 @@ def merge_entries(client, entries: list[dict], *, title: str = "") -> DistillRes
     return _call_structured(client, _MERGE_SYSTEM, user)
 
 
+#: 单条条目在合并 prompt 里的结构开销估算（序号/类型/置信度/换行）
+_ENTRY_OVERHEAD = 60
+#: 收敛失败时的保底条目上限（避免继续烧钱；调用方应记日志告警）
+MERGE_FALLBACK_CAP = 200
+
+
+def _batch_entries(entries: list[dict], max_chars: int) -> list[list[dict]]:
+    """按单次调用的字符预算把条目分批（合并阶段的输入保护）。
+
+    巨会话（实测单会话 110 片 → 段级上百条）一次性送 LLM 会超上下文，
+    必须分批——这是与切片同源的预算思想。
+    """
+    batches: list[list[dict]] = []
+    cur: list[dict] = []
+    cur_len = 0
+    for e in entries:
+        cost = len(str(e.get("content") or "")) + _ENTRY_OVERHEAD
+        if cur and cur_len + cost > max_chars:
+            batches.append(cur)
+            cur, cur_len = [], 0
+        cur.append(e)
+        cur_len += cost
+    if cur:
+        batches.append(cur)
+    return batches
+
+
+def merge_hierarchical(client, entries: list[dict], *, title: str = "",
+                       max_chars: int = 24000,
+                       max_rounds: int = 3) -> DistillResult:
+    """层级合并：输入超预算时分批合并，再把各批结果收敛（最多 max_rounds 轮）。
+
+    单批即单次 LLM 调用，与原语义一致；多批时先并行不出网顺序合并各批，
+    下一轮对合并结果再合（条目数应显著下降），直到单批为止。
+    轮数用尽仍未收敛 → 保底截断（返回结果 + 由调用方记日志），绝不无限调用。
+    """
+    if not entries:
+        return DistillResult(memories=[], rejected=[])
+    rejected: list[str] = []
+    current = list(entries)
+    for _round in range(max_rounds):
+        batches = _batch_entries(current, max_chars)
+        if len(batches) <= 1:
+            r = merge_entries(client, batches[0], title=title)
+            return DistillResult(memories=r.memories,
+                                 rejected=rejected + r.rejected)
+        nxt: list[dict] = []
+        for b in batches:
+            r = merge_entries(client, b, title=title)
+            rejected.extend(r.rejected)
+            nxt.extend(r.memories)
+        current = nxt
+    truncated = len(current) > MERGE_FALLBACK_CAP
+    return DistillResult(memories=current[:MERGE_FALLBACK_CAP],
+                         rejected=rejected + ([f"合并未收敛，截断至 "
+                                               f"{MERGE_FALLBACK_CAP} 条"] if truncated else []))
+
+
 def load_conversation_memories(idx: sqlite3.Connection, source: str,
                                conversation_id: str) -> list[dict]:
     """读某会话当前有效的蒸馏条目（排除已合并/重复的旧稿）。"""
@@ -790,7 +848,8 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
     slice_cfg = dcfg.get("slice") or {}
     runtime = dcfg.get("runtime") or {}
     sanitize_on = bool((dcfg.get("sanitize") or {}).get("enabled", True))
-    merge_enabled = bool((dcfg.get("merge") or {}).get("enabled", True))
+    merge_cfg = dcfg.get("merge") or {}
+    merge_enabled = bool(merge_cfg.get("enabled", True))
     dedup_cfg = dcfg.get("dedup") or {}
     dup_th = float(dedup_cfg.get("cosine_duplicate") or 0.92)
     sim_th = float(dedup_cfg.get("cosine_similar") or 0.80)
@@ -889,7 +948,10 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
                     stats["merge_skipped"] += 1
                     continue
                 try:
-                    merged = merge_entries(client, mems, title=ctitle)
+                    merged = merge_hierarchical(
+                        client, mems, title=ctitle,
+                        max_chars=int(merge_cfg.get("max_chars") or 24000),
+                        max_rounds=int(merge_cfg.get("max_rounds") or 3))
                 except Exception as e:       # fail-open：不登记，重跑可补
                     stats["merge_failed"] += 1
                     log.warning("合并失败 %s/%s：%s: %s",

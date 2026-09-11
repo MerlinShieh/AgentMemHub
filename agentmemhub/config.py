@@ -28,7 +28,13 @@ DEFAULT_DISTILL = {
         "boundary_window": 4,      # 粗切点 ±N 轮内找最低重叠处
         "per_message_cap": 2000,   # 单条消息入 prompt 时的截断
     },
-    "merge": {"enabled": True},    # 同会话多片合并沉淀
+    "merge": {
+        "enabled": True,           # 同会话多片合并沉淀
+        # 单次合并调用的输入字符预算：超过则分批合并再把结果收敛
+        # （巨会话实测 110 片 → 段级上百条，一次性送 LLM 会超上下文）
+        "max_chars": 24000,
+        "max_rounds": 3,           # 层级收敛最多轮数（防 LLM 不去重时无限调用）
+    },
     "dedup": {
         "cosine_duplicate": 0.92,  # ≥ 判重复（丢弃 + 指向已有）
         "cosine_similar": 0.80,    # ≥ 判相似（入库 + 打标互链）
