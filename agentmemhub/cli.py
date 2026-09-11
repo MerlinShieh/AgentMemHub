@@ -737,6 +737,38 @@ def cmd_score(args) -> None:
         _cli_log(f"score 失败 → {e}", level="error")
 
 
+def cmd_distill(args) -> None:
+    """记忆蒸馏：原始会话 → 结构化记忆（LLM 提炼，幂等 + fail-open）。
+
+    详见 docs/memory-distillation.md；用 --dry-run 可先预览产物与成本。
+    """
+    from agentmemhub import rag_bridge
+    from agentmemhub.distill import run_distill
+    only = None
+    if getattr(args, "only", ""):
+        only = set()
+        for item in args.only.split(","):
+            item = item.strip()
+            if ":" in item:
+                s, c = item.split(":", 1)
+                only.add((s.strip(), c.strip()))
+        if not only:
+            _stdout("--only 格式应为 source:conversation_id（逗号分隔多个）")
+            return
+    settings = rag_bridge.settings()
+    mode = "dry-run（不落库）" if args.dry_run else "落库"
+    _stdout(f"记忆蒸馏开始（{mode}）…")
+    r = run_distill(settings, source=args.source, only=only,
+                    limit=args.limit, dry_run=args.dry_run,
+                    on_progress=_stdout)
+    if r.get("error"):
+        _stdout(f"蒸馏未执行：{r['error']}")
+        _cli_log(f"distill 未执行 → {r['error']}", level="warn")
+        return
+    _stdout(json.dumps(r, ensure_ascii=False, indent=1))
+    _cli_log(f"distill({mode}) → {r}")
+
+
 def cmd_memos(args) -> None:
     run_memos(source=args.source, out=args.out, push=args.push,
               no_rebuild=args.no_rebuild, rebuild_mode=args.rebuild_mode)
@@ -847,6 +879,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     prb = sub.add_parser("rebuild", help="补向量：给缺向量的记忆补嵌（repair；rag 写入即嵌入）")
     prb.add_argument("--mode", default="repair", choices=("repair", "rebuild"))
+
+    pd = sub.add_parser("distill", help="记忆蒸馏：原始会话 → 结构化记忆（LLM 提炼，幂等）")
+    pd.add_argument("--source", default="", help="只处理某个 Agent 来源")
+    pd.add_argument("--only", default="",
+                    help="只处理指定会话（source:conversation_id，逗号分隔多个）")
+    pd.add_argument("--limit", type=int, default=0,
+                    help="最多处理多少个会话（按正文量降序，0=全部）")
+    pd.add_argument("--dry-run", action="store_true",
+                    help="只蒸馏不落库（预览产物与成本，可反复执行）")
     return p
 
 
@@ -863,6 +904,7 @@ def main() -> None:
         "adapters": cmd_adapters, "memos": cmd_memos, "folders": cmd_folders,
         "serve": cmd_serve, "mcp": cmd_mcp,
         "sync": cmd_sync, "clean": cmd_clean, "score": cmd_score, "rebuild": cmd_rebuild,
+        "distill": cmd_distill,
     }
     fn = handlers.get(args.command)
     if fn is None:

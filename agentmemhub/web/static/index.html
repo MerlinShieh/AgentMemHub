@@ -315,6 +315,10 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
                   class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
             <i data-lucide="eraser" class="h-3.5 w-3.5 text-primary"></i>清洗数据
           </button>
+          <button id="adminDistillBtn" title="用 LLM 把原始会话提炼为结构化记忆（去噪：丢弃寒暄与过程叙述；幂等可重复执行）"
+                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
+            <i data-lucide="sparkles" class="h-3.5 w-3.5 text-primary"></i>蒸馏记忆
+          </button>
           <button id="adminPushBtn" title="把采集库的会话向量化写入记忆索引（增量、幂等）"
                   class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
             <i data-lucide="upload" class="h-3.5 w-3.5 text-primary"></i>写入记忆
@@ -761,6 +765,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     state.classList.toggle('hidden', !busy);
     state.classList.toggle('inline-flex', busy);
     $('#adminIngestBtn').disabled = busy;
+    $('#adminDistillBtn').disabled = busy || !lastEngineOnline;
     $('#adminPushBtn').disabled = busy || !lastEngineOnline;
     $('#adminScoreBtn').disabled = busy || !lastEngineOnline;
     $('#adminCleanBtn').disabled = busy;
@@ -1076,6 +1081,13 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     $('#memosKw').addEventListener('keydown',e=>{ if(e.key==='Enter'){ const q=e.target.value.trim(); if(q) memosSearch(q); } });
     // 数据操作：提取入库 / 写入记忆（提交后台任务并轮询状态）
     $('#adminIngestBtn').onclick=()=>adminSubmit('/api/admin/ingest');
+    // 蒸馏记忆：需 LLM 已配置；幂等，可反复执行（已完成切片自动跳过）
+    $('#adminDistillBtn').onclick=()=>{
+      if(!confirm('将调用 LLM 把原始会话蒸馏为结构化记忆（去噪提炼）。\n\n'
+        +'· 幂等：已蒸馏且内容未变的切片会自动跳过\n'
+        +'· 首次全量可能产生较多 LLM 调用与费用\n\n确认开始？')) return;
+      adminSubmit('/api/admin/distill');
+    };
     $('#adminPushBtn').onclick=()=>adminSubmit('/api/admin/push');
     $('#adminScoreBtn').onclick=()=>adminSubmit('/api/admin/score');   // LLM 批量自动评分
     // 清洗数据：破坏性操作，先弹确认

@@ -13,16 +13,27 @@ from agentmemhub.sanitize import (
     scan,
 )
 
+# 假凭据样本：**运行时拼接**，源码里不出现完整凭据格式——
+# 否则 scripts/sensitive_scan.py（仓库推送前的兜底扫描）会把测试样本
+# 误报为真实泄漏，导致扫描结果不可信。
+AWS_KEY = "AKIA" + "X" * 16
+GITHUB_PAT = "github_pat_" + "X" * 20
+GH_TOKEN = "ghp_" + "X" * 24
+OPENAI_KEY = "sk-" + "X" * 20
+SLACK_TOKEN = "xoxb-" + "X" * 20
+BEARER = "Bearer " + "X" * 30
+
+
 # ── 凭据类：必须命中 ──────────────────────────────────────────────────
 
 def test_openai_style_key_hits():
-    f = scan("配置里写了 api key: sk-abcdef0123456789ABCDEF")
+    f = scan(f"配置里写了 api key: {OPENAI_KEY}")
     assert any(x.pattern == "openai_key" for x in f)
 
 
-def test_github_pat_and_token_hits():
-    assert not is_clean("token=github_pat_11ABCDEFG0abcdefghijklmnop")
-    assert not is_clean("ghp_abcdefghijklmnopqrstuvwx")
+def test_github_tokens_hit():
+    assert not is_clean(f"token={GITHUB_PAT}")
+    assert not is_clean(GH_TOKEN)
 
 
 def test_private_key_block_hits():
@@ -41,9 +52,9 @@ def test_jwt_hits():
 
 
 def test_aws_and_bearer_and_slack_hits():
-    assert not is_clean("AKIAIOSFODNN7EXAMPLE")
-    assert not is_clean("Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456")
-    assert not is_clean("xoxb-123456789012-abcdefghijkl")
+    assert not is_clean(AWS_KEY)
+    assert not is_clean(f"Authorization: {BEARER}")
+    assert not is_clean(SLACK_TOKEN)
 
 
 def test_password_assignment_hits():
@@ -54,7 +65,7 @@ def test_password_assignment_hits():
 # ── 个人信息类：必须命中 ───────────────────────────────────────────────
 
 def test_email_mobile_id_hits():
-    assert any(x.pattern == "email" for x in scan("联系 mulin.xie@outlook.com 处理"))
+    assert any(x.pattern == "email" for x in scan("联系 user@example.com 处理"))
     assert any(x.pattern == "cn_mobile" for x in scan("手机号 13812345678"))
     assert any(x.pattern == "cn_id" for x in scan("身份证 110101199003078515"))
 
@@ -95,9 +106,9 @@ def test_plain_numbers_not_mobile():
 # ── 剥离行为 ──────────────────────────────────────────────────────────
 
 def test_redact_replaces_and_records():
-    text = "我的 key 是 sk-abcdef0123456789，请记下"
+    text = f"我的 key 是 {OPENAI_KEY}，请记下"
     out, findings = redact(text)
-    assert "sk-abcdef0123456789" not in out
+    assert OPENAI_KEY not in out
     assert PLACEHOLDER in out
     assert len(findings) == 1
     assert findings[0].kind == "secret"
@@ -106,7 +117,7 @@ def test_redact_replaces_and_records():
 
 def test_redact_snippet_does_not_leak_full_secret():
     """命中记录只留摘要，避免日志本身成为泄漏源。"""
-    secret = "sk-abcdef0123456789ABCDEFGHIJ"
+    secret = "sk-" + "X" * 24
     out, findings = redact(f"key={secret}")
     assert secret not in findings[0].snippet
     assert "…" in findings[0].snippet

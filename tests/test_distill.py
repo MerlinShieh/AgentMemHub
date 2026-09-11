@@ -42,6 +42,10 @@ from agentmemhub.distill import (
     turns_from_events,
 )
 
+# 假凭据样本：运行时拼接（源码不出现完整格式，避免敏感扫描器误报）
+_FAKE_KEY = "sk-" + "X" * 20
+
+
 _INS_MEM = (
     "INSERT INTO distilled_memories"
     "(source, conversation_id, slice_key, turn_key, type, topic, content,"
@@ -601,18 +605,18 @@ def test_save_memories_redacts_secrets(conn):
     """脱敏兜底：命中敏感内容 → 剥离后入库，计数上报。"""
     sl = _slice()
     st = save_memories(conn, sl,
-                       _result(_mem(content="配置里的 key 是 sk-abcdef0123456789ABC")),
+                       _result(_mem(content=f"配置里的 key 是 {_FAKE_KEY}")),
                        created_at=1)
     assert st["sanitized"] == 1 and st["dropped"] == 0
     saved = conn.execute("SELECT content FROM distilled_memories").fetchone()[0]
-    assert "sk-abcdef0123456789ABC" not in saved
+    assert _FAKE_KEY not in saved
     assert "已脱敏" in saved
 
 
 def test_save_memories_drops_pure_secret(conn):
     """整条都是敏感内容 → 剥空后丢弃（不留空壳记忆）。"""
     sl = _slice()
-    st = save_memories(conn, sl, _result(_mem(content="sk-abcdef0123456789ABC")),
+    st = save_memories(conn, sl, _result(_mem(content=_FAKE_KEY)),
                        created_at=1)
     assert st["dropped"] == 1 and st["inserted"] == 0
     assert conn.execute("SELECT COUNT(*) FROM distilled_memories").fetchone()[0] == 0
@@ -621,7 +625,7 @@ def test_save_memories_drops_pure_secret(conn):
 def test_save_memories_sanitize_can_be_disabled(conn):
     sl = _slice()
     st = save_memories(conn, sl,
-                       _result(_mem(content="key sk-abcdef0123456789ABC")),
+                       _result(_mem(content=f"key {_FAKE_KEY}")),
                        sanitize_enabled=False, created_at=1)
     assert st["sanitized"] == 0 and st["inserted"] == 1
 
@@ -857,13 +861,13 @@ def test_save_merged_archives_sources_and_writes_final(conn):
 
 def test_save_merged_redacts(conn):
     m = _add_memory(conn, content="条目甲")
-    result = DistillResult(memories=[_mem(content="key 是 sk-abcdef0123456789ABC")],
+    result = DistillResult(memories=[_mem(content=f"key 是 {_FAKE_KEY}")],
                            rejected=[])
     st = save_merged(conn, "zcode", "conv-a", result, source_ids=[m["id"]], created_at=1)
     assert st["sanitized"] == 1
     saved = conn.execute(
         "SELECT content FROM distilled_memories WHERE status='new'").fetchone()[0]
-    assert "sk-abcdef0123456789ABC" not in saved
+    assert _FAKE_KEY not in saved
 
 
 # ══════════════════════════════════════════════════════════════════════

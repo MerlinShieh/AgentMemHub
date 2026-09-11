@@ -277,6 +277,34 @@ def _run_score_fn(cli, limit: int, dry_run: bool):
     return _do
 
 
+def _run_distill_fn(source: str, limit: int, dry_run: bool):
+    """看板「蒸馏记忆」后台动作：切片 → LLM 提炼 → 同会话合并 → 去重投影。
+
+    run_distill 的 on_progress 本就是逐行文本，直接接到 emit（无需 redirect_stdout）。
+    """
+    def _do(emit, meta) -> str:
+        from agentmemhub import rag_bridge
+        from agentmemhub.distill import run_distill
+        r = run_distill(rag_bridge.settings(), source=source, limit=limit,
+                        dry_run=dry_run, on_progress=emit)
+        if r.get("error"):
+            msg = f"蒸馏未执行：{r['error']}"
+        else:
+            msg = (
+                f"会话 {r['conversations']} 个 · 切片 {r['slices']} 片"
+                f"（幂等跳过 {r['skipped_done']} / 失败 {r['failed']}）\n"
+                f"产出记忆 {r['memories_new']} 条 · 合并沉淀 {r['merged']} 个会话"
+                f"（失败 {r['merge_failed']}）\n"
+                f"投影 {r['projected']} 条 · 相似打标 {r['similar']} · "
+                f"判重丢弃 {r['duplicate']}\n"
+                f"脱敏 {r['sanitized']} 条 · 丢弃空壳 {r['dropped']} 条\n"
+                f"耗时 {r['seconds']}s · 模型 {r['model']}"
+                + ("（dry-run：未落库）" if r.get("dry_run") else ""))
+        emit("\n" + msg)          # tasks.submit 不使用返回值，汇总必须走 emit
+        return msg
+    return _do
+
+
 def _run_exclude_fn(items, turn_key: str = ""):
     """看板「批量排除记忆」后台动作：逐会话落标记 + 清索引（幂等）。"""
     from agentmemhub.store import Store
@@ -882,6 +910,29 @@ def create_app(db_path: Path | None = None):
         name = f"批量排除记忆（{len(body.items)} 个会话）"
         job = tasks.submit(name, _logged_task(
             name, _run_exclude_fn(body.items, body.turn_key)))
+        if job is None:
+            raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
+        logs.record(f"提交任务：{name}（id={job['id']}）")
+        return JSONResponse({"job": job})
+
+    @app.post("/api/admin/distill")
+    def api_admin_distill(source: str = Query(default=""),
+                          limit: int = Query(default=0, ge=0),
+                          dryRun: bool = Query(default=False)):
+        """记忆蒸馏：LLM 把原始会话提炼为结构化记忆（后台任务，实时进度）。
+
+        需 llm 段已配置；幂等（重跑跳过已完成切片），失败切片不登记、重跑可补。
+        """
+        from agentmemhub import logs, memos_daemon
+        from agentmemhub.web import tasks
+        if memos_daemon.auth_state() is None:
+            raise HTTPException(
+                status_code=503,
+                detail="记忆索引不可用（检查 database/session_rag.db 与 models/）")
+        name = ("记忆蒸馏" + ("（预览）" if dryRun else "")
+                + (f"（{source}）" if source else ""))
+        job = tasks.submit(name, _logged_task(
+            name, _run_distill_fn(source, limit, dryRun)))
         if job is None:
             raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
         logs.record(f"提交任务：{name}（id={job['id']}）")

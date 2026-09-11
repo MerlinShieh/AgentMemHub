@@ -1,9 +1,12 @@
 # 记忆蒸馏方案（Memory Distillation）
 
 > 状态：设计定稿（2026-09-11，分支 `feat/memory-distillation`）
-> 实施进度：**D2 基础设施已完成**（沙箱隔离 / config llm+distillation 解析 /
-> 两表 DDL / LLM 客户端 `agentmemhub/llm.py` / 脱敏模块 `agentmemhub/sanitize.py`）；
-> D3 切片器起按本文件推进。
+> 实施进度：**D1–D6 已完成** —— 沙箱隔离 / 配置解析 / LLM 客户端
+> (`agentmemhub/llm.py`) / 脱敏模块 (`agentmemhub/sanitize.py`) / 两表 DDL /
+> S0 切片器 / S1 段级蒸馏 / S2 合并沉淀 / S3+S4 去重投影 / CLI `distill` /
+> 面板「蒸馏记忆」/ 71 题评测基线（`eval/baseline-predistill.json`）。
+> **D7 验收待 LLM 配置**（在 `agentmemhub.yaml` 的 `llm` 段填
+> endpoint/api_key/model 后即可跑）。
 > 目标：用 LLM 把原始会话蒸馏为**可沉淀、可总结**的结构化记忆，替代当前
 > 「原始 unit 直接向量化」的写入路径，从源头消除召回噪音。
 
