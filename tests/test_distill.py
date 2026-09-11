@@ -4,16 +4,18 @@
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
 
 from agentmemhub.distill import (
     CONFIDENCES,
-    DISTILLED_SOURCE,
+    DISTILLED_ROLE,
     DISTILLED_SRC_PREFIX,
     MEMORY_STATUSES,
     MEMORY_TYPES,
+    MERGE_SLICE_KEY,
     PROMPT_VER,
     SLICE_WHOLE,
     TOPIC_MAX,
@@ -27,10 +29,15 @@ from agentmemhub.distill import (
     distill_slice,
     ensure_distill_schema,
     fingerprint,
+    load_conversation_memories,
     mark_slice_done,
+    merge_entries,
+    merge_input_hash,
     normalize_memories,
+    project_memories,
     run_distill,
     save_memories,
+    save_merged,
     slice_done,
     turns_from_events,
 )
@@ -154,9 +161,10 @@ def test_check_memory_fields_rejects_invalid():
 def test_constants_shape():
     assert MEMORY_TYPES == ("decision", "fact", "preference", "lesson")
     assert MEMORY_STATUSES == ("new", "similar", "duplicate")
-    assert DISTILLED_SOURCE == "distilled"
+    assert DISTILLED_ROLE == "distilled"
     assert DISTILLED_SRC_PREFIX == "dst_"
     assert SLICE_WHOLE == "whole"
+    assert MERGE_SLICE_KEY == "*merge*"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -674,8 +682,10 @@ class _HubCfgStub:
 
 @pytest.fixture()
 def distill_env(tmp_path, monkeypatch):
-    """临时源库 + 索引库路径 + 替身配置（不触网）。"""
-    from types import SimpleNamespace
+    """临时源库 + 索引库 + 替身 LLM 配置（投影阶段需真实模型注册表）。"""
+    import dataclasses
+
+    from agentmemhub.rag.config import load_settings
 
     src_path = tmp_path / "agentmemhub.db"
     c = sqlite3.connect(str(src_path))
@@ -693,7 +703,9 @@ def distill_env(tmp_path, monkeypatch):
     c.close()
 
     monkeypatch.setattr("agentmemhub.config.config", _HubCfgStub)
-    return SimpleNamespace(source_db=src_path, index_db=tmp_path / "session_rag.db")
+    # 数据路径指向临时库，模型注册表用真实配置（投影要真的向量化）
+    return dataclasses.replace(load_settings(), source_db=src_path,
+                               index_db=tmp_path / "session_rag.db")
 
 
 def _install_llm(monkeypatch, fake):
@@ -777,3 +789,198 @@ def test_run_distill_missing_llm_config_returns_error(distill_env, monkeypatch):
                         lambda: _HubCfgStub(llm={"endpoint": "", "api_key": "",
                                                  "model": ""}))
     assert "未配置完整" in run_distill(distill_env)["error"]
+
+
+# ══════════════════════════════════════════════════════════════════════
+# S2 同会话合并沉淀
+# ══════════════════════════════════════════════════════════════════════
+
+def _add_memory(conn, *, content, source="zcode", cid="conv-a", mtype="fact",
+                topic="主题", status="new", slice_key="s0"):
+    h = fingerprint(content)
+    cur = conn.execute(
+        "INSERT INTO distilled_memories"
+        "(source, conversation_id, slice_key, type, topic, content, confidence,"
+        " status, content_hash, prompt_ver, created_at)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (source, cid, slice_key, mtype, topic, content, "high", status, h, 1, 0))
+    conn.commit()
+    return {"id": cur.lastrowid, "source": source, "conversation_id": cid,
+            "type": mtype, "topic": topic, "content": content,
+            "confidence": "high", "turn_key": None, "created_at": 0,
+            "content_hash": h}
+
+
+def test_merge_input_hash_stable_and_sensitive():
+    a = [{"content": "甲"}, {"content": "乙"}]
+    assert merge_input_hash(a) == merge_input_hash([{"content": "甲"}, {"content": "乙"}])
+    assert merge_input_hash(a) != merge_input_hash([{"content": "甲"}, {"content": "丙"}])
+
+
+def test_load_conversation_memories_excludes_archived(conn):
+    _add_memory(conn, content="有效条目", status="new")
+    _add_memory(conn, content="相似条目", status="similar")
+    _add_memory(conn, content="已被合并的旧稿", status="merged")
+    _add_memory(conn, content="判重丢弃的", status="duplicate")
+    mems = load_conversation_memories(conn, "zcode", "conv-a")
+    assert {m["content"] for m in mems} == {"相似条目", "有效条目"}
+
+
+def test_merge_entries_calls_llm_with_all_entries():
+    client = _FakeLLM({"memories": [_mem(content="合并后的结论")]})
+    r = merge_entries(client, [{"type": "fact", "confidence": "high", "content": "甲"},
+                               {"type": "fact", "confidence": "high", "content": "乙"}],
+                      title="会话标题")
+    assert len(r.memories) == 1
+    assert client.calls == 1
+
+
+def test_save_merged_archives_sources_and_writes_final(conn):
+    m1 = _add_memory(conn, content="条目甲，关于切片预算")
+    m2 = _add_memory(conn, content="条目乙，关于话题边界")
+    result = DistillResult(memories=[_mem(content="合并后的终稿结论")], rejected=[])
+    st = save_merged(conn, "zcode", "conv-a", result,
+                     source_ids=[m1["id"], m2["id"]], created_at=1)
+    assert st["inserted"] == 1
+    # 来源条目归档为 merged（不再参与召回的候选）
+    rows = conn.execute(
+        "SELECT id, status FROM distilled_memories WHERE id IN (?,?)",
+        (m1["id"], m2["id"])).fetchall()
+    assert [r[1] for r in rows] == ["merged", "merged"]
+    # 新终稿记录来源，可溯源
+    final = conn.execute(
+        "SELECT status, merged_from_json, slice_key FROM distilled_memories"
+        " WHERE status='new'").fetchone()
+    assert final[0] == "new" and final[2] == MERGE_SLICE_KEY
+    assert json.loads(final[1]) == [m1["id"], m2["id"]]
+
+
+def test_save_merged_redacts(conn):
+    m = _add_memory(conn, content="条目甲")
+    result = DistillResult(memories=[_mem(content="key 是 sk-abcdef0123456789ABC")],
+                           rejected=[])
+    st = save_merged(conn, "zcode", "conv-a", result, source_ids=[m["id"]], created_at=1)
+    assert st["sanitized"] == 1
+    saved = conn.execute(
+        "SELECT content FROM distilled_memories WHERE status='new'").fetchone()[0]
+    assert "sk-abcdef0123456789ABC" not in saved
+
+
+# ══════════════════════════════════════════════════════════════════════
+# S3 跨会话去重 + S4 投影
+# ══════════════════════════════════════════════════════════════════════
+
+@pytest.fixture(scope="module")
+def real_settings():
+    """真实模型注册表（投影要真的向量化，用随项目分发的 bge-small）。"""
+    from agentmemhub.rag.config import load_settings
+    return load_settings()
+
+
+@pytest.fixture()
+def idx_conn(tmp_path):
+    from agentmemhub.rag.ingest import open_index
+    c = open_index(tmp_path / "session_rag.db")
+    ensure_distill_schema(c)
+    yield c
+    c.close()
+
+
+def _unit_count(conn) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) FROM units WHERE role=?", (DISTILLED_ROLE,)).fetchone()[0]
+
+
+def _mem_dict(conn, **kw):
+    m = _add_memory(conn, **kw)
+    return m
+
+
+def test_project_first_time_writes_units(idx_conn, real_settings):
+    m = _mem_dict(idx_conn, content="用户决定记忆引擎采用 RRF 融合向量与 trigram 两路召回")
+    st = project_memories(idx_conn, real_settings, [m])
+    assert st == {"projected": 1, "similar": 0, "duplicate": 0}
+    row = idx_conn.execute(
+        "SELECT source, conversation_id, seq, role, src_id, text, title"
+        " FROM units").fetchone()
+    # source/conversation_id 沿用原会话 → 排除与删除机制天然覆盖
+    assert row[0] == "zcode" and row[1] == "conv-a"
+    assert row[3] == DISTILLED_ROLE
+    assert row[2] < 0                                   # 负 seq 不与事件冲突
+    assert row[4].startswith(DISTILLED_SRC_PREFIX)
+    assert "RRF" in row[5]
+    # 状态回写为 new
+    assert idx_conn.execute(
+        "SELECT status FROM distilled_memories WHERE id=?", (m["id"],)
+    ).fetchone()[0] == "new"
+
+
+def test_project_idempotent(idx_conn, real_settings):
+    m = _mem_dict(idx_conn, content="幂等性验证用的记忆内容甲")
+    project_memories(idx_conn, real_settings, [m])
+    project_memories(idx_conn, real_settings, [m])
+    assert _unit_count(idx_conn) == 1
+
+
+def test_project_duplicate_across_conversations(idx_conn, real_settings):
+    """跨会话同内容 → 第二条判重复、不投影、互链到已有条目。"""
+    text = "用户决定记忆引擎采用 RRF 融合向量与 trigram 两路召回"
+    m1 = _mem_dict(idx_conn, content=text, cid="conv-a")
+    m2 = _mem_dict(idx_conn, content=text, cid="conv-b")
+    project_memories(idx_conn, real_settings, [m1])
+    st2 = project_memories(idx_conn, real_settings, [m2])
+    assert st2["duplicate"] == 1 and st2["projected"] == 0
+    assert _unit_count(idx_conn) == 1                   # 重复的不占召回面
+    row = idx_conn.execute(
+        "SELECT status, dedup_of FROM distilled_memories WHERE id=?",
+        (m2["id"],)).fetchone()
+    assert row[0] == "duplicate" and row[1] == m1["id"]
+
+
+def test_project_similar_branch(idx_conn, real_settings):
+    """相似（低于重复阈值）→ 投影 + 打标互链（阈值化验证分支）。"""
+    m1 = _mem_dict(idx_conn, content="用户决定采用 RRF 融合两路召回", cid="conv-a")
+    m2 = _mem_dict(idx_conn, content="采用 RRF 向量与 trigram 融合的召回策略", cid="conv-b")
+    project_memories(idx_conn, real_settings, [m1])
+    st = project_memories(idx_conn, real_settings, [m2],
+                          duplicate_threshold=0.999, similar_threshold=0.0)
+    assert st["similar"] == 1 and st["projected"] == 1
+    assert _unit_count(idx_conn) == 2                   # 相似条目仍入召回面
+    row = idx_conn.execute(
+        "SELECT status, dedup_of FROM distilled_memories WHERE id=?",
+        (m2["id"],)).fetchone()
+    assert row[0] == "similar" and row[1] == m1["id"]
+
+
+def test_project_unrelated_is_new(idx_conn, real_settings):
+    m1 = _mem_dict(idx_conn, content="记忆蒸馏按轮数和字符双预算切片", cid="conv-a")
+    m2 = _mem_dict(idx_conn, content="晚饭吃火锅店还是烤肉店比较好呢", cid="conv-b")
+    project_memories(idx_conn, real_settings, [m1])
+    st = project_memories(idx_conn, real_settings, [m2])
+    assert st == {"projected": 1, "similar": 0, "duplicate": 0}
+
+
+def test_projected_memory_searchable_via_fts(idx_conn, real_settings):
+    """投影后 FTS 触发器自动同步 → 立刻可被关键词召回。"""
+    m = _mem_dict(idx_conn, content="用户决定记忆引擎采用 RRF 融合向量与 trigram 两路召回")
+    project_memories(idx_conn, real_settings, [m])
+    rows = idx_conn.execute(
+        "SELECT rowid FROM units_fts WHERE units_fts MATCH ?", ('"RRF"',)).fetchall()
+    assert rows, "投影后 FTS 未同步"
+    # 标题也进 FTS（供 title 命中）
+    m2 = _mem_dict(idx_conn, content="另一条内容完全不同的结论", cid="conv-c")
+    m2["title"] = "向量迁移专题"
+    project_memories(idx_conn, real_settings, [m2])
+    rows2 = idx_conn.execute(
+        "SELECT rowid FROM units_fts WHERE units_fts MATCH ?", ('"向量迁移"',)).fetchall()
+    assert rows2
+
+
+def test_project_needs_units_table_and_vec(idx_conn, real_settings):
+    """投影会自动建向量表与 FTS（首次运行无需手工准备）。"""
+    m = _mem_dict(idx_conn, content="自动建表验证")
+    project_memories(idx_conn, real_settings, [m])
+    names = {r[0] for r in idx_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert real_settings.active_spec.vec_table in names
+    assert "units_fts" in names

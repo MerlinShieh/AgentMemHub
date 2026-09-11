@@ -281,14 +281,39 @@ CREATE TABLE IF NOT EXISTS distilled_memories(
 ### 6.2 units 投影（召回零改动）
 
 ```
-distilled_memories(status != 'duplicate') → units(source='distilled', role='assistant',
-    turn_key=该记忆归属轮（单片会话取会话首 turn；多片取来源切片首 turn）,
-    src_id='dst_' + content_hash,   -- 幂等锚，与 memstore 的 mcp_ 前缀同思想
-    text=content, title=会话标题)
-→ 之后 _vectorize_stage / 三路召回 / MCP / 面板 / 排除机制全部沿用现有管线
+distilled_memories(status IN ('new','similar'))
+  → units(source=**原会话 source**, conversation_id=**原会话 id**,
+          role='distilled',                    ← 用 role 而非 source 标识蒸馏产物
+          seq=**-(memory_id)**,                ← 负值：不与采集事件正 seq 冲突
+          turn_key=该记忆归属轮,
+          src_id='dst_' + content_hash,        ← 幂等锚（重复投影则原地更新）
+          text=('topic：' if topic else '') + content,
+          title=会话标题)
+  → FTS 触发器自动同步 → 三路召回 / MCP / 面板全部沿用现有管线
 ```
 
-### 6.3 脱敏兜底（第二层，正则）
+**关键决策：用 `units.role='distilled'` 而不是独立 `source`。** 现有排除
+（`memory_exclusions`）、删除（`delete_units_for_conversation`）与召回侧
+`exclude_session` 全部按 `(source, conversation_id)` 定位——若蒸馏投影另起
+source，这些机制会**静默失效**（排除会话后蒸馏记忆仍被召回）。沿用原
+source/conversation_id 后，三者天然生效，零额外代码。
+
+**待投影判据**：`distilled_memories.status IN ('new','similar')` 且 units 中
+不存在对应 `src_id`。用这个判据而非额外的"已投影"标记，好处是 units 被
+误删或被排除机制清掉后，重跑会自动补回（自愈）。
+
+### 6.3 S3 去重池的选择
+
+去重池 = **已投影的蒸馏条目**（它们已在 units 里带向量）：
+
+- 不需要额外的向量表（省一套 schema 与同步逻辑）；
+- 历史向量不必重算（直接查 vec 表 KNN）；
+- 跨项目去重天然完成（池子不按 session/source 分区）。
+
+顺序上先投影再判重会浪费（duplicate 条目填了又删），因此实现为**判定后
+才投影**：向量化 → KNN 查既有蒸馏条目 → 三档 → `new`/`similar` 才写 units。
+
+### 6.4 脱敏兜底（第二层，正则）
 
 prompt 层失效的最后防线，入库前对每条 content 扫描：
 

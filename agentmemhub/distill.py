@@ -21,11 +21,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+
+import numpy as np
 
 # 话题边界检测复用 FTS 侧的分词口径（3-gram 步长 1 + 中文噪音表），
 # 保证"切片看到的话题"与"检索命中时看到的话题"是同一套词法。
@@ -38,8 +41,11 @@ CONFIDENCES = ("high", "medium", "low")
 #: 入库状态：new=新增；similar=与既有条目相似（入库但打标互链）；duplicate=重复（丢弃）
 MEMORY_STATUSES = ("new", "similar", "duplicate")
 
-#: units 投影用的 source 值（与 MCP 原子记忆的 'memory' 区隔）
-DISTILLED_SOURCE = "distilled"
+#: units.role 的蒸馏取值 —— 刻意**不占用 units.source**：蒸馏投影沿用原会话的
+#: source/conversation_id，使既有的排除（memory_exclusions）、删除
+#: （delete_units_for_conversation）与召回侧 exclude_session 全部天然生效；
+#: 用 role 而非 source 区分"这是蒸馏产物"。
+DISTILLED_ROLE = "distilled"
 #: units 投影的 src_id 前缀（幂等锚；对齐 memstore 的 'mcp_' 前缀思想）
 DISTILLED_SRC_PREFIX = "dst_"
 #: 单片会话（未切片）的 slice_key
@@ -491,23 +497,52 @@ def distill_slice(client, sl: Slice, *, title: str = "") -> DistillResult:
     DistillError，由调用方 fail-open 处理。
     """
     user = f"会话标题：{title or '（无）'}\n对话片段：\n{sl.text}"
+    return _call_structured(client, _SYSTEM_PROMPT, user)
+
+
+def _call_structured(client, system: str, user: str) -> DistillResult:
+    """调用 LLM 并把输出规范化为 DistillResult（解析失败重试 1 次）。
+
+    非法的单条被丢弃；"有输出但全部非法"视为失败（不登记 hash，重跑可补）。
+    """
     last_err: Exception | None = None
     for _attempt in range(2):
         try:
-            raw = client.complete_json(_SYSTEM_PROMPT, user)
+            raw = client.complete_json(system, user)
         except ValueError as e:          # 解析失败 → 重试一次
             last_err = e
             continue
         mems, rejected = normalize_memories(raw)
         if not mems and rejected:
-            # 有输出但全部非法：视为失败（不登记），重跑可补
-            raise DistillError(
-                f"输出条目全部非法：{rejected[:3]}")
+            raise DistillError(f"输出条目全部非法：{rejected[:3]}")
         return DistillResult(memories=mems, rejected=rejected)
     raise DistillError(f"输出无法解析（已重试）：{last_err}")
 
 
 # ── 幂等与落库（索引库）─────────────────────────────────────────────────
+
+
+def _hash_done(idx: sqlite3.Connection, source: str, conversation_id: str,
+               slice_key: str, content_hash: str, prompt_ver: int) -> bool:
+    ensure_distill_schema(idx)
+    return idx.execute(
+        "SELECT 1 FROM distill_hashes WHERE source=? AND conversation_id=?"
+        " AND slice_key=? AND content_hash=? AND prompt_ver=?",
+        (source, conversation_id, slice_key, content_hash,
+         prompt_ver)).fetchone() is not None
+
+
+def _mark_hash(idx: sqlite3.Connection, source: str, conversation_id: str,
+               slice_key: str, content_hash: str, prompt_ver: int,
+               model: str = "", created_at: int | None = None) -> None:
+    ensure_distill_schema(idx)
+    with idx:
+        idx.execute(
+            "INSERT OR IGNORE INTO distill_hashes"
+            "(source, conversation_id, slice_key, content_hash, prompt_ver,"
+            " model, created_at) VALUES(?,?,?,?,?,?,?)",
+            (source, conversation_id, slice_key, content_hash, prompt_ver,
+             model, int(created_at or time.time())))
 
 
 def slice_done(idx: sqlite3.Connection, sl: Slice, *, prompt_ver: int,
@@ -516,27 +551,15 @@ def slice_done(idx: sqlite3.Connection, sl: Slice, *, prompt_ver: int,
 
     模型不同不触发重蒸（同一提示词下的产出视为等价）；模型名仅作审计记录。
     """
-    ensure_distill_schema(idx)
-    row = idx.execute(
-        "SELECT 1 FROM distill_hashes WHERE source=? AND conversation_id=?"
-        " AND slice_key=? AND content_hash=? AND prompt_ver=?",
-        (sl.source, sl.conversation_id, sl.slice_key, sl.content_hash,
-         prompt_ver)).fetchone()
-    return row is not None
+    return _hash_done(idx, sl.source, sl.conversation_id, sl.slice_key,
+                      sl.content_hash, prompt_ver)
 
 
 def mark_slice_done(idx: sqlite3.Connection, sl: Slice, *, prompt_ver: int,
                     model: str = "", created_at: int | None = None) -> None:
     """登记切片已完成（幂等：重复登记安全）。"""
-    import time as _t
-    ensure_distill_schema(idx)
-    with idx:
-        idx.execute(
-            "INSERT OR IGNORE INTO distill_hashes"
-            "(source, conversation_id, slice_key, content_hash, prompt_ver,"
-            " model, created_at) VALUES(?,?,?,?,?,?,?)",
-            (sl.source, sl.conversation_id, sl.slice_key, sl.content_hash,
-             prompt_ver, model, int(created_at or _t.time())))
+    _mark_hash(idx, sl.source, sl.conversation_id, sl.slice_key,
+               sl.content_hash, prompt_ver, model, created_at)
 
 
 def save_memories(idx: sqlite3.Connection, sl: Slice, result: DistillResult,
@@ -552,9 +575,8 @@ def save_memories(idx: sqlite3.Connection, sl: Slice, result: DistillResult,
     （跨会话去重是 S3 的职责，不依赖此处 UNIQUE）。
     """
     from agentmemhub import sanitize
-    import time as _t
     ensure_distill_schema(idx)
-    ts = int(created_at or _t.time())
+    ts = int(created_at or time.time())
     turn_key = sl.turns[0] if sl.turns else None
     inserted = sanitized = dropped = 0
     with idx:
@@ -594,6 +616,99 @@ def save_memories(idx: sqlite3.Connection, sl: Slice, result: DistillResult,
 #: dry_run 时保留的产物样本上限（供人工抽查，避免返回值过大）
 SAMPLE_CAP = 20
 
+
+# ══════════════════════════════════════════════════════════════════════
+# S2 同会话合并沉淀：多片条目 → 再过一遍 LLM 去重提炼为终稿
+# （单片会话自动跳过：段级结果即终稿）
+# ══════════════════════════════════════════════════════════════════════
+
+#: 合并步骤在 distill_hashes 里的哨兵 slice_key
+MERGE_SLICE_KEY = "*merge*"
+
+_MERGE_SYSTEM = """你是记忆合并器：把同一会话不同片段提炼出的记忆条目合并为终稿。
+
+【任务】
+- 合并重复或高度相似的条目：同一事项的多种表述合成一条更完整的表述
+- 保留各自独有的信息，不得丢失细节
+- 内容互相矛盾时保留双方，并把 confidence 降为 low
+- 合并后条目数应不大于输入条目数
+
+【要求】
+- content 保持自包含，不得出现"上文""上述""第 N 条"之类指代
+- 输出格式：只输出 JSON，不要解释、不要 markdown 围栏
+{"memories": [{"type": "decision|fact|preference|lesson", "topic": "主题", "content": "内容", "confidence": "high|medium|low"}]}"""
+
+
+def merge_input_hash(entries: list[dict]) -> str:
+    """合并输入的指纹：来源内容拼接。输入变了才需要重新合并（幂等键）。"""
+    return fingerprint("\n".join(str(e.get("content") or "") for e in entries))
+
+
+def merge_entries(client, entries: list[dict], *, title: str = "") -> DistillResult:
+    """同会话多片条目合并沉淀（LLM②）。"""
+    lines = [f"[{i}] ({e.get('type')}/{e.get('confidence')}) {e.get('content')}"
+             for i, e in enumerate(entries)]
+    user = (f"会话标题：{title or '（无）'}\n待合并条目（共 {len(entries)} 条）：\n"
+            + "\n".join(lines))
+    return _call_structured(client, _MERGE_SYSTEM, user)
+
+
+def load_conversation_memories(idx: sqlite3.Connection, source: str,
+                               conversation_id: str) -> list[dict]:
+    """读某会话当前有效的蒸馏条目（排除已合并/重复的旧稿）。"""
+    ensure_distill_schema(idx)
+    rows = idx.execute(
+        "SELECT id, type, topic, content, confidence, slice_key, turn_key"
+        " FROM distilled_memories"
+        " WHERE source=? AND conversation_id=? AND status IN ('new','similar')"
+        " ORDER BY id", (source, conversation_id)).fetchall()
+    return [{"id": r[0], "type": r[1], "topic": r[2], "content": r[3],
+             "confidence": r[4], "slice_key": r[5], "turn_key": r[6]}
+            for r in rows]
+
+
+def save_merged(idx: sqlite3.Connection, source: str, conversation_id: str,
+                result: DistillResult, *, source_ids: list[int],
+                prompt_ver: int = PROMPT_VER, model: str = "",
+                sanitize_enabled: bool = True,
+                created_at: int | None = None) -> dict[str, int]:
+    """写入合并终稿并归档来源条目（单事务）。
+
+    - 来源条目 status → 'merged'（不再参与投影与召回，但保留审计与溯源）；
+    - 新终稿 merged_from_json 记录来源 id 列表；
+    - 入库前同样走脱敏兜底。
+    """
+    from agentmemhub import sanitize
+    ensure_distill_schema(idx)
+    ts = int(created_at or time.time())
+    inserted = sanitized = dropped = 0
+    with idx:
+        if source_ids:
+            qs = ",".join("?" * len(source_ids))
+            idx.execute(
+                f"UPDATE distilled_memories SET status='merged'"
+                f" WHERE id IN ({qs})", source_ids)
+        for m in result.memories:
+            content = m["content"]
+            if sanitize_enabled:
+                content, findings = sanitize.redact(content)
+                if findings:
+                    sanitized += 1
+                if not sanitize.has_substance(content):
+                    dropped += 1
+                    continue
+            h = fingerprint(content)
+            cur = idx.execute(
+                "INSERT OR IGNORE INTO distilled_memories"
+                "(source, conversation_id, slice_key, turn_key, type, topic,"
+                " content, confidence, status, content_hash, prompt_ver, model,"
+                " merged_from_json, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (source, conversation_id, MERGE_SLICE_KEY, None, m["type"],
+                 m.get("topic") or None, content, m["confidence"], "new", h,
+                 prompt_ver, model, json.dumps(source_ids), ts))
+            if cur.rowcount:
+                inserted += 1
+    return {"inserted": inserted, "sanitized": sanitized, "dropped": dropped}
 
 def list_conversations(src: sqlite3.Connection, *, source: str = "",
                        limit: int = 0) -> list[dict]:
@@ -675,6 +790,10 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
     slice_cfg = dcfg.get("slice") or {}
     runtime = dcfg.get("runtime") or {}
     sanitize_on = bool((dcfg.get("sanitize") or {}).get("enabled", True))
+    merge_enabled = bool((dcfg.get("merge") or {}).get("enabled", True))
+    dedup_cfg = dcfg.get("dedup") or {}
+    dup_th = float(dedup_cfg.get("cosine_duplicate") or 0.92)
+    sim_th = float(dedup_cfg.get("cosine_similar") or 0.80)
     workers = max(1, int(runtime.get("max_concurrent") or 4))
     client = LLMClient(LLMConfig.from_dict(
         dcfg.get("llm"), timeout=float(runtime.get("timeout") or 60)))
@@ -685,6 +804,8 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
         "conversations": 0, "slices": 0, "skipped_done": 0,
         "distilled": 0, "failed": 0, "rejected": 0,
         "memories_new": 0, "sanitized": 0, "dropped": 0,
+        "merged": 0, "merge_skipped": 0, "merge_failed": 0, "merge_seconds": 0.0,
+        "projected": 0, "similar": 0, "duplicate": 0,
         "seconds": 0.0, "dry_run": dry_run, "prompt_ver": prompt_ver,
         "model": client.cfg.model, "samples": [],
     }
@@ -700,12 +821,16 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
         emit(f"扫描会话 {len(convs)} 个…")
 
         pending: list[tuple[dict, Slice]] = []
+        merge_convs: list[tuple[str, str, str]] = []
         for conv in convs:
             sls = _slices_for(src, conv, slice_cfg)
             if not sls:
                 continue
             stats["conversations"] += 1
             stats["slices"] += len(sls)
+            if len(sls) > 1:
+                merge_convs.append((conv["source"], conv["conversation_id"],
+                                    conv.get("title") or ""))
             for sl in sls:
                 if slice_done(idx, sl, prompt_ver=prompt_ver):
                     stats["skipped_done"] += 1
@@ -750,6 +875,59 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
                     if done % 10 == 0 or done == n_total:
                         emit(f"  [{done}/{n_total}] 已产出记忆 "
                              f"{stats['memories_new']} 条")
+        # ── 阶段 C：同会话合并沉淀（仅多片会话；LLM②）──
+        if not dry_run and merge_enabled and merge_convs:
+            t_merge = time.perf_counter()
+            for s, cid, ctitle in merge_convs:
+                mems = load_conversation_memories(idx, s, cid)
+                if len(mems) <= 1:
+                    continue
+                if {m["slice_key"] for m in mems} == {SLICE_WHOLE}:
+                    continue                 # 单片会话：段级结果即终稿
+                mhash = merge_input_hash(mems)
+                if _hash_done(idx, s, cid, MERGE_SLICE_KEY, mhash, prompt_ver):
+                    stats["merge_skipped"] += 1
+                    continue
+                try:
+                    merged = merge_entries(client, mems, title=ctitle)
+                except Exception as e:       # fail-open：不登记，重跑可补
+                    stats["merge_failed"] += 1
+                    log.warning("合并失败 %s/%s：%s: %s",
+                                s, cid, type(e).__name__, e)
+                    continue
+                mst = save_merged(idx, s, cid, merged,
+                                  source_ids=[m["id"] for m in mems],
+                                  prompt_ver=prompt_ver, model=client.cfg.model,
+                                  sanitize_enabled=sanitize_on)
+                _mark_hash(idx, s, cid, MERGE_SLICE_KEY, mhash, prompt_ver,
+                           client.cfg.model)
+                stats["merged"] += 1
+                stats["memories_new"] += mst["inserted"]
+                stats["sanitized"] += mst["sanitized"]
+                stats["dropped"] += mst["dropped"]
+            stats["merge_seconds"] = round(time.perf_counter() - t_merge, 1)
+            emit(f"合并沉淀 {stats['merged']} 个会话（失败 {stats['merge_failed']}，"
+                 f"跳过 {stats['merge_skipped']}）")
+
+        # ── 阶段 D：跨会话去重 + 投影进 units（走既有三路召回）──
+        if not dry_run:
+            todo = _pending_projection(idx)
+            if todo:
+                emit(f"投影去重 {len(todo)} 条…")
+                title_map = {(c["source"], c["conversation_id"]):
+                             (c.get("title") or "") for c in convs}
+                for m in todo:
+                    m["title"] = title_map.get(
+                        (m["source"], m["conversation_id"])) or None
+                pst = project_memories(idx, settings, todo,
+                                       duplicate_threshold=dup_th,
+                                       similar_threshold=sim_th, log=log)
+                stats["projected"] = pst["projected"]
+                stats["similar"] = pst["similar"]
+                stats["duplicate"] = pst["duplicate"]
+                emit(f"投影 {pst['projected']} 条（判重丢弃 {pst['duplicate']}，"
+                     f"相似打标 {pst['similar']}）")
+
         stats["seconds"] = round(time.perf_counter() - t0, 1)
         if dry_run:
             stats["samples"] = stats["samples"][:SAMPLE_CAP]
@@ -757,3 +935,130 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
     finally:
         idx.close()
         src.close()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# S3 跨会话去重 + S4 投影（写进 units，走既有三路召回）
+#
+# 去重池 = **已投影的蒸馏条目**（它们已在 units 里带向量），因此：
+#   · 不需要额外的向量表；
+#   · 历史向量不必重算（直接查 vec 表 KNN）；
+#   · 跨项目去重天然完成（池子不分 session/source）。
+# 三档标记：duplicate（丢弃不投影）/ similar（投影 + 打标互链）/ new。
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _memory_id_by_anchor(idx: sqlite3.Connection, src_id: str | None) -> int | None:
+    """由 units.src_id（dst_<内容hash>）反查 distilled_memories.id。"""
+    if not src_id or not src_id.startswith(DISTILLED_SRC_PREFIX):
+        return None
+    h = src_id[len(DISTILLED_SRC_PREFIX):]
+    row = idx.execute(
+        "SELECT id FROM distilled_memories WHERE content_hash=?", (h,)).fetchone()
+    return row[0] if row else None
+
+
+def _project_one(idx: sqlite3.Connection, m: dict, vec: np.ndarray,
+                 spec) -> int:
+    """把一条蒸馏记忆投影进 units（幂等：src_id 命中则更新）。
+
+    units.source/conversation_id 用**原会话**的值 → 排除与删除机制天然覆盖。
+    seq 取负值（-memory_id）：既不与采集事件的正 seq 冲突，又保证同会话唯一。
+    """
+    src_id = DISTILLED_SRC_PREFIX + (m.get("content_hash") or fingerprint(m["content"]))
+    topic = m.get("topic") or ""
+    text = m["content"]
+    body = f"{topic}：{text}" if topic and topic not in text else text
+    title = m.get("title") or None
+    existing = idx.execute("SELECT id FROM units WHERE src_id=?", (src_id,)).fetchone()
+    if existing:
+        uid = int(existing[0])
+        idx.execute(
+            "UPDATE units SET text=?, chars=?, title=?, turn_key=? WHERE id=?",
+            (body, len(body), title, m.get("turn_key"), uid))
+    else:
+        uid = int(idx.execute(
+            "INSERT INTO units(source, conversation_id, seq, role, turn_key,"
+            " src_id, time, title, text, chars) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (m["source"], m["conversation_id"], -abs(int(m["id"])),
+             DISTILLED_ROLE, m.get("turn_key"), src_id,
+             int(m.get("created_at") or time.time()), title, body,
+             len(body))).lastrowid)
+    idx.execute(
+        f"INSERT OR REPLACE INTO {spec.vec_table}(rowid, embedding) VALUES(?,?)",
+        (uid, np.ascontiguousarray(vec, dtype=np.float32).tobytes()))
+    return uid
+
+
+def _pending_projection(idx: sqlite3.Connection) -> list[dict]:
+    """待投影条目：状态有效且尚未出现在 units 里的蒸馏记忆。
+
+    以"units 中是否存在对应 src_id"为判据（而非额外的已投影标记）——
+    这样 units 被误删/被排除机制清掉后，重跑会自动补回（自愈）。
+    """
+    ensure_distill_schema(idx)
+    rows = idx.execute(
+        "SELECT m.id, m.source, m.conversation_id, m.type, m.topic, m.content,"
+        " m.confidence, m.turn_key, m.created_at, m.content_hash"
+        " FROM distilled_memories m"
+        " WHERE m.status IN ('new','similar')"
+        "   AND NOT EXISTS (SELECT 1 FROM units u"
+        "        WHERE u.src_id = ? || m.content_hash)"
+        " ORDER BY m.id", (DISTILLED_SRC_PREFIX,)).fetchall()
+    return [{"id": r[0], "source": r[1], "conversation_id": r[2], "type": r[3],
+             "topic": r[4], "content": r[5], "confidence": r[6],
+             "turn_key": r[7], "created_at": r[8], "content_hash": r[9]}
+            for r in rows]
+
+
+def project_memories(idx: sqlite3.Connection, settings, memories: list[dict], *,
+                     duplicate_threshold: float = 0.92,
+                     similar_threshold: float = 0.80,
+                     log: logging.Logger | None = None) -> dict[str, int]:
+    """S3+S4：向量化 → 跨会话去重打标 → 投影进 units（duplicate 不投影）。
+
+    memories：来自 distilled_memories 的条目（需含 id/source/conversation_id/
+    content/type 等字段；可选 topic/turn_key/title/created_at）。
+    """
+    from agentmemhub.rag.ingest import ensure_vec_table
+    from agentmemhub.rag.runtime import get_active_embedder
+    from agentmemhub.rag.search import ensure_search_schema, vector_search
+
+    log = log or logging.getLogger("agentmemhub.distill")
+    stats = {"projected": 0, "similar": 0, "duplicate": 0}
+    if not memories:
+        return stats
+    spec = settings.active_spec
+    ensure_vec_table(idx, spec)
+    ensure_search_schema(idx)          # FTS 触发器随投影自动同步
+    embedder = get_active_embedder(settings)
+    vecs = embedder.encode_passages([m["content"] for m in memories])
+
+    for m, vec in zip(memories, vecs):
+        best_sim, best_anchor = 0.0, None
+        for uid, sim in vector_search(idx, spec.vec_table, vec, k=8):
+            row = idx.execute(
+                "SELECT role, src_id FROM units WHERE id=?", (uid,)).fetchone()
+            if not row or row[0] != DISTILLED_ROLE:
+                continue                    # 只与既有蒸馏记忆比对
+            if sim > best_sim:
+                best_sim, best_anchor = sim, row[1]
+        status, dedup_of = "new", None
+        if best_anchor is not None and best_sim >= duplicate_threshold:
+            status = "duplicate"
+            dedup_of = _memory_id_by_anchor(idx, best_anchor)
+            stats["duplicate"] += 1
+            log.info("判重：与 #%s 相似度 %.3f → duplicate（不投影）",
+                     dedup_of, best_sim)
+        else:
+            if best_anchor is not None and best_sim >= similar_threshold:
+                status = "similar"
+                dedup_of = _memory_id_by_anchor(idx, best_anchor)
+                stats["similar"] += 1
+            _project_one(idx, m, vec, spec)
+            stats["projected"] += 1
+        idx.execute(
+            "UPDATE distilled_memories SET status=?, dedup_of=? WHERE id=?",
+            (status, dedup_of, m["id"]))
+    idx.commit()
+    return stats
