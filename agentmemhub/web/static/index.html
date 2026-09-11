@@ -294,10 +294,6 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         <input id="memKw" type="text" placeholder="关键字（内容 / 主题）"
                class="w-full rounded-md border border-input bg-card py-1.5 pl-8 pr-2 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring">
       </div>
-      <select id="memSort" class="rounded-md border border-border bg-card px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring">
-        <option value="time">按时间</option>
-        <option value="value">按分值</option>
-      </select>
       <button id="memResetBtn" class="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
         <i data-lucide="rotate-ccw" class="h-3.5 w-3.5"></i>重置
       </button>
@@ -495,17 +491,17 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
           <span id="memStatsChips" class="flex flex-wrap items-center gap-1 text-[10px]"></span>
         </div>
         <div class="overflow-x-auto scroll-thin">
-          <table class="zebra w-full text-left text-xs">
+          <table id="memTable" class="zebra w-full text-left text-xs">
             <thead class="border-b border-border bg-muted/50 text-[11px] uppercase tracking-wide text-muted-foreground">
               <tr>
-                <th class="whitespace-nowrap px-3 py-2">类型</th>
+                <th class="cursor-pointer select-none whitespace-nowrap px-3 py-2 hover:text-foreground" data-msort="type" title="点击按类型排序">类型</th>
                 <th class="px-3 py-2">记忆内容<span class="ml-1 font-normal normal-case opacity-60">（点击展开全文与溯源）</span></th>
-                <th class="whitespace-nowrap px-3 py-2">置信</th>
-                <th class="whitespace-nowrap px-3 py-2">状态</th>
-                <th class="whitespace-nowrap px-3 py-2">来源</th>
-                <th class="px-3 py-2">来源会话</th>
-                <th class="whitespace-nowrap px-3 py-2">时间</th>
-                <th class="whitespace-nowrap px-3 py-2 text-right">分数</th>
+                <th class="cursor-pointer select-none whitespace-nowrap px-3 py-2 hover:text-foreground" data-msort="confidence" title="点击按置信度排序（高→低）">置信</th>
+                <th class="cursor-pointer select-none whitespace-nowrap px-3 py-2 hover:text-foreground" data-msort="status" title="点击按状态排序（新型→重复）">状态</th>
+                <th class="cursor-pointer select-none whitespace-nowrap px-3 py-2 hover:text-foreground" data-msort="source" title="点击按来源排序">来源</th>
+                <th class="cursor-pointer select-none px-3 py-2 hover:text-foreground" data-msort="conversation" title="点击按来源会话标题排序">来源会话</th>
+                <th class="cursor-pointer select-none whitespace-nowrap px-3 py-2 hover:text-foreground" data-msort="time" title="点击按时间排序">时间</th>
+                <th class="cursor-pointer select-none whitespace-nowrap px-3 py-2 text-right hover:text-foreground" data-msort="value" title="点击按分值排序">分数</th>
                 <th class="whitespace-nowrap px-3 py-2 text-right">操作</th>
               </tr>
             </thead>
@@ -692,7 +688,8 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     source:new Set(), type:new Set(), conf:new Set(),
     statuses:new Set(['new','similar']),   // 默认=活跃（new+similar，可下拉勾选）
     srcNone:false,                          // 来源「全不选」→ 空结果（所见即所选）
-    q:'', sort:'time', sessionUid:null, conversationId:null, convLabel:'',
+    q:'', sort:'time', sortDir:-1,             // 表头排序：字段 + 方向（-1 降序 / 1 升序）
+    sessionUid:null, conversationId:null, convLabel:'',
     page:1, pageSize:20, expanded:new Set(), seq:0,
   };
   const MEM_STATUS_LABELS = [['new','新型'],['similar','相似'],
@@ -956,10 +953,11 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       : (nSt===2 && MEMF.statuses.has('new') && MEMF.statuses.has('similar')) ? '活跃'
       : (nSt===0 ? '未选' : `${nSt}/${MEM_STATUS_KEYS.length}`);
     $('#memStatusBtn').classList.toggle('border-primary', nSt!==2 || !MEMF.statuses.has('new') || !MEMF.statuses.has('similar'));
-    // 来源下拉
+    // 来源下拉：「空集 = 全部」是内部表示，勾选态要如实回显（全选时全部打勾）
     const opts = memSourceOptions();
     $$('#memSourceOptions .mem-source-chk').forEach(ch=>{
-      ch.checked = !MEMF.srcNone && MEMF.source.has(ch.value); });
+      ch.checked = MEMF.srcNone ? false
+        : (MEMF.source.size===0 ? true : MEMF.source.has(ch.value)); });
     const nSrc=MEMF.srcNone ? 0 : MEMF.source.size;
     $('#memSourceCount').textContent = MEMF.srcNone ? '未选'
       : (nSrc===0 ? '全部' : (nSrc===opts.length ? '全选' : `${nSrc}/${opts.length}`));
@@ -967,10 +965,19 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     // 类型/置信 chips
     $$('#memTypeChips .mchip').forEach(c=>c.classList.toggle('on', MEMF.type.has(c.dataset.val)));
     $$('#memConfChips .mchip').forEach(c=>c.classList.toggle('on', MEMF.conf.has(c.dataset.val)));
-    const sel=$('#memSort'); if(sel) sel.value = MEMF.sort;
     const kw=$('#memKw'); if(kw && document.activeElement!==kw) kw.value = MEMF.q;
+    renderMemSortMarks();
     syncMemConvChip();
     reicons();
+  }
+  // 表头排序指示（▲/▼，复用 .sortable-asc/.sortable-desc 样式）
+  const MEM_SORT_DEFAULT_DIR = {time:-1, value:-1};   // 数值列首点降序；文本/枚举列首点升序
+  function renderMemSortMarks(){
+    $$('#memTable th[data-msort]').forEach(th=>{
+      th.classList.remove('sortable-asc','sortable-desc');
+      if(th.dataset.msort===MEMF.sort)
+        th.classList.add(MEMF.sortDir>0?'sortable-asc':'sortable-desc');
+    });
   }
   function syncMemConvChip(){
     const chip = $('#memConvChip');
@@ -1006,7 +1013,15 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       kwT=setTimeout(()=>{ MEMF.q=v.trim(); MEMF.page=1; loadMemories().catch(()=>{}); }, 350); });
     $('#memKw').addEventListener('keydown', e=>{ if(e.key==='Enter'){ clearTimeout(kwT);
       MEMF.q=e.target.value.trim(); MEMF.page=1; loadMemories().catch(()=>{}); } });
-    $('#memSort').onchange=e=>{ MEMF.sort=e.target.value; MEMF.page=1; loadMemories().catch(()=>{}); };
+    // 表头点击排序（类型/置信/状态/来源/来源会话/时间/分数）
+    $$('#memTable th[data-msort]').forEach(th=>th.onclick=()=>{
+      const k=th.dataset.msort;
+      if(MEMF.sort===k) MEMF.sortDir=-MEMF.sortDir;
+      else { MEMF.sort=k; MEMF.sortDir=MEM_SORT_DEFAULT_DIR[k]||1; }
+      MEMF.page=1;
+      renderMemSortMarks();
+      loadMemories().catch(()=>{});
+    });
     // 状态/来源下拉面板（与会话页 Agent 面板同式：按钮开合 + 外部点击关闭）
     $('#memStatusBtn').onclick=e=>{ e.stopPropagation(); togglePanel(e.currentTarget,$('#memStatusPanel')); };
     $('#memSourceBtn').onclick=e=>{ e.stopPropagation(); togglePanel(e.currentTarget,$('#memSourcePanel')); };
@@ -1023,9 +1038,13 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     });
     $('#memSourceOptions').addEventListener('change',e=>{
       if(!e.target.classList.contains('mem-source-chk')) return;
-      const v=e.target.value;
+      const v=e.target.value, all=memSourceOptions().map(o=>o.v);
+      if(!e.target.checked && !MEMF.srcNone && MEMF.source.size===0){
+        all.forEach(x=>MEMF.source.add(x));    // 从「全部」（空集语义）取消一项：先物化全集
+      }
       MEMF.srcNone=false;                      // 任一勾选动作即退出「全不选」
       e.target.checked ? MEMF.source.add(v) : MEMF.source.delete(v);
+      if(MEMF.source.size>=all.length) MEMF.source.clear();   // 归一化：全选=空集（=全部）
       MEMF.page=1; MEMF.expanded.clear(); syncMemFilters();
       loadMemories().catch(()=>{});
     });
@@ -1040,7 +1059,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     $('#memResetBtn').onclick=()=>{
       MEMF.source.clear(); MEMF.type.clear(); MEMF.conf.clear();
       MEMF.statuses=new Set(['new','similar']); MEMF.srcNone=false;
-      MEMF.q=''; MEMF.sort='time';
+      MEMF.q=''; MEMF.sort='time'; MEMF.sortDir=-1;
       MEMF.sessionUid=null; MEMF.conversationId=null; MEMF.convLabel='';
       MEMF.page=1; MEMF.expanded.clear();
       syncMemFilters(); loadMemories().catch(()=>{});
@@ -1098,7 +1117,8 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
             && MEMF.statuses.has('similar')) p.set('status','active');
     else p.set('status', [...MEMF.statuses].join(','));
     if(MEMF.q) p.set('q', MEMF.q);
-    if(MEMF.sort!=='time') p.set('sort', MEMF.sort);
+    p.set('sort', MEMF.sort);
+    p.set('order', MEMF.sortDir>0 ? 'asc' : 'desc');
     if(MEMF.conversationId) p.set('conversationId', MEMF.conversationId);
     else if(MEMF.sessionUid!=null) p.set('sessionUid', MEMF.sessionUid);
     p.set('page', MEMF.page); p.set('page_size', MEMF.pageSize);

@@ -825,7 +825,8 @@ def create_app(db_path: Path | None = None):
         q: Optional[str] = Query(default="", description="关键字（内容/主题 LIKE）"),
         conversationId: Optional[str] = Query(default="", description="按会话 id 筛选（会话→记忆联动）"),
         sessionUid: Optional[int] = Query(default=None, description="按全局会话 uid 筛选"),
-        sort: str = Query(default="time", description="排序：time（默认，时间倒序）| value（分值倒序）"),
+        sort: str = Query(default="time", description="排序字段：time|value|type|confidence|status|source|conversation"),
+        order: str = Query(default="desc", description="排序方向：asc|desc"),
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=20, ge=1, le=100),
     ):
@@ -856,27 +857,44 @@ def create_app(db_path: Path | None = None):
                 "SELECT source || '/' || id AS k, session_uid AS uid, title AS t"
                 " FROM conversations")}
 
+            # 「来源会话」列排序需按会话标题（在采集库）→ ATTACH 采集库只读。
+            # 失败（文件锁/路径异常）则降级：标题由 Python 侧兜底、该列不支持排序
+            attached = True
+            try:
+                idx.execute("ATTACH DATABASE ? AS srcdb",
+                            (f"file:{Path(store.db_path).as_posix()}?mode=ro",))
+            except Exception:
+                attached = False
+
             # 投影锚：units.src_id = 'dst_' || content_hash（distill 常量，
             # 非用户输入，f-string 插值安全）；未投影条目 LEFT JOIN 得 NULL
             _p = DISTILLED_SRC_PREFIX
+            conv_d = (" LEFT JOIN srcdb.conversations c"
+                      " ON c.source = m.source AND c.id = m.conversation_id"
+                      if attached else "")
+            conv_m = (" LEFT JOIN srcdb.conversations c"
+                      " ON c.source = u.source AND c.id = u.conversation_id"
+                      if attached else "")
+            title_col = " c.title AS conversation_title" if attached \
+                else " NULL AS conversation_title"
             distill_sel = (
                 "SELECT 'distilled' AS origin, m.id, m.source, m.conversation_id,"
                 " m.type, m.topic, m.content, m.confidence, m.status, m.model,"
                 " m.created_at, m.turn_key, m.dedup_of,"
                 " u.id AS unit_id, v.value AS value,"
-                " v.manual_value AS manual_value"
-                " FROM distilled_memories m"
+                " v.manual_value AS manual_value," + title_col
+                + " FROM distilled_memories m"
                 f" LEFT JOIN units u ON u.src_id = ('{_p}' || m.content_hash)"
-                " LEFT JOIN unit_values v ON v.unit_id = u.id")
+                " LEFT JOIN unit_values v ON v.unit_id = u.id" + conv_d)
             manual_sel = (
                 "SELECT 'manual' AS origin, u.id, u.source, u.conversation_id,"
                 " 'manual' AS type, NULL AS topic, u.text AS content,"
                 " NULL AS confidence, 'new' AS status, NULL AS model,"
                 " u.time AS created_at, NULL AS turn_key, NULL AS dedup_of,"
                 " u.id AS unit_id, v.value AS value,"
-                " v.manual_value AS manual_value"
-                " FROM units u LEFT JOIN unit_values v ON v.unit_id = u.id"
-                " WHERE u.source='memory'")
+                " v.manual_value AS manual_value," + title_col
+                + " FROM units u LEFT JOIN unit_values v ON v.unit_id = u.id"
+                + conv_m + " WHERE u.source='memory'")
 
             where, args = [], []
             srcs = [x.strip() for x in (source or "").split(",") if x.strip()]
@@ -923,12 +941,26 @@ def create_app(db_path: Path | None = None):
 
             union = f"({distill_sel} UNION ALL {manual_sel})"
             titles = conv_meta
-            # 排序：time=时间倒序（默认，稳定）；value=有效分倒序（手动权重
-            # 优先于自动值，与召回口径一致），无分条目沉底
-            order = ("t.created_at DESC, t.origin, t.id" if sort != "value"
-                     else "(t.value IS NULL AND t.manual_value IS NULL),"
-                          " COALESCE(t.manual_value, t.value) DESC,"
-                          " t.created_at DESC, t.id")
+            # 排序字段 → SQL 表达式（表头点击列；confidence/status 用语义权重，
+            # 而非字典序）。NULL 一律沉底；次级键保持稳定分页。
+            _SORT_EXPR = {
+                "time": "t.created_at",
+                "value": "COALESCE(t.manual_value, t.value)",
+                "type": "t.type",
+                "source": "t.source",
+                "confidence": "CASE t.confidence WHEN 'high' THEN 0"
+                              " WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END",
+                "status": "CASE t.status WHEN 'new' THEN 0 WHEN 'similar' THEN 1"
+                          " WHEN 'merged' THEN 2 WHEN 'duplicate' THEN 3 ELSE 4 END",
+                "conversation": "COALESCE(t.conversation_title, t.conversation_id)",
+            }
+            key = sort if sort in _SORT_EXPR else "time"
+            if key == "conversation" and not attached:
+                key = "time"          # 采集库未附上：该列无法按标题排，回退时间
+            direction = "ASC" if (order or "").lower() == "asc" else "DESC"
+            nulls = ("(t.value IS NULL AND t.manual_value IS NULL) ASC, "
+                     if key == "value" else "")
+            order = f"{nulls}{_SORT_EXPR[key]} {direction}, t.origin, t.id"
             total = idx.execute(
                 f"SELECT COUNT(*) FROM {union} t{wsql}", args).fetchone()[0]
             items = [dict(r) for r in idx.execute(
@@ -963,7 +995,7 @@ def create_app(db_path: Path | None = None):
                 key = f"{it['source']}/{it['conversation_id']}"
                 uid_, title_ = titles.get(key, (None, ""))
                 it["session_uid"] = uid_
-                it["conversation_title"] = title_
+                it["conversation_title"] = it.get("conversation_title") or title_
                 it["has_conversation"] = key in titles
                 it["fb_polarity"] = fb_map.get(it.get("unit_id"))
         finally:

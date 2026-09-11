@@ -189,6 +189,30 @@ def test_memories_sort_by_value(memories_env):
     assert d["items"][-1]["unit_id"] is None               # 无分沉底
 
 
+def test_memories_sort_fields_and_order(memories_env):
+    """表头排序：type/confidence/status/source/conversation + asc/desc。
+
+    conversation 依赖 ATTACH 采集库按会话标题排序（标题在采集库）。
+    """
+    client, _ = memories_env
+    d = client.get("/api/memories", params={"status": "all", "sort": "type",
+                                            "order": "asc"}).json()
+    types = [i["type"] for i in d["items"]]
+    assert types == sorted(types)
+    d2 = client.get("/api/memories", params={"status": "all", "sort": "conversation",
+                                             "order": "asc"}).json()
+    keys = [i["conversation_title"] or i["conversation_id"] for i in d2["items"]]
+    assert keys == sorted(keys)
+    d3 = client.get("/api/memories", params={"status": "all", "sort": "confidence",
+                                             "order": "asc"}).json()
+    rank = {None: 3, "high": 0, "medium": 1, "low": 2}
+    ranks = [rank[i["confidence"]] for i in d3["items"]]
+    assert ranks == sorted(ranks)
+    # 未知字段回退 time（不报错）
+    d4 = client.get("/api/memories", params={"status": "all", "sort": "bogus"}).json()
+    assert d4["total"] == 4
+
+
 def test_memories_conversation_flag_and_feedback_state(memories_env, monkeypatch):
     """has_conversation：MCP 原子记忆（占位会话 mcp）不得可点为会话链接（404 根因）；
     fb_polarity + 状态式反馈：点赞可高亮、再点同极性=取消、干净回退初始分。
