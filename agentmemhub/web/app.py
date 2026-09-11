@@ -820,7 +820,7 @@ def create_app(db_path: Path | None = None):
     def api_memories(
         source: Optional[str] = Query(default="", description="Agent 来源（逗号多选）"),
         type: Optional[str] = Query(default="", description="类型多选：decision,fact,preference,lesson,manual"),
-        status: str = Query(default="active", description="active=new+similar | all | 单值"),
+        status: str = Query(default="active", description="active=new+similar | all | 单值 | 逗号多值（面板下拉）"),
         conf: Optional[str] = Query(default="", description="置信度多选：high,medium,low"),
         q: Optional[str] = Query(default="", description="关键字（内容/主题 LIKE）"),
         conversationId: Optional[str] = Query(default="", description="按会话 id 筛选（会话→记忆联动）"),
@@ -889,9 +889,11 @@ def create_app(db_path: Path | None = None):
                 args += types
             if status == "active":
                 where.append("t.status IN ('new','similar')")
-            elif status != "all":
-                where.append("t.status=?")
-                args.append(status)
+            elif status and status != "all":
+                sts = [x.strip() for x in status.split(",") if x.strip()]
+                if sts:
+                    where.append(f"t.status IN ({','.join('?' * len(sts))})")
+                    args += sts
             confs = [x.strip() for x in (conf or "").split(",") if x.strip()]
             if confs:
                 where.append(f"t.confidence IN ({','.join('?' * len(confs))})")

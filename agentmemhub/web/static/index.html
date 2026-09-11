@@ -245,11 +245,24 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       <span class="shrink-0 font-semibold text-primary">当前查看：</span>
       <span id="summaryChips" class="flex flex-wrap items-center gap-1"></span>
     </div>
-    <!-- Filter bar：记忆报表（chips 即时筛选，无需「应用」） -->
-    <div id="memFilterBar" class="hidden flex-wrap items-center gap-x-3 gap-y-1.5 border-t border-border bg-card/60 px-5 py-2">
-      <div class="flex items-center gap-1">
-        <span class="text-[11px] font-medium text-muted-foreground">状态</span>
-        <div id="memStatusChips" class="flex items-center gap-1"></div>
+    <!-- Filter bar：记忆报表（下拉多选 + chips 即时筛选，无需「应用」） -->
+    <div id="memFilterBar" class="hidden flex-wrap items-center gap-x-2.5 gap-y-1.5 border-t border-border bg-card/60 px-5 py-2">
+      <div class="relative" id="memStatusWrap">
+        <button id="memStatusBtn" class="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs text-foreground hover:bg-muted">
+          <i data-lucide="circle-dot" class="h-3.5 w-3.5 text-primary"></i>状态
+          <span class="ml-1 rounded bg-primary/10 px-1.5 text-[10px] font-semibold text-primary" id="memStatusCount">活跃</span>
+          <i data-lucide="chevron-down" class="h-3 w-3 opacity-60"></i>
+        </button>
+        <div id="memStatusPanel" class="absolute left-0 top-full z-40 mt-1 hidden w-44 rounded-lg border border-border bg-popover p-2 shadow-lg">
+          <div class="mb-1.5 flex items-center justify-between px-1">
+            <span class="text-[11px] font-medium text-muted-foreground">记忆状态</span>
+            <span class="space-x-2 text-[11px]">
+              <button class="text-primary hover:underline" data-act="mem-status-all">全选</button>
+              <button class="text-muted-foreground hover:text-foreground" data-act="mem-status-none">全不选</button>
+            </span>
+          </div>
+          <div id="memStatusOptions" class="max-h-64 space-y-0.5 overflow-y-auto scroll-thin"></div>
+        </div>
       </div>
       <div class="flex items-center gap-1">
         <span class="text-[11px] font-medium text-muted-foreground">类型</span>
@@ -259,11 +272,24 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         <span class="text-[11px] font-medium text-muted-foreground">置信</span>
         <div id="memConfChips" class="flex items-center gap-1"></div>
       </div>
-      <div class="flex items-center gap-1">
-        <span class="text-[11px] font-medium text-muted-foreground">来源</span>
-        <div id="memSourceChips" class="flex items-center gap-1"></div>
+      <div class="relative" id="memSourceWrap">
+        <button id="memSourceBtn" class="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs text-foreground hover:bg-muted">
+          <i data-lucide="database" class="h-3.5 w-3.5 text-primary"></i>来源
+          <span class="ml-1 rounded bg-primary/10 px-1.5 text-[10px] font-semibold text-primary" id="memSourceCount">全部</span>
+          <i data-lucide="chevron-down" class="h-3 w-3 opacity-60"></i>
+        </button>
+        <div id="memSourcePanel" class="absolute left-0 top-full z-40 mt-1 hidden w-60 rounded-lg border border-border bg-popover p-2 shadow-lg">
+          <div class="mb-1.5 flex items-center justify-between px-1">
+            <span class="text-[11px] font-medium text-muted-foreground">记忆来源（含 MCP 写入）</span>
+            <span class="space-x-2 text-[11px]">
+              <button class="text-primary hover:underline" data-act="mem-source-all">全选</button>
+              <button class="text-muted-foreground hover:text-foreground" data-act="mem-source-none">全不选</button>
+            </span>
+          </div>
+          <div id="memSourceOptions" class="max-h-64 space-y-0.5 overflow-y-auto scroll-thin"></div>
+        </div>
       </div>
-      <div class="relative min-w-[170px] flex-1">
+      <div class="relative min-w-[150px] flex-1">
         <i data-lucide="search" class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"></i>
         <input id="memKw" type="text" placeholder="关键字（内容 / 主题）"
                class="w-full rounded-md border border-input bg-card py-1.5 pl-8 pr-2 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring">
@@ -493,9 +519,11 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         <div class="flex items-center justify-between border-t border-border px-4 py-2.5 text-[11px] text-muted-foreground">
           <span id="memPageInfo">—</span>
           <div class="flex items-center gap-1">
+            <button id="memFirstPage" class="nav-btn inline-flex h-7 items-center gap-0.5 rounded-md border border-border px-1.5 hover:bg-muted disabled:opacity-40" title="首页（最新）"><i data-lucide="chevrons-left" class="h-3.5 w-3.5"></i>首页</button>
             <button id="memPrevPage" class="nav-btn inline-flex h-7 w-7 items-center justify-center rounded-md border border-border hover:bg-muted disabled:opacity-40"><i data-lucide="chevron-left" class="h-3.5 w-3.5"></i></button>
             <span id="memPageNav" class="tnum px-1">1 / 1</span>
             <button id="memNextPage" class="nav-btn inline-flex h-7 w-7 items-center justify-center rounded-md border border-border hover:bg-muted disabled:opacity-40"><i data-lucide="chevron-right" class="h-3.5 w-3.5"></i></button>
+            <button id="memLastPage" class="nav-btn inline-flex h-7 items-center gap-0.5 rounded-md border border-border px-1.5 hover:bg-muted disabled:opacity-40" title="尾页（最早）">末页<i data-lucide="chevrons-right" class="h-3.5 w-3.5"></i></button>
             <select id="memPageSize" class="ml-2 rounded border border-border bg-card px-1.5 py-0.5 text-[11px] focus:outline-none">
               <option value="20" selected>20 条/页</option>
               <option value="50">50 条/页</option>
@@ -659,13 +687,16 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   let reqSeq=0;                        // 筛选请求竞态保护
   // ---- 标签页与记忆报表状态（P3：统一会话 / 记忆报表）----
   let curTab='convs';                  // 'convs' | 'memories'
-  const MEMF = {                       // 记忆报表筛选（chips 点击即时生效）
-    source:new Set(), type:new Set(), conf:new Set(), status:'active',
+  const MEM_STATUS_KEYS = ['new','similar','merged','duplicate'];
+  const MEMF = {                       // 记忆报表筛选（下拉/ chips 即时生效）
+    source:new Set(), type:new Set(), conf:new Set(),
+    statuses:new Set(['new','similar']),   // 默认=活跃（new+similar，可下拉勾选）
+    srcNone:false,                          // 来源「全不选」→ 空结果（所见即所选）
     q:'', sort:'time', sessionUid:null, conversationId:null, convLabel:'',
     page:1, pageSize:20, expanded:new Set(), seq:0,
   };
-  const MEM_STATUS = [['active','活跃'],['all','全部'],['new','新型'],
-                      ['similar','相似'],['merged','已合并'],['duplicate','重复']];
+  const MEM_STATUS_LABELS = [['new','新型'],['similar','相似'],
+                             ['merged','已合并'],['duplicate','重复']];
   const MEM_TYPES = [['decision','决策'],['fact','事实'],['preference','偏好'],
                      ['lesson','教训'],['manual','手动写入']];
   const MEM_CONFS = [['high','高'],['medium','中'],['low','低']];
@@ -717,7 +748,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
 
   // ---- 记忆报表页（内置 agentmemhub.rag：无独立服务、无启停）----
   function initMemTab(){
-    buildMemChips();
+    buildMemFilters();                  // 状态下拉 + 来源下拉（含 MCP）+ 类型/置信 chips
     bindMemEvents();                    // 事件绑定 + 索引状态轮询（含按钮置灰）
     loadMemories().catch(()=>{});       // 首次加载记忆列表
   }
@@ -875,8 +906,8 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     MEMF.conversationId = o.conversationId || null;
     MEMF.convLabel = o.title || o.conversationId || '';
     MEMF.q=''; MEMF.type.clear(); MEMF.conf.clear(); MEMF.source.clear();
-    MEMF.status='active'; MEMF.page=1; MEMF.expanded.clear();
-    syncMemChips();
+    MEMF.statuses = new Set(['new','similar']); MEMF.page=1; MEMF.expanded.clear();
+    syncMemFilters();
     switchTab('memories');
     toast('已筛选该会话总结出的记忆');
   }
@@ -892,26 +923,54 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     await openDrawer(c);
     if(turnKey) locateTurn(turnKey);
   }
-  // ---- 筛选 chips（点击即筛） ----
-  function buildMemChips(){
-    $('#memStatusChips').innerHTML = MEM_STATUS.map(([v,label])=>
-      `<span class="mchip" data-fam="status" data-val="${v}">${label}</span>`).join('');
+  // ---- 记忆筛选：状态/来源=下拉多选（与会话页 Agent 面板同式），类型/置信=chips ----
+  // 来源选项 = 采集来源 + MCP（Agent 主动写入的原子记忆，source='memory'）
+  function memSourceOptions(){
+    return [{v:'memory', label:'MCP', color:'#8B5CF6'}]
+      .concat((D.stats.sources||[]).map(s=>({v:s.source, label:s.source, color:s.color})));
+  }
+  function buildMemFilters(){
+    $('#memStatusOptions').innerHTML = MEM_STATUS_LABELS.map(([v,label])=>
+      `<label class="flex cursor-pointer items-center gap-2 rounded px-2 py-1 hover:bg-muted">
+         <input type="checkbox" value="${v}" class="mem-status-chk h-3.5 w-3.5 rounded border-border text-primary">
+         <span class="text-[11px] text-foreground">${label}</span>
+         <span class="ml-auto text-[10.5px] text-muted-foreground">${v==='new'?'未被判重':'判重归档'}</span>
+       </label>`).join('');
+    $('#memSourceOptions').innerHTML = memSourceOptions().map(s=>
+      `<label class="flex cursor-pointer items-center gap-2 rounded px-2 py-1 hover:bg-muted">
+         <input type="checkbox" value="${esc(s.v)}" class="mem-source-chk h-3.5 w-3.5 rounded border-border text-primary">
+         <span class="chip" style="background:${s.color}1f;color:${s.color}">${esc(s.label)}</span>
+         ${s.v==='memory'?'<span class="ml-auto text-[10px] text-muted-foreground">Agent 主动写入</span>':''}
+       </label>`).join('');
     $('#memTypeChips').innerHTML = MEM_TYPES.map(([v,label])=>
       `<span class="mchip" data-fam="type" data-val="${v}">${label}</span>`).join('');
     $('#memConfChips').innerHTML = MEM_CONFS.map(([v,label])=>
       `<span class="mchip" data-fam="conf" data-val="${v}">${label}</span>`).join('');
-    $('#memSourceChips').innerHTML = (D.stats.sources||[]).map(s=>
-      `<span class="mchip" data-fam="source" data-val="${esc(s.source)}">${esc(s.source)}</span>`).join('');
-    syncMemChips();
+    syncMemFilters();
   }
-  function syncMemChips(){
-    $$('#memStatusChips .mchip').forEach(c=>c.classList.toggle('on', c.dataset.val===MEMF.status));
+  function syncMemFilters(){
+    // 状态下拉
+    $$('#memStatusOptions .mem-status-chk').forEach(ch=>{ ch.checked = MEMF.statuses.has(ch.value); });
+    const nSt=MEMF.statuses.size;
+    $('#memStatusCount').textContent = nSt===MEM_STATUS_KEYS.length ? '全部'
+      : (nSt===2 && MEMF.statuses.has('new') && MEMF.statuses.has('similar')) ? '活跃'
+      : (nSt===0 ? '未选' : `${nSt}/${MEM_STATUS_KEYS.length}`);
+    $('#memStatusBtn').classList.toggle('border-primary', nSt!==2 || !MEMF.statuses.has('new') || !MEMF.statuses.has('similar'));
+    // 来源下拉
+    const opts = memSourceOptions();
+    $$('#memSourceOptions .mem-source-chk').forEach(ch=>{
+      ch.checked = !MEMF.srcNone && MEMF.source.has(ch.value); });
+    const nSrc=MEMF.srcNone ? 0 : MEMF.source.size;
+    $('#memSourceCount').textContent = MEMF.srcNone ? '未选'
+      : (nSrc===0 ? '全部' : (nSrc===opts.length ? '全选' : `${nSrc}/${opts.length}`));
+    $('#memSourceBtn').classList.toggle('border-primary', MEMF.srcNone || nSrc>0);
+    // 类型/置信 chips
     $$('#memTypeChips .mchip').forEach(c=>c.classList.toggle('on', MEMF.type.has(c.dataset.val)));
     $$('#memConfChips .mchip').forEach(c=>c.classList.toggle('on', MEMF.conf.has(c.dataset.val)));
-    $$('#memSourceChips .mchip').forEach(c=>c.classList.toggle('on', MEMF.source.has(c.dataset.val)));
     const sel=$('#memSort'); if(sel) sel.value = MEMF.sort;
     const kw=$('#memKw'); if(kw && document.activeElement!==kw) kw.value = MEMF.q;
     syncMemConvChip();
+    reicons();
   }
   function syncMemConvChip(){
     const chip = $('#memConvChip');
@@ -929,20 +988,18 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     reicons();
   }
   function bindMemEvents(){
+    // 类型 / 置信 chips（状态、来源已改下拉面板，见下方各自绑定）
     const onChip = e=>{
       const c = e.target.closest('.mchip');
       if(!c) return;
       const fam=c.dataset.fam, v=c.dataset.val;
-      if(fam==='status'){ MEMF.status = v; }
-      else if(fam==='type'){ MEMF.type.has(v)?MEMF.type.delete(v):MEMF.type.add(v); }
+      if(fam==='type'){ MEMF.type.has(v)?MEMF.type.delete(v):MEMF.type.add(v); }
       else if(fam==='conf'){ MEMF.conf.has(v)?MEMF.conf.delete(v):MEMF.conf.add(v); }
-      else if(fam==='source'){ MEMF.source.has(v)?MEMF.source.delete(v):MEMF.source.add(v); }
       MEMF.page=1; MEMF.expanded.clear();
-      syncMemChips();
+      syncMemFilters();
       loadMemories().catch(()=>{});
     };
-    ['#memStatusChips','#memTypeChips','#memConfChips','#memSourceChips']
-      .forEach(sel=>$(sel).addEventListener('click', onChip));
+    ['#memTypeChips','#memConfChips'].forEach(sel=>$(sel).addEventListener('click', onChip));
     let kwT;
     $('#memKw').addEventListener('input', e=>{ clearTimeout(kwT);
       const v=e.target.value;
@@ -950,16 +1007,52 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     $('#memKw').addEventListener('keydown', e=>{ if(e.key==='Enter'){ clearTimeout(kwT);
       MEMF.q=e.target.value.trim(); MEMF.page=1; loadMemories().catch(()=>{}); } });
     $('#memSort').onchange=e=>{ MEMF.sort=e.target.value; MEMF.page=1; loadMemories().catch(()=>{}); };
+    // 状态/来源下拉面板（与会话页 Agent 面板同式：按钮开合 + 外部点击关闭）
+    $('#memStatusBtn').onclick=e=>{ e.stopPropagation(); togglePanel(e.currentTarget,$('#memStatusPanel')); };
+    $('#memSourceBtn').onclick=e=>{ e.stopPropagation(); togglePanel(e.currentTarget,$('#memSourcePanel')); };
+    document.addEventListener('click',e=>{
+      if(!e.target.closest('#memStatusWrap')) $('#memStatusPanel').classList.add('hidden');
+      if(!e.target.closest('#memSourceWrap')) $('#memSourcePanel').classList.add('hidden');
+    });
+    $('#memStatusOptions').addEventListener('change',e=>{
+      if(!e.target.classList.contains('mem-status-chk')) return;
+      const v=e.target.value;
+      e.target.checked ? MEMF.statuses.add(v) : MEMF.statuses.delete(v);
+      MEMF.page=1; MEMF.expanded.clear(); syncMemFilters();
+      loadMemories().catch(()=>{});
+    });
+    $('#memSourceOptions').addEventListener('change',e=>{
+      if(!e.target.classList.contains('mem-source-chk')) return;
+      const v=e.target.value;
+      MEMF.srcNone=false;                      // 任一勾选动作即退出「全不选」
+      e.target.checked ? MEMF.source.add(v) : MEMF.source.delete(v);
+      MEMF.page=1; MEMF.expanded.clear(); syncMemFilters();
+      loadMemories().catch(()=>{});
+    });
+    $('[data-act="mem-status-all"]').onclick=()=>{ MEMF.statuses=new Set(MEM_STATUS_KEYS);
+      MEMF.page=1; syncMemFilters(); loadMemories().catch(()=>{}); };
+    $('[data-act="mem-status-none"]').onclick=()=>{ MEMF.statuses.clear();
+      MEMF.page=1; syncMemFilters(); loadMemories().catch(()=>{}); };
+    $('[data-act="mem-source-all"]').onclick=()=>{ MEMF.source.clear(); MEMF.srcNone=false;   // 空=全部
+      MEMF.page=1; syncMemFilters(); loadMemories().catch(()=>{}); };
+    $('[data-act="mem-source-none"]').onclick=()=>{ MEMF.srcNone=true; MEMF.source.clear();
+      MEMF.page=1; syncMemFilters(); loadMemories().catch(()=>{}); };
     $('#memResetBtn').onclick=()=>{
       MEMF.source.clear(); MEMF.type.clear(); MEMF.conf.clear();
-      MEMF.status='active'; MEMF.q=''; MEMF.sort='time';
+      MEMF.statuses=new Set(['new','similar']); MEMF.srcNone=false;
+      MEMF.q=''; MEMF.sort='time';
       MEMF.sessionUid=null; MEMF.conversationId=null; MEMF.convLabel='';
       MEMF.page=1; MEMF.expanded.clear();
-      syncMemChips(); loadMemories().catch(()=>{});
+      syncMemFilters(); loadMemories().catch(()=>{});
       toast('已重置记忆筛选');
     };
+    $('#memFirstPage').onclick=()=>{ if(MEMF.page>1){ MEMF.page=1; loadMemories().catch(()=>{}); } };
     $('#memPrevPage').onclick=()=>{ if(MEMF.page>1){ MEMF.page--; loadMemories().catch(()=>{}); } };
     $('#memNextPage').onclick=()=>{ MEMF.page++; loadMemories().catch(()=>{}); };
+    $('#memLastPage').onclick=()=>{
+      const pages=Math.max(1, Math.ceil(MEMF.total/MEMF.pageSize));
+      if(MEMF.page<pages){ MEMF.page=pages; loadMemories().catch(()=>{}); }
+    };
     $('#memPageSize').onchange=e=>{ MEMF.pageSize=+e.target.value; MEMF.page=1; loadMemories().catch(()=>{}); };
     // 行内操作（事件委托）：⭐加权 / 👍👎反馈 / 跳会话 / 行点击展开详情
     $('#memTbody').addEventListener('click', e=>{
@@ -986,11 +1079,24 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   // ---- 记忆列表加载/渲染 ----
   async function loadMemories(opts){
     const mySeq = ++MEMF.seq;
+    const nSrcAll = memSourceOptions().length;
+    // 全不选（状态/来源）→ 空结果，所见即所选，不发请求
+    if(MEMF.statuses.size===0 || MEMF.srcNone){
+      MEMF.items=[]; MEMF.total=0; MEMF.stats={};
+      renderMemTable(); renderMemStats();
+      const tc=$('#tabMemCount'); if(tc) tc.textContent='0';
+      return;
+    }
     const p = new URLSearchParams();
-    if(MEMF.source.size) p.set('source', [...MEMF.source].join(','));
+    if(MEMF.source.size && MEMF.source.size<nSrcAll)
+      p.set('source', [...MEMF.source].join(','));
     if(MEMF.type.size) p.set('type', [...MEMF.type].join(','));
     if(MEMF.conf.size) p.set('conf', [...MEMF.conf].join(','));
-    p.set('status', MEMF.status);
+    // 状态：全选=all；默认两值=active；其余组合传多值（后端支持逗号多值）
+    if(MEMF.statuses.size===MEM_STATUS_KEYS.length) p.set('status','all');
+    else if(MEMF.statuses.size===2 && MEMF.statuses.has('new')
+            && MEMF.statuses.has('similar')) p.set('status','active');
+    else p.set('status', [...MEMF.statuses].join(','));
     if(MEMF.q) p.set('q', MEMF.q);
     if(MEMF.sort!=='time') p.set('sort', MEMF.sort);
     if(MEMF.conversationId) p.set('conversationId', MEMF.conversationId);
@@ -1122,6 +1228,8 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     $('#memPageNav').textContent = `${MEMF.page} / ${pages}`;
     $('#memPrevPage').disabled = MEMF.page<=1;
     $('#memNextPage').disabled = MEMF.page>=pages;
+    $('#memFirstPage').disabled = MEMF.page<=1;
+    $('#memLastPage').disabled = MEMF.page>=pages;
     reicons();
   }
   // ---- 数据操作：提取入库 / 推送记忆（后台任务，轮询状态）----
@@ -1275,7 +1383,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     document.title = `AgentMemHub 记忆面板 (${D.meta.totalConversations})`;
     updateStatsHead(D.meta); updateSummary();
     renderStats(); renderCharts(); renderTable();
-    fillAdminSource(); buildMemChips(); reicons();
+    fillAdminSource(); buildMemFilters(); reicons();
     if(!silent) toast('数据已刷新');
   }
   // ---- 统一操作日志（面板控制/任务执行）----
