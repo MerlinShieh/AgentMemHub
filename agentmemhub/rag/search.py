@@ -26,7 +26,7 @@ import numpy as np
 from .config import Settings
 from .embedder import Embedder, OnnxEmbedder
 from .runtime import get_embedder
-from .ingest import open_index
+from .ingest import ensure_vec_table, open_index
 
 if TYPE_CHECKING:
     from .ext import Judge, ValueProvider
@@ -374,9 +374,17 @@ def hybrid_search(
 
         channels: dict[str, ChannelHits] = {}
         if mode in ("hybrid", "vector"):
-            qvec = embedder.encode_query(query)
-            channels["vec"] = vector_search(conn, spec.vec_table, qvec,
-                                            candidate_k, exclude_ids=excl)
+            # 多模型向量路：按 rag.retrieval.models 逐模型检索（配置语义落地）。
+            # active 模型通道名保持 "vec"（兼容 Hit.vec_rank 与既有行为），
+            # 其余模型用 "vec:<model_id>" —— 各路独立参与 RRF，一致命中信号更强。
+            for mid in settings.retrieval_models:
+                s = settings.model(mid)
+                ensure_vec_table(conn, s)
+                em = embedder if mid == spec.id else get_embedder(s, settings=settings)
+                qv = em.encode_query(query)
+                name = "vec" if mid == spec.id else f"vec:{mid}"
+                channels[name] = vector_search(conn, s.vec_table, qv,
+                                               candidate_k, exclude_ids=excl)
         if mode in ("hybrid", "fts"):
             channels["fts"] = fts_search(conn, query, candidate_k, exclude_ids=excl)
         if mode == "hybrid" and idents:
@@ -414,11 +422,16 @@ def hybrid_search(
                        for i, m in metas.items()}
             emb_of: dict[int, np.ndarray] = {}
             if pool:
-                marks = ",".join("?" * len(pool))
-                for rid, blob in conn.execute(
-                    f"SELECT rowid, embedding FROM {spec.vec_table}"
-                    f" WHERE rowid IN ({marks})", [i for i, _ in pool]):
-                    emb_of[rid] = np.frombuffer(blob, dtype=np.float32)
+                # MMR 仅用 active 模型的向量（维度一致；多模型混合会维度冲突），
+                # 缺向量/表未建时该条不参与多样性计算（不影响召回本身）。
+                try:
+                    marks = ",".join("?" * len(pool))
+                    for rid, blob in conn.execute(
+                        f"SELECT rowid, embedding FROM {spec.vec_table}"
+                        f" WHERE rowid IN ({marks})", [i for i, _ in pool]):
+                        emb_of[rid] = np.frombuffer(blob, dtype=np.float32)
+                except sqlite3.OperationalError:
+                    pass    # active 向量表尚未建立（换模型首次写入前）→ 退化为无向量去重
             top = select_diverse(ranked, conv_of, emb_of,
                                  k=k, max_per_conversation=max_per_conversation)
         else:

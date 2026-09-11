@@ -29,7 +29,7 @@ from agentmemhub.rag.memstore import (
     put_feedback,
     set_user_feedback,
 )
-from agentmemhub.rag.runtime import get_active_embedder
+from agentmemhub.rag.runtime import get_active_embedder, get_embedder
 from agentmemhub.rag.search import Hit, hybrid_search
 
 _SETTINGS: Optional[Settings] = None
@@ -278,12 +278,21 @@ def import_bundle(traces: list[dict], *, embedder=None) -> dict:
             pend_texts.append(text)
             pend_dtos.append({**t, "_text": text})
         if pend_texts:
-            vecs = emb.encode_passages(pend_texts)
+            # 多模型写入：按 rag.write.order 逐模型嵌入并写各自向量表
+            # （与 run_ingest 的多模型编排同语义）——只写 active 一个模型时，
+            # 一旦配置换模型（而写入进程仍缓存旧 active），新记忆就会落进
+            # 另一张表、在召回侧"隐形"；多写一份即消除该结构性风险。
+            multi: list[tuple] = []
+            for mid in st.write_order:
+                s = st.model(mid)
+                ensure_vec_table(conn, s)
+                em = emb if mid == st.active_model else get_embedder(s, settings=st)
+                multi.append((s, em.encode_passages(pend_texts)))
             with conn:
                 seq = conn.execute(
                     "SELECT COALESCE(MAX(seq),0) FROM units"
                     " WHERE source='memory'").fetchone()[0]
-                for d, v in zip(pend_dtos, vecs):
+                for i, d in enumerate(pend_dtos):
                     seq += 1
                     ts = int((d.get("ts") or time.time() * 1000) // 1000)
                     cur = conn.execute(
@@ -292,10 +301,11 @@ def import_bundle(traces: list[dict], *, embedder=None) -> dict:
                         " VALUES('memory','mcp',?,'user','mcp',?,?,?,?,?,?)",
                         (seq, content_anchor(d["_text"]), ts,
                          "记忆", d["_text"], len(d["_text"]), d["id"]))
-                    conn.execute(
-                        f"INSERT INTO {spec.vec_table}(rowid, embedding)"
-                        " VALUES(?,?)",
-                        (cur.lastrowid, bytes(v)))
+                    for s, vecs in multi:
+                        conn.execute(
+                            f"INSERT OR REPLACE INTO {s.vec_table}"
+                            "(rowid, embedding) VALUES(?,?)",
+                            (cur.lastrowid, bytes(vecs[i])))
                     value = float(d.get("value") or 0.0)
                     if value:
                         conn.execute(
@@ -365,7 +375,7 @@ def rebuild_embeddings(mode: str = "repair", limit: int = 500,
             " WHERE v.rowid IS NULL")]
         updated = 0
         if mode == "repair" and missing:
-            emb = get_active_embedder(spec)
+            emb = get_active_embedder(st)      # 注意：签名收 Settings（曾误传 spec 致 AttributeError）
             tables = [spec.vec_table]
             for chunk_i in range(0, len(missing), 64):
                 ids = missing[chunk_i:chunk_i + 64]

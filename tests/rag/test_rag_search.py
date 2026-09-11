@@ -1,4 +1,4 @@
-"""混合召回测试：FTS 懒建/触发器同步/trigram+LIKE、RRF、向量路、端到端与溯源日志。"""
+﻿"""混合召回测试：FTS 懒建/触发器同步/trigram+LIKE、RRF、向量路、端到端与溯源日志。"""
 from __future__ import annotations
 
 import dataclasses
@@ -321,3 +321,46 @@ def test_search_logs_traceability(rag_db, embedder, tmp_log_dir):
     assert "fused_ids=" in content
     if hits:
         assert str(hits[0].unit_id) in content
+
+
+def test_multi_model_vector_recall(project_settings, embedder, tmp_path):
+    """retrieval.models 多模型召回：只在「第二模型表」里有向量的单元也能被召回。
+
+    背景（2026-09-11 实测缺陷）：写入与召回各自按进程内 active 选表，
+    换模型后旧记忆会落进另一张表、在召回侧"隐形"。配置语义本该是多模型
+    融合（active 通道名保持 "vec"，其余为 "vec:<id>"）。
+    """
+    import dataclasses
+
+    from agentmemhub.rag.ingest import ensure_vec_table, open_index
+    from agentmemhub.rag.search import hybrid_search
+
+    m2 = dataclasses.replace(project_settings.active_spec, id="probe-m2")
+    st = dataclasses.replace(
+        project_settings,
+        index_db=tmp_path / "idx_multi.db",
+        models={**project_settings.models, m2.id: m2},
+        retrieval={**project_settings.retrieval, "models": [m2.id]},  # 仅第二模型参与
+    )
+    text = "多模型召回探针：这条记忆只在第二模型的向量表里有向量"
+    conn = open_index(st.index_db)
+    try:
+        ensure_vec_table(conn, m2)
+        ensure_vec_table(conn, project_settings.active_spec)   # active 表存在但为空（真实态）
+        with conn:
+            cur = conn.execute(
+                "INSERT INTO units(source, conversation_id, seq, role, turn_key,"
+                " src_id, time, title, text, chars)"
+                " VALUES('probe','conv',1,'user','tk','probe-multi-1',1786000000,"
+                "'探针',?,?)", (text, len(text)))
+            v = embedder.encode_passages([text])[0]
+            conn.execute(
+                f"INSERT INTO {m2.vec_table}(rowid, embedding) VALUES(?,?)",
+                (cur.lastrowid, bytes(v)))
+    finally:
+        conn.close()
+
+    hits = hybrid_search(st, "多模型召回探针记忆", mode="vector", k=5,
+                         embedder=embedder, log=_qlog)
+    assert any("探针" in (h.text or "") for h in hits), \
+        "第二模型表里的向量必须能通过 retrieval.models 被召回"

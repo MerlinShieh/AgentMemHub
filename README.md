@@ -33,6 +33,17 @@ uv run python scripts/fetch_model.py Xenova/bge-base-zh-v1.5
 # （模型目录名即模型 id；下载脚本会自动登记到配置）
 ```
 
+**换 active 模型的标准流程**（顺序错会出现"记忆搜不到"）：
+
+1. 改 `agentmemhub.yaml` 的 `rag.active`（新模型须先登记进 `rag.models`）；
+2. 重建向量：`uv run python -m agentmemhub.rag.cli reembed --model <新模型>`
+   （只补缺失用 `uv run python -m agentmemhub rebuild --mode repair`）；
+3. **重启常驻进程**（面板 / MCP server）——它们启动时加载配置，不重启将
+   继续按旧模型写入，新记忆会落进另一张向量表、在召回侧"隐形"。
+
+嫌换模型麻烦？把 `rag.write.order` 配成多模型（如 small + base），
+写入时每个模型各存一份向量，任意 active 都能召回。
+
 模型来源：[Xenova/bge-small-zh-v1.5](https://huggingface.co/Xenova/bge-small-zh-v1.5) ·
 [Xenova/bge-base-zh-v1.5](https://huggingface.co/Xenova/bge-base-zh-v1.5)（均为量化 ONNX）。
 网络受限时脚本自动回退代理；国内可加 `--base https://hf-mirror.com`。
@@ -606,6 +617,8 @@ backend:
 rag:
   active: bge-small-zh-v1.5           # 检索用模型（随仓库分发，开箱即用）
   write:
+    # 多模型写入（真正生效）：逐模型各存一份向量——换 active 后旧记忆不会
+    # 因向量在另一张表而在召回侧隐形；代价是写入耗时随模型数增加
     order: [bge-small-zh-v1.5]        # 向量化顺序；可加更多模型
     fast_first: true                  # 首个模型完成即返回可检索，其余后台并发
     background_hint: "高精度模型正在后台向量化，稍后自动生效"
@@ -614,7 +627,9 @@ rag:
     bucketing: true                   # 按文本长度分桶批处理（性能关键）
     bucket_caps: [64, 128, 256, 384]  # 分桶边界（字符）
   retrieval:
-    models: [bge-small-zh-v1.5]       # 参与召回融合的模型（多路 RRF）
+    # 多模型召回融合（真正生效，2026-09-11 起）：逐模型向量路 + RRF；
+    # 同门模型重叠度高，扩展前先评测
+    models: [bge-small-zh-v1.5]
     candidate_k: 30                   # 每路候选数
     threshold_floor: 0.2              # 相对阈值（×top）
     max_per_conversation: 2           # 同会话限席（原子记忆不受限）
