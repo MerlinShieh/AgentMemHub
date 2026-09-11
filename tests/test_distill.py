@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 
@@ -669,8 +670,22 @@ class _SeqLLM:
         self.calls += 1
         if self.always_fail:
             raise RuntimeError("模拟 LLM 故障")
-        return {"memories": [{"type": "fact", "topic": "切片", "confidence": "high",
-                              "content": f"第 {self.calls} 条蒸馏结论"}]}
+        return {"memories": [{"type": "fact", "topic": f"主题{self.calls}",
+                              "confidence": "high",
+                              "content": _unique_text(self.calls)}]}
+
+#: 汉字池：用于生成**互不相似**的假蒸馏内容。
+#: 早期版本用 "第 N 条蒸馏结论" 这类模板，导致不同条目余弦相似度 >0.92
+#: 被判重 → 会话全部记忆被判重后从召回面消失（触发真实设计语义，但不是
+#: 测试想验证的东西）。真实场景内容各异，故用哈希派生的独特串。
+_CHARS = "记忆蒸馏切片召回向量融合阈值预算边界轮次话题过滤去重合并投影引擎索引"
+
+
+def _unique_text(n: int) -> str:
+    """由序号派生一段独特且与他项低相似的中文内容。"""
+    h = hashlib.sha256(f"seed-{n}".encode()).hexdigest()
+    return "该轮对话的结论是" + "".join(
+        _CHARS[int(h[i:i + 2], 16) % len(_CHARS)] for i in range(0, 58, 2))
 
 
 class _HubCfgStub:
@@ -1254,3 +1269,82 @@ def test_topic_boundary_cannot_cross_window():
     assert [s.slice_key for s in slices] == ["w0-0", "w1-0"]
     assert slices[0].turns == ("a0", "a1", "a2", "a3")
     assert slices[1].turns == ("b0", "b1", "b2", "b3")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 增量追加场景（真实使用中最常见）：只蒸新片 + 历史记忆参与重新合并
+# ══════════════════════════════════════════════════════════════════════
+
+def _append_turns(db_path, source, cid, *, start_seq, turn_keys, content="新增对话"):
+    c = sqlite3.connect(str(db_path))
+    try:
+        c.executemany(
+            "INSERT INTO events(source, conversation_id, seq, role, content,"
+            " turn_key, is_system) VALUES(?,?,?,?,?,?,0)",
+            [(source, cid, start_seq + i, "user", f"{content}{tk}", tk)
+             for i, tk in enumerate(turn_keys)])
+        c.commit()
+    finally:
+        c.close()
+
+
+def test_appending_only_distills_new_slices_and_remerges(distill_env, monkeypatch):
+    """核心增量语义：会话被追加后，**只蒸新产生的切片**，且合并时把
+    历史终稿与新条目一起重新提炼（不是从零重蒸整个会话）。"""
+    # max_turns=2 → conv-a(4轮) 切成 2 片；conv-b(2轮) 1 片
+    monkeypatch.setattr("agentmemhub.config.config", lambda: _HubCfgStub(
+        slice={"max_chars": 10**9, "max_turns": 2, "topic_boundary": False,
+               "boundary_window": 4, "per_message_cap": 2000}))
+    fake1 = _install_llm(monkeypatch, _SeqLLM())
+    st1 = run_distill(distill_env)
+    first_slices = st1["slices"]
+    first_distilled = st1["distilled"]
+    assert first_slices >= 3 and first_distilled == first_slices   # 全蒸
+    finals_1 = _all_memories(distill_env.index_db)
+    assert finals_1, "首跑应有终稿"
+
+    # 会话 conv-a 追加 2 轮（第 3 个窗口）→ 仅该窗口的新片需要蒸馏
+    _append_turns(distill_env.source_db, "zcode", "conv-a",
+                  start_seq=100, turn_keys=("t10", "t11"))
+
+    fake2 = _install_llm(monkeypatch, _SeqLLM())
+    st2 = run_distill(distill_env)
+    assert st2["slices"] > first_slices, "追加后总片数应增加"
+    assert st2["skipped_done"] > 0, "历史片必须被跳过（不重复蒸馏）"
+    assert st2["distilled"] < first_distilled, "只应蒸馏新增的片"
+    assert st2["distilled"] == st2["slices"] - st2["skipped_done"]
+    assert st2["merged"] == 1, "该会话需重新合并（切片集合变了）"
+
+    # 历史终稿应被归档，库内有效条目为重新生成的结果
+    conn = sqlite3.connect(str(distill_env.index_db))
+    try:
+        statuses = dict(conn.execute(
+            "SELECT status, COUNT(*) FROM distilled_memories GROUP BY 1").fetchall())
+    finally:
+        conn.close()
+    assert statuses.get("merged", 0) > 0, "旧终稿应归档为 merged"
+    assert statuses.get("new", 0) > 0
+
+    # 第三次跑：完全幂等（无新增、无 LLM 调用）
+    fake3 = _install_llm(monkeypatch, _SeqLLM())
+    st3 = run_distill(distill_env)
+    assert st3["distilled"] == 0 and st3["memories_new"] == 0
+    assert st3["merge_skipped"] >= 1
+    assert fake3.calls == 0
+
+
+def test_appending_to_single_slice_conversation(distill_env, monkeypatch):
+    """单片会话追加后若仍在同一窗口内 → 该片内容变化 → 重蒸该片（合理）。"""
+    monkeypatch.setattr("agentmemhub.config.config", lambda: _HubCfgStub(
+        slice={"max_chars": 10**9, "max_turns": 16, "topic_boundary": False,
+               "boundary_window": 4, "per_message_cap": 2000}))
+    _install_llm(monkeypatch, _SeqLLM())
+    st1 = run_distill(distill_env, only={("zcode", "conv-b")})
+    assert st1["slices"] == 1
+
+    _append_turns(distill_env.source_db, "zcode", "conv-b",
+                  start_seq=200, turn_keys=("x1",))
+    fake2 = _install_llm(monkeypatch, _SeqLLM())
+    st2 = run_distill(distill_env, only={("zcode", "conv-b")})
+    assert st2["skipped_done"] == 0, "单片会话内容变了 → 需重蒸"
+    assert st2["distilled"] == 1

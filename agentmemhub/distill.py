@@ -626,16 +626,35 @@ def save_memories(idx: sqlite3.Connection, sl: Slice, result: DistillResult,
                     dropped += 1
                     continue
             h = fingerprint(content)
-            cur = idx.execute(
-                "INSERT OR IGNORE INTO distilled_memories"
+            # 已存在同内容条目：UNIQUE(source, conversation_id, content_hash)
+            # 会挡住重复插入。但**归档条目（merged/duplicate）不该让内容复现
+            # 时永久缺席召回面** —— 追加对话后新片产出与历史条目同内容时会
+            # 命中这种情况（实测：新片蒸了却被静默忽略，导致该内容从召回面
+            # 消失、合并候选也随之缺失）。此时复活归档条目为有效状态。
+            exist = idx.execute(
+                "SELECT id, status FROM distilled_memories"
+                " WHERE source=? AND conversation_id=? AND content_hash=?",
+                (sl.source, sl.conversation_id, h)).fetchone()
+            if exist:
+                if exist[1] in ("merged", "duplicate"):
+                    idx.execute(
+                        "UPDATE distilled_memories SET status='new', slice_key=?,"
+                        " turn_key=?, type=?, topic=?, confidence=?, prompt_ver=?,"
+                        " model=?, created_at=? WHERE id=?",
+                        (sl.slice_key, turn_key, m["type"],
+                         m.get("topic") or None, m["confidence"], prompt_ver,
+                         model, ts, exist[0]))
+                    inserted += 1
+                continue
+            idx.execute(
+                "INSERT INTO distilled_memories"
                 "(source, conversation_id, slice_key, turn_key, type, topic,"
                 " content, confidence, status, content_hash, prompt_ver, model,"
                 " created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (sl.source, sl.conversation_id, sl.slice_key, turn_key,
                  m["type"], m.get("topic") or None, content, m["confidence"],
                  "new", h, prompt_ver, model, ts))
-            if cur.rowcount:
-                inserted += 1
+            inserted += 1
         idx.execute(
             "INSERT OR IGNORE INTO distill_hashes"
             "(source, conversation_id, slice_key, content_hash, prompt_ver,"
@@ -806,16 +825,30 @@ def save_merged(idx: sqlite3.Connection, source: str, conversation_id: str,
                     dropped += 1
                     continue
             h = fingerprint(content)
-            cur = idx.execute(
-                "INSERT OR IGNORE INTO distilled_memories"
+            exist = idx.execute(
+                "SELECT id, status FROM distilled_memories"
+                " WHERE source=? AND conversation_id=? AND content_hash=?",
+                (source, conversation_id, h)).fetchone()
+            if exist:
+                if exist[1] in ("merged", "duplicate"):
+                    idx.execute(
+                        "UPDATE distilled_memories SET status='new', slice_key=?,"
+                        " type=?, topic=?, confidence=?, prompt_ver=?, model=?,"
+                        " merged_from_json=?, created_at=? WHERE id=?",
+                        (MERGE_SLICE_KEY, m["type"], m.get("topic") or None,
+                         m["confidence"], prompt_ver, model,
+                         json.dumps(source_ids), ts, exist[0]))
+                    inserted += 1
+                continue
+            idx.execute(
+                "INSERT INTO distilled_memories"
                 "(source, conversation_id, slice_key, turn_key, type, topic,"
                 " content, confidence, status, content_hash, prompt_ver, model,"
                 " merged_from_json, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (source, conversation_id, MERGE_SLICE_KEY, None, m["type"],
                  m.get("topic") or None, content, m["confidence"], "new", h,
                  prompt_ver, model, json.dumps(source_ids), ts))
-            if cur.rowcount:
-                inserted += 1
+            inserted += 1
     return {"inserted": inserted, "sanitized": sanitized, "dropped": dropped}
 
 def list_conversations(src: sqlite3.Connection, *, source: str = "",
