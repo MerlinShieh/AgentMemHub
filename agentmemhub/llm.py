@@ -152,11 +152,12 @@ class LLMConfig:
     timeout: float = 60.0
     max_retries: int = 2          # 仅对瞬态错误生效
     backoff_base: float = 1.5     # 退避基数（秒）：base * 2^attempt
-    max_tokens: int = 8192
-    # 默认 8192（而非 2048）：推理模型（如 deepseek-flash）先消耗 reasoning
-    # token 再产出正文，上限过小时 JSON 会被静默截断——实测 2048 下 69% 的
-    # 蒸馏输出不完整，8192 降至 13%（再配合提示词输出长度约束）。
-    # 按生成量计费，截断重试反而更贵，留足更划算。
+    max_tokens: int = 16384
+    # 默认 16384：推理模型（如 deepseek-flash）先消耗 reasoning token 再产出
+    # 正文，上限过小时 JSON 会被静默截断甚至正文为空——实测段级蒸馏 2048 下
+    # 69% 输出不完整；而**合并**类任务（输入大→输出大）在 8192 下仍会
+    # reasoning 吃满、content 为空（finish_reason=length, reasoning_tokens=8192）。
+    # 按生成量计费，上限提高不增加成本（除非真用到），留足更划算。
     temperature: float = 0.0      # 蒸馏/抽取类任务恒 0，保证可复现
     #: provider 特定的额外请求头（配置驱动，不硬编码在客户端里）。
     #: 实测 OpenCode Go（opencode.ai/zen/go）需要 User-Agent（过 Cloudflare 1010）
@@ -186,7 +187,7 @@ class LLMConfig:
             timeout=float(d.get("timeout") or 60.0),
             max_retries=int(d.get("max_retries") if d.get("max_retries") is not None else 2),
             backoff_base=float(d.get("backoff_base") or 1.5),
-            max_tokens=int(d.get("max_tokens") or 8192),
+            max_tokens=int(d.get("max_tokens") or 16384),
             temperature=float(d.get("temperature") if d.get("temperature") is not None else 0.0),
             headers={str(k): str(v) for k, v in headers.items()} if isinstance(headers, dict) else {},
         )
