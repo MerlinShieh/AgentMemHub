@@ -169,8 +169,21 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         </button>
       </div>
     </div>
-    <!-- Filter bar -->
-    <div class="flex flex-wrap items-center gap-2 border-t border-border bg-card/60 px-5 py-2.5">
+    <!-- Tabs：统一会话 / 记忆报表（两套筛选栏随标签页切换） -->
+    <div class="flex items-center gap-1 border-t border-border px-5 pt-1.5">
+      <button id="tabConvs" data-tab="convs"
+              class="tab-btn -mb-px inline-flex items-center gap-1.5 border-b-2 border-transparent px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground">
+        <i data-lucide="messages-square" class="h-3.5 w-3.5"></i>统一会话
+        <span id="tabConvCount" class="tnum rounded bg-muted px-1 text-[10px] font-semibold text-muted-foreground"></span>
+      </button>
+      <button id="tabMems" data-tab="memories"
+              class="tab-btn -mb-px inline-flex items-center gap-1.5 border-b-2 border-transparent px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground">
+        <i data-lucide="brain" class="h-3.5 w-3.5"></i>记忆报表
+        <span id="tabMemCount" class="tnum rounded bg-muted px-1 text-[10px] font-semibold text-muted-foreground"></span>
+      </button>
+    </div>
+    <!-- Filter bar：统一会话 -->
+    <div id="convFilterBar" class="flex flex-wrap items-center gap-2 border-t border-border bg-card/60 px-5 py-2.5">
       <div class="relative" id="agentFilterWrap">
         <button id="agentFilterBtn" class="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs text-foreground hover:bg-muted">
           <i data-lucide="bot" class="h-3.5 w-3.5 text-primary"></i>Agent
@@ -226,14 +239,65 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       </button>
       <span class="ml-auto text-[11px] text-muted-foreground tnum" id="resultCount">—</span>
     </div>
-    <!-- 当前筛选摘要条（高对比，第一时间可见） -->
+    <!-- 当前筛选摘要条（高对比，第一时间可见；仅统一会话页） -->
     <div id="filterSummary" class="hidden items-center gap-2 border-y border-primary/30 bg-primary/5 px-5 py-2 text-[11px] text-foreground">
       <i data-lucide="eye" class="h-3.5 w-3.5 shrink-0 text-primary"></i>
       <span class="shrink-0 font-semibold text-primary">当前查看：</span>
       <span id="summaryChips" class="flex flex-wrap items-center gap-1"></span>
     </div>
+    <!-- Filter bar：记忆报表（chips 即时筛选，无需「应用」） -->
+    <div id="memFilterBar" class="hidden flex-wrap items-center gap-x-3 gap-y-1.5 border-t border-border bg-card/60 px-5 py-2">
+      <div class="flex items-center gap-1">
+        <span class="text-[11px] font-medium text-muted-foreground">状态</span>
+        <div id="memStatusChips" class="flex items-center gap-1"></div>
+      </div>
+      <div class="flex items-center gap-1">
+        <span class="text-[11px] font-medium text-muted-foreground">类型</span>
+        <div id="memTypeChips" class="flex items-center gap-1"></div>
+      </div>
+      <div class="flex items-center gap-1">
+        <span class="text-[11px] font-medium text-muted-foreground">置信</span>
+        <div id="memConfChips" class="flex items-center gap-1"></div>
+      </div>
+      <div class="flex items-center gap-1">
+        <span class="text-[11px] font-medium text-muted-foreground">来源</span>
+        <div id="memSourceChips" class="flex items-center gap-1"></div>
+      </div>
+      <div class="relative min-w-[170px] flex-1">
+        <i data-lucide="search" class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"></i>
+        <input id="memKw" type="text" placeholder="关键字（内容 / 主题）"
+               class="w-full rounded-md border border-input bg-card py-1.5 pl-8 pr-2 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring">
+      </div>
+      <select id="memSort" class="rounded-md border border-border bg-card px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring">
+        <option value="time">按时间</option>
+        <option value="value">按分值</option>
+      </select>
+      <button id="memResetBtn" class="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
+        <i data-lucide="rotate-ccw" class="h-3.5 w-3.5"></i>重置
+      </button>
+      <span id="memConvChip" class="hidden items-center gap-1 rounded-full border border-primary/40 bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary"></span>
+      <span class="ml-auto text-[11px] text-muted-foreground tnum" id="memResultCount">—</span>
+    </div>
   </header>
 
+  <!-- 全局任务进度条（统一会话 / 记忆报表两页可见：任务在后台跑，切页不丢） -->
+  <section id="jobBar" class="hidden px-5 pt-4">
+    <div class="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-3.5 py-2 shadow-sm">
+      <span id="adminJobState" class="hidden items-center gap-1.5 text-xs text-muted-foreground">
+        <i data-lucide="loader-circle" class="h-3.5 w-3.5 animate-spin"></i><span id="adminJobName">任务运行中…</span>
+        <span id="adminJobClock" class="tnum"></span>
+        <span class="inline-flex w-32 items-center gap-1">
+          <span class="h-2 flex-1 overflow-hidden rounded-full bg-muted"><span id="adminJobBar" class="block h-full rounded-full bg-primary transition-all" style="width:0%"></span></span>
+          <span id="adminJobPct" class="tnum text-[10px]">0%</span>
+        </span>
+      </span>
+      <span id="adminJobWarn" class="hidden text-[11px] text-warning"></span>
+      <pre id="adminJobOut" class="mt-1 hidden max-h-32 w-full overflow-y-auto rounded-md bg-muted/40 p-2 text-[10.5px] leading-relaxed text-muted-foreground scroll-thin"></pre>
+    </div>
+  </section>
+
+  <!-- ============ 视图：统一会话（Tab 1） ============ -->
+  <div id="viewConvs">
   <!-- Stat cards -->
   <section class="grid grid-cols-2 gap-3 px-5 py-4 lg:grid-cols-5">
     <div class="rounded-xl border border-border bg-card p-3.5 shadow-sm">
@@ -270,77 +334,8 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     </div>
   </section>
 
-  <!-- 记忆索引：内置引擎（agentmemhub.rag），无独立服务、无启停 -->
-  <section id="memosPanel" class="hidden px-5 pb-4">
-    <div class="rounded-xl border border-border bg-card p-4 shadow-sm">
-      <div class="flex flex-wrap items-center gap-2">
-        <i data-lucide="brain" class="h-4 w-4 text-primary"></i>
-        <h2 class="text-sm font-semibold text-foreground">记忆索引</h2>
-        <span id="memosDot" class="h-2 w-2 rounded-full bg-muted-foreground"></span>
-        <span id="memosState" class="text-xs text-muted-foreground">检测中…</span>
-        <span id="memosMeta" class="tnum text-[11px] text-muted-foreground"></span>
-        <span id="memExcluded" class="ml-auto hidden text-[11px] text-muted-foreground"></span>
-      </div>
-      <div id="memosHint" class="mt-2 hidden text-[11px] text-muted-foreground"></div>
-      <div id="memosOnline" class="mt-3 hidden grid gap-4 lg:grid-cols-2">
-        <div>
-          <div class="mb-1.5 flex items-start gap-1.5 text-[10px] text-muted-foreground">
-            <i data-lucide="info" class="mt-0.5 h-3 w-3 shrink-0"></i>
-            <span>此处为<b>语义检索</b>（按相关度找具体轮次，结果可点击跳转）；顶部筛选框是<b>会话级关键字搜索</b>（穷举哪些会话聊过），两者用途不同。</span>
-          </div>
-          <div class="relative">
-            <i data-lucide="search" class="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"></i>
-            <input id="memosKw" type="text" placeholder="语义检索记忆（例：部署、依赖修复…），回车触发"
-                   class="w-full rounded-md border border-input bg-background py-1.5 pl-8 pr-3 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring">
-          </div>
-          <div id="memosHits" class="mt-2 max-h-56 space-y-1.5 overflow-y-auto scroll-thin"></div>
-        </div>
-        <div>
-          <div class="text-[11px] font-medium text-muted-foreground">最近记忆</div>
-          <div id="memosRecent" class="mt-1.5 max-h-64 space-y-1 overflow-y-auto scroll-thin"></div>
-        </div>
-      </div>
-      <div class="mt-3 border-t border-border pt-3">
-        <div class="flex flex-wrap items-center gap-2">
-          <span class="text-[11px] font-medium text-muted-foreground">记忆操作</span>
-          <select id="adminSource" title="选择要操作的 Agent（全部=所有已发现的数据源）"
-                  class="rounded-md border border-input bg-background px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring">
-            <option value="">全部 Agent</option>
-          </select>
-          <button id="adminIngestBtn" title="从各 Agent 源文件提取会话，写入统一采集库"
-                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
-            <i data-lucide="download" class="h-3.5 w-3.5 text-primary"></i>提取会话入库
-          </button>
-          <button id="adminCleanBtn" title="删除系统注入事件（预览后执行，重建 FTS 与计数）"
-                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
-            <i data-lucide="eraser" class="h-3.5 w-3.5 text-primary"></i>清洗数据
-          </button>
-          <button id="adminDistillBtn" title="用 LLM 把原始会话提炼为结构化记忆（去噪：丢弃寒暄与过程叙述；幂等可重复执行）"
-                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
-            <i data-lucide="sparkles" class="h-3.5 w-3.5 text-primary"></i>蒸馏记忆
-          </button>
-          <button id="adminPushBtn" title="把采集库的会话向量化写入记忆索引（增量、幂等）"
-                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
-            <i data-lucide="upload" class="h-3.5 w-3.5 text-primary"></i>写入记忆
-          </button>
-          <button id="adminScoreBtn" title="LLM 三轴批量评估记忆并写入价值分（需已配置 LLM）"
-                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
-            <i data-lucide="star" class="h-3.5 w-3.5 text-primary"></i>自动评分
-          </button>
-          <span id="adminJobState" class="hidden items-center gap-1.5 text-xs text-muted-foreground">
-            <i data-lucide="loader-circle" class="h-3.5 w-3.5 animate-spin"></i><span id="adminJobName">任务运行中…</span>
-            <span id="adminJobClock" class="tnum"></span>
-            <span class="inline-flex w-32 items-center gap-1">
-              <span class="h-2 flex-1 overflow-hidden rounded-full bg-muted"><span id="adminJobBar" class="block h-full rounded-full bg-primary transition-all" style="width:0%"></span></span>
-              <span id="adminJobPct" class="tnum text-[10px]">0%</span>
-            </span>
-          </span>
-          <span id="adminJobWarn" class="hidden text-[11px] text-warning"></span>
-        </div>
-        <pre id="adminJobOut" class="mt-2 hidden max-h-40 overflow-y-auto rounded-md bg-muted/40 p-2 text-[10.5px] leading-relaxed text-muted-foreground scroll-thin"></pre>
-      </div>
-    </div>
-  </section>
+  <!-- 记忆索引板块（原 memosPanel）已迁移为「记忆报表」标签页 —— 见 viewMemories -->
+
 
   <!-- 操作日志 -->
   <section id="logsPanel" class="hidden px-5 pb-4">
@@ -371,10 +366,6 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         <button id="batchDelBtn" class="hidden inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-error hover:bg-error-soft">
           <i data-lucide="trash-2" class="h-3 w-3"></i>批量删除
         </button>
-        <button id="batchExcludeBtn" title="所选会话不写入记忆（立即从索引移除；原文保留在采集库）"
-                class="hidden items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-foreground hover:bg-muted">
-          <i data-lucide="ban" class="h-3 w-3"></i><span id="batchExcludeLabel">设为不写入记忆</span>
-        </button>
       </div>
       <div class="overflow-x-auto scroll-thin">
         <table class="zebra w-full text-left text-xs">
@@ -389,8 +380,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
               <th class="px-3 py-2">角色分布</th>
               <th class="cursor-pointer select-none px-3 py-2 hover:text-foreground" data-sort="createdAt">创建时间</th>
               <th class="cursor-pointer select-none px-3 py-2 hover:text-foreground" data-sort="updatedAt">更新时间</th>
-              <th class="px-3 py-2 text-right">操作</th>
-            </tr>
+              <th class="px-3 py-2 text-right">操作</th>            </tr>
           </thead>
           <tbody id="convTbody"></tbody>
         </table>
@@ -409,6 +399,113 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       </div>
     </div>
   </section>
+  </div><!-- /viewConvs -->
+
+  <!-- ============ 视图：记忆报表（Tab 2） ============ -->
+  <div id="viewMemories" class="hidden">
+    <!-- 记忆操作（数据流水线：提取 → 清洗 → 蒸馏 → 写入 → 评分） -->
+    <section class="px-5 py-4">
+      <div class="rounded-xl border border-border bg-card p-3.5 shadow-sm">
+        <div class="flex flex-wrap items-center gap-2">
+          <i data-lucide="database" class="h-4 w-4 text-primary"></i>
+          <span class="text-xs font-medium text-foreground">记忆操作</span>
+          <select id="adminSource" title="选择要操作的 Agent（全部=所有已发现的数据源）"
+                  class="rounded-md border border-input bg-background px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring">
+            <option value="">全部 Agent</option>
+          </select>
+          <button id="adminIngestBtn" title="从各 Agent 源文件提取会话，写入统一采集库"
+                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
+            <i data-lucide="download" class="h-3.5 w-3.5 text-primary"></i>提取会话入库
+          </button>
+          <button id="adminCleanBtn" title="删除系统注入事件（预览后执行，重建 FTS 与计数）"
+                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
+            <i data-lucide="eraser" class="h-3.5 w-3.5 text-primary"></i>清洗数据
+          </button>
+          <button id="adminDistillBtn" title="用 LLM 把原始会话提炼为结构化记忆（去噪：丢弃寒暄与过程叙述；幂等可重复执行）"
+                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
+            <i data-lucide="sparkles" class="h-3.5 w-3.5 text-primary"></i>蒸馏记忆
+          </button>
+          <button id="adminPushBtn" title="把采集库的会话向量化写入记忆索引（增量、幂等）"
+                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
+            <i data-lucide="upload" class="h-3.5 w-3.5 text-primary"></i>写入记忆
+          </button>
+          <button id="adminScoreBtn" title="LLM 三轴批量评估记忆并写入价值分（需已配置 LLM）"
+                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
+            <i data-lucide="star" class="h-3.5 w-3.5 text-primary"></i>自动评分
+          </button>
+          <span class="ml-auto flex items-center gap-1.5">
+            <span id="memosDot" class="h-2 w-2 rounded-full bg-muted-foreground"></span>
+            <span id="memosState" class="text-xs text-muted-foreground">检测中…</span>
+            <span id="memosMeta" class="tnum text-[11px] text-muted-foreground"></span>
+          </span>
+        </div>
+        <div id="memosHint" class="mt-2 hidden text-[11px] text-muted-foreground"></div>
+      </div>
+    </section>
+
+    <!-- 语义检索（按相关度召回；结果可点开原始会话） -->
+    <section class="px-5 pb-4">
+      <div class="rounded-xl border border-border bg-card p-3.5 shadow-sm">
+        <div class="flex flex-wrap items-center gap-2">
+          <i data-lucide="radar" class="h-4 w-4 text-primary"></i>
+          <span class="text-xs font-medium text-foreground">语义检索</span>
+          <span class="text-[10px] text-muted-foreground">按相关度召回（向量 + 全文混合评分；与下方报表的关键字 LIKE 筛选用途不同），回车触发，结果可点开原始会话</span>
+        </div>
+        <div class="relative mt-2 w-full">
+          <i data-lucide="search" class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"></i>
+          <input id="memosKw" type="text" placeholder="语义检索记忆（例：部署、依赖修复…），回车触发"
+                 class="w-full rounded-md border border-input bg-background py-1.5 pl-8 pr-3 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring">
+        </div>
+        <div id="memosHits" class="mt-2 hidden max-h-72 space-y-1.5 overflow-y-auto scroll-thin"></div>
+      </div>
+    </section>
+
+    <!-- 记忆列表（蒸馏终稿 ∪ Agent 手动写入） -->
+    <section class="flex-1 px-5 pb-8">
+      <div class="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+        <div class="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2.5">
+          <i data-lucide="brain" class="h-4 w-4 text-primary"></i>
+          <span class="text-xs font-medium text-foreground">记忆列表</span>
+          <span id="memStatsChips" class="flex flex-wrap items-center gap-1 text-[10px]"></span>
+        </div>
+        <div class="overflow-x-auto scroll-thin">
+          <table class="zebra w-full text-left text-xs">
+            <thead class="border-b border-border bg-muted/50 text-[11px] uppercase tracking-wide text-muted-foreground">
+              <tr>
+                <th class="whitespace-nowrap px-3 py-2">类型</th>
+                <th class="px-3 py-2">记忆内容<span class="ml-1 font-normal normal-case opacity-60">（点击展开全文与溯源）</span></th>
+                <th class="whitespace-nowrap px-3 py-2">置信</th>
+                <th class="whitespace-nowrap px-3 py-2">状态</th>
+                <th class="whitespace-nowrap px-3 py-2">来源</th>
+                <th class="px-3 py-2">来源会话</th>
+                <th class="whitespace-nowrap px-3 py-2">时间</th>
+                <th class="whitespace-nowrap px-3 py-2 text-right">分数</th>
+                <th class="whitespace-nowrap px-3 py-2 text-right">操作</th>
+              </tr>
+            </thead>
+            <tbody id="memTbody"></tbody>
+          </table>
+        </div>
+        <div id="memEmptyState" class="hidden flex-col items-center justify-center gap-2 py-16 text-center">
+          <i data-lucide="inbox" class="h-10 w-10 text-muted-foreground"></i>
+          <p class="text-sm text-muted-foreground" id="memEmptyMsg">无匹配记忆，试试调整筛选条件</p>
+        </div>
+        <div class="flex items-center justify-between border-t border-border px-4 py-2.5 text-[11px] text-muted-foreground">
+          <span id="memPageInfo">—</span>
+          <div class="flex items-center gap-1">
+            <button id="memPrevPage" class="nav-btn inline-flex h-7 w-7 items-center justify-center rounded-md border border-border hover:bg-muted disabled:opacity-40"><i data-lucide="chevron-left" class="h-3.5 w-3.5"></i></button>
+            <span id="memPageNav" class="tnum px-1">1 / 1</span>
+            <button id="memNextPage" class="nav-btn inline-flex h-7 w-7 items-center justify-center rounded-md border border-border hover:bg-muted disabled:opacity-40"><i data-lucide="chevron-right" class="h-3.5 w-3.5"></i></button>
+            <select id="memPageSize" class="ml-2 rounded border border-border bg-card px-1.5 py-0.5 text-[11px] focus:outline-none">
+              <option value="20" selected>20 条/页</option>
+              <option value="50">50 条/页</option>
+              <option value="100">100 条/页</option>
+            </select>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div><!-- /viewMemories -->
 </div>
 
 <!-- Detail Drawer -->
@@ -423,12 +520,16 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         <span id="drawerModel" class="inline-flex items-center gap-1"><i data-lucide="cpu" class="h-3 w-3"></i>—</span>
         <span id="drawerCwd" class="inline-flex items-center gap-1 max-w-[60%] truncate" title=""><i data-lucide="folder" class="h-3 w-3"></i>—</span>
         <span id="drawerEvtCount" class="tnum"></span>
+        <button id="drawerToMemBtn" class="inline-flex items-center gap-1 rounded-md border border-border px-2 py-0.5 text-[11px] font-medium text-foreground transition-colors hover:bg-muted"
+                title="切到记忆报表并筛选该会话总结出的记忆">
+          <i data-lucide="brain" class="h-3 w-3 text-primary"></i>该会话记忆
+        </button>
       </div>
     </div>
     <button id="drawerClose" class="inline-flex h-7 w-7 items-center justify-center rounded-md hover:bg-muted"><i data-lucide="x" class="h-4 w-4"></i></button>
   </div>
   <div class="flex flex-wrap items-center gap-1 border-b border-border px-5 py-2" id="roleFilterBar"></div>
-  <div id="drawerBody" class="flex-1 overflow-y-auto scroll-thin px-5 py-4 space-y-3"></div>
+  <div id="drawerBody" class="flex-1 overflow-y-auto scroll-thin px-5 pt-4 pb-24 space-y-3"></div>
   <!-- 抽屉内事件分页栏 -->
   <div id="drawerPager" class="hidden items-center justify-between border-t border-border px-5 py-2 text-[11px] text-muted-foreground">
     <span id="drawerPageInfo">—</span>
@@ -467,8 +568,8 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   </div>
 </div>
 
-<!-- Toast -->
-<div id="toast" class="fixed bottom-5 left-1/2 z-50 hidden -translate-x-1/2 items-center gap-2 rounded-lg bg-foreground px-3.5 py-2 text-xs text-background shadow-lg">
+<!-- Toast（右下角：不遮挡表格与底部内容；pointer-events-none 不挡点击） -->
+<div id="toast" class="pointer-events-none fixed bottom-6 right-6 z-50 hidden items-center gap-2 rounded-lg bg-foreground px-3.5 py-2 text-xs text-background shadow-lg">
   <i data-lucide="check-circle-2" class="h-4 w-4"></i><span id="toastMsg"></span>
 </div>
 
@@ -487,13 +588,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   pre.codeblk { background: color-mix(in srgb, var(--as-foreground) 6%, var(--as-card)); border:1px solid var(--as-border); border-radius:6px; padding:8px 10px; overflow-x:auto; font-family:var(--as-font-mono); font-size:11.5px; line-height:1.5; }
   code.inl { font-family:var(--as-font-mono); font-size:11.5px; background: color-mix(in srgb, var(--as-foreground) 8%, transparent); padding:1px 4px; border-radius:4px; }
   .row-selected { background: color-mix(in srgb, var(--as-primary) 10%, var(--as-card)) !important; }
-  /* R6 记忆排除态双色阶：整会话排除=红（强）、部分轮次排除=橙（弱） */
-  tr.row-excl-whole { background: color-mix(in srgb, var(--state-error) 9%, var(--as-card)); }
-  tr.row-excl-whole:hover { background: color-mix(in srgb, var(--state-error) 15%, var(--as-card)); }
-  tr.row-excl-whole td:first-child { box-shadow: inset 3px 0 0 var(--state-error); }
-  tr.row-excl-partial { background: color-mix(in srgb, var(--state-warning) 8%, var(--as-card)); }
-  tr.row-excl-partial:hover { background: color-mix(in srgb, var(--state-warning) 14%, var(--as-card)); }
-  tr.row-excl-partial td:first-child { box-shadow: inset 3px 0 0 var(--state-warning); }
+  /* 记忆排除态双色阶（R6 UI 已下线，后端能力保留；样式留作历史回退参考） */
   .sortable-asc::after { content:" ▲"; opacity:.6; }
   .sortable-desc::after { content:" ▼"; opacity:.6; }
   .nav-btn:disabled { cursor:not-allowed; }
@@ -503,6 +598,21 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   .text-info{color:var(--state-info);} .bg-info-soft{background-color:color-mix(in srgb,var(--state-info) 12%,transparent);}
   .ev-gap { text-align:center; font-size:10.5px; color:var(--as-muted-foreground); display:flex; align-items:center; gap:8px; }
   .ev-gap::before,.ev-gap::after { content:""; flex:1; height:1px; background:var(--as-border); }
+  /* 标签页（统一会话 / 记忆报表） */
+  .tab-btn.active { border-color: var(--as-primary); color: var(--as-primary); }
+  /* 记忆报表筛选 chips（点击即筛，无需「应用」） */
+  .mchip { display:inline-flex; align-items:center; gap:3px; padding:1px 7px; border-radius:9999px;
+           font-size:10px; font-weight:600; line-height:1.5; cursor:pointer; user-select:none;
+           border:1px solid var(--as-border); color:var(--as-muted-foreground); background:transparent; }
+  .mchip:hover { background: color-mix(in srgb, var(--as-primary) 8%, transparent); }
+  .mchip.on { border-color: var(--as-primary); background: color-mix(in srgb, var(--as-primary) 12%, transparent); color: var(--as-primary); }
+  /* 记忆类型色（decision/fact/preference/lesson/manual） */
+  .mem-type-decision  { background: color-mix(in srgb, #3B82F6 14%, transparent); color:#3B82F6; }
+  .mem-type-fact      { background: color-mix(in srgb, #10B981 14%, transparent); color:#10B981; }
+  .mem-type-preference{ background: color-mix(in srgb, #8B5CF6 14%, transparent); color:#8B5CF6; }
+  .mem-type-lesson    { background: color-mix(in srgb, #F59E0B 16%, transparent); color:#F59E0B; }
+  .mem-type-manual    { background: color-mix(in srgb, #64748B 16%, transparent); color:#64748B; }
+  .mem-row-expand > td { background: color-mix(in srgb, var(--as-primary) 5%, var(--as-card)); }
 </style>
 
 <!-- ============ LOGIC（v2: 数据全部来自本机 API，事件按需加载）============ -->
@@ -546,8 +656,24 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   let selectedKeys=new Set();          // 勾选集：key = source + '\u241F' + id（数据库主键）
   let trendChart=null, pieChart=null;
   let curConv=null, curEvts=[], curTotal=0, curPage=1, curPages=1, curLim=100;  // 抽屉分页状态
-  let curExclusion={whole:false, turns:new Set()};   // R6 记忆排除态（抽屉会话）
   let reqSeq=0;                        // 筛选请求竞态保护
+  // ---- 标签页与记忆报表状态（P3：统一会话 / 记忆报表）----
+  let curTab='convs';                  // 'convs' | 'memories'
+  const MEMF = {                       // 记忆报表筛选（chips 点击即时生效）
+    source:new Set(), type:new Set(), conf:new Set(), status:'active',
+    q:'', sort:'time', sessionUid:null, conversationId:null, convLabel:'',
+    page:1, pageSize:20, expanded:new Set(), seq:0,
+  };
+  const MEM_STATUS = [['active','活跃'],['all','全部'],['new','新型'],
+                      ['similar','相似'],['merged','已合并'],['duplicate','重复']];
+  const MEM_TYPES = [['decision','决策'],['fact','事实'],['preference','偏好'],
+                     ['lesson','教训'],['manual','手动写入']];
+  const MEM_CONFS = [['high','高'],['medium','中'],['low','低']];
+  const MEM_TYPE_CLS = {decision:'mem-type-decision', fact:'mem-type-fact',
+    preference:'mem-type-preference', lesson:'mem-type-lesson', manual:'mem-type-manual'};
+  const MEM_TYPE_LABEL = {decision:'决策', fact:'事实', preference:'偏好',
+    lesson:'教训', manual:'手动'};
+  const MEM_STATUS_LABEL = {new:'新型', similar:'相似', merged:'已合并', duplicate:'重复'};
 
   const keyOf=(source,id)=>source+'\u241F'+id;   // ␟ 分隔符不可见于常规内容
 
@@ -582,43 +708,17 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     renderStats(); renderCharts(); renderTable();
     bindTrendDrag();
     updateSummary();
-    initMemosPanel();
+    initMemTab();                       // 记忆报表页：索引状态 + 筛选 chips + 事件 + 首次加载
+    switchTab(location.hash==='#memories' ? 'memories' : 'convs');
     reicons();
     return true;
   }
 
-  // ---- 记忆索引板块（内置 agentmemhub.rag：无独立服务、无启停） ----
-  const TIER_META = {
-    2: {label:'记忆', color:'#3B82F6'},
-  };
-  async function initMemosPanel(){
-    const panel = $('#memosPanel');
-    let s;
-    try{
-      const r = await fetch('/api/memos/status');
-      if(!r.ok) throw 0;
-      s = await r.json();
-    }catch(e){ return; }                    // 后端不支持或异常：保持隐藏
-    panel.classList.remove('hidden');       // 内置引擎恒可用，不再按插件目录隐藏
-    renderMemosStatus(s);
-    if(s.online){
-      $('#memosOnline').classList.remove('hidden');
-      loadMemosRecent();
-    }
-    loadExclusionSummary();
-    reicons();
-  }
-  async function loadExclusionSummary(){
-    try{
-      const r = await fetch('/api/exclusions/summary');
-      if(!r.ok) return;
-      const d = await r.json();
-      const el = $('#memExcluded');
-      if(d.count > 0){
-        el.textContent = `已排除 ${d.count} 项`;
-        el.classList.remove('hidden');
-      } else { el.classList.add('hidden'); }
-    }catch(e){}
+  // ---- 记忆报表页（内置 agentmemhub.rag：无独立服务、无启停）----
+  function initMemTab(){
+    buildMemChips();
+    bindMemEvents();                    // 事件绑定 + 索引状态轮询（含按钮置灰）
+    loadMemories().catch(()=>{});       // 首次加载记忆列表
   }
   function renderMemosStatus(s){
     const dot = $('#memosDot'), state = $('#memosState'),
@@ -640,61 +740,25 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       hint.classList.remove('hidden');
     }
   }
-  async function loadMemosRecent(){
-    const box = $('#memosRecent');
-    try{
-      const r = await fetch('/api/memos/traces?limit=8');
-      if(!r.ok) throw 0;
-      const d = await r.json();
-      if(!(d.traces||[]).length){ box.innerHTML = '<div class="py-3 text-center text-[11px] text-muted-foreground">暂无记忆</div>'; return; }
-      box.innerHTML = d.traces.map(t=>{
-        const v = (typeof t.value==='number') ? t.value : null;
-        const vChip = v===null ? '' : `<span class="rounded px-1 text-[10px] font-semibold ${v>0?'bg-emerald-500/10 text-emerald-500':(v<0?'bg-error-soft text-error':'bg-muted text-muted-foreground')}">${v>0?'+':''}${v.toFixed(1)}</span>`;
-        const ts = t.ts ? new Date(t.ts).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '';
-        const u = esc((t.userText||'（无用户输入）').slice(0,90));
-        // 手动加权三档循环：清除 → ⭐(0.6) → ⭐⭐(1.0) → 清除。
-        // 锁定后优先于自动聚合值且不随时间衰减（用户意志优先于新陈代谢）。
-        const mw = (typeof t.manualValue==='number') ? t.manualValue : null;
-        const star = mw===null
-          ? '<i data-lucide="star" class="h-3 w-3"></i>'
-          : `<span class="tnum text-[9px] font-bold text-amber-500">${mw>=1?'★★':'★'}</span>`;
-        const starBtn = `<button class="rounded p-0.5 transition-colors ${mw===null?'text-muted-foreground hover:text-amber-500':'text-amber-500'}"
-            title="${mw===null?'手动加权：锁定该记忆的价值（不衰减）':'当前手动权重 '+mw.toFixed(1)+'，点击切档/清除'}"
-            data-weight="${mw===null?'':(mw<1?'1.0':'')}" data-trace="${esc(t.id)}">${star}</button>`;
-        // 打分（正/负反馈）：引擎立即重算该条价值分
-        const scoreBtns = `<span class="ml-auto flex items-center gap-0.5">${vChip}${starBtn}
-          <button class="rounded p-0.5 text-muted-foreground hover:text-emerald-500 transition-colors" title="标记有用（正向评分）" data-score="positive" data-trace="${esc(t.id)}"><i data-lucide="thumbs-up" class="h-3 w-3"></i></button>
-          <button class="rounded p-0.5 text-muted-foreground hover:text-error transition-colors" title="标记无用（负向评分）" data-score="negative" data-trace="${esc(t.id)}"><i data-lucide="thumbs-down" class="h-3 w-3"></i></button>
-        </span>`;
-        return `<div class="rounded-md border border-border bg-background px-2.5 py-1.5 text-xs ${mw!==null?'border-amber-500/40':''}">
-          <div class="flex items-center gap-2"><span class="tnum text-[10px] text-muted-foreground">${ts}</span>${scoreBtns}</div>
-          <div class="mt-0.5 truncate text-foreground" title="${esc(t.userText||'')}">${u}</div>
-        </div>`;
-      }).join('');
-      reicons();
-    }catch(e){
-      box.innerHTML = '<div class="py-3 text-center text-[11px] text-muted-foreground">记忆列表加载失败</div>';
-    }
-  }
-  async function setWeight(traceId, value){
+  async function setWeight(unitRef, value){
     if(!lastEngineOnline){ toast('记忆索引不可用，无法加权'); return; }
     try{
       const q = value==='' ? '' : `&value=${value}`;
-      const r=await fetchWithTimeout(`/api/memos/weight?traceId=${encodeURIComponent(traceId)}${q}`,{method:'POST'},10000);
+      const r=await fetchWithTimeout(`/api/memos/weight?traceId=${encodeURIComponent(unitRef)}${q}`,{method:'POST'},10000);
       const d=await r.json().catch(()=>({}));
       if(!r.ok){ toast(typeof d.detail==='string'?d.detail:'加权失败'); return; }
       toast(value===''?'已清除手动权重（回到自动演化）':'已锁定权重 '+Number(value).toFixed(1)+'（不衰减）');
-      loadMemosRecent();
+      loadMemories({silent:true});
     }catch(e){ toast('加权失败：'+(e.message||e)); }
   }
-  async function scoreMemos(traceId, polarity){
+  async function scoreMemos(unitRef, polarity){
     if(!lastEngineOnline){ toast('记忆索引不可用，无法打分'); return; }
     try{
-      const r=await fetchWithTimeout(`/api/memos/feedback?traceId=${encodeURIComponent(traceId)}&polarity=${polarity}`,{method:'POST'},10000);
+      const r=await fetchWithTimeout(`/api/memos/feedback?traceId=${encodeURIComponent(unitRef)}&polarity=${polarity}`,{method:'POST'},10000);
       const d=await r.json().catch(()=>({}));
       if(!r.ok){ toast(typeof d.detail==='string'?d.detail:'打分失败'); return; }
       toast(polarity==='positive'?'已标记为有用':'已标记为无用');
-      loadMemosRecent();                          // 刷新列表（价值分已重算）
+      loadMemories({silent:true});               // 刷新列表（价值分已重算）
     }catch(e){ toast('打分失败：'+(e.message||e)); }
   }
   async function memosSearch(q){
@@ -743,22 +807,283 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     }
   }
   // 语义检索命中 → 打开会话抽屉并高亮/定位到对应轮次
+  // 语义检索命中 → 切到统一会话并打开抽屉、定位到对应轮次
   async function openHitConversation(h){
-    const c = CONVS.find(x=>x.source===h.source && x.id===h.conversationId);
-    if(!c){ toast('该会话不在当前列表（可能已被筛选或删除）'); return; }
-    await openDrawer(c);
-    if(h.turnKey) locateTurn(h.turnKey);
+    if(!h.conversationId){ toast('原子记忆无对应会话'); return; }
+    await gotoConversation(h.source, h.conversationId, h.turnKey);
   }
-  // 在抽屉内滚动定位到指定轮次并短暂高亮
+  // 在抽屉内滚动定位到指定轮次并短暂高亮（轮次表头带 data-turn 锚）
   function locateTurn(tk){
-    const box = document.querySelector(`.turn-ex-chk[data-turn="${CSS.escape(tk)}"]`);
+    if(!tk) return;
+    const box = document.querySelector(`[data-turn="${CSS.escape(tk)}"]`);
     if(!box) return;
-    const target = box.closest('label')?.parentElement || box.parentElement;
-    if(target){
-      target.scrollIntoView({behavior:'smooth', block:'center'});
-      target.classList.add('ring-2','ring-primary','rounded');
-      setTimeout(()=>target.classList.remove('ring-2','ring-primary','rounded'), 2200);
+    box.scrollIntoView({behavior:'smooth', block:'center'});
+    box.classList.add('ring-2','ring-primary','rounded');
+    setTimeout(()=>box.classList.remove('ring-2','ring-primary','rounded'), 2200);
+  }
+
+  // ==================================================================
+  // 记忆报表页（Tab 2）：筛选 chips + 记忆列表 + ⭐加权/反馈 + 双向跳转
+  // ==================================================================
+  function switchTab(tab, opts){
+    curTab = (tab==='memories') ? 'memories' : 'convs';
+    const isMem = curTab==='memories';
+    closeDrawer();                       // 切页收起详情抽屉（避免遮罩挡住另一页）
+    $('#viewConvs').classList.toggle('hidden', isMem);
+    $('#viewMemories').classList.toggle('hidden', !isMem);
+    $('#convFilterBar').classList.toggle('hidden', isMem);
+    $('#convFilterBar').classList.toggle('flex', !isMem);
+    $('#memFilterBar').classList.toggle('hidden', !isMem);
+    $('#memFilterBar').classList.toggle('flex', isMem);
+    if(isMem){
+      $('#filterSummary').classList.add('hidden');
+      $('#filterSummary').classList.remove('flex');
+    }else if($('#summaryChips').innerHTML){
+      updateSummary();                     // 回到会话页恢复摘要条
     }
+    $$('.tab-btn').forEach(b=>b.classList.toggle('active', b.dataset.tab===curTab));
+    try{ history.replaceState(null,'', isMem?'#memories':'#convs'); }catch(e){}
+    if(isMem && !(opts && opts.silent)) loadMemories().catch(()=>{});
+    reicons();
+  }
+  // 会话 → 记忆报表：按该会话筛选（sessionUid 优先，回退 conversationId）
+  function gotoMemories(opts){
+    const o = opts || {};
+    MEMF.sessionUid = (o.sessionUid!=null) ? o.sessionUid : null;
+    MEMF.conversationId = o.conversationId || null;
+    MEMF.convLabel = o.title || o.conversationId || '';
+    MEMF.q=''; MEMF.type.clear(); MEMF.conf.clear(); MEMF.source.clear();
+    MEMF.status='active'; MEMF.page=1; MEMF.expanded.clear();
+    syncMemChips();
+    switchTab('memories');
+    toast('已筛选该会话总结出的记忆');
+  }
+  // 记忆 → 会话：切到统一会话页并打开抽屉、定位轮次
+  async function gotoConversation(source, cid, turnKey){
+    switchTab('convs');
+    let c = CONVS.find(x=>x.source===source && x.id===cid);
+    if(!c){
+      // 不在当前列表（被筛选/已删除）：构造最小对象，抽屉按需拉事件
+      c = { source, id:cid, title:'（不在当前筛选列表）', model:'', cwd:'',
+            eventCount:0, roles:[], createdAt:0, updatedAt:0, sessionUid:null };
+    }
+    await openDrawer(c);
+    if(turnKey) locateTurn(turnKey);
+  }
+  // ---- 筛选 chips（点击即筛） ----
+  function buildMemChips(){
+    $('#memStatusChips').innerHTML = MEM_STATUS.map(([v,label])=>
+      `<span class="mchip" data-fam="status" data-val="${v}">${label}</span>`).join('');
+    $('#memTypeChips').innerHTML = MEM_TYPES.map(([v,label])=>
+      `<span class="mchip" data-fam="type" data-val="${v}">${label}</span>`).join('');
+    $('#memConfChips').innerHTML = MEM_CONFS.map(([v,label])=>
+      `<span class="mchip" data-fam="conf" data-val="${v}">${label}</span>`).join('');
+    $('#memSourceChips').innerHTML = (D.stats.sources||[]).map(s=>
+      `<span class="mchip" data-fam="source" data-val="${esc(s.source)}">${esc(s.source)}</span>`).join('');
+    syncMemChips();
+  }
+  function syncMemChips(){
+    $$('#memStatusChips .mchip').forEach(c=>c.classList.toggle('on', c.dataset.val===MEMF.status));
+    $$('#memTypeChips .mchip').forEach(c=>c.classList.toggle('on', MEMF.type.has(c.dataset.val)));
+    $$('#memConfChips .mchip').forEach(c=>c.classList.toggle('on', MEMF.conf.has(c.dataset.val)));
+    $$('#memSourceChips .mchip').forEach(c=>c.classList.toggle('on', MEMF.source.has(c.dataset.val)));
+    const sel=$('#memSort'); if(sel) sel.value = MEMF.sort;
+    const kw=$('#memKw'); if(kw && document.activeElement!==kw) kw.value = MEMF.q;
+    syncMemConvChip();
+  }
+  function syncMemConvChip(){
+    const chip = $('#memConvChip');
+    if(MEMF.conversationId || MEMF.sessionUid!=null){
+      chip.innerHTML = `<i data-lucide="link" class="h-3 w-3"></i>会话：${esc((MEMF.convLabel||MEMF.conversationId||'').slice(0,30))}`
+        + '<button id="memConvClear" class="ml-0.5 font-bold hover:opacity-70" title="清除会话筛选">✕</button>';
+      chip.classList.remove('hidden'); chip.classList.add('inline-flex');
+      const x=$('#memConvClear');
+      if(x) x.onclick=()=>{ MEMF.sessionUid=null; MEMF.conversationId=null;
+        MEMF.convLabel=''; MEMF.page=1; syncMemConvChip();
+        loadMemories().catch(()=>{}); };
+    }else{
+      chip.classList.add('hidden'); chip.classList.remove('inline-flex');
+    }
+    reicons();
+  }
+  function bindMemEvents(){
+    const onChip = e=>{
+      const c = e.target.closest('.mchip');
+      if(!c) return;
+      const fam=c.dataset.fam, v=c.dataset.val;
+      if(fam==='status'){ MEMF.status = v; }
+      else if(fam==='type'){ MEMF.type.has(v)?MEMF.type.delete(v):MEMF.type.add(v); }
+      else if(fam==='conf'){ MEMF.conf.has(v)?MEMF.conf.delete(v):MEMF.conf.add(v); }
+      else if(fam==='source'){ MEMF.source.has(v)?MEMF.source.delete(v):MEMF.source.add(v); }
+      MEMF.page=1; MEMF.expanded.clear();
+      syncMemChips();
+      loadMemories().catch(()=>{});
+    };
+    ['#memStatusChips','#memTypeChips','#memConfChips','#memSourceChips']
+      .forEach(sel=>$(sel).addEventListener('click', onChip));
+    let kwT;
+    $('#memKw').addEventListener('input', e=>{ clearTimeout(kwT);
+      const v=e.target.value;
+      kwT=setTimeout(()=>{ MEMF.q=v.trim(); MEMF.page=1; loadMemories().catch(()=>{}); }, 350); });
+    $('#memKw').addEventListener('keydown', e=>{ if(e.key==='Enter'){ clearTimeout(kwT);
+      MEMF.q=e.target.value.trim(); MEMF.page=1; loadMemories().catch(()=>{}); } });
+    $('#memSort').onchange=e=>{ MEMF.sort=e.target.value; MEMF.page=1; loadMemories().catch(()=>{}); };
+    $('#memResetBtn').onclick=()=>{
+      MEMF.source.clear(); MEMF.type.clear(); MEMF.conf.clear();
+      MEMF.status='active'; MEMF.q=''; MEMF.sort='time';
+      MEMF.sessionUid=null; MEMF.conversationId=null; MEMF.convLabel='';
+      MEMF.page=1; MEMF.expanded.clear();
+      syncMemChips(); loadMemories().catch(()=>{});
+      toast('已重置记忆筛选');
+    };
+    $('#memPrevPage').onclick=()=>{ if(MEMF.page>1){ MEMF.page--; loadMemories().catch(()=>{}); } };
+    $('#memNextPage').onclick=()=>{ MEMF.page++; loadMemories().catch(()=>{}); };
+    $('#memPageSize').onchange=e=>{ MEMF.pageSize=+e.target.value; MEMF.page=1; loadMemories().catch(()=>{}); };
+    // 行内操作（事件委托）：⭐加权 / 👍👎反馈 / 跳会话 / 行点击展开详情
+    $('#memTbody').addEventListener('click', e=>{
+      const w=e.target.closest('button[data-weight]');
+      if(w){ if(w.dataset.unit) setWeight('unit:'+w.dataset.unit, w.dataset.weight); return; }
+      const btn=e.target.closest('button[data-score]');
+      if(btn){ if(btn.dataset.unit) scoreMemos('unit:'+btn.dataset.unit, btn.dataset.score); return; }
+      const go=e.target.closest('[data-goconv]');
+      if(go){ e.preventDefault(); gotoConversation(go.dataset.source, go.dataset.convid, go.dataset.turn||''); return; }
+      const tr=e.target.closest('tr[data-memrow]');
+      if(tr) toggleMemDetail(tr.dataset.memrow);
+    });
+    $('#memosKw').addEventListener('keydown',e=>{ if(e.key==='Enter'){ const q=e.target.value.trim(); if(q) memosSearch(q); } });
+    memosPollStatus();                          // 立即探一次索引状态（按钮置灰）
+    setInterval(memosPollStatus, 15000);        // 之后每 15s 自动刷新
+  }
+  const memKey = it => it.origin + ':' + it.id;
+  function toggleMemDetail(key){
+    MEMF.expanded.has(key) ? MEMF.expanded.delete(key) : MEMF.expanded.add(key);
+    renderMemTable();
+  }
+  // ---- 记忆列表加载/渲染 ----
+  async function loadMemories(opts){
+    const mySeq = ++MEMF.seq;
+    const p = new URLSearchParams();
+    if(MEMF.source.size) p.set('source', [...MEMF.source].join(','));
+    if(MEMF.type.size) p.set('type', [...MEMF.type].join(','));
+    if(MEMF.conf.size) p.set('conf', [...MEMF.conf].join(','));
+    p.set('status', MEMF.status);
+    if(MEMF.q) p.set('q', MEMF.q);
+    if(MEMF.sort!=='time') p.set('sort', MEMF.sort);
+    if(MEMF.conversationId) p.set('conversationId', MEMF.conversationId);
+    else if(MEMF.sessionUid!=null) p.set('sessionUid', MEMF.sessionUid);
+    p.set('page', MEMF.page); p.set('page_size', MEMF.pageSize);
+    try{
+      const r = await fetchWithTimeout('/api/memories?'+p.toString(), {}, 15000);
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      const d = await r.json();
+      if(mySeq!==MEMF.seq) return;                 // 过期响应丢弃
+      MEMF.items = d.items||[]; MEMF.total = d.total||0;
+      MEMF.stats = d.stats||{}; MEMF.pageSize = d.pageSize||MEMF.pageSize;
+      const pages = Math.max(1, Math.ceil(MEMF.total/MEMF.pageSize));
+      if(MEMF.page>pages) MEMF.page = pages;
+      renderMemTable(); renderMemStats();
+      const tc=$('#tabMemCount'); if(tc) tc.textContent = fmtNum(MEMF.total);
+    }catch(e){
+      if(mySeq===MEMF.seq) toast('记忆加载失败：'+(e.message||e));
+    }
+  }
+  function memScore(it){
+    const mv=(typeof it.manual_value==='number') ? it.manual_value : null;
+    const v=(typeof it.value==='number') ? it.value : null;
+    return {mv, v, eff:(mv!=null?mv:v)};
+  }
+  function renderMemTable(){
+    const tb=$('#memTbody'); tb.innerHTML='';
+    const empty = !MEMF.items.length;
+    $('#memEmptyState').classList.toggle('hidden', !empty);
+    $('#memEmptyState').classList.toggle('flex', empty);
+    MEMF.items.forEach(it=>{
+      const key=memKey(it);
+      const tcls=MEM_TYPE_CLS[it.type]||'mem-type-manual';
+      const tlabel=MEM_TYPE_LABEL[it.type]||esc(it.type);
+      const {mv, eff}=memScore(it);
+      const vChip = eff==null
+        ? '<span class="text-[10px] text-muted-foreground">—</span>'
+        : `<span class="tnum text-[11px] font-semibold ${eff>=0.6?'text-emerald-500':(eff>0.3?'text-foreground':'text-muted-foreground')}">${eff.toFixed(2)}</span>`
+          + (mv!=null?'<span class="ml-0.5 text-[9px] text-amber-500" title="手动锁定（不衰减）">★</span>':'');
+      const canWeight = it.unit_id != null;
+      // 三档循环：无星 → ⭐0.6 → ⭐⭐1.0 → 清除（传空=清除，勿把 null 档也传空）
+      const starVal = mv==null ? '0.6' : (mv<1 ? '1.0' : '');
+      const starBtn = canWeight
+        ? `<button class="rounded p-0.5 transition-colors ${mv==null?'text-muted-foreground hover:text-amber-500':'text-amber-500'}"
+             title="${mv==null?'手动加权：锁定该记忆的价值（不衰减）':'当前手动权重 '+Number(mv).toFixed(1)+'，点击切档/清除'}"
+             data-unit="${it.unit_id}" data-weight="${starVal}"><i data-lucide="star" class="h-3.5 w-3.5"></i></button>`
+        : '<button class="cursor-not-allowed rounded p-0.5 text-muted-foreground/40" disabled title="该条未投影到召回面（归档条目），无法加权"><i data-lucide="star" class="h-3.5 w-3.5"></i></button>';
+      const scoreBtns = canWeight
+        ? `<button class="rounded p-0.5 text-muted-foreground transition-colors hover:text-emerald-500" title="标记有用（正向评分）" data-unit="${it.unit_id}" data-score="positive"><i data-lucide="thumbs-up" class="h-3.5 w-3.5"></i></button>
+           <button class="rounded p-0.5 text-muted-foreground transition-colors hover:text-error" title="标记无用（负向评分）" data-unit="${it.unit_id}" data-score="negative"><i data-lucide="thumbs-down" class="h-3.5 w-3.5"></i></button>`
+        : `<button class="cursor-not-allowed rounded p-0.5 text-muted-foreground/40" disabled><i data-lucide="thumbs-up" class="h-3.5 w-3.5"></i></button>
+           <button class="cursor-not-allowed rounded p-0.5 text-muted-foreground/40" disabled><i data-lucide="thumbs-down" class="h-3.5 w-3.5"></i></button>`;
+      const confChip = it.confidence
+        ? `<span class="text-[10px] font-semibold ${it.confidence==='high'?'text-emerald-500':(it.confidence==='medium'?'text-amber-500':'text-muted-foreground')}">${{high:'高',medium:'中',low:'低'}[it.confidence]||esc(it.confidence)}</span>`
+        : '<span class="text-[10px] text-muted-foreground/50">—</span>';
+      const statusChip = `<span class="rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold ${it.status==='new'?'text-primary':(it.status==='similar'?'text-muted-foreground':'text-muted-foreground/70')}">${MEM_STATUS_LABEL[it.status]||esc(it.status)}</span>`;
+      const convCell = it.conversation_id
+        ? `<a href="#" data-goconv="1" data-source="${esc(it.source)}" data-convid="${esc(it.conversation_id)}" data-turn="${esc(it.turn_key||'')}"
+              class="text-primary hover:underline" title="${esc(it.conversation_title||it.conversation_id)}${it.turn_key?'（点击打开会话并定位该轮）':''}">${esc((it.conversation_title||it.conversation_id).slice(0,24))}${it.turn_key?' <span class="text-[9px] text-muted-foreground">↗</span>':''}</a>`
+        : '<span class="text-[10px] text-muted-foreground">（原子记忆）</span>';
+      const content = esc((it.content||'').replace(/\s+/g,' ').slice(0,150));
+      const topic = it.topic ? `<span class="font-semibold text-foreground">${esc(it.topic)}</span><span class="mx-1 text-muted-foreground/40">·</span>` : '';
+      const tr=el('tr','cursor-pointer border-b border-border/60 hover:bg-muted/40'+(MEMF.expanded.has(key)?' mem-row-expand':''));
+      tr.dataset.memrow = key;
+      tr.innerHTML = `
+        <td class="px-3 py-2.5 whitespace-nowrap"><span class="chip ${tcls}">${tlabel}</span></td>
+        <td class="px-3 py-2.5 max-w-[520px]"><div class="truncate" title="${esc((it.content||'').slice(0,300))}">${topic}<span class="text-foreground">${content}</span></div></td>
+        <td class="px-3 py-2.5 whitespace-nowrap">${confChip}</td>
+        <td class="px-3 py-2.5 whitespace-nowrap">${statusChip}</td>
+        <td class="px-3 py-2.5 whitespace-nowrap">${srcTag(it.source)}</td>
+        <td class="px-3 py-2.5 max-w-[210px]"><div class="truncate">${convCell}</div></td>
+        <td class="px-3 py-2.5 whitespace-nowrap text-muted-foreground" title="${fmtTime(it.created_at)}">${relTime(it.created_at)}</td>
+        <td class="px-3 py-2.5 whitespace-nowrap text-right">${vChip}</td>
+        <td class="px-3 py-2.5 whitespace-nowrap text-right">${starBtn}${scoreBtns}</td>`;
+      tb.appendChild(tr);
+      if(MEMF.expanded.has(key)){
+        const dtr=el('tr','mem-row-expand');
+        dtr.innerHTML = `<td colspan="9" class="px-4 py-3">
+          <div class="rounded-lg border border-border bg-background p-3">
+            <div class="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">记忆全文</div>
+            <div class="mt-1 whitespace-pre-wrap text-[12.5px] leading-relaxed text-foreground">${esc(it.content||'')}</div>
+            <div class="mt-2.5 flex flex-wrap gap-x-4 gap-y-1 text-[10.5px] text-muted-foreground">
+              <span>类型 <b class="text-foreground">${tlabel}</b></span>
+              ${it.topic?`<span>主题 <b class="text-foreground">${esc(it.topic)}</b></span>`:''}
+              <span>置信 <b class="text-foreground">${esc(it.confidence||'—')}</b></span>
+              <span>状态 <b class="text-foreground">${MEM_STATUS_LABEL[it.status]||esc(it.status)}</b></span>
+              <span>来源 <b class="text-foreground">${esc(it.source)}</b></span>
+              ${it.model?`<span>蒸馏模型 <b class="text-foreground">${esc(it.model)}</b></span>`:''}
+              <span>创建 <b class="text-foreground">${fmtTime(it.created_at)}</b></span>
+              ${it.unit_id!=null?`<span>召回单元 <b class="text-foreground">unit:${it.unit_id}</b></span>`:'<span class="text-warning">未投影（不在召回面）</span>'}
+              ${it.dedup_of?`<span>判重指向 <b class="text-foreground">#${it.dedup_of}</b></span>`:''}
+              ${it.session_uid!=null?`<span>会话UID <b class="text-foreground">#${it.session_uid}</b></span>`:''}
+            </div>
+            ${it.turn_key?`<div class="mt-1.5 text-[10.5px] text-muted-foreground">轮次锚 <span class="mono">${esc(it.turn_key)}</span></div>`:''}
+            <div class="mt-2.5 flex flex-wrap gap-2">
+              ${it.conversation_id?`<button class="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-foreground transition-colors hover:bg-muted" data-goconv="1" data-source="${esc(it.source)}" data-convid="${esc(it.conversation_id)}" data-turn="${esc(it.turn_key||'')}"><i data-lucide="messages-square" class="h-3 w-3 text-primary"></i>打开原始会话${it.turn_key?'（定位该轮）':''}</button>`:''}
+            </div>
+          </div></td>`;
+        tb.appendChild(dtr);
+      }
+    });
+    reicons();
+  }
+  function renderMemStats(){
+    const s=MEMF.stats||{};
+    const part=(obj,labeler)=>Object.entries(obj||{}).map(([k,n])=>
+      `<span class="rounded bg-muted px-1.5 py-0.5 text-muted-foreground">${labeler?labeler(k):esc(k)} <b class="tnum text-foreground">${n}</b></span>`).join(' ');
+    $('#memStatsChips').innerHTML = part(s.byType, k=>MEM_TYPE_LABEL[k]||k)
+      + '<span class="text-muted-foreground/40">|</span>' + part(s.byStatus, k=>MEM_STATUS_LABEL[k]||k)
+      + '<span class="text-muted-foreground/40">|</span>' + part(s.bySource);
+    const pages=Math.max(1, Math.ceil(MEMF.total/MEMF.pageSize));
+    $('#memResultCount').textContent = `匹配 ${fmtNum(MEMF.total)} 条记忆`;
+    $('#memPageInfo').textContent = `第 ${MEMF.total?((MEMF.page-1)*MEMF.pageSize+1):0}–${Math.min(MEMF.page*MEMF.pageSize, MEMF.total)} 条 / 共 ${fmtNum(MEMF.total)} 条`;
+    $('#memPageNav').textContent = `${MEMF.page} / ${pages}`;
+    $('#memPrevPage').disabled = MEMF.page<=1;
+    $('#memNextPage').disabled = MEMF.page>=pages;
+    reicons();
   }
   // ---- 数据操作：提取入库 / 推送记忆（后台任务，轮询状态）----
   async function fetchWithTimeout(url, opts={}, ms=15000){
@@ -782,6 +1107,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     // 独立于细节渲染，任何渲染异常都不会再卡住 loading
     const state=$('#adminJobState'), out=$('#adminJobOut'), warn=$('#adminJobWarn');
     const busy=!!(j && j.status==='running');
+    const jobBar=$('#jobBar'); if(jobBar) jobBar.classList.toggle('hidden', !j);  // 无任务收起全局任务条
     state.classList.toggle('hidden', !busy);
     state.classList.toggle('inline-flex', busy);
     $('#adminIngestBtn').disabled = busy;
@@ -881,7 +1207,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       adminPoll();
     }catch(e){ toast('提交失败：'+(e.message||e)); }
   }
-  // 记忆索引状态自动轮询（索引不可用时按钮置灰、状态行变灰）
+  // 索引状态自动轮询（索引不可用时记忆操作按钮置灰、状态行变灰）
   let lastMemosSig='', lastEngineOnline=false;
   async function memosPollStatus(){
     try{
@@ -895,8 +1221,6 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       if(sig===lastMemosSig) return;                       // 无变化不重绘（避免闪烁）
       lastMemosSig=sig;
       renderMemosStatus(s);
-      if(s.online && !s.auth_required){ $('#memosOnline').classList.remove('hidden'); loadMemosRecent(); }
-      if(!s.online) $('#memosOnline').classList.add('hidden');
     }catch(e){}
   }
   async function refreshData(opts){
@@ -912,7 +1236,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     document.title = `AgentMemHub 记忆面板 (${D.meta.totalConversations})`;
     updateStatsHead(D.meta); updateSummary();
     renderStats(); renderCharts(); renderTable();
-    fillAdminSource(); reicons();
+    fillAdminSource(); buildMemChips(); reicons();
     if(!silent) toast('数据已刷新');
   }
   // ---- 统一操作日志（面板控制/任务执行）----
@@ -946,6 +1270,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     $('#statTool').textContent = fmtNum(meta.toolCalls);
     $('#statModel').textContent= fmtNum(meta.modelsCount);
     $('#statWs').textContent   = fmtNum(meta.workspacesCount);
+    const tc=$('#tabConvCount'); if(tc) tc.textContent = fmtNum(D.conversations.length);
   }
 
   // ---- filter options ----
@@ -1068,6 +1393,8 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   function fmtDate(ts){ const d=new Date(ts*1000); const p=n=>String(n).padStart(2,'0'); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`; }
 
   function bindStaticEvents(){
+    $('#tabConvs').onclick=()=>switchTab('convs');       // 标签页：统一会话
+    $('#tabMems').onclick=()=>switchTab('memories');     // 标签页：记忆报表
     $('#agentOptions').addEventListener('change',e=>{ if(e.target.classList.contains('src-chk')){ const v=e.target.value; if(e.target.checked)F.sources.delete(v); else F.sources.add(v); updateFilterChips(); markDirty(); } });
     $('#wsOptions').addEventListener('change',e=>{ if(e.target.classList.contains('ws-chk')){ const v=e.target.value; if(e.target.checked)F.cwds.delete(v); else F.cwds.add(v); updateFilterChips(); markDirty(); } });
     $('[data-act="agent-all"]').onclick=()=>{ $$('.src-chk').forEach(c=>{c.checked=true;});F.sources.clear();updateFilterChips();markDirty(); };
@@ -1089,11 +1416,6 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       const list=filtered.concat(CONVS).filter(c=>selectedKeys.has(keyOf(c.source,c.id)));
       const seen=new Set(); const uniq=list.filter(c=>{const k=keyOf(c.source,c.id); if(seen.has(k))return false; seen.add(k); return true;});
       openDelete(uniq);
-    };
-    $('#batchExcludeBtn').onclick=()=>{
-      const list=filtered.concat(CONVS).filter(c=>selectedKeys.has(keyOf(c.source,c.id)));
-      const seen=new Set(); const uniq=list.filter(c=>{const k=keyOf(c.source,c.id); if(seen.has(k))return false; seen.add(k); return true;});
-      openBatchExclude(uniq);
     };
     $('#prevPage').onclick=()=>{if(page>1){page--;renderTable();}};
     $('#nextPage').onclick=()=>{if(page*pageSize<filtered.length){page++;renderTable();}};
@@ -1120,77 +1442,18 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     };
     fillAdminSource();                       // Agent 筛选下拉（全部 + 各源）
     adminPoll();                             // 页面加载时恢复可能仍在进行中的任务
-    memosPollStatus();                       // 立即探一次引擎状态（含推送按钮置灰）
-    setInterval(memosPollStatus, 15000);     // 之后每 15s 自动刷新（外部启停也能反映）
     $('#logsToggleBtn').onclick=toggleLogs;  // 操作日志面板
     $('#logsRefreshBtn').onclick=loadLogs;
-    // 记忆评分（正/负反馈）：事件委托（内联 onclick 无法访问 IIFE 内函数）
-    $('#memosRecent').addEventListener('click', e=>{
-      const w=e.target.closest('button[data-weight]');
-      if(w){ setWeight(w.dataset.trace, w.dataset.weight); return; }
-      const btn=e.target.closest('button[data-score]');
-      if(!btn) return;
-      scoreMemos(btn.dataset.trace, btn.dataset.score);
-    });
+    $('#drawerToMemBtn').onclick=()=>{       // 抽屉 → 记忆报表（该会话的记忆）
+      if(!curConv) return;
+      gotoMemories({sessionUid:curConv.sessionUid, conversationId:curConv.id,
+                    source:curConv.source, title:curConv.title||curConv.id});
+    };
   }
   // P1 修复：原改写时遗漏此定义，导致勾选/删除触发 "updateBatchBtn is not defined"
   function updateBatchBtn(){
-    const n=selectedKeys.size, b=$('#batchDelBtn'), x=$('#batchExcludeBtn');
+    const n=selectedKeys.size, b=$('#batchDelBtn');
     b.classList.toggle('hidden',n===0); b.classList.toggle('inline-flex',n>0);
-    x.classList.toggle('hidden',n===0); x.classList.toggle('inline-flex',n>0);
-  }
-
-  // ---- 记忆排除（R6）：批量设为不写入 / 恢复写入 ----
-  async function openBatchExclude(convs){
-    if(!convs.length) return;
-    const preview = convs.slice(0,5).map(c=>`· [${esc(c.source)}] ${esc((c.title||c.id).slice(0,40))}`).join('<br>');
-    const more = convs.length>5 ? `<br>… 等共 <b>${convs.length}</b> 个会话` : '';
-    showModal({
-      title:'记忆写入控制', iconColor:'info',
-      msg:`所选 <b>${convs.length}</b> 个会话：<br>${preview}${more}`
-        + '<br><br><b>设为不写入</b>：记忆立即从索引移除，不再被召回'
-        + '（原始会话保留在采集库，可随时恢复）。'
-        + '<br><b>恢复写入</b>：取消排除，下次「写入记忆」后重新入库。',
-      body:'<div class="flex gap-2 pt-1">'
-        + '<button id="exclApplyBtn" class="flex-1 rounded-md bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground hover:opacity-90">'
-        + '<i data-lucide="ban" class="mr-1 inline h-3.5 w-3.5"></i>设为不写入记忆</button>'
-        + '<button id="exclRestoreBtn" class="flex-1 rounded-md border border-border px-3 py-2 text-xs font-medium text-foreground hover:bg-muted">'
-        + '<i data-lucide="rotate-ccw" class="mr-1 inline h-3.5 w-3.5"></i>恢复写入</button>'
-        + '</div>',
-      confirmText:'关闭', confirmClass:'bg-muted text-foreground',
-      onConfirm:()=>{},
-    });
-    $('#exclApplyBtn').onclick=()=>{ closeModal(); submitExclusion(convs, true); };
-    $('#exclRestoreBtn').onclick=()=>{ closeModal(); submitExclusion(convs, false); };
-    reicons();
-  }
-  async function submitExclusion(convs, exclude){
-    toast(exclude?'正在排除…':'正在恢复…');
-    let ok=0, units=0, fail=0;
-    for(const c of convs){
-      const url='/api/conversations/'+encodeURIComponent(c.source)+'/'
-        +encodeURIComponent(c.id)+'/memory-exclusion';
-      try{
-        const r = exclude
-          ? await fetchWithTimeout(url,{method:'POST',
-              headers:{'Content-Type':'application/json'},
-              body:JSON.stringify({turn_key:'',sync_peers:false})},15000)
-          : await fetchWithTimeout(url,{method:'DELETE'},15000);
-        if(r.ok){ const d=await r.json().catch(()=>({})); ok++; units+=(d.unitsRemoved||0); }
-        else fail++;
-      }catch(e){ fail++; }
-    }
-    toast(exclude
-      ? `已排除 ${ok} 个会话，移除记忆 ${units} 条${fail?`（${fail} 失败）`:''}`
-      : `已恢复 ${ok} 个会话${fail?`（${fail} 失败）`:''} — 下次「写入记忆」后重新入库`);
-    selectedKeys.clear(); $$('.row-chk').forEach(ch=>ch.checked=false);
-    updateBatchBtn(); loadExclusionSummary();
-    // 修复：排除态变更后必须重载数据并重渲染，否则列表红/橙标记要手动刷新才出现
-    await refreshData({silent:true});
-    if(curConv){
-      const still = CONVS.find(x=>x.source===curConv.source && x.id===curConv.id);
-      if(still) curConv = still;    // 同步抽屉持有的对象（保持 excl 字段最新）
-    }
   }
 
   // ---- stats over in-memory filtered set ----
@@ -1295,23 +1558,15 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     $('#emptyState').classList.toggle('flex', filtered.length===0);
     rows.forEach(c=>{
       const key=keyOf(c.source,c.id);
-      // R6 记忆排除态双色阶：整会话排除=红、部分轮次排除=橙
-      const exclCls = c.excl==='whole' ? ' row-excl-whole'
-                    : c.excl==='partial' ? ' row-excl-partial' : '';
-      const tr=el('tr','cursor-pointer border-b border-border/60 hover:bg-muted/40'+exclCls);
+      const tr=el('tr','cursor-pointer border-b border-border/60 hover:bg-muted/40');
       tr.dataset.key=key;
-      const exclBadge = c.excl==='whole'
-        ? '<span class="ml-1.5 shrink-0 rounded bg-error-soft px-1 py-0.5 text-[9px] font-semibold text-error" title="该会话全部内容不写入记忆">不写入</span>'
-        : c.excl==='partial'
-        ? `<span class="ml-1.5 shrink-0 rounded bg-warning-soft px-1 py-0.5 text-[9px] font-semibold text-warning" title="${c.exclTurns||0} 个轮次不写入记忆，其余正常">部分不写入</span>`
-        : '';
       // 修复：行点击不再经 idx 反查（filtered 对象可能无 idx 导致静默失效），
-      // 直接闭包传递当前会话对象，点击任意位置（除勾选/编辑/删除按钮）都打开详情抽屉
-      tr.onclick=e=>{ if(e.target.closest('input,.edit-btn,.del-btn'))return; openDrawer(c); };
+      // 直接闭包传递当前会话对象，点击任意位置（除勾选/编辑/删除/记忆按钮）都打开详情抽屉
+      tr.onclick=e=>{ if(e.target.closest('input,.edit-btn,.del-btn,.mem-btn'))return; openDrawer(c); };
       tr.innerHTML=`
         <td class="px-3 py-2.5"><input type="checkbox" class="row-chk h-3.5 w-3.5 rounded border-border text-primary" data-source="${esc(c.source)}" data-cid="${esc(c.id)}"></td>
         <td class="px-3 py-2.5">${srcTag(c.source)}</td>
-        <td class="px-3 py-2.5 max-w-[280px]"><div class="flex items-center"><span class="truncate font-medium text-foreground" title="${esc(c.title)}">${esc(c.title)}</span>${exclBadge}</div></td>
+        <td class="px-3 py-2.5 max-w-[380px]"><div class="flex items-center"><span class="truncate font-medium text-foreground" title="${esc(c.title)}">${esc(c.title)}</span></div></td>
         <td class="px-3 py-2.5">${c.model?`<span class="chip" style="background:var(--as-muted);color:var(--as-muted-foreground)">${esc(c.model)}</span>`:'—'}</td>
         <td class="px-3 py-2.5 max-w-[180px]"><div class="truncate text-muted-foreground" title="${esc(c.cwd||'')}">${esc(c.cwd||'—')}</div></td>
         <td class="px-3 py-2.5 text-right tnum font-medium text-foreground">${fmtNum(c.eventCount)}</td>
@@ -1319,10 +1574,14 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         <td class="px-3 py-2.5 text-muted-foreground whitespace-nowrap">${fmtTime(c.createdAt)}</td>
         <td class="px-3 py-2.5 text-muted-foreground whitespace-nowrap" title="${fmtTime(c.updatedAt)}">${relTime(c.updatedAt)}</td>
         <td class="px-3 py-2.5 text-right whitespace-nowrap">
-          <button class="edit-btn inline-grid h-6 w-6 place-items-center rounded hover:bg-muted" title="编辑"><i data-lucide="pencil" class="h-3.5 w-3.5"></i></button>
+          <button class="mem-btn inline-grid h-6 w-6 place-items-center rounded hover:bg-muted" title="查看该会话总结出的记忆（记忆报表）"><i data-lucide="brain" class="h-3.5 w-3.5 text-primary"></i></button>
+          <button class="edit-btn inline-grid h-6 w-6 place-items-center rounded hover:bg-muted" title="修改标题"><i data-lucide="pencil" class="h-3.5 w-3.5"></i></button>
           <button class="del-btn inline-grid h-6 w-6 place-items-center rounded hover:bg-error-soft text-error" title="删除"><i data-lucide="trash-2" class="h-3.5 w-3.5"></i></button>
         </td>`;
       // 每行按钮在创建时直接闭包绑定当前对象 c——避免任何反查
+      tr.querySelector('.mem-btn').onclick=e=>{e.stopPropagation();
+        gotoMemories({sessionUid:c.sessionUid, conversationId:c.id,
+                      source:c.source, title:c.title||c.id});};
       tr.querySelector('.edit-btn').onclick=e=>{e.stopPropagation();openEdit(c);};
       tr.querySelector('.del-btn').onclick=e=>{e.stopPropagation();openDelete([c]);};
       tr.querySelector('.row-chk').onchange=e=>{ e.target.checked?selectedKeys.add(key):selectedKeys.delete(key); updateBatchBtn(); };
@@ -1349,7 +1608,6 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   async function openDrawer(c){
     if(!c) return;
     curConv=c; curEvts=[]; curTotal=c.eventCount||0; curPage=1; curPages=1; curLim=100;
-    curExclusion={whole:false, turns:new Set()};
     const col=(SRC_COLOR())[c.source]||'#64748B';
     $('#drawerSrc').style.background=col; $('#drawerSrc').textContent=c.source;
     $('#drawerTitle').textContent=c.title;
@@ -1389,11 +1647,6 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     try{
       const d=await fetchEventsPage(curConv.source,curConv.id,offset,curLim);
       curEvts=d.events; curTotal=d.total;
-      // R6：后端随事件流返回排除态（整会话 / 已排除轮次）
-      if(d.exclusion){
-        curExclusion={whole:!!d.exclusion.whole,
-                      turns:new Set(d.exclusion.turns||[])};
-      }
       curPages=Math.max(1,Math.ceil(d.total/curLim));
       curPage=Math.floor(offset/curLim)+1;
     }catch(e){
@@ -1455,9 +1708,6 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       b.className=`rounded-md border px-2 py-0.5 text-[11px] transition-colors ${on?'border-primary bg-primary/10 text-primary':'border-border text-muted-foreground hover:bg-muted'}`;
     });
   }
-  function isTurnExcluded(tk){
-    return curExclusion.whole || (tk && curExclusion.turns.has(tk));
-  }
   function renderDrawerBody(){
     const body=$('#drawerBody'); body.innerHTML='';
     const hasAll=activeRoles.has('__all__');
@@ -1474,66 +1724,17 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     });
     reicons();
   }
+  // 轮次分割头（data-turn 锚：记忆→会话跳转时滚动定位用）
   function renderTurnHeader(tk, idx, firstEv){
     const t=firstEv.t?relTime(firstEv.t):'';
     const head=idx===1?'会话开始':'轮次 '+idx;
-    const ex=isTurnExcluded(tk);
-    const box=el('div','flex items-center gap-2 px-2 my-1 select-none'
-      +(ex?' opacity-60':''), `
+    return el('div','flex items-center gap-2 px-2 my-1 select-none', `
       <div class="h-px flex-1 bg-border"></div>
-      <label class="inline-flex cursor-pointer items-center gap-1" title="勾选=该轮不写入记忆（立即从索引移除）">
-        <input type="checkbox" class="turn-ex-chk h-3 w-3 rounded border-border text-primary"
-               data-turn="${esc(tk)}" ${ex?'checked':''}>
-        <span class="text-[10px] font-medium uppercase tracking-wider ${ex?'text-error':'text-muted-foreground'}">${head}</span>
-      </label>
-      ${ex?'<span class="rounded bg-error-soft px-1 text-[10px] font-semibold text-error">不写入记忆</span>':''}
+      <span class="text-[10px] font-medium uppercase tracking-wider text-muted-foreground"
+            data-turn="${esc(tk)}">${head}</span>
       <span class="text-[10px] text-muted-foreground tnum">${t}</span>
       <span class="text-[10px] mono text-muted-foreground/60">${tk.slice(-8)}</span>
       <div class="h-px flex-1 bg-border"></div>`);
-    const cb=box.querySelector('.turn-ex-chk');
-    if(cb) cb.onchange=()=>setTurnExclusion(tk, cb.checked, cb);
-    return box;
-  }
-
-  // R6：单轮排除/恢复（立即调后端，索引即时收敛）
-  async function setTurnExclusion(tk, exclude, cb){
-    if(!curConv) return;
-    const base='/api/conversations/'+encodeURIComponent(curConv.source)+'/'
-      +encodeURIComponent(curConv.id)+'/memory-exclusion';
-    if(cb) cb.disabled=true;
-    try{
-      let r;
-      if(exclude){
-        r=await fetchWithTimeout(base,{method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({turn_key:tk, sync_peers:true})},20000);
-      }else{
-        r=await fetchWithTimeout(base+'?turn_key='+encodeURIComponent(tk),
-                                 {method:'DELETE'},20000);
-      }
-      const d=await r.json().catch(()=>({}));
-      if(!r.ok) throw new Error(d.detail||('HTTP '+r.status));
-      if(exclude){
-        curExclusion.turns.add(tk);
-        const peers=(d.peers||[]).length;
-        const n=d.unitsRemoved||0;
-        toast(`该轮已排除，移除记忆 ${n} 条`+(peers?`（含 ${peers} 个跨源副本）`:''));
-      }else{
-        curExclusion.turns.delete(tk);
-        toast('已恢复写入 — 下次「写入记忆」后重新入库');
-      }
-      loadExclusionSummary();
-      renderDrawerBody();
-      // 修复：抽屉内轮次操作后同步刷新列表（行级红/橙标记即时更新）
-      await refreshData({silent:true});
-      if(curConv){
-        const still = CONVS.find(x=>x.source===curConv.source && x.id===curConv.id);
-        if(still) curConv = still;
-      }
-    }catch(e){
-      toast((exclude?'排除失败：':'恢复失败：')+(e.message||e));
-      if(cb) cb.disabled=false;
-    }
   }
   function renderEvent(e,c){
     const role=e.r; const meta=ROLE_META[role]||{label:role,ic:'circle'};
