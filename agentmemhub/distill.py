@@ -281,24 +281,46 @@ def fingerprint(text: str | None) -> str:
 
 def _choose_bounds(turns: list[Turn], *, max_chars: int, max_turns: int,
                    topic_boundary: bool, window: int,
-                   cache: dict[int, set[str]]) -> list[int]:
-    """返回各片结束索引（不含）；预算按**原文**字符数控制（保守）。"""
-    bounds: list[int] = []
-    start, n = 0, len(turns)
-    while start < n:
-        acc, hi = 0, start
-        while hi < n:
-            if acc + turns[hi].chars > max_chars or (hi - start) + 1 > max_turns:
-                break
-            acc += turns[hi].chars
-            hi += 1
-        if hi == start:            # 首轮即超预算（巨轮）→ 该轮独占一片
-            hi = start + 1
-        if topic_boundary and hi < n and hi - start > 1:
-            lo = max(start + 1, hi - window)
-            hi = _refine_boundary(turns, lo, hi, cache)
-        bounds.append(hi)
-        start = hi
+                   cache: dict[int, set[str]]) -> list[tuple[int, int]]:
+    """返回各片 (结束索引(不含), 窗口号)。
+
+    **切分基准是"固定轮数窗口"，不是累积长度** —— 这是历史稳定性的关键：
+
+    · 第 k 个窗口 = 轮 [k*max_turns, (k+1)*max_turns)，窗口之间互不影响；
+    · 窗口内的切点（字符预算 + 话题边界细化）**只依赖窗口内内容**；
+    · 因此向会话**追加新对话**时，已满的旧窗口切片逐字不变，只有包含
+      新轮的尾部窗口会重新切分（新内容总要处理，无法避免）。
+
+    旧的"从头累积长度"实现会让追加导致所有后续切点整体平移、历史切片
+    hash 全变 → 大面积无谓重蒸（实测痛点）。
+    """
+    bounds: list[tuple[int, int]] = []
+    n = len(turns)
+    if max_turns <= 0:
+        max_turns = 1
+    w_start, w_idx = 0, 0
+    while w_start < n:
+        w_end = min(w_start + max_turns, n)      # 本窗口（末尾窗口可能未满）
+        i = w_start
+        while i < w_end:
+            if turns[i].chars > max_chars:
+                bounds.append((i + 1, w_idx))    # 巨轮独占一片（后续轮内硬切）
+                i += 1
+                continue
+            acc = turns[i].chars
+            j = i + 1
+            while j < w_end and acc + turns[j].chars <= max_chars:
+                acc += turns[j].chars
+                j += 1
+            hi = j                               # 窗口内的预算上限
+            # 话题边界细化：只在窗口内移动（不跨窗口），窗口末尾无需细化
+            if topic_boundary and hi < w_end and hi - i > 1:
+                lo = max(i + 1, hi - window)
+                hi = _refine_boundary(turns, lo, hi, cache)
+            bounds.append((hi, w_idx))
+            i = hi
+        w_start = w_end
+        w_idx += 1
     return bounds
 
 
@@ -336,21 +358,28 @@ def build_slices(source: str, conversation_id: str, turns: list[Turn], *,
                             window=boundary_window, cache=cache)
     slices: list[Slice] = []
     idx = 0
-    for end in bounds:
+    counters: dict[int, int] = {}
+    for end, w_idx in bounds:
         group = turns[idx:end]
         idx = end
+        seq_in_window = counters.get(w_idx, 0)
+        # slice_key 绑定窗口号（w{k}-{窗口内序号}）：窗口内片数变化不会波及
+        # 其它窗口的键，配合窗口化切分共同保证历史切片的键与内容都稳定
         # 单轮独占且超预算 → 轮内硬切（巨会话）；此处不施加单条截断
         if len(group) == 1 and group[0].chars > max_chars:
             for part in _hard_split_turn(group[0], max_chars):
                 slices.append(_make_slice(
-                    source, conversation_id, f"s{len(slices)}",
+                    source, conversation_id, f"w{w_idx}-{seq_in_window}",
                     [(group[0].turn_key, tuple(part))],
                     per_message_cap=None, whole=False))
+                seq_in_window += 1
+            counters[w_idx] = seq_in_window
             continue
         slices.append(_make_slice(
-            source, conversation_id, f"s{len(slices)}",
+            source, conversation_id, f"w{w_idx}-{seq_in_window}",
             [(t.turn_key, t.messages) for t in group],
             per_message_cap=per_message_cap, whole=False))
+        counters[w_idx] = seq_in_window + 1
     return slices
 
 

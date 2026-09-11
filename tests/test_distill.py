@@ -241,7 +241,8 @@ def test_turn_budget_triggers_slicing():
                           max_chars=10_000_000, topic_boundary=False)
     assert len(slices) == 4                      # ceil(10/3)
     assert slices[0].turns == ("t0", "t1", "t2")
-    assert all(s.slice_key == f"s{i}" for i, s in enumerate(slices))
+    # 键绑定窗口号：max_turns=3 → 每窗口一片
+    assert [s.slice_key for s in slices] == ["w0-0", "w1-0", "w2-0", "w3-0"]
 
 
 def test_char_budget_triggers_slicing():
@@ -292,7 +293,7 @@ def test_giant_single_turn_hard_split():
     slices = build_slices("qwen", "sess_big", turns, max_chars=1000,
                           max_turns=16, per_message_cap=2000)
     assert len(slices) >= 10                     # 确实被切开
-    assert all(s.slice_key.startswith("s") for s in slices)
+    assert all(s.slice_key.startswith("w") for s in slices)   # 窗口内序号
     # 渲染前缀（[轮次 N | tag] / [role] ）会带来少量开销，放宽 200 字符
     assert all(s.chars <= 1000 + 200 for s in slices)
     # 内容不丢：所有片合起来覆盖全部行
@@ -1185,3 +1186,71 @@ def _all_memories(idx_path) -> list:
         return c.execute("SELECT id, content FROM distilled_memories").fetchall()
     finally:
         c.close()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 历史切片稳定性（窗口化切分的核心目的）
+# ══════════════════════════════════════════════════════════════════════
+
+def _conv_turns(n: int, prefix: str = "t", size: int = 20):
+    return [_turn(f"{prefix}{i}", ("user", f"第{i}轮：{'内容' * size}")) for i in range(n)]
+
+
+def test_appending_turns_keeps_historical_slices_identical():
+    """核心需求：**追加新对话后，历史窗口的切片键与 hash 逐字不变**。
+
+    旧实现按累积长度切 → 追加会让后续切点整体平移、历史 hash 全变 →
+    大面积无谓重蒸。窗口化切分后只有尾部未满窗口会重切。
+    """
+    kw = dict(max_turns=4, max_chars=10**9, topic_boundary=False)
+    before = build_slices("zcode", "c", _conv_turns(8), **kw)
+    after = build_slices("zcode", "c", _conv_turns(12), **kw)
+
+    hist = {s.slice_key: s.content_hash for s in before}
+    assert list(hist) == ["w0-0", "w1-0"]          # 两个已满窗口
+
+    new = {s.slice_key: s.content_hash for s in after}
+    for key, h in hist.items():
+        assert new.get(key) == h, f"历史切片 {key} 发生变化（违反了稳定性）"
+    assert "w2-0" in new                            # 新增的只有尾部窗口
+
+
+def test_only_partial_tail_window_is_rebuilt():
+    """已满窗口不受影响；仅尾部"未满窗口"随追加重切（新内容总得处理）。"""
+    kw = dict(max_turns=4, max_chars=10**9, topic_boundary=False)
+    before = build_slices("zcode", "c", _conv_turns(6), **kw)   # 窗口1 只有 2 轮
+    after = build_slices("zcode", "c", _conv_turns(8), **kw)    # 窗口1 补满 4 轮
+
+    b = {s.slice_key: s for s in before}
+    a = {s.slice_key: s for s in after}
+    assert b["w0-0"].content_hash == a["w0-0"].content_hash     # 已满窗口不动
+    assert "w1-0" in b and "w1-0" in a
+    assert b["w1-0"].content_hash != a["w1-0"].content_hash     # 尾部窗口重切
+    assert b["w1-0"].turns == ("t4", "t5")
+    assert a["w1-0"].turns == ("t4", "t5", "t6", "t7")
+
+
+def test_char_budget_splits_within_window_only():
+    """字符预算只在窗口内生效，切点不会跨窗口（保证窗口间互不影响）。"""
+    turns = [_turn(f"t{i}", ("user", "x" * 100)) for i in range(8)]
+    slices = build_slices("zcode", "c", turns, max_turns=4, max_chars=250,
+                          topic_boundary=False)
+    # 窗口0(轮0-3) → 每片2轮 → w0-0,w0-1；窗口1(轮4-7) → w1-0,w1-1
+    assert [s.slice_key for s in slices] == ["w0-0", "w0-1", "w1-0", "w1-1"]
+    assert slices[0].turns == ("t0", "t1")
+    assert slices[2].turns == ("t4", "t5")
+
+
+def test_topic_boundary_cannot_cross_window():
+    """话题边界细化只能在窗口内移动切点（跨窗口的话题切换不被追随）。"""
+    # 窗口边界（轮4/轮5 之间）正是话题切换处：话题A(轮0-3) → 话题B(轮4-7)
+    turns = ([_turn(f"a{i}", ("user", "记忆蒸馏切片预算与话题边界的讨论内容"))
+              for i in range(4)]
+             + [_turn(f"b{i}", ("user", "晚饭吃火锅店还是烤肉店比较好呢给个建议"))
+                for i in range(4)])
+    slices = build_slices("zcode", "c", turns, max_turns=4, max_chars=10**9,
+                          topic_boundary=True, boundary_window=4)
+    # 窗口0 与窗口1 各一片，切点就是窗口边界（不会为了话题而跨窗口调整）
+    assert [s.slice_key for s in slices] == ["w0-0", "w1-0"]
+    assert slices[0].turns == ("a0", "a1", "a2", "a3")
+    assert slices[1].turns == ("b0", "b1", "b2", "b3")
