@@ -211,16 +211,18 @@ class Config:
     # -- LLM（蒸馏 / 评分共用）-------------------------------------------
 
     @property
-    def llm(self) -> dict[str, str]:
-        """LLM 接入配置：{endpoint, api_key, model}。
+    def llm(self) -> dict[str, Any]:
+        """LLM 接入配置：{endpoint, api_key, model} + 可选的 headers/超参。
 
         优先级：env（AGENTMEMHUB_LLM_ENDPOINT / _API_KEY / _MODEL）> yaml `llm` 段。
         空值表示未配置，由调用方决定报错或降级。api_key 只读不打印。
+
+        headers：provider 特定请求头（如 OpenCode Go 需 x-opencode-session）。
         """
         sec = self._get("llm", {}) or {}
         if not isinstance(sec, dict):
             sec = {}
-        return {
+        out: dict[str, Any] = {
             "endpoint": str(self._env.get("AGENTMEMHUB_LLM_ENDPOINT", "")
                             or sec.get("endpoint", "") or ""),
             "api_key": str(self._env.get("AGENTMEMHUB_LLM_API_KEY", "")
@@ -228,6 +230,33 @@ class Config:
             "model": str(self._env.get("AGENTMEMHUB_LLM_MODEL", "")
                          or sec.get("model", "") or ""),
         }
+        headers = sec.get("headers")
+        if isinstance(headers, dict) and headers:
+            out["headers"] = {str(k): str(v) for k, v in headers.items()}
+        for k in ("timeout", "max_tokens", "temperature"):
+            if sec.get(k) is not None:
+                out[k] = sec[k]
+        return out
+
+    @staticmethod
+    def _merge_llm(top: dict[str, Any], sub: dict[str, Any]) -> dict[str, Any]:
+        """蒸馏的 llm 子段：标量留空继承顶层；headers 合并（子段优先）。"""
+        out: dict[str, Any] = {
+            k: (str(sub.get(k) or "") or str(top.get(k) or ""))
+            for k in ("endpoint", "api_key", "model")
+        }
+        headers: dict[str, Any] = {}
+        if isinstance(top.get("headers"), dict):
+            headers.update(top["headers"])
+        if isinstance(sub.get("headers"), dict):
+            headers.update(sub["headers"])
+        if headers:
+            out["headers"] = headers
+        for k in ("timeout", "max_tokens", "temperature"):
+            v = sub.get(k) if sub.get(k) is not None else top.get(k)
+            if v is not None:
+                out[k] = v
+        return out
 
     # -- 记忆蒸馏 ---------------------------------------------------------
 
@@ -239,12 +268,7 @@ class Config:
         需要蒸馏走不同模型时再单独覆盖（如更便宜/更长上下文的模型）。
         """
         merged = _deep_merge(DEFAULT_DISTILL, self._get("distillation", {}) or {})
-        top = self.llm
-        sub = merged.get("llm") or {}
-        merged["llm"] = {
-            k: (str(sub.get(k) or "") or top.get(k, ""))
-            for k in ("endpoint", "api_key", "model")
-        }
+        merged["llm"] = self._merge_llm(self.llm, merged.get("llm") or {})
         return merged
 
     # -- 内部 -------------------------------------------------------------

@@ -147,3 +147,54 @@ def test_distillation_llm_partially_overrides_top_level(tmp_path):
     assert d["model"] == "cheap-model"
     assert d["endpoint"] == "https://top/v1"
     assert d["api_key"] == "k"
+
+
+# ── LLM headers（provider 特定请求头，如 OpenCode Go 的 x-opencode-session）──
+
+def test_llm_headers_read_from_yaml(tmp_path):
+    f = tmp_path / "agentmemhub.yaml"
+    f.write_text(
+        "llm:\n"
+        "  endpoint: https://opencode.ai/zen/go/v1/chat/completions\n"
+        "  api_key: k\n"
+        "  model: deepseek-flash\n"
+        "  headers:\n"
+        "    User-Agent: OpenCode/1.0.0\n"
+        "    x-opencode-session: agentmemhub-distill\n", encoding="utf-8")
+    c = _cfg(path=f)
+    assert c.llm["headers"] == {"User-Agent": "OpenCode/1.0.0",
+                                "x-opencode-session": "agentmemhub-distill"}
+
+
+def test_llm_without_headers_keeps_three_keys(tmp_path):
+    """无 headers 时不引入额外键（保持既有契约）。"""
+    c = _cfg(env={}, path=tmp_path / "none.yaml")
+    assert c.llm == {"endpoint": "", "api_key": "", "model": ""}
+    assert "headers" not in c.llm
+
+
+def test_distillation_inherits_headers_from_top_level(tmp_path):
+    """蒸馏 llm 子段留空 → 连同 headers 一起继承顶层（否则 OpenCode Go 403）。"""
+    f = tmp_path / "agentmemhub.yaml"
+    f.write_text(
+        "llm:\n  endpoint: https://x/v1\n  api_key: k\n  model: m\n"
+        "  headers:\n    x-opencode-session: top\n"
+        "distillation:\n  enabled: true\n", encoding="utf-8")
+    c = _cfg(path=f)
+    d = c.distillation["llm"]
+    assert d["endpoint"] == "https://x/v1"
+    assert d["headers"] == {"x-opencode-session": "top"}
+
+
+def test_distillation_headers_merge_child_wins(tmp_path):
+    """headers 合并：子段同名键覆盖顶层，不同键保留。"""
+    f = tmp_path / "agentmemhub.yaml"
+    f.write_text(
+        "llm:\n  endpoint: https://x/v1\n  api_key: k\n  model: m\n"
+        "  headers:\n    User-Agent: top-ua\n    x-opencode-session: top\n"
+        "distillation:\n  llm:\n    headers:\n      x-opencode-session: child\n",
+        encoding="utf-8")
+    c = _cfg(path=f)
+    h = c.distillation["llm"]["headers"]
+    assert h["User-Agent"] == "top-ua"          # 顶层独有 → 保留
+    assert h["x-opencode-session"] == "child"   # 子段覆盖

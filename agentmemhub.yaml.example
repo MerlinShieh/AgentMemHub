@@ -69,10 +69,19 @@ memos:
 # ---------------------------------------------------------------------------
 llm:
   # OpenAI 兼容的 chat/completions 端点
-  endpoint: ""            # 如 https://open.bigmodel.cn/api/paas/v4/chat/completions
+  #   例：https://open.bigmodel.cn/api/paas/v4/chat/completions
+  #       https://opencode.ai/zen/go/v1/chat/completions（OpenCode Go）
+  endpoint: ""
   # api_key: 只读不打印；也可用环境变量 AGENTMEMHUB_LLM_API_KEY
   api_key: ""
-  model: ""               # 如 deepseek-flash
+  model: ""               # 如 deepseek-flash / glm-5.3-flash
+  # headers: provider 特定请求头（多数 provider 不需要）。
+  #   实测：OpenCode Go 必须带 x-opencode-session（否则 400 MissingSessionID），
+  #   且需带 User-Agent（否则被 Cloudflare 拦成 403 error code 1010）。
+  #   可用 scripts/sync_llm_from_zcode.py 从 ZCode 配置一键同步（自动补齐）。
+  # headers:
+  #   User-Agent: "OpenCode/1.0.0"
+  #   x-opencode-session: "agentmemhub-distill"
 
 # ---------------------------------------------------------------------------
 # 记忆蒸馏：原始会话 → 结构化记忆（详见 docs/memory-distillation.md）

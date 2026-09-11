@@ -113,6 +113,10 @@ class LLMConfig:
     backoff_base: float = 1.5     # 退避基数（秒）：base * 2^attempt
     max_tokens: int = 2048
     temperature: float = 0.0      # 蒸馏/抽取类任务恒 0，保证可复现
+    #: provider 特定的额外请求头（配置驱动，不硬编码在客户端里）。
+    #: 实测 OpenCode Go（opencode.ai/zen/go）需要 User-Agent（过 Cloudflare 1010）
+    #: 与 x-opencode-session（路由亲和，缺失时 400 MissingSessionID）。
+    headers: dict[str, str] = field(default_factory=dict)
 
     def complete(self) -> bool:
         """三项必填是否齐全（不打印 api_key）。"""
@@ -129,6 +133,7 @@ class LLMConfig:
         """从配置字典构造（蒸馏段或顶层 llm 段皆可）。"""
         d = dict(cfg or {})
         d.update({k: v for k, v in overrides.items() if v is not None})
+        headers = d.get("headers") or {}
         return cls(
             endpoint=str(d.get("endpoint") or ""),
             api_key=str(d.get("api_key") or ""),
@@ -138,6 +143,7 @@ class LLMConfig:
             backoff_base=float(d.get("backoff_base") or 1.5),
             max_tokens=int(d.get("max_tokens") or 2048),
             temperature=float(d.get("temperature") if d.get("temperature") is not None else 0.0),
+            headers={str(k): str(v) for k, v in headers.items()} if isinstance(headers, dict) else {},
         )
 
 
@@ -158,12 +164,15 @@ class LLMClient:
     # -- 单次请求 --------------------------------------------------------
 
     def _post(self, body: dict, timeout: float) -> dict:
+        headers = {"Content-Type": "application/json",
+                   "Authorization": f"Bearer {self.cfg.api_key}"}
+        if self.cfg.headers:
+            headers.update(self.cfg.headers)      # provider 特定头（可覆盖默认）
         try:
             req = urllib.request.Request(
                 self.cfg.endpoint,
                 data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-                headers={"Content-Type": "application/json",
-                         "Authorization": f"Bearer {self.cfg.api_key}"},
+                headers=headers,
                 method="POST")
         except ValueError as e:
             # endpoint 非法（缺协议头等）——配置错误，不重试
