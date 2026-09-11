@@ -1,4 +1,4 @@
-﻿"""AgentMemHub Web — FastAPI 应用。
+"""AgentMemHub Web — FastAPI 应用。
 
 只读为主的管理面：统计/筛选/分页列表/单会话事件流按需加载；
 管理操作仅限删除会话与改标题（显式接口，事务级联）。
@@ -389,6 +389,8 @@ def _conv_to_dict(c: Any, *, excl_map: Optional[dict] = None) -> dict[str, Any]:
     d = {
         "source": c["source"],
         "id": c["id"],
+        # 全局唯一会话 ID（递增、只增不减）：记忆报表 ↔ 会话报表的绑定键
+        "sessionUid": c["session_uid"] if "session_uid" in c.keys() else None,
         "title": c["title"] or "",
         "cwd": c["cwd"] or "",
         "workspace": _workspace_of(c["cwd"]),
@@ -808,6 +810,124 @@ def create_app(db_path: Path | None = None):
             pass
         logs.record(f"记忆打分：trace={traceId} {polarity}（幅度 {magnitude}）")
         return JSONResponse({"ok": True, "traceId": traceId, "feedback": res})
+
+    @app.get("/api/memories")
+    def api_memories(
+        source: Optional[str] = Query(default="", description="Agent 来源（逗号多选）"),
+        type: Optional[str] = Query(default="", description="类型多选：decision,fact,preference,lesson,manual"),
+        status: str = Query(default="active", description="active=new+similar | all | 单值"),
+        conf: Optional[str] = Query(default="", description="置信度多选：high,medium,low"),
+        q: Optional[str] = Query(default="", description="关键字（内容/主题 LIKE）"),
+        conversationId: Optional[str] = Query(default="", description="按会话 id 筛选（会话→记忆联动）"),
+        sessionUid: Optional[int] = Query(default=None, description="按全局会话 uid 筛选"),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+    ):
+        """记忆报表数据源：蒸馏终稿（含归档可筛）+ Agent 手动写入的记忆。
+
+        每条带完整溯源：来源会话（sessionUid/标题）、轮次锚（turnKey）、
+        类型/主题/置信度、蒸馏模型与时间。memory_count 的会话维度联动
+        走 conversationId 参数。
+        """
+        import sqlite3 as _sq
+
+        from agentmemhub import rag_bridge
+        st = rag_bridge.settings()
+        # 跨库：蒸馏记忆/手动记忆在索引库，会话（sessionUid/标题）在采集库。
+        # 采集库用本应用持有的 store（与面板各端点同源，勿用 rag 配置的路径）
+        idx = _sq.connect(f"file:{Path(st.index_db).as_posix()}?mode=ro", uri=True)
+        idx.row_factory = _sq.Row
+        src = _sq.connect(f"file:{Path(store.db_path).as_posix()}?mode=ro", uri=True)
+        src.row_factory = _sq.Row
+        try:
+            # 采集库资产：source/id → (session_uid, title)
+            conv_meta = {r["k"]: (r["uid"], r["t"]) for r in src.execute(
+                "SELECT source || '/' || id AS k, session_uid AS uid, title AS t"
+                " FROM conversations")}
+
+            distill_sel = (
+                "SELECT 'distilled' AS origin, m.id, m.source, m.conversation_id,"
+                " m.type, m.topic, m.content, m.confidence, m.status, m.model,"
+                " m.created_at, m.turn_key, m.dedup_of"
+                " FROM distilled_memories m")
+            manual_sel = (
+                "SELECT 'manual' AS origin, u.id, u.source, u.conversation_id,"
+                " 'manual' AS type, NULL AS topic, u.text AS content,"
+                " NULL AS confidence, 'new' AS status, NULL AS model,"
+                " u.time AS created_at, NULL AS turn_key, NULL AS dedup_of"
+                " FROM units u WHERE u.source='memory'")
+
+            where, args = [], []
+            srcs = [x.strip() for x in (source or "").split(",") if x.strip()]
+            if srcs:
+                where.append(f"t.source IN ({','.join('?' * len(srcs))})")
+                args += srcs
+            types = [x.strip() for x in (type or "").split(",") if x.strip()]
+            if types:
+                where.append(f"t.type IN ({','.join('?' * len(types))})")
+                args += types
+            if status == "active":
+                where.append("t.status IN ('new','similar')")
+            elif status != "all":
+                where.append("t.status=?")
+                args.append(status)
+            confs = [x.strip() for x in (conf or "").split(",") if x.strip()]
+            if confs:
+                where.append(f"t.confidence IN ({','.join('?' * len(confs))})")
+                args += confs
+            if conversationId:
+                where.append("t.conversation_id=?")
+                args.append(conversationId)
+            if sessionUid is not None:
+                # 全局会话 uid → (source, conversation_id) 集合（采集库反查）
+                pair_keys = [k for k, (uid_, _t) in conv_meta.items()
+                             if uid_ == sessionUid]
+                pairs = [tuple(k.split("/", 1)) for k in pair_keys]
+                if not pairs:
+                    return JSONResponse({"items": [], "total": 0, "page": page,
+                                         "pageSize": page_size, "stats": {}})
+                cond = " OR ".join(["(t.source=? AND t.conversation_id=?)"] * len(pairs))
+                where.append(f"({cond})")
+                args += [x for pr in pairs for x in pr]
+            if (q or "").strip():
+                # ESCAPE 字符用 \（Python 源码 '\\' → SQL 单字符）；like 值已由
+                # 前端原样传入，%/_ 通配按字面处理（报表关键字不做通配语义）
+                where.append("(t.content LIKE ? ESCAPE '\\' OR"
+                             " IFNULL(t.topic,'') LIKE ? ESCAPE '\\')")
+                like = f"%{(q or '').strip()}%"
+                args += [like, like]
+            wsql = (" WHERE " + " AND ".join(where)) if where else ""
+
+            union = f"({distill_sel} UNION ALL {manual_sel})"
+            titles = conv_meta
+            total = idx.execute(
+                f"SELECT COUNT(*) FROM {union} t{wsql}", args).fetchone()[0]
+            items = [dict(r) for r in idx.execute(
+                f"SELECT * FROM {union} t{wsql}"
+                " ORDER BY t.created_at DESC, t.origin, t.id"
+                " LIMIT ? OFFSET ?",
+                args + [page_size, (page - 1) * page_size]).fetchall()]
+            stats = {
+                "byType": dict(idx.execute(
+                    f"SELECT t.type, COUNT(*) FROM {union} t{wsql}"
+                    " GROUP BY t.type", args).fetchall()),
+                "byStatus": dict(idx.execute(
+                    f"SELECT t.status, COUNT(*) FROM {union} t{wsql}"
+                    " GROUP BY t.status", args).fetchall()),
+                "bySource": dict(idx.execute(
+                    f"SELECT t.source, COUNT(*) FROM {union} t{wsql}"
+                    " GROUP BY t.source ORDER BY COUNT(*) DESC", args).fetchall()),
+            }
+            for it in items:
+                uid_, title_ = titles.get(
+                    f"{it['source']}/{it['conversation_id']}", (None, ""))
+                it["session_uid"] = uid_
+                it["conversation_title"] = title_
+        finally:
+            idx.close()
+            src.close()
+        return JSONResponse({"items": items, "total": total, "page": page,
+                             "pageSize": page_size, "stats": stats})
 
     @app.post("/api/memos/weight")
     def api_memos_weight(traceId: str = Query(...),
