@@ -110,13 +110,14 @@ MENU = """
   ── 数据流程（按顺序操作）────────────────────────
   [1] 提取所有 Agent 会话入库（可选单个 Agent）
   [2] 清洗数据（删除系统注入事件，先预览后确认）
-  [3] 写入记忆（向量化采集库会话到记忆索引）
-  [4] 自动评分（LLM 三轴批量补价值分，跳过已评）
+  [3] 蒸馏记忆（LLM 提炼原始会话为结构化记忆）
+  [4] 写入记忆（向量化采集库会话到记忆索引）
+  [5] 自动评分（LLM 三轴批量补价值分，跳过已评）
   ── 日常查询与看板 ──────────────────────────────
-  [5] 检索关键字（跨 Agent 全文搜索）
-  [6] 启动网页看板（后台运行，菜单不阻塞）
-  [7] 停止网页看板（结束占用看板端口的服务进程）
-  [8] 状态总览（数据源 / 本地库 / 记忆索引）
+  [6] 检索关键字（跨 Agent 全文搜索）
+  [7] 启动网页看板（后台运行，菜单不阻塞）
+  [8] 停止网页看板（结束占用看板端口的服务进程）
+  [9] 状态总览（数据源 / 本地库 / 记忆索引）
   [0] 退出
 """
 
@@ -276,6 +277,31 @@ def action_score() -> None:
     _cli_log(f"score（控制台）→ {r}")
 
 
+def action_distill() -> None:
+    """蒸馏记忆：LLM 把原始会话提炼为结构化记忆（幂等，可反复执行）。"""
+    from agentmemhub import rag_bridge
+    from agentmemhub.distill import run_distill
+    if not _confirm("  调用 LLM 蒸馏原始会话为结构化记忆？"
+                    "（幂等：已蒸馏且内容未变的切片自动跳过）"):
+        _out("  （已取消）")
+        return
+    _out("  蒸馏中（可能耗时较长）…")
+    try:
+        r = run_distill(rag_bridge.settings(), on_progress=lambda m: _out("  " + m))
+    except Exception as e:
+        _out(f"  ✗ 蒸馏失败: {e}")
+        return
+    if r.get("error"):
+        _out(f"  ✗ 蒸馏未执行：{r['error']}")
+        return
+    _out(f"  ✓ 会话 {r['conversations']} · 切片 {r['slices']}"
+         f"（跳过 {r['skipped_done']} / 失败 {r['failed']}）")
+    _out(f"    产出记忆 {r['memories_new']} 条 · 合并 {r['merged']} 会话 · "
+         f"投影 {r['projected']}（判重 {r['duplicate']}）")
+    _out(f"    耗时 {r['seconds']}s · 模型 {r['model']}")
+    _cli_log(f"蒸馏记忆（控制台）→ {r}")
+
+
 def action_memos() -> None:
     """写入记忆：把采集库的会话向量化写入记忆索引（小模型先跑完即可检索）。"""
     from agentmemhub.cli import _vectorize_stage
@@ -301,12 +327,13 @@ def action_status() -> None:
 ACTIONS = {
     "1": ("提取会话入库", action_ingest),
     "2": ("清洗数据", action_clean),
-    "3": ("写入记忆", action_memos),
-    "4": ("自动评分", action_score),
-    "5": ("检索关键字", action_search),
-    "6": ("启动网页看板", action_dashboard),
-    "7": ("停止网页看板", action_dashboard_stop),
-    "8": ("状态总览", action_status),
+    "3": ("蒸馏记忆", action_distill),
+    "4": ("写入记忆", action_memos),
+    "5": ("自动评分", action_score),
+    "6": ("检索关键字", action_search),
+    "7": ("启动网页看板", action_dashboard),
+    "8": ("停止网页看板", action_dashboard_stop),
+    "9": ("状态总览", action_status),
 }
 
 
