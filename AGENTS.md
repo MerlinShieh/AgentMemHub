@@ -28,17 +28,25 @@
 - **架构不变量**：MCP 五工具与面板网关的**响应契约不得破坏**（Skill 侧强依赖）；
   源库（`database/agentmemhub.db`）只读、索引库（`session_rag.db`）自持；
   摄取幂等（`src_id` 锚）、排除机制防回流。
-- **配置单点**：模型/分桶/召回/写入策略一律经 `agentmemhub.yaml`，**禁止硬编码模型 id/维度/路径**。
+- **配置单点**：模型/分桶/召回/写入策略/蒸馏/LLM 一律经 `agentmemhub.yaml`，
+  **禁止硬编码模型 id/维度/路径/密钥**。LLM 接入可用
+  `scripts/sync_llm_from_zcode.py` 从 ZCode 配置同步（密钥只写本地 yaml，不入库）。
+- **面板结构**：双标签页「统一会话 / 记忆报表」；会话页只做查看/删除/改标题
+  （记忆排除 UI 已下线，后端能力保留）；记忆页承载筛选/溯源/⭐加权/👍👎/蒸馏入口。
+  会话与记忆通过 `session_uid`（全局递增）双向绑定跳转。
 - **测试纪律**：每次改动带测试；bug 修复先写复现测试（红→绿）；
-  `uv run pytest` 全绿是提交门槛（当前 262 项）。
+  `uv run pytest` 全绿是提交门槛（数量以实测为准，当前 440+ 项）。
 - **日志纪律**：统一 `logs/` 按程序分文件；测试必须隔离日志与数据目录
   （`conftest` 已强制指向临时目录）。
 - `.bat` 脚本：纯 ASCII + CRLF + `if (...)` 块内不得含 `)`。
-- 推送远端前必须脱敏（配置走 example 占位）；`scripts/sensitive_scan.py` 是兜底检查。
+- 推送远端前必须脱敏（配置走 example 占位）；`scripts/sensitive_scan.py` 是兜底检查
+  （规则含动态取本机用户名与私有路径模式）。
 - 用户验证功能期间不要主动 git commit/push，等明确指令。
 
 ## 相关文档
 
-- `README.md` — 使用说明与快速开始（含「Agent 协作配置」章节）
+- `README.md` — 使用说明与快速开始（含「记忆蒸馏」「Agent 协作配置」章节）
 - `ARCHITECTURE.md` — 架构说明
+- `docs/memory-distillation.md` — 记忆蒸馏的设计与实施记录
 - `docs/recall-fusion.md` — 三路召回融合的机制与实测数据
+- `docs/EXAMPLES.md` — SQL / CLI / Python 查询示例

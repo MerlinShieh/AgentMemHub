@@ -1,4 +1,4 @@
-# ==== 不纳入版本库的内容 ====
+﻿# ==== 不纳入版本库的内容 ====
 # 用户数据库（笔记/收藏/项目归类/摘要，体积大且持续变化）
 hub_notes.sqlite
 hub_notes.sqlite-wal
@@ -79,3 +79,7 @@ node_modules/
 
 # E2E 临时测试库
 _e2e_tmp/
+
+# 配置备份（含时间戳的 .bak 一律不入库；本机配置本体已由 agentmemhub.yaml 规则覆盖）
+agentmemhub.yaml.bak*
+*.bak-*

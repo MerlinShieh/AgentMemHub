@@ -1,4 +1,4 @@
-"""批量自动评分（scoring）单元测试：verdict 解析 / LLM 调用 / 批量循环 / 面板端点。"""
+﻿"""批量自动评分（scoring）单元测试：verdict 解析 / LLM 调用 / 批量循环 / 面板端点。"""
 from __future__ import annotations
 
 import json
@@ -561,7 +561,7 @@ def test_llm_opener_direct_by_default(monkeypatch):
 
     assert _proxy_handlers(scoring._llm_opener()) == []
     # 显式指定才走代理（私有部署逃生口）
-    monkeypatch.setenv("AGENTMEMHUB_LLM_PROXY", "http://127.0.0.1:7897")
+    monkeypatch.setenv("AGENTMEMHUB_LLM_PROXY", "http://127.0.0.1:8080")
     phs = _proxy_handlers(scoring._llm_opener())
     assert len(phs) == 1 and phs[0].proxies == {
-        "http": "http://127.0.0.1:7897", "https": "http://127.0.0.1:7897"}
+        "http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"}
