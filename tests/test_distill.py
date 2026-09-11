@@ -35,7 +35,7 @@ from agentmemhub.distill import (
     mark_slice_done,
     merge_entries,
     merge_hierarchical,
-    merge_input_hash,
+    merge_key_for_conversation,
     normalize_memories,
     project_memories,
     purge_stale_memories,
@@ -823,10 +823,39 @@ def _add_memory(conn, *, content, source="zcode", cid="conv-a", mtype="fact",
             "content_hash": h}
 
 
-def test_merge_input_hash_stable_and_sensitive():
-    a = [{"content": "甲"}, {"content": "乙"}]
-    assert merge_input_hash(a) == merge_input_hash([{"content": "甲"}, {"content": "乙"}])
-    assert merge_input_hash(a) != merge_input_hash([{"content": "甲"}, {"content": "丙"}])
+def test_merge_key_binds_slice_hashes(conn):
+    """合并幂等键由切片哈希集合决定：切片不变则键不变（重跑跳过）。"""
+    for sk, h in (("s0", "h0"), ("s1", "h1")):
+        conn.execute(_INS_HASH, ("zcode", "conv-a", sk, h, 1, "m", 0))
+    conn.commit()
+    k1 = merge_key_for_conversation(conn, "zcode", "conv-a", 1)
+    assert k1 == merge_key_for_conversation(conn, "zcode", "conv-a", 1)
+
+    # 切片内容变化 → 键变化（需要重合并）
+    conn.execute(_INS_HASH, ("zcode", "conv-a", "s2", "h2", 1, "m", 0))
+    conn.commit()
+    assert merge_key_for_conversation(conn, "zcode", "conv-a", 1) != k1
+
+    # 提示词升版 → 另一套键
+    assert merge_key_for_conversation(conn, "zcode", "conv-a", 2) != k1
+
+    # 关键回归：登记 merge 自身的指纹后键不得变化（自指会让键每轮都变→永不命中）
+    base = merge_key_for_conversation(conn, "zcode", "conv-a", 1)
+    conn.execute(_INS_HASH, ("zcode", "conv-a", MERGE_SLICE_KEY, base, 1, "m", 0))
+    conn.commit()
+    assert merge_key_for_conversation(conn, "zcode", "conv-a", 1) == base
+
+
+def test_merge_key_ignores_memory_status(conn):
+    """关键回归：键只看切片，不受条目状态变化影响（首跑把段级归档为 merged
+    后，二次运行必须仍能判定"已合并"）——否则会重复合并、产生重复记忆。"""
+    conn.execute(_INS_HASH, ("zcode", "conv-a", "s0", "h0", 1, "m", 0))
+    m = _add_memory(conn, content="段级条目")
+    conn.commit()
+    before = merge_key_for_conversation(conn, "zcode", "conv-a", 1)
+    conn.execute("UPDATE distilled_memories SET status='merged' WHERE id=?", (m["id"],))
+    conn.commit()
+    assert merge_key_for_conversation(conn, "zcode", "conv-a", 1) == before
 
 
 def test_load_conversation_memories_excludes_archived(conn):
@@ -1120,3 +1149,39 @@ def test_purge_stale_noop_when_all_current(idx_conn, real_settings):
     project_memories(idx_conn, real_settings, [m])
     assert purge_stale_memories(idx_conn, real_settings, PROMPT_VER) == 0
     assert _unit_count(idx_conn) == 1
+
+
+def test_run_distill_idempotent_with_merge(distill_env, monkeypatch):
+    """关键回归：**多片会话的合并步骤也必须幂等**。
+
+    原幂等测试用的是单片会话（自动跳过合并），因此漏掉了这条路径：
+    首跑把段级条目归档为 merged、产出终稿后，二次运行若以"当前有效条目"
+    为合并输入，会发现输入变了而重复合并 → 产出重复记忆（实测 44 条）。
+    现在合并幂等键绑定切片哈希，二次运行必须零 LLM 调用。
+    """
+    monkeypatch.setattr("agentmemhub.config.config", lambda: _HubCfgStub(
+        slice={"max_chars": 60, "max_turns": 2, "topic_boundary": False,
+               "boundary_window": 4, "per_message_cap": 2000}))
+    fake = _install_llm(monkeypatch, _SeqLLM())
+
+    st1 = run_distill(distill_env)
+    assert st1["slices"] > 1, "需切成多片才能覆盖合并路径"
+    assert st1["merged"] == 1 and st1["merge_failed"] == 0
+    assert st1["memories_new"] > 0
+    calls_after_first = fake.calls
+
+    st2 = run_distill(distill_env)
+    assert st2["skipped_done"] == st2["slices"]        # 切片全部幂等跳过
+    assert st2["merged"] == 0 and st2["merge_skipped"] == 1   # 合并也跳过
+    assert st2["memories_new"] == 0                    # 零新增（不产生重复）
+    assert fake.calls == calls_after_first             # 零 LLM 调用
+    assert len(_all_memories(distill_env.index_db)) == len(
+        _all_memories(distill_env.index_db))           # 库内条数未增长
+
+
+def _all_memories(idx_path) -> list:
+    c = sqlite3.connect(str(idx_path))
+    try:
+        return c.execute("SELECT id, content FROM distilled_memories").fetchall()
+    finally:
+        c.close()

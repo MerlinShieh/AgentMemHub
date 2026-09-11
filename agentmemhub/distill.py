@@ -646,9 +646,23 @@ _MERGE_SYSTEM = """你是记忆合并器：把同一会话不同片段提炼出�
 {"memories": [{"type": "decision|fact|preference|lesson", "topic": "主题", "content": "内容", "confidence": "high|medium|low"}]}"""
 
 
-def merge_input_hash(entries: list[dict]) -> str:
-    """合并输入的指纹：来源内容拼接。输入变了才需要重新合并（幂等键）。"""
-    return fingerprint("\n".join(str(e.get("content") or "") for e in entries))
+def merge_key_for_conversation(idx: sqlite3.Connection, source: str,
+                               conversation_id: str, prompt_ver: int) -> str:
+    """合并步骤的幂等键：该会话**已完成切片的 (slice_key, content_hash) 指纹**。
+
+    ⚠️ 不能用"当前有效条目的内容"作键：首次合并会把段级条目归档为 merged 并
+    产出终稿，第二次运行时"当前有效条目"已变成上一轮的终稿 → 键变化 →
+    重复合并并产出表述略有差异的新条目（实测产生 44 条重复，绕过 UNIQUE）。
+    绑定切片哈希集合后，切片内容不变则键不变，重跑正确跳过。
+    """
+    # 必须排除 MERGE_SLICE_KEY 自身的记录：首轮登记的合并指纹若被算进输入，
+    # 键每轮都会变化 → 永远无法命中 → 每次都重新合并（自指 bug，实测复现）。
+    rows = idx.execute(
+        "SELECT slice_key, content_hash FROM distill_hashes"
+        " WHERE source=? AND conversation_id=? AND prompt_ver=? AND slice_key<>?"
+        " ORDER BY slice_key",
+        (source, conversation_id, prompt_ver, MERGE_SLICE_KEY)).fetchall()
+    return fingerprint("\n".join(f"{k}:{h}" for k, h in rows))
 
 
 def merge_entries(client, entries: list[dict], *, title: str = "") -> DistillResult:
@@ -956,11 +970,13 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
             t_merge = time.perf_counter()
             for s, cid, ctitle in merge_convs:
                 mems = load_conversation_memories(idx, s, cid)
-                if len(mems) <= 1:
+                # 无需合并的两种情形（计入 skipped，口径=本次未执行合并的会话）：
+                #   · 有效条目 ≤1 条：无重复可去（含首跑合并后的终稿）
+                #   · 只有单片：段级结果即终稿
+                if len(mems) <= 1 or {m["slice_key"] for m in mems} == {SLICE_WHOLE}:
+                    stats["merge_skipped"] += 1
                     continue
-                if {m["slice_key"] for m in mems} == {SLICE_WHOLE}:
-                    continue                 # 单片会话：段级结果即终稿
-                mhash = merge_input_hash(mems)
+                mhash = merge_key_for_conversation(idx, s, cid, prompt_ver)
                 if _hash_done(idx, s, cid, MERGE_SLICE_KEY, mhash, prompt_ver):
                     stats["merge_skipped"] += 1
                     continue
