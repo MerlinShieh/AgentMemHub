@@ -40,6 +40,9 @@ CREATE TABLE IF NOT EXISTS unit_feedback(
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_uf_unit ON unit_feedback(unit_id);
+-- src_id 业务锚索引（与 ingest.ensure_bridge_schema 幂等同源）：记忆报表
+-- JOIN 与投影点查依赖；缺失时带筛选的 JOIN 会全表扫 units（实测 20s/次）
+CREATE INDEX IF NOT EXISTS idx_units_src ON units(src_id);
 """
 
 POLARITY_SIGN = {"positive": 1.0, "negative": -1.0, "neutral": 0.0}

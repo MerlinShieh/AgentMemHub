@@ -38,6 +38,8 @@ def memories_env(tmp_path, monkeypatch):
     conn = open_index(idx_path)
     conn.row_factory = sqlite3.Row
     ensure_distill_schema(conn)
+    from agentmemhub.rag.memstore import ensure_memstore_schema
+    ensure_memstore_schema(conn)
     # 两条蒸馏记忆（不同会话/类型）+ 一条手动记忆
     for i, (cid, mtype, content) in enumerate(
             (("c1", "decision", "会话一的蒸馏结论"),
@@ -50,10 +52,23 @@ def memories_env(tmp_path, monkeypatch):
             " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             ("zcode", cid, "s0", f"tk{i}", mtype, f"主题{i}", content,
              "high", "new", f"h{i}", 1, 1000 + i))
-    conn.execute(
+    # units 投影 + 分值：h0/h1 已投影（dst_<hash>），h2 故意不投影
+    for i, h in enumerate(("h0", "h1")):
+        cur = conn.execute(
+            "INSERT INTO units(source, conversation_id, seq, role, turn_key,"
+            " src_id, time, text, chars) VALUES(?,?,?,?,?,?,?,?,?)",
+            ("zcode", "c1", -1 - i, "distilled", f"tk{i}", f"dst_{h}",
+             1000 + i, f"投影条目{i}", 5))
+        conn.execute(
+            "INSERT INTO unit_values(unit_id, value, updated_at) VALUES(?,?,?)",
+            (cur.lastrowid, 0.3, 1000))
+    cur = conn.execute(
         "INSERT INTO units(source, conversation_id, seq, role, turn_key,"
         " src_id, time, text, chars) VALUES('memory','mcp',1,'user','mcp',"
         "'mcp_manual1',500,'Agent 手动写入的记忆',9)")
+    conn.execute(
+        "INSERT INTO unit_values(unit_id, value, updated_at) VALUES(?,?,?)",
+        (cur.lastrowid, 0.6, 500))
     conn.commit()
     conn.close()
 
@@ -139,3 +154,36 @@ def test_conversations_carry_session_uid(memories_env):
     r = client.get("/api/conversations").json()
     rows = [x for x in r["items"] if x["id"] == "c1"]
     assert rows and isinstance(rows[0]["sessionUid"], int)
+
+
+def test_memories_carry_unit_ref_and_value(memories_env):
+    """报表带 unit_id / value / manual_value：面板 ⭐ 加权与 👍👎 的定位锚。
+
+    未投影的归档条目 unit_id 为 null（该条不在召回面上，面板禁用加权）。
+    """
+    client, _ = memories_env
+    d = client.get("/api/memories", params={"status": "all"}).json()
+    by_content = {i["content"]: i for i in d["items"]}
+    m = by_content["会话一的蒸馏结论"]                 # 已投影 dst_h0
+    assert m["unit_id"] is not None and m["value"] == 0.3
+    assert m["manual_value"] is None
+    man = by_content["Agent 手动写入的记忆"]          # units.id 即 unit_id
+    assert man["unit_id"] is not None and man["value"] == 0.6
+    assert by_content["会话二的踩坑教训"]["unit_id"] is None
+
+
+def test_memories_sort_by_value(memories_env):
+    """sort=value：手动权重优先于自动值；无分条目沉底。"""
+    client, paths = memories_env
+    c = sqlite3.connect(str(paths["idx"]))
+    c.execute("UPDATE unit_values SET manual_value=1.0 WHERE unit_id="
+              "(SELECT id FROM units WHERE src_id='dst_h1')")
+    c.commit(); c.close()
+    d = client.get("/api/memories",
+                   params={"status": "all", "sort": "value"}).json()
+    vals = [i["manual_value"] if i["manual_value"] is not None else i["value"]
+            for i in d["items"]]
+    nums = [v for v in vals if v is not None]
+    assert nums == sorted(nums, reverse=True)
+    assert d["items"][0]["content"] == "会话一的事实记录"   # manual 1.0 居首
+    assert d["items"][-1]["unit_id"] is None               # 无分沉底

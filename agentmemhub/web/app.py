@@ -820,18 +820,24 @@ def create_app(db_path: Path | None = None):
         q: Optional[str] = Query(default="", description="关键字（内容/主题 LIKE）"),
         conversationId: Optional[str] = Query(default="", description="按会话 id 筛选（会话→记忆联动）"),
         sessionUid: Optional[int] = Query(default=None, description="按全局会话 uid 筛选"),
+        sort: str = Query(default="time", description="排序：time（默认，时间倒序）| value（分值倒序）"),
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=20, ge=1, le=100),
     ):
         """记忆报表数据源：蒸馏终稿（含归档可筛）+ Agent 手动写入的记忆。
 
         每条带完整溯源：来源会话（sessionUid/标题）、轮次锚（turnKey）、
-        类型/主题/置信度、蒸馏模型与时间。memory_count 的会话维度联动
-        走 conversationId 参数。
+        类型/主题/置信度、蒸馏模型与时间；并带记忆索引侧的定位与分值
+        （unit_id / value / manual_value）——面板 ⭐ 加权与 👍👎 反馈即
+        用 unit_id 定位（unit:<id> 是 resolve_unit_id 的稳定引用）。
+
+        未投影的归档条目（merged/duplicate 等）unit_id 为 null，面板据此
+        禁用加权（该条不在召回面上）。
         """
         import sqlite3 as _sq
 
         from agentmemhub import rag_bridge
+        from agentmemhub.distill import DISTILLED_SRC_PREFIX
         st = rag_bridge.settings()
         # 跨库：蒸馏记忆/手动记忆在索引库，会话（sessionUid/标题）在采集库。
         # 采集库用本应用持有的 store（与面板各端点同源，勿用 rag 配置的路径）
@@ -845,17 +851,27 @@ def create_app(db_path: Path | None = None):
                 "SELECT source || '/' || id AS k, session_uid AS uid, title AS t"
                 " FROM conversations")}
 
+            # 投影锚：units.src_id = 'dst_' || content_hash（distill 常量，
+            # 非用户输入，f-string 插值安全）；未投影条目 LEFT JOIN 得 NULL
+            _p = DISTILLED_SRC_PREFIX
             distill_sel = (
                 "SELECT 'distilled' AS origin, m.id, m.source, m.conversation_id,"
                 " m.type, m.topic, m.content, m.confidence, m.status, m.model,"
-                " m.created_at, m.turn_key, m.dedup_of"
-                " FROM distilled_memories m")
+                " m.created_at, m.turn_key, m.dedup_of,"
+                " u.id AS unit_id, v.value AS value,"
+                " v.manual_value AS manual_value"
+                " FROM distilled_memories m"
+                f" LEFT JOIN units u ON u.src_id = ('{_p}' || m.content_hash)"
+                " LEFT JOIN unit_values v ON v.unit_id = u.id")
             manual_sel = (
                 "SELECT 'manual' AS origin, u.id, u.source, u.conversation_id,"
                 " 'manual' AS type, NULL AS topic, u.text AS content,"
                 " NULL AS confidence, 'new' AS status, NULL AS model,"
-                " u.time AS created_at, NULL AS turn_key, NULL AS dedup_of"
-                " FROM units u WHERE u.source='memory'")
+                " u.time AS created_at, NULL AS turn_key, NULL AS dedup_of,"
+                " u.id AS unit_id, v.value AS value,"
+                " v.manual_value AS manual_value"
+                " FROM units u LEFT JOIN unit_values v ON v.unit_id = u.id"
+                " WHERE u.source='memory'")
 
             where, args = [], []
             srcs = [x.strip() for x in (source or "").split(",") if x.strip()]
@@ -900,11 +916,16 @@ def create_app(db_path: Path | None = None):
 
             union = f"({distill_sel} UNION ALL {manual_sel})"
             titles = conv_meta
+            # 排序：time=时间倒序（默认，稳定）；value=有效分倒序（手动权重
+            # 优先于自动值，与召回口径一致），无分条目沉底
+            order = ("t.created_at DESC, t.origin, t.id" if sort != "value"
+                     else "(t.value IS NULL AND t.manual_value IS NULL),"
+                          " COALESCE(t.manual_value, t.value) DESC,"
+                          " t.created_at DESC, t.id")
             total = idx.execute(
                 f"SELECT COUNT(*) FROM {union} t{wsql}", args).fetchone()[0]
             items = [dict(r) for r in idx.execute(
-                f"SELECT * FROM {union} t{wsql}"
-                " ORDER BY t.created_at DESC, t.origin, t.id"
+                f"SELECT * FROM {union} t{wsql} ORDER BY {order}"
                 " LIMIT ? OFFSET ?",
                 args + [page_size, (page - 1) * page_size]).fetchall()]
             stats = {

@@ -64,6 +64,10 @@ def ensure_bridge_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE units ADD COLUMN legacy_id TEXT")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_units_legacy"
                      " ON units(legacy_id) WHERE legacy_id IS NOT NULL")
+    # src_id 业务锚索引：记忆报表 JOIN（'dst_'||content_hash）、投影幂等查询
+    # （WHERE src_id=?）与 resolve_unit_id 都靠它。缺失时带 status 筛选的
+    # 报表 JOIN 会退化为 units 全表扫描（实测单查询 20s）
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_units_src ON units(src_id)")
     conn.executescript(_SCHEMA_BRIDGE)
     conn.commit()
 
