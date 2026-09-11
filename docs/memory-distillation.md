@@ -1,6 +1,9 @@
 # 记忆蒸馏方案（Memory Distillation）
 
 > 状态：设计定稿（2026-09-11，分支 `feat/memory-distillation`）
+> 实施进度：**D2 基础设施已完成**（沙箱隔离 / config llm+distillation 解析 /
+> 两表 DDL / LLM 客户端 `agentmemhub/llm.py` / 脱敏模块 `agentmemhub/sanitize.py`）；
+> D3 切片器起按本文件推进。
 > 目标：用 LLM 把原始会话蒸馏为**可沉淀、可总结**的结构化记忆，替代当前
 > 「原始 unit 直接向量化」的写入路径，从源头消除召回噪音。
 
@@ -88,13 +91,16 @@
 | 幂等摄入 | `_existing_keys` / `src_id` 锚 / `ensure_vec_table` | units 投影直接走现有向量化管线 |
 | 敏感扫描 | `scripts/sensitive_scan.py` 正则族 | 抽成可编程调用的脱敏模块（S4 兜底） |
 
-### 1.5 配置现状缺口
+### 1.5 配置现状与 D2 修复
 
-`agentmemhub.yaml` 已有 `llm:` 段（endpoint/api_key/model）但 **config.py 未解析**；
-`scoring.read_engine_llm()` 读的是回退引擎 `memOS/home/config.yaml`（memos 时代路径）。
-→ D2 必须把 llm 段接入 config.py，rag 主线获得统一 LLM 配置源；
-蒸馏默认继承该段，`distillation.llm.*` 可单独覆盖（留空=继承）。
-**所有模型名/端点/阈值一律进统一配置，禁止硬编码**（项目既有铁律）。
+`agentmemhub.yaml` 早有 `llm:` 段，但 `config.py` 原先**未解析**它；
+`scoring.read_engine_llm()` 读的是回退引擎的配置文件（memos 时代路径）——
+rag 主线因此没有统一的 LLM 配置源。
+
+→ **D2 已修复**：`config.py` 新增 `llm` 与 `distillation` 两个属性
+（含默认值深合并、`AGENTMEMHUB_LLM_*` 环境变量覆盖）；蒸馏默认继承顶层 `llm` 段，
+`distillation.llm.*` 可单独覆盖（留空=继承），需要蒸馏走更便宜/更长上下文的模型时
+只改一处。**所有模型名/端点/阈值一律进统一配置，禁止硬编码**（项目既有铁律）。
 
 ---
 
@@ -133,13 +139,14 @@
 
 ## 3. S1 段级蒸馏（LLM①，强制结构化输出）
 
-### 3.1 输出 schema（用户指定，逐字遵守）
+### 3.1 输出 schema（用户指定 + 评估后微调）
 
 ```json
 {
   "memories": [
     {
       "type": "decision | fact | preference | lesson",
+      "topic": "AgentMemHub",
       "content": "用户决定记忆引擎采用 RRF 融合向量与 trigram 两路召回",
       "confidence": "high | medium | low"
     }
@@ -148,8 +155,15 @@
 ```
 
 - `type` 四枚举：decision（决策）/ fact（事实）/ preference（偏好）/ lesson（经验教训，含踩坑）
+- `topic`（≤12 字主题标签）：供面板按主题分组、FTS 通道命中主题词、跨会话去重的辅助信号
 - `content` 必须**自包含**：含关键实体（项目名/文件/命令/版本），脱离原会话可理解
 - 无值得沉淀的内容 → `"memories": []`（寒暄会话、纯执行轮的合法出口）
+
+**评估后否决的字段**（曾考虑加入）：`entities` 列表（content 已含实体，FTS 能抽）、
+数字型 confidence（枚举对 LLM 的输出稳定性更高）、`skip_reason`（空 memories 即语义）。
+
+**溯源元数据不让 LLM 输出**，由系统自动携带：source / conversation_id /
+slice_key / turn_key / prompt_ver / content_hash / model / created_at。
 
 ### 3.2 提示词纪律（v1 要点，`prompt_ver` 管理）
 
@@ -225,17 +239,20 @@ CREATE TABLE IF NOT EXISTS distill_hashes(
     PRIMARY KEY(source, conversation_id, slice_key, prompt_ver)
 );
 
--- 蒸馏真相源：type/confidence/dedup 链完整保留；units 只是检索投影
-CREATE TABLE IF NOT EXISTS memories(
+-- 蒸馏真相源：type/topic/confidence/dedup 链完整保留；units 只是检索投影
+-- 表名刻意不用 memories：与 memstore 的手动原子记忆（units.source='memory'）区隔
+CREATE TABLE IF NOT EXISTS distilled_memories(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source TEXT NOT NULL,
     conversation_id TEXT NOT NULL,
-    slice_key TEXT,
+    slice_key TEXT,                  -- 单片会话=whole；多片=s0/s1…
+    turn_key TEXT,                   -- 该记忆归属轮（单片取会话首轮，多片取来源切片首轮）
     type TEXT NOT NULL,              -- decision|fact|preference|lesson
+    topic TEXT,                      -- ≤12 字主题标签（面板分组 / FTS 命中）
     content TEXT NOT NULL,
     confidence TEXT NOT NULL,        -- high|medium|low
-    status TEXT NOT NULL,            -- new|similar|duplicate
-    dedup_of INTEGER,                -- similar/duplicate 指向既有 memories.id
+    status TEXT NOT NULL DEFAULT 'new',  -- new|similar|duplicate
+    dedup_of INTEGER,                -- similar/duplicate 指向既有 distilled_memories.id
     content_hash TEXT NOT NULL,      -- 条目级防重锚
     prompt_ver INTEGER NOT NULL,
     model TEXT,
@@ -248,7 +265,7 @@ CREATE TABLE IF NOT EXISTS memories(
 ### 6.2 units 投影（召回零改动）
 
 ```
-memories(status != 'duplicate') → units(source='distilled', role='assistant',
+distilled_memories(status != 'duplicate') → units(source='distilled', role='assistant',
     turn_key=该记忆归属轮（单片会话取会话首 turn；多片取来源切片首 turn）,
     src_id='dst_' + content_hash,   -- 幂等锚，与 memstore 的 mcp_ 前缀同思想
     text=content, title=会话标题)

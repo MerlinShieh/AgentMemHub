@@ -63,3 +63,42 @@ memos:
   # lightweight: true=轻量模式（写入记忆不进化）；false=完整进化链；
   #   留空 = 交给引擎自身的 config.yaml 配置（可用 memos-daemon --lightweight 控制）
   lightweight: ""
+
+# ---------------------------------------------------------------------------
+# LLM（记忆蒸馏 / 自动评分共用；三项齐全相关功能才可用）
+# ---------------------------------------------------------------------------
+llm:
+  # OpenAI 兼容的 chat/completions 端点
+  endpoint: ""            # 如 https://open.bigmodel.cn/api/paas/v4/chat/completions
+  # api_key: 只读不打印；也可用环境变量 AGENTMEMHUB_LLM_API_KEY
+  api_key: ""
+  model: ""               # 如 deepseek-flash
+
+# ---------------------------------------------------------------------------
+# 记忆蒸馏：原始会话 → 结构化记忆（详见 docs/memory-distillation.md）
+# 全部键均可省略（用内置默认）；此处列出便于按需调整
+# ---------------------------------------------------------------------------
+distillation:
+  enabled: true
+  # prompt_ver: 提示词版本。升版会触发已蒸馏内容的重新蒸馏（幂等键之一）
+  prompt_ver: 1
+  # llm: 留空字段继承上面的 llm 段；需要蒸馏走更便宜的模型时在此单独覆盖
+  # llm:
+  #   model: ""
+  slice:
+    max_chars: 24000       # 单片字符预算（防超上下文；超预算按轮边界切片）
+    max_turns: 16          # 单片轮数预算（与字符预算谁先触顶按谁切）
+    topic_boundary: true   # 用关键词重叠度细化话题边界，避免把话题从中间切开
+    boundary_window: 4     # 粗切点 ±N 轮内寻找最低重叠处作为真边界
+    per_message_cap: 2000  # 单条消息送入提示词时的截断字符数
+  merge:
+    enabled: true          # 同会话多片 → 再过一遍 LLM 合并沉淀（单片会话自动跳过）
+  dedup:
+    cosine_duplicate: 0.92 # 与既有记忆相似度 ≥ 此值判为重复（丢弃 + 指向已有）
+    cosine_similar: 0.80   # ≥ 此值判为相似（入库 + 打标互链）
+  sanitize:
+    enabled: true          # 入库前正则脱敏兜底（凭据 / 个人信息）
+  runtime:
+    max_concurrent: 4      # LLM 并发数
+    timeout: 60            # 单次调用超时（秒）
+    dry_run: false         # true = 只蒸馏不入库（预览成本与产物）
