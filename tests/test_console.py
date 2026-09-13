@@ -214,3 +214,88 @@ def test_no_undefined_global_names_in_package():
     for py in sorted(pkg.rglob("*.py")):
         scan(py)
     assert not problems, "未定义的全局引用（运行时 NameError 风险）：\n" + "\n".join(problems)
+
+
+# ── 看板启停：按进程特征识别（端口不限配置值）─────────────────────
+
+def test_parse_serve_port():
+    from agentmemhub.console import _parse_serve_port, dashboard_port
+    assert _parse_serve_port("python -m agentmemhub serve --port 8099 --no-open") == 8099
+    assert _parse_serve_port("python -m agentmemhub serve --port=9200") == 9200
+    assert _parse_serve_port("python -m agentmemhub serve") == dashboard_port()
+
+
+def test_parse_ps_processes_array_and_single():
+    from agentmemhub.console import _parse_ps_processes
+    arr = ('[{"ProcessId":11,"CommandLine":"python -m agentmemhub serve --port 8099"},'
+           '{"ProcessId":22,"CommandLine":"x --port=9200"}]')
+    assert _parse_ps_processes(arr) == [{"pid": 11, "port": 8099},
+                                        {"pid": 22, "port": 9200}]
+    single = '{"ProcessId":33,"CommandLine":"python -m agentmemhub serve"}'
+    got = _parse_ps_processes(single)
+    assert len(got) == 1 and got[0]["pid"] == 33
+    assert _parse_ps_processes("") == []
+    assert _parse_ps_processes("not-json") == []
+
+
+def test_find_serve_processes_via_powershell():
+    import agentmemhub.console as console
+    payload = '[{"ProcessId":36948,"CommandLine":"python -m agentmemhub serve --port 8099 --no-open"}]'
+    with mock.patch("agentmemhub.console.os.name", "nt"), \
+         mock.patch("agentmemhub.console.subprocess.run") as mr:
+        mr.return_value = mock.Mock(stdout=payload)
+        got = console._find_serve_processes()
+    assert got == [{"pid": 36948, "port": 8099}]
+
+
+def test_find_serve_processes_non_windows_empty():
+    import agentmemhub.console as console
+    with mock.patch("agentmemhub.console.os.name", "posix"):
+        assert console._find_serve_processes() == []
+
+
+def test_dashboard_pid_no_substring_false_match():
+    """:8086 子串不得误命中 :80861 端口。"""
+    fake_out = "  TCP    127.0.0.1:80861       0.0.0.0:0              LISTENING       11111\r\n"
+    with mock.patch("agentmemhub.console.subprocess.run") as mr, \
+         mock.patch("agentmemhub.console.os.name", "nt"):
+        mr.return_value = mock.Mock(stdout=fake_out)
+        assert _dashboard_pid(8086) is None
+        assert _dashboard_pid(80861) == 11111
+
+
+def test_action_dashboard_detects_running_on_any_port(capsys):
+    """[6] 重复启动提示真实端口 URL（手动 --port 8099 场景，修复 URL 不一致根因）。"""
+    import agentmemhub.console as console
+    with mock.patch.object(console, "_find_serve_processes",
+                           return_value=[{"pid": 36948, "port": 8099}]):
+        console.action_dashboard()
+    out = capsys.readouterr().out
+    assert "http://127.0.0.1:8099/" in out
+    assert "已在运行" in out
+
+
+def test_action_dashboard_stop_finds_process_on_any_port(capsys):
+    """[7] 能停掉跑在非配置端口的看板进程（旧逻辑只探配置端口，停不掉）。"""
+    import agentmemhub.console as console
+    with mock.patch.object(console, "_find_serve_processes",
+                           return_value=[{"pid": 36948, "port": 8099}]), \
+         mock.patch.object(console, "_confirm", return_value=True), \
+         mock.patch.object(console, "_port_listening", return_value=False), \
+         mock.patch.object(console, "_action_log") as mlog, \
+         mock.patch("agentmemhub.console.subprocess.run") as mrun:
+        console.action_dashboard_stop()
+    out = capsys.readouterr().out
+    assert "8099" in out and "已停止" in out
+    mrun.assert_called_once()          # taskkill /PID 36948
+    assert mrun.call_args[0][0][:2] == ["taskkill", "/PID"]
+    mlog.assert_called_once()
+
+
+def test_action_dashboard_stop_reports_not_running(capsys):
+    """无看板进程且端口空闲时明确提示（不再打印误导性的端口信息）。"""
+    import agentmemhub.console as console
+    with mock.patch.object(console, "_find_serve_processes", return_value=[]), \
+         mock.patch.object(console, "_port_listening", return_value=False):
+        console.action_dashboard_stop()
+    assert "未在运行" in capsys.readouterr().out

@@ -129,7 +129,7 @@ MENU = """
   ── 日常查询与看板 ──────────────────────────────
   [5] 检索关键字（跨 Agent 全文搜索）
   [6] 启动网页看板（后台运行，菜单不阻塞）
-  [7] 停止网页看板（结束占用看板端口的服务进程）
+  [7] 停止网页看板（结束看板服务进程，不限端口）
   [8] 状态总览（数据源 / 本地库 / 记忆索引）
   [0] 退出
 
@@ -176,10 +176,19 @@ def action_search() -> None:
 
 
 def action_dashboard() -> None:
+    # 先按进程特征找已有看板：端口以进程实际启动参数为准（面板可被手动
+    # serve --port XXXX 拉起，只按配置端口探测会「找不到、提示错 URL」）。
+    procs = _find_serve_processes()
+    if procs:
+        p = procs[0]
+        _out(f"  看板已在运行（PID {p['pid']}）→ http://127.0.0.1:{p['port']}/")
+        if len(procs) > 1:
+            _out(f"  ⚠ 另有 {len(procs) - 1} 个看板进程并存，可用 [7] 一并停止")
+        return
     port = dashboard_port()
     if _port_listening(port):
-        _out(f"  看板已在运行（端口 {port} 被占用，跳过重复启动）")
-        _out(f"  → 直接在浏览器打开 http://127.0.0.1:{port}/")
+        _out(f"  端口 {port} 已被其他程序占用，看板无法启动；"
+             f"可换端口启动：python -m agentmemhub serve --port <端口>")
         return
     # 独立子进程跑 serve：菜单不阻塞；同样继承当前解释器（uv venv 生效）
     proc = subprocess.Popen(
@@ -188,7 +197,8 @@ def action_dashboard() -> None:
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
     _out(f"  看板启动中（PID {proc.pid}）→ http://127.0.0.1:{port}/")
-    _out("  （在浏览器打开上面的地址；停止看板可关闭该进程或按 Ctrl+C 退出控制台）")
+    _out("  （在浏览器打开上面的地址；停止看板可用 [7] 或关闭该进程）")
+    _action_log(f"看板启动（控制台）→ PID {proc.pid} 端口 {port}")
 
 
 def _port_listening(port: int) -> bool:
@@ -198,52 +208,119 @@ def _port_listening(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+_PS_FIND_SERVE = ("Get-CimInstance Win32_Process | "
+                  "Where-Object { ($_.Name -like 'python*' -or "
+                  "$_.Name -like 'agentmemhub*') -and "
+                  "$_.CommandLine -match 'agentmemhub(\\.exe)?\\s+serve' } | "
+                  "Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress")
+
+
+def _parse_serve_port(cmdline: str) -> int:
+    """从 serve 命令行解析端口（--port 8099 / --port=8099），缺省回配置端口。"""
+    import re
+    m = re.search(r"--port[= ](\d+)", cmdline or "")
+    return int(m.group(1)) if m else dashboard_port()
+
+
+def _parse_ps_processes(raw: str) -> list[dict]:
+    """解析 PowerShell ConvertTo-Json 输出（单结果时是对象而非数组）。"""
+    import json
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return []
+    items = data if isinstance(data, list) else [data]
+    out = []
+    for it in items:
+        try:
+            out.append({"pid": int(it["ProcessId"]),
+                        "port": _parse_serve_port(it.get("CommandLine") or "")})
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _find_serve_processes() -> list[dict]:
+    """按命令行特征找看板进程（python -m agentmemhub serve），返回 [{pid, port}]。
+
+    端口以进程实际启动参数为准：面板可能被手动以任意端口拉起，只认配置
+    端口会导致 [7] 停不掉、提示的 URL 与实际不符。非 Windows 返回空，
+    由调用方回退端口探测。
+    """
+    if os.name != "nt":
+        return []
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", _PS_FIND_SERVE],
+                             capture_output=True, text=True, errors="replace",
+                             timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return _parse_ps_processes(out.stdout)
+
+
 def _dashboard_pid(port: int) -> Optional[int]:
-    """返回监听端口进程的 PID（Windows netstat；其他平台用 psutil 简化探测）。"""
+    """返回监听端口的进程 PID（Windows netstat；其他平台不支持返回 None）。
+
+    按列解析而非子串匹配：":8086" 子串会误命中 ":80861" 这类端口。
+    """
     if os.name == "nt":
         out = subprocess.run(["netstat", "-ano"], capture_output=True,
-                             text=True).stdout
+                             text=True, errors="replace").stdout
         for line in out.splitlines():
-            if "LISTENING" in line and f":{port}" in line:
-                parts = line.split()
-                if parts:
-                    try:
-                        return int(parts[-1])
-                    except ValueError:
-                        return None
+            parts = line.split()
+            if len(parts) >= 5 and parts[3] == "LISTENING" \
+                    and parts[1].rsplit(":", 1)[-1] == str(port):
+                try:
+                    return int(parts[-1])
+                except ValueError:
+                    return None
     return None
 
 
 def action_dashboard_stop() -> None:
-    """停止网页看板：结束占用看板端口的服务进程（确认后执行）。"""
+    """停止网页看板：按进程特征找 serve 进程结束之（确认后执行）。"""
     import time as _t
-    port = dashboard_port()
-    if not _port_listening(port):
-        _out(f"  看板未在运行（端口 {port} 空闲）")
-        return
-    pid = _dashboard_pid(port)
-    if pid is None:
-        _out(f"  端口 {port} 被占用但未能解析进程 PID，请手动关闭占用进程")
-        return
-    if not _confirm(f"  将停止看板进程（PID {pid}，端口 {port}）？"):
+    procs = _find_serve_processes()
+    if not procs:
+        # 兜底：进程特征没命中（非 Windows / 命令行变形）再按配置端口找
+        port = dashboard_port()
+        if not _port_listening(port):
+            _out("  看板未在运行")
+            return
+        pid = _dashboard_pid(port)
+        if pid is None:
+            _out(f"  端口 {port} 被占用但未能解析进程 PID，请手动关闭占用进程")
+            return
+        procs = [{"pid": pid, "port": port}]
+    where = "、".join(f"PID {p['pid']}（端口 {p['port']}）" for p in procs)
+    if not _confirm(f"  将停止看板进程 {where}？"):
         _out("  （已取消）")
         return
-    if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(pid), "/F"],
-                       capture_output=True, text=True)
-    else:
-        import signal as _sig
-        try:
-            os.kill(pid, _sig.SIGTERM)
-        except OSError:
-            _out("  ✗ 进程不存在（可能已退出）")
-            return
+    stopped = []
+    for p in procs:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(p["pid"]), "/F"],
+                           capture_output=True, text=True, errors="replace")
+        else:
+            import signal as _sig
+            try:
+                os.kill(p["pid"], _sig.SIGTERM)
+            except OSError:
+                continue
+        stopped.append(p)
+    if not stopped:
+        _out("  ✗ 未能结束任何看板进程（可能已退出）")
+        return
     for _ in range(20):                      # 等端口释放（最多 10 秒）
-        if not _port_listening(port):
-            _out(f"  ✓ 网页看板已停止（PID {pid}，端口 {port} 已释放）")
+        if all(not _port_listening(p["port"]) for p in stopped):
+            _out(f"  ✓ 网页看板已停止（{where}，端口已释放）")
+            _action_log(f"看板停止（控制台）→ {where}")
             return
         _t.sleep(0.5)
-    _out(f"  ⚠ 端口 {port} 仍在占用（进程可能未完全退出）")
+    _out(f"  ⚠ 看板进程可能未完全退出，可重试 [7] 或手动结束 {where}")
 
 
 def action_clean() -> None:
