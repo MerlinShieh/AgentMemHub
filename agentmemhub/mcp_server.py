@@ -408,8 +408,24 @@ class MCPHandler:
         return {"content": [{"type": "text", "text": fn(args)}]}
 
 
+def _force_utf8_stdio() -> None:
+    """把 stdio 切到 UTF-8（MCP 协议规定 UTF-8）。
+
+    Windows 上 ``sys.stdin``/``sys.stdout`` 默认走 locale 编码（cp936）：
+    不强制时中文会在 stdio 上损坏——客户端发来的 UTF-8 中文被按 cp936
+    解码（读进来就已损坏，语义检索会直接报 tokenizer 错），服务端写出的
+    中文被编成 cp936（对端按 UTF-8 解成乱码）。
+    只对支持 ``reconfigure`` 的文本流生效，测试注入的 StringIO 不受影响。
+    """
+    for stream in (sys.stdin, sys.stdout):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8")
+
+
 def run_stdio() -> None:
     """stdio 传输：逐行读 stdin，逐行写响应（Agent host 拉起子进程）。"""
+    _force_utf8_stdio()
     MCPHandler().run()
 
 

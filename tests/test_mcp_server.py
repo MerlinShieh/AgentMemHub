@@ -1,4 +1,4 @@
-﻿"""MCP 记忆网关单元测试。
+"""MCP 记忆网关单元测试。
 
 覆盖：JSON-RPC 握手/错误、tools/list 契约、四个工具在引擎离线/在线
 （mock engine API）下的行为。引擎调用一律 mock，不依赖真实引擎。
@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 from unittest import mock
 
 from agentmemhub import memos_daemon
-from agentmemhub.mcp_server import MCPHandler, _engine_hint
+from agentmemhub.mcp_server import MCPHandler, _engine_hint, run_stdio
 
 
 def _handler() -> tuple[MCPHandler, io.StringIO]:
@@ -211,3 +212,47 @@ def test_unknown_tool_is_protocol_error():
     h, _ = _handler()
     r = _call(h, _req("tools/call", {"name": "nope", "arguments": {}}))
     assert r is not None and r["error"]["code"] == -32601
+
+
+# ---------------------------------------------------------------------------
+# stdio 编码（Windows 兼容性回归）
+# ---------------------------------------------------------------------------
+
+def test_run_stdio_forces_utf8_on_locale_streams(monkeypatch):
+    """复现 Windows 中文损坏：run_stdio 必须把 stdio 切到 UTF-8。
+
+    Windows 上 ``sys.stdin``/``sys.stdout`` 默认走 locale 编码（cp936），
+    而 MCP 协议规定 UTF-8。不强制时：客户端发来的 UTF-8 中文被按 cp936
+    解码（读进来就已损坏），服务端写出的中文被编成 cp936（对端按 UTF-8
+    解成乱码）。这里用 cp936 包装的字节流模拟该平台的默认 stdio。
+    """
+    fake_in = io.TextIOWrapper(io.BytesIO(), encoding="cp936")
+    fake_out = io.TextIOWrapper(io.BytesIO(), encoding="cp936", write_through=True)
+    monkeypatch.setattr(sys, "stdin", fake_in)
+    monkeypatch.setattr(sys, "stdout", fake_out)
+
+    run_stdio()          # 空输入 → 读完即返回
+
+    assert fake_in.encoding.lower().replace("-", "") == "utf8"
+    assert fake_out.encoding.lower().replace("-", "") == "utf8"
+
+
+def test_run_stdio_roundtrips_chinese_over_locale_streams(monkeypatch):
+    """cp936 平台默认流下，中文仍须能按 UTF-8 正确往返（端到端）。"""
+    req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                     ensure_ascii=False)
+    stdin_raw = io.BytesIO((req + "\n").encode("utf-8"))
+    stdout_raw = io.BytesIO()
+    monkeypatch.setattr(sys, "stdin",
+                        io.TextIOWrapper(stdin_raw, encoding="cp936"))
+    monkeypatch.setattr(sys, "stdout",
+                        io.TextIOWrapper(stdout_raw, encoding="cp936",
+                                         write_through=True))
+
+    run_stdio()
+
+    # 响应里的中文工具描述必须能按 UTF-8 解出（cp936 编码的字节会在这里暴露）
+    text = stdout_raw.getvalue().decode("utf-8")
+    payload = json.loads(text)
+    assert payload["result"]["tools"]
+    assert "语义检索" in text
