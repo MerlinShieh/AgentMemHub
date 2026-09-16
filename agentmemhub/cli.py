@@ -737,6 +737,82 @@ def cmd_score(args) -> None:
         _cli_log(f"score 失败 → {e}", level="error")
 
 
+def cmd_distill(args) -> None:
+    """记忆蒸馏：原始会话 → 结构化记忆（LLM 提炼，幂等 + fail-open）。
+
+    详见 docs/memory-distillation.md；用 --dry-run 可先预览产物与成本。
+    """
+    from agentmemhub import rag_bridge
+    from agentmemhub.distill import run_distill
+    only = None
+    if getattr(args, "only", ""):
+        only = set()
+        for item in args.only.split(","):
+            item = item.strip()
+            if ":" in item:
+                s, c = item.split(":", 1)
+                only.add((s.strip(), c.strip()))
+        if not only:
+            _stdout("--only 格式应为 source:conversation_id（逗号分隔多个）")
+            return
+    settings = rag_bridge.settings()
+    mode = "dry-run（不落库）" if args.dry_run else "落库"
+    _stdout(f"记忆蒸馏开始（{mode}）…")
+    r = run_distill(settings, source=args.source, only=only,
+                    limit=args.limit, dry_run=args.dry_run,
+                    on_progress=_stdout)
+    if r.get("error"):
+        _stdout(f"蒸馏未执行：{r['error']}")
+        _cli_log(f"distill 未执行 → {r['error']}", level="warn")
+        return
+    _stdout(json.dumps(r, ensure_ascii=False, indent=1))
+    _cli_log(f"distill({mode}) → {r}")
+
+
+def cmd_weight(args) -> None:
+    """记忆手动加权：锁定价值分（优先于自动聚合值，且不随时间衰减）。
+
+    ref 支持三种引用：内容锚（mcp_*）、蒸馏锚（dst_*）、unit 编号（unit:N 或纯数字）。
+    不带 --value 时仅查看当前权重；--clear 清除手动设定（回到自动演化）。
+    """
+    import sqlite3
+    from agentmemhub import rag_bridge
+    from agentmemhub.rag import memstore
+    st = rag_bridge.settings()
+    conn = sqlite3.connect(str(st.index_db), timeout=15.0)
+    try:
+        memstore.ensure_memstore_schema(conn)   # 幂等迁移（如补 manual_value 列）
+        uid = rag_bridge.resolve_unit_id(conn, args.ref)
+        if uid is None:
+            _stdout(f"未找到记忆：{args.ref}")
+            return
+        row = conn.execute(
+            "SELECT value, manual_value FROM unit_values WHERE unit_id=?",
+            (uid,)).fetchone()
+        auto = row[0] if row else None
+        manual = row[1] if row else None
+        if args.clear:
+            r = memstore.set_manual_value(conn, uid, None)
+            _stdout(f"✓ 已清除手动加权（unit={uid}，回到自动值 "
+                    f"{r['effective']:.2f}）")
+        elif args.value is not None:
+            if not 0.0 <= args.value <= 1.0:
+                _stdout("--value 须在 0~1 之间")
+                return
+            r = memstore.set_manual_value(conn, uid, args.value)
+            _stdout(f"✓ 已锁定权重 {args.value}（unit={uid}，"
+                    f"自动值 {auto if auto is not None else '无'}）")
+        else:
+            state = f"手动={manual:.2f}" if manual is not None else "未手动加权"
+            eff = manual if manual is not None else auto
+            eff_s = f"{eff:.2f}" if eff is not None else "无"
+            auto_s = f"{auto:.2f}" if auto is not None else "无"
+            _stdout(f"unit={uid}  自动值={auto_s}  {state}  生效值={eff_s}")
+        _cli_log(f"weight {args.ref} → value={args.value} clear={args.clear}")
+    finally:
+        conn.close()
+
+
 def cmd_memos(args) -> None:
     run_memos(source=args.source, out=args.out, push=args.push,
               no_rebuild=args.no_rebuild, rebuild_mode=args.rebuild_mode)
@@ -847,6 +923,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     prb = sub.add_parser("rebuild", help="补向量：给缺向量的记忆补嵌（repair；rag 写入即嵌入）")
     prb.add_argument("--mode", default="repair", choices=("repair", "rebuild"))
+
+    pw = sub.add_parser("weight", help="记忆手动加权：锁定价值分（优先于自动聚合、不衰减）")
+    pw.add_argument("ref", help="记忆引用：mcp_* / dst_* / unit:N（见面板或检索结果）")
+    pw.add_argument("--value", type=float, default=None,
+                    help="权重 0~1；不传=仅查看当前权重")
+    pw.add_argument("--clear", action="store_true", help="清除手动加权（回到自动演化）")
+
+    pd = sub.add_parser("distill", help="记忆蒸馏：原始会话 → 结构化记忆（LLM 提炼，幂等）")
+    pd.add_argument("--source", default="", help="只处理某个 Agent 来源")
+    pd.add_argument("--only", default="",
+                    help="只处理指定会话（source:conversation_id，逗号分隔多个）")
+    pd.add_argument("--limit", type=int, default=0,
+                    help="最多处理多少个会话（按正文量降序，0=全部）")
+    pd.add_argument("--dry-run", action="store_true",
+                    help="只蒸馏不落库（预览产物与成本，可反复执行）")
     return p
 
 
@@ -863,6 +954,7 @@ def main() -> None:
         "adapters": cmd_adapters, "memos": cmd_memos, "folders": cmd_folders,
         "serve": cmd_serve, "mcp": cmd_mcp,
         "sync": cmd_sync, "clean": cmd_clean, "score": cmd_score, "rebuild": cmd_rebuild,
+        "distill": cmd_distill, "weight": cmd_weight,
     }
     fn = handlers.get(args.command)
     if fn is None:

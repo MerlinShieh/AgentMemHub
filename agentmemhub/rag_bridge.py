@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import sqlite3
 import time
 from typing import Any, Optional
@@ -27,8 +28,9 @@ from agentmemhub.rag.memstore import (
     content_anchor,
     ensure_memstore_schema,
     put_feedback,
+    set_user_feedback,
 )
-from agentmemhub.rag.runtime import get_active_embedder
+from agentmemhub.rag.runtime import get_active_embedder, get_embedder
 from agentmemhub.rag.search import Hit, hybrid_search
 
 _SETTINGS: Optional[Settings] = None
@@ -132,6 +134,7 @@ def _rows_to_traces(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
         agents = [r for r in g if r["role"] == "assistant"]
         anchor = users[0] if users else g[0]
         vals = [r["value"] for r in g if r["value"] is not None]
+        manuals = [r["manual_value"] for r in g if r["manual_value"] is not None]
         out.append({
             "id": anchor["legacy_id"] or anchor["src_id"] or f"unit:{anchor['id']}",
             "ts": int(anchor["time"] or 0) * 1000,
@@ -140,7 +143,9 @@ def _rows_to_traces(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
             "userText": "\n".join(r["text"] for r in users),
             "agentText": "\n".join(r["text"] for r in agents),
             "summary": (anchor["title"] or "")[:200],
-            "value": vals[0] if vals else 0.0,
+            # 手动加权优先于自动聚合值（与 ValueStore.values 的读取口径一致）
+            "value": manuals[0] if manuals else (vals[0] if vals else 0.0),
+            "manualValue": manuals[0] if manuals else None,
             "source": anchor["source"],
             "conversationId": anchor["conversation_id"],
         })
@@ -150,7 +155,7 @@ def _rows_to_traces(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
 
 _SELECT_TRACE = (
     "SELECT u.id, u.source, u.conversation_id, u.seq, u.role, u.turn_key,"
-    " u.time, u.title, u.src_id, u.legacy_id, u.text, v.value"
+    " u.time, u.title, u.src_id, u.legacy_id, u.text, v.value, v.manual_value"
     " FROM units u LEFT JOIN unit_values v ON v.unit_id = u.id")
 
 
@@ -181,10 +186,12 @@ def search(agent: str, query: str, *, k: int = SEARCH_MAX_HITS,
     """
     t0 = time.perf_counter()
     st = settings()
+    vstore = memstore.ValueStore(st.index_db)
     hits = hybrid_search(
         st, query, k=k, candidate_k=max(k * 4, 30), expand_turns=False,
         exclude_session=exclude_session,
-        value_provider=memstore.ValueStore(st.index_db),
+        value_provider=vstore,
+        no_decay_ids=vstore.no_decay_ids,
         log=_log())
     refmap: dict = {}
     if hits:
@@ -272,24 +279,41 @@ def import_bundle(traces: list[dict], *, embedder=None) -> dict:
             pend_texts.append(text)
             pend_dtos.append({**t, "_text": text})
         if pend_texts:
-            vecs = emb.encode_passages(pend_texts)
+            # 多模型写入：按 rag.write.order 逐模型嵌入并写各自向量表
+            # （与 run_ingest 的多模型编排同语义）——只写 active 一个模型时，
+            # 一旦配置换模型（而写入进程仍缓存旧 active），新记忆就会落进
+            # 另一张表、在召回侧"隐形"；多写一份即消除该结构性风险。
+            multi: list[tuple] = []
+            for mid in st.write_order:
+                s = st.model(mid)
+                ensure_vec_table(conn, s)
+                em = emb if mid == st.active_model else get_embedder(s, settings=st)
+                multi.append((s, em.encode_passages(pend_texts)))
             with conn:
                 seq = conn.execute(
                     "SELECT COALESCE(MAX(seq),0) FROM units"
                     " WHERE source='memory'").fetchone()[0]
-                for d, v in zip(pend_dtos, vecs):
+                for i, d in enumerate(pend_dtos):
                     seq += 1
                     ts = int((d.get("ts") or time.time() * 1000) // 1000)
+                    # 标签：MCP memory_save 的可选 tags → 存 JSON 数组文本；其它来源为 NULL。
+                    # 只接受序列，避免 bundle 里出现任意类型时写出脏数据。
+                    raw_tags = d.get("tags")
+                    tags_json = None
+                    if isinstance(raw_tags, (list, tuple)) and raw_tags:
+                        tags_json = json.dumps([str(x) for x in raw_tags],
+                                               ensure_ascii=False)
                     cur = conn.execute(
                         "INSERT INTO units(source, conversation_id, seq, role,"
-                        " turn_key, src_id, time, title, text, chars, legacy_id)"
-                        " VALUES('memory','mcp',?,'user','mcp',?,?,?,?,?,?)",
+                        " turn_key, src_id, time, title, text, chars, legacy_id, tags)"
+                        " VALUES('memory','mcp',?,'user','mcp',?,?,?,?,?,?,?)",
                         (seq, content_anchor(d["_text"]), ts,
-                         "记忆", d["_text"], len(d["_text"]), d["id"]))
-                    conn.execute(
-                        f"INSERT INTO {spec.vec_table}(rowid, embedding)"
-                        " VALUES(?,?)",
-                        (cur.lastrowid, bytes(v)))
+                         "记忆", d["_text"], len(d["_text"]), d["id"], tags_json))
+                    for s, vecs in multi:
+                        conn.execute(
+                            f"INSERT OR REPLACE INTO {s.vec_table}"
+                            "(rowid, embedding) VALUES(?,?)",
+                            (cur.lastrowid, bytes(vecs[i])))
                     value = float(d.get("value") or 0.0)
                     if value:
                         conn.execute(
@@ -304,15 +328,25 @@ def import_bundle(traces: list[dict], *, embedder=None) -> dict:
 
 
 def feedback(trace_id: str, polarity: str, *, magnitude: float = 1.0,
-             channel: str = "explicit") -> dict:
-    """POST /api/v1/feedback 的 rag 实现 + 会话级 r_task 滚动聚合。"""
+             channel: str = "explicit", state: bool = False,
+             revoke: bool = False) -> dict:
+    """POST /api/v1/feedback 的 rag 实现 + 会话级 r_task 滚动聚合。
+
+    state=True：**面板状态式反馈**（先清后写；revoke=True 表示仅清除取消）——
+    一个 unit 一条当前表态，反复点不叠加、可干净回退；
+    默认 False：**历史累加**语义（MemOS 同源，MCP memory_score / 批量评分沿用）。
+    """
     conn = _conn()
     try:
         uid = resolve_unit_id(conn, trace_id)
         if uid is None:
             raise KeyError(f"trace 不存在: {trace_id}")
-        out = put_feedback(conn, uid, polarity, magnitude=magnitude,
-                           channel=channel)
+        if state:
+            out = set_user_feedback(conn, uid, None if revoke else polarity,
+                                    magnitude=magnitude, channel=channel)
+        else:
+            out = put_feedback(conn, uid, polarity, magnitude=magnitude,
+                               channel=channel)
         src, cid = conn.execute(
             "SELECT source, conversation_id FROM units WHERE id=?",
             (uid,)).fetchone()
@@ -349,7 +383,7 @@ def rebuild_embeddings(mode: str = "repair", limit: int = 500,
             " WHERE v.rowid IS NULL")]
         updated = 0
         if mode == "repair" and missing:
-            emb = get_active_embedder(spec)
+            emb = get_active_embedder(st)      # 注意：签名收 Settings（曾误传 spec 致 AttributeError）
             tables = [spec.vec_table]
             for chunk_i in range(0, len(missing), 64):
                 ids = missing[chunk_i:chunk_i + 64]

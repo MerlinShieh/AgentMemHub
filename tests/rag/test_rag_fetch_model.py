@@ -25,9 +25,9 @@ def test_build_curl_cmd(fm):
     assert cmd[-1] == "https://x/y"
     assert "--proxy" not in cmd
     cmd2 = fm.build_curl_cmd("https://x/y", fm.Path("out.bin"),
-                             proxy="http://127.0.0.1:7897")
+                             proxy="http://127.0.0.1:8080")
     i = cmd2.index("--proxy")
-    assert cmd2[i + 1] == "http://127.0.0.1:7897"
+    assert cmd2[i + 1] == "http://127.0.0.1:8080"
 
 
 def test_registry_entry_shape(fm):

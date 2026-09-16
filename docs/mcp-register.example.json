@@ -1,6 +1,6 @@
 {
   "//": "AgentMemHub MCP 记忆网关注册示例（脱敏模板，不含真实路径）。",
-  "//2": "前提：MemOS 记忆引擎需先常驻（agentmemhub memos-daemon start 或看板「记忆引擎→启动」）；网关只转发请求，绝不自动拉起引擎。",
+  "//2": "前提：v2.0 起记忆引擎内置于本项目（agentmemhub.rag，进程内直调）——无独立服务、无守护进程；先执行 agentmemhub sync 建立索引即可。网关只转发请求。",
   "//3": "传输二选一：stdio=本地个人（Agent 拉起子进程）；http=团队共享（一台机器 --http 常驻，多客户端连同一个引擎）。",
 
   "stdio_local": {

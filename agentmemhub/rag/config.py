@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -144,8 +145,29 @@ def _load_models_json(root: Path) -> tuple[dict, str]:
     return raw.get("models", {}), str(raw.get("active") or "")
 
 
+def _data_dir_override() -> Path | None:
+    """AGENTMEM_HUB_DATA_DIR 覆盖（与顶层 agentmemhub/config.py 同源语义）。
+
+    沙箱隔离：一个环境变量同时切换采集库与索引库，使实验（如记忆蒸馏）
+    完全不碰生产数据。日志目录**不跟随**——既定语义是统一 <程序根>/logs
+    （见 agentmemhub/logs.py），沙箱实验日志仍可在同一处追溯。
+    """
+    v = os.environ.get("AGENTMEM_HUB_DATA_DIR", "").strip()
+    return Path(v) if v else None
+
+
 def load_settings(root: Path | str | None = None) -> Settings:
-    """读配置（yaml 优先，models.json 兼容回退），校验激活模型文件齐全。"""
+    """读配置（yaml 优先，models.json 兼容回退），校验激活模型文件齐全。
+
+    数据目录解析（优先级）：
+    - **显式传入 root** → `root/database`（调用方指定根，测试隔离用，不受环境变量干扰）；
+    - 无参调用 → `AGENTMEM_HUB_DATA_DIR` 环境变量优先（沙箱/测试隔离），
+      否则项目内 `PROJECT_ROOT/database`。
+
+    注：`rag_bridge.settings()` 会以自己的 hub 配置真源再覆盖一次 source_db/
+    index_db（见 rag_bridge._derive_settings），两条路径结果一致。
+    """
+    explicit_root = root is not None
     root = Path(root) if root else PROJECT_ROOT
     models_raw, embed, retrieval, write, active = _load_rag_section(root)
     if not models_raw:
@@ -186,12 +208,15 @@ def load_settings(root: Path | str | None = None) -> Settings:
                 f"激活模型 {active!r} 缺少文件：{f}"
                 f"（量化版文件名会被自动探测）")
 
+    # 数据目录：显式 root 优先；无参调用时环境变量优先（沙箱隔离）
+    data_dir = (root / "database") if explicit_root else (
+        _data_dir_override() or (root / "database"))
     return Settings(
         root=root,
         models=models,
         active_model=active,
-        source_db=root / "database" / "agentmemhub.db",
-        index_db=root / "database" / "session_rag.db",
+        source_db=data_dir / "agentmemhub.db",
+        index_db=data_dir / "session_rag.db",
         log_dir=root / "logs",
         embed=embed or dict(DEFAULT_EMBED),
         retrieval=retrieval or dict(DEFAULT_RETRIEVAL),

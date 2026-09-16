@@ -1,6 +1,6 @@
-﻿# AgentMemHub
+# AgentMemHub
 
-统一提取你电脑上所有 AI Agent Harness 的对话历史 → 归一为**全量事件流**（含工具链、思维链、Shell 执行、代码补丁）→ 本地 SQLite 存储可搜索 → 导出 JSONL / Markdown → **内置记忆引擎 `agentmemhub.rag`**（会话向量化 + 混合召回 + 价值评分，进程内直调、无独立服务）。
+统一提取你电脑上所有 AI Agent Harness 的对话历史 → 归一为**全量事件流**（含工具链、思维链、Shell 执行、代码补丁）→ 本地 SQLite 存储可搜索 → **记忆蒸馏**（LLM 离线提炼为结构化记忆）→ **内置记忆引擎 `agentmemhub.rag`**（向量化 + 混合召回 + 价值评分，进程内直调、无独立服务）→ 面板双标签页浏览（统一会话 / 记忆报表）。
 
 **让任何 Agent 的会话经验，变成可检索、可迁移、可复用的统一记忆资产。**
 
@@ -8,6 +8,11 @@
 > ——进程内直调，**无独立服务、无端口、无守护进程**，启动面板或跑 `sync` 即完整可用。
 > MCP 五工具与面板契约零改动；如需回退 MemOS，在 `agentmemhub.yaml` 设 `backend.backend: memos`
 > 即可（vendored `memOS/` 保留未删）。召回机制与实测数据见 [docs/recall-fusion.md](docs/recall-fusion.md)。
+>
+> **v2.1（2026-09-11）**：新增**记忆蒸馏**（离线把会话提炼为结构化记忆，四入口：
+> Python / CLI / start.bat 控制台 / 面板，详见「记忆蒸馏」章节）；**双标签页面板**
+> （统一会话 / 记忆报表，含筛选·展开溯源·⭐加权·👍👎反馈·表头排序·双向跳转）；
+> 权重体系完整落地（来源初始分 → 反馈演化 → 手动加权不衰减）。
 
 ## 模型准备（首次使用必读）
 
@@ -27,6 +32,17 @@ uv run python scripts/fetch_model.py Xenova/bge-base-zh-v1.5
 # 下载后在 agentmemhub.yaml 中把 rag.active 改为 bge-base-zh-v1.5
 # （模型目录名即模型 id；下载脚本会自动登记到配置）
 ```
+
+**换 active 模型的标准流程**（顺序错会出现"记忆搜不到"）：
+
+1. 改 `agentmemhub.yaml` 的 `rag.active`（新模型须先登记进 `rag.models`）；
+2. 重建向量：`uv run python -m agentmemhub.rag.cli reembed --model <新模型>`
+   （只补缺失用 `uv run python -m agentmemhub rebuild --mode repair`）；
+3. **重启常驻进程**（面板 / MCP server）——它们启动时加载配置，不重启将
+   继续按旧模型写入，新记忆会落进另一张向量表、在召回侧"隐形"。
+
+嫌换模型麻烦？把 `rag.write.order` 配成多模型（如 small + base），
+写入时每个模型各存一份向量，任意 active 都能召回。
 
 模型来源：[Xenova/bge-small-zh-v1.5](https://huggingface.co/Xenova/bge-small-zh-v1.5) ·
 [Xenova/bge-base-zh-v1.5](https://huggingface.co/Xenova/bge-base-zh-v1.5)（均为量化 ONNX）。
@@ -102,7 +118,7 @@ AgentMemHub/
 │   ├── sensitive_scan.py         #   推送前敏感信息扫描
 │   ├── web_verify.py             #   面板前后端接口联调自检（对运行中的服务）
 │   └── e2e/                      #   浏览器级端到端测试
-├── eval/                         # 召回评测集（71 题）+ 基准
+├── eval/                         # 召回评测示例集（queries.example.yaml；私有集不入库）
 ├── tests/                        # pytest（262 项）
 ├── docs/                         # 设计文档（架构/迁移/召回融合等）
 ├── memOS/                        # 回退用的上游引擎（gitignore，默认不参与运行）
@@ -126,7 +142,8 @@ AgentMemHub/
 uv run python -m agentmemhub
 ```
 
-菜单涵盖：环境检测 → 提取入库 → 清洗数据 → **写入记忆（向量化）** → 自动评分 → 检索 → 看板启停 → 状态总览。
+菜单涵盖：提取入库 → 清洗数据 → **蒸馏记忆** → 写入记忆（向量化）→ 检索 → 看板启停 → 状态总览。
+（自动评分入口已隐藏，见下方「命令行」表格备注）
 
 **方式 B — 命令行**
 
@@ -147,7 +164,7 @@ uv run python -m agentmemhub export --format markdown --out exports_md/
 # 5. 写入记忆：采集 + 向量化（小模型先跑完即可检索，大模型后台并发补齐）
 uv run python -m agentmemhub sync
 
-# 6. LLM 批量评分（可选，给记忆打价值分以优化排序）
+# 6. LLM 批量评分（⚠️ 当前不生效：实测多为 neutral/全跳过；命令保留备查）
 uv run python -m agentmemhub score
 ```
 
@@ -219,11 +236,11 @@ python -m agentmemhub sync
 - `events` — 全量事件流（role / content / tool / reasoning / patch / shell，含 `raw_json` 原始保底）
 - `events_fts` — FTS5 全文索引（英文检索）
 
-![本地 SQLite 数据库结构 — conversations / events / events_fts 三张核心表](./docs/images/local-database.png)
+![记忆报表页 — 状态/类型/置信/来源筛选、表头排序、展开溯源与 ⭐ 加权](./docs/images/memory-report.png)
 
 **记忆索引库**（`database/session_rag.db`，由内置引擎管理）：
 
-- `units` — 记忆单元（消息级文本，模型无关；含 `turn_key` 轮次锚与 `legacy_id` 旧系统别名）
+- `units` — 记忆单元（消息级文本，模型无关；含 `turn_key` 轮次锚、`legacy_id` 旧系统别名与 `tags` 标签）
 - `vec_<model>` — 每模型独立的向量表（sqlite-vec，维度建表时固定）
 - `units_fts` — trigram 全文索引（中文友好，与标题列联合）
 - `unit_values` / `unit_feedback` — 价值评分与反馈明细（引擎存值，打分策略在 Hub 侧）
@@ -273,7 +290,7 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 | `rebuild [--mode repair\|rebuild]` | 补齐缺失向量（repair）/ 全量重算 |
 | `memos [--source] [--out]` | 回退路径：生成 MemOS bundle（backend=memos 时用）|
 | `clean [--source x] [--apply]` | 记忆清洗：删除系统注入事件（默认预览，`--apply` 才执行并重建 FTS/计数；sync 会自动只清变更会话）|
-| `score [--pending] [--limit N] [--dry-run] [--workers N] [--ids id1,id2] [--unscored-count] [--sync-episodes]` | LLM 批量自动评分历史记忆（**增量优先**：pending_score 队列非空只评队列·定点读零全量枚举，队列空则先筛未评 id 再读正文；`--pending` 仅评队列，`--ids` 只评指定条（写后即评），`--unscored-count` 统计未评条数（只读 id），`--sync-episodes` 回填 episode.r_task；**三档 verdict 均记入跳过清单**——positive/negative 写 value、neutral 不写值但仍标记「已评」避免下次重评（dry-run 一律不记录）；网关**内容审核拒评（如智谱 1301）自动归 neutral 并记账**，不再每次卡该条报错；LLM 调用**强制直连**、不受系统代理影响，确需代理设 `AGENTMEMHUB_LLM_PROXY`）|
+| `score [--pending] [--limit N] [--dry-run] [--workers N] [--ids id1,id2] [--unscored-count] [--sync-episodes]` | ⚠️ **当前不生效**（入口已从控制台/面板隐藏；实测评为 neutral 居多且跑批全跳过，质量把关由蒸馏置信度 + 面板 👍/👎 承担）——命令保留备查。原功能：LLM 批量自动评分历史记忆（**增量优先**：pending_score 队列非空只评队列·定点读零全量枚举，队列空则先筛未评 id 再读正文；`--pending` 仅评队列，`--ids` 只评指定条（写后即评），`--unscored-count` 统计未评条数（只读 id），`--sync-episodes` 回填 episode.r_task；**三档 verdict 均记入跳过清单**——positive/negative 写 value、neutral 不写值但仍标记「已评」避免下次重评（dry-run 一律不记录）；网关**内容审核拒评（如智谱 1301）自动归 neutral 并记账**，不再每次卡该条报错；LLM 调用**强制直连**、不受系统代理影响，确需代理设 `AGENTMEMHUB_LLM_PROXY`）|
 | `rebuild [--mode repair\|rebuild]` | 补向量：触发引擎 embedding rebuild（导入记忆后修复语义检索）|
 | `stats` / `adapters` | 统计 / adapter 状态 |
 
@@ -337,7 +354,7 @@ Agent 不会自觉保存，必须靠规则约束。
 git clone https://github.com/MerlinShieh/Agent-skill-save-memory.git   ~/.zcode/skills/save-memory          # ZCode；其他 Harness 放对应 skills 目录
 ```
 
-Skill 定义**何时保存、按什么顺序保存+评分**（写后即评）。它不含存储实现，
+Skill 定义**何时保存**（写入即完成，不自动评分——价值分由真实使用演化）。它不含存储实现，
 强绑定本项目的 MCP 工具，无降级路径。
 
 ### 步骤 3：把记忆纪律写进 AGENTS.md（触发保障）⚠️ 最容易漏
@@ -357,7 +374,7 @@ Skill 的触发依赖模型自觉，长对话/高负载下**会漏触发**。必
        （AgentMemHub 项目内 uv run python -m agentmemhub sync；内置引擎无守护进程，
        没有"启动引擎"这个动作），不硬写；
     2. memory_save 写入自包含结论（背景一句话 + 结论/做法）；
-    3. 对刚写入的 id 立即 memory_score（多数应 positive）。
+    3. 写入后不自动评分——价值分由真实使用演化（面板 👍/👎，或按需 memory_score）。
 
     ⚠️ 只写 Agent 自己的本地会话记忆不算完成——必须落到记忆索引。
     需要历史经验时主动 memory_search，与保存流程互相独立。
@@ -381,8 +398,8 @@ Claude Code 等支持 MCP 的 Agent harness 上——模型在会话进行中即
 | `memory_search(query, topK)` | 语义检索历史记忆（三路混合召回），返回命中条目 + 注入上下文 |
 | `memory_recent(limit)` | 最近写入的记忆时间线，快速了解近期积累 |
 | `memory_stats()` | 索引就绪状态 / 记忆总量 / 嵌入模型与 LLM 评分可用性 |
-| `memory_save(content)` | 写一条记忆（即时入库并补向量，写后验证 imported，失败明确报错不伪装）|
-| `memory_score(trace_id, polarity)` | 对刚写入/任意一条记忆写后即评（反馈 → 引擎即时重算 value/priority，检索排序生效）|
+| `memory_save(content, importance?, tags?)` | 写一条记忆。`importance` 为可选档位（`high`/`normal`/`low` → 初始价值 0.8/0.6/0.4，**不传即 normal**），由 Agent 用当前推理直接判断，**无需外挂评分模型**；`tags` 为可选标签数组（面板筛选/溯源用，引擎纯透传）。即时入库并补向量，写后验证 imported，失败明确报错不伪装 |
+| `memory_score(trace_id, polarity)` | 按需对任意一条记忆打分（反馈 → 引擎即时重算 value/priority；**写后即评流程已废除**，仅用户明确要求加权时使用）|
 
 ```bash
 # 0. 确保记忆索引已建立（v2.0 起引擎内置，无需启动任何服务）：
@@ -483,11 +500,24 @@ Skill 与 MCP 强绑定、无降级路径——MCP 不可用时 Skill 会明确�
 
 ## 数据模型
 
-- **conversations**：会话元数据（source/id/title/cwd/model/时间/signature）
+**采集库**（`database/agentmemhub.db`）：
+
+- **conversations**：会话元数据（source/id/title/cwd/model/时间/signature，另含
+  `session_uid` 全局递增会话 ID 与 `title_custom` 用户改标题标记）
 - **events**：全量事件流（role/content/tool/reasoning/patch/shell/raw_json）
 - **events_fts**：FTS5 全文索引（英文走 FTS，中文子串走 LIKE 兜底）
+- **memory_exclusions**：会话/轮次级「不写入记忆」标记（CLI/MCP 可用）
+- **deleted_conversations**：删除墓碑（防 ingest 回灌，保住 uid 与标题资产）
 
-详见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
+**索引库**（`database/session_rag.db`）：
+
+- **units / unit_vectors / units_fts**：原子记忆与向量（含蒸馏投影：
+  `role='distilled'`、`src_id='dst_<内容hash>'`）
+- **unit_values / unit_feedback**：价值分（`manual_value` = 用户 ⭐ 锁定值）与反馈记录
+- **distilled_memories**：蒸馏终稿（type/topic/content/confidence/status + 完整溯源）
+- **distill_hashes**：蒸馏幂等锚（切片/合并级内容哈希 + 提示词版本）
+
+详见 [ARCHITECTURE.md](./ARCHITECTURE.md) 与 [docs/memory-distillation.md](docs/memory-distillation.md)。
 
 ## 记忆引擎管理（内置 agentmemhub.rag）
 
@@ -509,7 +539,7 @@ AgentMemHub/
 
 ```bash
 uv run python -m agentmemhub sync        # 采集 + 向量化写入记忆索引（首次必跑）
-uv run python -m agentmemhub score       # LLM 批量评分（优化检索排序）
+uv run python -m agentmemhub score       # LLM 批量评分（⚠️ 当前不生效，见命令行表格备注）
 uv run python -m agentmemhub stats       # 索引规模统计
 uv run python -m agentmemhub serve       # 启动记忆面板 http://127.0.0.1:8086
 ```
@@ -527,6 +557,52 @@ uv run python -m agentmemhub serve       # 启动记忆面板 http://127.0.0.1:8
   `AGENTMEMHUB_BACKEND=memos`）即可切回 vendored 引擎，此时才需要其独立服务与
   `memos-daemon` 管理命令。
 
+## 记忆蒸馏（把会话提炼为结构化记忆）
+
+离线把原始会话**去噪提炼**为结构化记忆（决策 decision / 事实 fact / 偏好 preference /
+教训 lesson），是检索质量的来源。四个使用入口：
+
+| 入口 | 方式 |
+|---|---|
+| Python | `from agentmemhub.distill import run_distill; run_distill(settings)` |
+| CLI | `uv run python -m agentmemhub distill [--source X] [--limit N] [--dry-run]` |
+| 控制台 | `start.bat` → `[3] 蒸馏记忆` |
+| 面板 | 「记忆报表」页 →「蒸馏记忆」按钮（后台任务 + 进度条，两页可见） |
+
+流程（五阶段，全本地）：
+
+```
+S0 切片      固定轮数窗口（默认 16 轮）+ 话题边界细化 —— 追加新对话时
+             已满窗口的历史切片逐字不变（增量稳定，不反复重蒸）
+S1 段级蒸馏  LLM 逐片提炼 → 结构化 JSON（脱敏；丢弃寒暄与过程叙述）
+S2 合并沉淀  同会话多片再合并去重（层级合并，批次化防超上下文）
+S3 跨会话去重 与既有记忆向量近邻 → 三档标记 new / similar / duplicate
+S4 投影      新/相似条目写入 units（role='distilled'）→ 立即可被召回
+```
+
+要点：
+
+- **幂等**：切片级与合并级都按「内容哈希 + 提示词版本」判重，重复执行自动跳过；
+  已蒸馏会话追加新内容时只蒸新增切片，再与历史终稿重新合并
+- **脱敏**：prompt 层要求忽略凭据类内容 + 正则兜底（`agentmemhub/sanitize.py`）
+- **fail-open**：单切片失败只计数不中断、不登记哈希，重跑自动补齐
+- **结果隔离**：蒸馏产物只存在于索引库（`distilled_memories` + 投影 units），
+  不影响采集库原文；排除（`memory_exclusions`）与删除会同步作用于投影
+- **权重**：蒸馏来源初始分 0.3（Agent 主动写入 0.6），可被 👍👎 反馈与
+  ⭐ 手动加权（锁定后不衰减）覆盖
+
+LLM 接入（`agentmemhub.yaml` 的 `llm` 段；也可用 `scripts/sync_llm_from_zcode.py`
+从 ZCode 客户端配置一键同步，密钥只写入 gitignore 的本地配置）：
+
+```yaml
+llm:
+  endpoint: "https://api.deepseek.com/chat/completions"   # OpenAI 兼容端点
+  api_key: ""                    # 只写入 agentmemhub.yaml（已 gitignore），不入库
+  model: "deepseek-v4-flash"
+  headers:                       # 可选：provider 特定请求头
+    User-Agent: "AgentMemHub/1.0"
+```
+
 ## 统一配置
 
 所有路径/端口默认采用官方默认；需要覆盖时创建 `agentmemhub.yaml`（模板见 `agentmemhub.yaml.example`）。优先级：环境变量 > 配置文件 > 内置默认。
@@ -541,6 +617,8 @@ backend:
 rag:
   active: bge-small-zh-v1.5           # 检索用模型（随仓库分发，开箱即用）
   write:
+    # 多模型写入（真正生效）：逐模型各存一份向量——换 active 后旧记忆不会
+    # 因向量在另一张表而在召回侧隐形；代价是写入耗时随模型数增加
     order: [bge-small-zh-v1.5]        # 向量化顺序；可加更多模型
     fast_first: true                  # 首个模型完成即返回可检索，其余后台并发
     background_hint: "高精度模型正在后台向量化，稍后自动生效"
@@ -549,7 +627,9 @@ rag:
     bucketing: true                   # 按文本长度分桶批处理（性能关键）
     bucket_caps: [64, 128, 256, 384]  # 分桶边界（字符）
   retrieval:
-    models: [bge-small-zh-v1.5]       # 参与召回融合的模型（多路 RRF）
+    # 多模型召回融合（真正生效，2026-09-11 起）：逐模型向量路 + RRF；
+    # 同门模型重叠度高，扩展前先评测
+    models: [bge-small-zh-v1.5]
     candidate_k: 30                   # 每路候选数
     threshold_floor: 0.2              # 相对阈值（×top）
     max_per_conversation: 2           # 同会话限席（原子记忆不受限）
@@ -572,10 +652,21 @@ memos:                                # 仅 backend=memos 时参与
 web:
   port: 8086
 
-llm:                                  # 评分用（可选）
-  endpoint: ""
-  api_key: ""
-  model: ""
+llm:                                  # 蒸馏与评分共用（OpenAI 兼容端点）
+  endpoint: "https://api.deepseek.com/chat/completions"
+  api_key: ""                         # 只写入本地 agentmemhub.yaml（gitignore）
+  model: "deepseek-v4-flash"
+  headers: {}                         # 可选：provider 特定请求头
+
+distillation:                         # 记忆蒸馏全部可调（不硬编码）
+  enabled: true
+  prompt_ver: null                    # 留空=跟随代码内版本（改提示词自动重蒸）
+  slice: {max_turns: 16, max_chars: 24000, topic_boundary: true}
+  merge: {enabled: true, max_chars: 8000, max_rounds: 6}
+  dedup: {cosine_duplicate: 0.92, cosine_similar: 0.80}
+  sanitize: {enabled: true}
+  runtime: {max_concurrent: 4, timeout: 60}
+  # llm: {}                           # 可选：蒸馏单独覆盖顶层 llm（继承+合并）
 ```
 
 相对路径相对项目根解析，`~` 展开为用户目录。
@@ -602,22 +693,35 @@ uv run python -m agentmemhub serve
 uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentmemhub.db
 ```
 
-功能：Agent/工作空间多选筛选 · 服务端分页列表 · 全文搜索（FTS5+LIKE）· 统计卡与图表 ·
-会话详情抽屉（用户消息/思维链/工具调用/代码补丁 全渲染，按记忆轮次分组）· 标题编辑与会话删除（真实写库）。
-页面顶部下方有**「记忆索引」板块**：状态（就绪/记忆规模/模型/向量覆盖率/已排除数）、
-语义检索框（按相关度返回具体轮次，**结果可点击跳转**到对应会话并定位该轮）、
-最近记忆列表（value 正负标注 + 👍/👎 单条打分）。操作行按流程排序：
-**提取会话入库** → **清洗数据**（删系统注入，带确认弹窗）→ **写入记忆**（向量化）→
-**自动评分**（LLM 三轴批量补价值分，进度条 + 百分比）——全部为后台任务，
-**进度条按百分比分级配色**、结果实时回显、同一时刻只允许一个任务。
+功能：**双标签页**——「统一会话」与「记忆报表」分开呈现，互不混排。
 
-**记忆写入控制**（独占能力）：
-- **会话级**：主表格勾选会话 → 「设为不写入记忆」/「恢复写入」；整会话被排除的行显示**淡红底 + 左红边 + 「不写入」角标**
-- **轮次级**：点会话进右侧抽屉，每个轮次分割线处有勾选框 → 勾上即该轮不写入；
-  被排除轮次**灰化 + 「不写入记忆」角标**，所在行显示**淡橙底 + 左橙边 + 「部分不写入」**角标
-- **层级语义**：整会话排除**覆盖并清除**其下所有轮次排除；取消整会话即彻底恢复
-- 排除是**立即生效**的（索引即刻移除，不再被召回）；原文始终保留在采集库，
-  取消排除后下次「写入记忆」即恢复
+**统一会话页**：Agent/工作空间多选筛选 · 服务端分页列表 · 全文搜索（FTS5+LIKE）· 统计卡与图表 ·
+会话详情抽屉（用户消息/思维链/工具调用/代码补丁 全渲染，按记忆轮次分组）· 标题编辑与会话删除（真实写库）。
+每行「🧠 查看该会话记忆」直达记忆报表并自动筛选该会话；标题修改与删除**不会被后续 ingest 覆盖**
+（全局递增 `session_uid` + 用户修改保护 + 删除墓碑）。
+
+**记忆报表页**：展示目前存放的全部记忆（蒸馏终稿 ∪ Agent 手动写入，每条带来源会话与轮次锚）。
+- **状态下拉**（默认「活跃」= 新型+相似，可勾选已合并/重复）+ **来源下拉**（含 **MCP** 写入项，
+  与采集来源同列多选，全选/全不选）+ 类型/置信 chips + 关键字 **即时生效**
+- **表头点击排序**：类型 / 置信 / 状态 / 来源 / 来源会话 / 时间 / 分数，升降序切换；
+  置信按「高→低」、状态按「新型→重复」的语义序（非字典序）；「来源会话」按采集库
+  标题排（跨库 ATTACH 只读，失败自动降级回时间序）。分页 20/50/100，带**首页 / 末页**跳转
+- 点击任意行**展开全文与溯源**（类型/主题/置信/状态/来源/蒸馏模型/召回单元/会话UID/轮次锚），
+  可一键跳回原始会话并定位到该轮
+- 每行 ⭐ **手动加权**（两态：加权 1.0 ↔ 取消；锁定后不衰减）+
+  👍/👎 **状态式反馈**（当前态高亮，再点同极性即取消、干净回退来源初始分）。
+  两种操作都为**就地更新**（不重拉列表、不丢滚动与筛选位置）且带防连点。
+  反馈语义与 MCP `memory_score` 的"历史累加"分开：面板是**当前表态**（一 unit 一条），
+  累加均值会越点越钝、且无法取消，不适合人工按钮
+- 来源列区分 **`MCP`**（Agent 主动写入的原子记忆，无原始会话、会话列不可点）与采集来源；
+  每行标注「召回单元」与「有无原始会话」，避免误点失效链接
+- **语义检索**框（向量+全文混合评分召回，结果可点开原始会话）
+- 「记忆操作」工具栏：**提取会话入库 → 清洗数据 → 蒸馏记忆 → 写入记忆**，
+  （自动评分按钮已隐藏——蒸馏置信度 + 👍/👎 已覆盖质量把关）
+  全部为后台任务；**全局进度条**（两页可见，按百分比分级配色、结果实时回显、同一时刻只允许一个任务）
+
+> 记忆排除（会话级/轮次级「不写入记忆」）的**后端能力保留**（`memory_exclusions` 表、
+> `/api/*/memory-exclusion`、CLI/MCP 均可用），面板 UI 自 P3 起下线——会话列表只做查看/删除/改标题。
 
 ![AgentMemHub 主看板 — 筛选栏、统计卡、趋势/占比图与会话列表](./docs/images/dashboard.png)
 
@@ -653,7 +757,7 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 - [x] 统一配置体系（agentmemhub.yaml：全路径可配置）
 - [x] MCP 记忆网关（stdio / Streamable HTTP 双传输，供 ZCode/OpenCode 等 harness 检索/写入记忆）
 - [x] 记忆清洗（clean：删除系统注入事件，预览→执行并重建 FTS/计数）
-- [x] LLM 批量自动评分（score：三轴评估写价值分、跳过已评、面板进度条）
+- [x] ~~LLM 批量自动评分~~（score：三轴评估写价值分——**入口已隐藏**：实测多为 neutral/全跳过，质量把关改由蒸馏置信度 + 面板 👍/👎 承担；命令保留备查）
 - [x] 统一日志（`<程序根>/logs/`：web/cli/engine/tasks 分文件，面板可查历史）
 - [x] MCP 写后即评（memory_score 工具 + save-memory Skill 独立仓：触发纪律/生效前提/逻辑归属）
 - [x] 导入数据质量（meta 幽灵轮剔除、纯工具轮标题兜底、恢复环境整源丢失修复）
@@ -664,11 +768,13 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 - [x] 引擎接缝 `rag_bridge`：原 MemOS 端点语义的进程内实现，MCP 五工具与面板契约零改动
 - [x] 一行配置回退 MemOS（`backend.backend: memos`），vendored `memOS/` 保留
 - [x] 存量零丢失迁移（MemOS 2286 traces / 3836 feedback → 新索引）
-- [x] 记忆写入控制：会话级 + 轮次级排除（立即生效、层级语义、防回流、跨源副本同步）
-- [x] 面板改造为「AgentMemHub 记忆面板」：记忆控制台 + 检索可跳转 + 排除态双色阶标记
+- [x] 记忆写入控制：会话级 + 轮次级排除（后端能力保留；面板 UI 自 P3 起下线，改用双标签页报表）
+- [x] 面板改造为「AgentMemHub 记忆面板」：**双标签页（统一会话 / 记忆报表）**、记忆报表（筛选·展开溯源·⭐加权·反馈·语义检索）、会话↔记忆双向跳转、标题修改与删除防 ingest 覆盖
 - [x] 批量嵌入性能优化：按文本长度分桶（bge-base 5.26 → 26 条/秒，全量 51 → 11.6 分钟）
 - [x] 多模型写入编排：小模型先跑完即可检索，高精度模型后台子进程并发补齐
 - [x] 统一配置 `agentmemhub.yaml`（模型注册/分桶/召回/写入策略/后端开关单文件）
+- [x] 记忆蒸馏（离线，四入口：Python/CLI/start.bat 控制台/面板）：S0 窗口化切片 → S1 段级蒸馏 → S2 同会话合并 → S3 跨会话去重 → S4 投影为可召回 unit；幂等增量、脱敏、失败可重跑
+- [x] 权重体系：来源初始分 → 反馈演化（状态式可撤销）→ 手动加权（⭐ 两态锁定不衰减，有界 boost）
 - [x] 带标签的版本锚点（`v0-pre-rag` 回滚点 / `v1-rag-backend-only` / v2.0）
 
 - [ ] 更多 Agent（Claude Code / Cursor / Gemini CLI / CodeBuddy）

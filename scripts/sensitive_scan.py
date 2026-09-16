@@ -9,10 +9,24 @@
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+
+def _username_patterns() -> dict[str, re.Pattern]:
+    """本机用户名 → 扫描规则（动态取自环境，不把真实用户名写进源码）。"""
+    out: dict[str, re.Pattern] = {}
+    for var in ("USERNAME", "USER", "USERPROFILE"):
+        name = os.environ.get(var, "") or ""
+        if var == "USERPROFILE":
+            name = Path(name).name
+        name = name.strip()
+        if len(name) >= 3 and re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+            out[f"真实用户名 ({var})"] = re.compile(rf"\b{re.escape(name)}\b", re.I)
+    return out
 
 
 def main() -> int:
@@ -21,7 +35,7 @@ def main() -> int:
     files = [Path(f) for f in out.splitlines() if f]
 
     patterns = {
-        "真实用户名 (mulin)": re.compile(r"\bmulin\b", re.I),
+        **_username_patterns(),
         "GitHub PAT 令牌": re.compile(r"github_pat_[A-Za-z0-9_]+"),
         "OpenAI/厂商 key (sk-)": re.compile(r"\b(?:sk|sk-[A-Za-z0-9]|pk)-[A-Za-z0-9]{12,}"),
         "NVIDIA api key (nvapi-)": re.compile(r"nvapi-[A-Za-z0-9]+"),
@@ -34,7 +48,7 @@ def main() -> int:
     }
 
     skip_ext = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".tgz", ".woff", ".woff2"}
-    # 扫描器自身包含规则关键词（mulin/路径模式），排除避免自指误报
+    # 扫描器自身含规则关键词语义（用户名/路径模式由环境注入），排除避免自指误报
     self_file = Path(__file__).resolve()
     found_any = False
     for fp in files:

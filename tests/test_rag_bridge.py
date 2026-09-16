@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 
 import pytest
@@ -236,6 +237,24 @@ def test_search_hits_include_conversation_location(rag_env):
     assert atomic, "原子记忆须标记 atomic=True（无对应会话）"
 
 
+def test_import_bundle_stores_tags(rag_env):
+    """MCP memory_save 的 tags 落进 units.tags（JSON 数组文本）；缺省为 NULL。
+
+    tags 是纯透传字段（引擎不解释语义），供面板筛选与溯源使用。
+    """
+    rag_bridge.import_bundle([
+        {"id": "mcp_tags_a", "userText": "带标签的原子记忆", "ts": 1,
+         "tags": ["dsh", "mcp"]},
+        {"id": "mcp_tags_b", "userText": "无标签的原子记忆", "ts": 2},
+    ])
+    conn = rag_bridge._conn()
+    rows = dict(conn.execute(
+        "SELECT legacy_id, tags FROM units"
+        " WHERE legacy_id IN ('mcp_tags_a','mcp_tags_b')").fetchall())
+    assert json.loads(rows["mcp_tags_a"]) == ["dsh", "mcp"]
+    assert rows["mcp_tags_b"] is None, "未传 tags 应保持 NULL，而不是空字符串"
+
+
 def test_safe_cutoff_hits_rules():
     hits = [{"score": s} for s in (1.0, 0.9, 0.71, 0.69, 0.5, 0.4)]
     kept = rag_bridge.safe_cutoff_hits(hits, max_keep=5)
@@ -271,3 +290,37 @@ def test_llm_availability_probe_honest(rag_env, monkeypatch):
     monkeypatch.delenv("NOPE", raising=False)
     v = rag_bridge._scoring_llm_available()
     assert isinstance(v, bool)     # 读不到配置就是 False，不装样子
+
+
+def test_import_bundle_writes_all_write_order_models(rag_env, tmp_path):
+    """import_bundle 按 rag.write.order 逐模型写向量。
+
+    修复前只写 active 一张表 → 写入进程缓存旧 active 时，新记忆会落进
+    另一张表在召回侧隐形（2026-09-11 实测：27 条 MCP 记忆因此搜不到）。
+    """
+    import dataclasses
+
+    from agentmemhub.rag.config import load_settings
+    from agentmemhub.rag.ingest import open_index
+
+    base = load_settings()
+    m2 = dataclasses.replace(base.active_spec, id="probe-m2-write")
+    st = dataclasses.replace(
+        base, index_db=tmp_path / "idx_write.db", source_db=tmp_path / "src.db",
+        log_dir=tmp_path / "logs",
+        models={**base.models, m2.id: m2},
+        write={**base.write, "order": [base.active_model, m2.id]})
+    rag_bridge.configure(st)
+    r = rag_bridge.import_bundle(
+        [{"id": "probe-w1", "userText": "多模型写入探针：应同时落两张向量表"}])
+    assert r["imported"] == 1
+    conn = open_index(st.index_db)
+    try:
+        uid = conn.execute("SELECT id FROM units WHERE legacy_id='probe-w1'"
+                           ).fetchone()[0]
+        for spec in (base.active_spec, m2):
+            row = conn.execute(
+                f"SELECT 1 FROM {spec.vec_table} WHERE rowid=?", (uid,)).fetchone()
+            assert row, f"{spec.id} 的向量表应有该单元"
+    finally:
+        conn.close()

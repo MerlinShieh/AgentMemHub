@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS units(
     title TEXT,
     text TEXT NOT NULL,
     chars INTEGER NOT NULL,
+    tags TEXT,
     UNIQUE(source, conversation_id, seq)
 );
 CREATE TABLE IF NOT EXISTS ingest_meta(
@@ -58,12 +59,20 @@ CREATE TABLE IF NOT EXISTS conv_scores(
 
 
 def ensure_bridge_schema(conn: sqlite3.Connection) -> None:
-    """units.legacy_id 幂等补列 + 桥接元表（AgentMemHub rag_bridge 启动时调用）。"""
+    """units.legacy_id / units.tags 幂等补列 + 桥接元表（rag_bridge 启动时调用）。"""
     cols = [r[1] for r in conn.execute("PRAGMA table_info(units)")]
     if "legacy_id" not in cols:
         conn.execute("ALTER TABLE units ADD COLUMN legacy_id TEXT")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_units_legacy"
                      " ON units(legacy_id) WHERE legacy_id IS NOT NULL")
+    # tags：MCP memory_save 的可选标签（JSON 数组文本）。不参与 FTS（units_fts
+    # 只索引 text/title），故补列无需重建索引。
+    if "tags" not in cols:
+        conn.execute("ALTER TABLE units ADD COLUMN tags TEXT")
+    # src_id 业务锚索引：记忆报表 JOIN（'dst_'||content_hash）、投影幂等查询
+    # （WHERE src_id=?）与 resolve_unit_id 都靠它。缺失时带 status 筛选的
+    # 报表 JOIN 会退化为 units 全表扫描（实测单查询 20s）
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_units_src ON units(src_id)")
     conn.executescript(_SCHEMA_BRIDGE)
     conn.commit()
 

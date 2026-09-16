@@ -3,14 +3,17 @@
 用法：
   uv run python scripts/fetch_model.py Xenova/bge-base-zh-v1.5
   uv run python scripts/fetch_model.py <repo> --dir bge-base-zh --base https://hf-mirror.com
+  uv run python scripts/fetch_model.py <repo> --proxy http://127.0.0.1:7897
 
-网络经验（本机）：直连可能超时；代理 Clash 127.0.0.1:7897 兜底；
-大文件下载须 Range 续传 + Content-Length 终校，防"假成功截断"。
+网络经验：直连可能超时；需要代理时用 --proxy，或设环境变量
+AGENTMEMHUB_DL_PROXY（直连失败时自动兜底）；大文件下载须 Range 续传 +
+Content-Length 终校，防"假成功截断"。
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -28,7 +31,7 @@ CORE_FILES = [
 def build_curl_cmd(url: str, dest: Path, proxy: str | None = None) -> list[str]:
     """curl 命令构造（纯函数便于测试）。
 
-    为什么用 curl 不用 urllib：本机注册表系统代理指向 Clash 7897（可能未运行），
+    为什么用 curl 不用 urllib：系统注册表级代理（如 Clash 类工具）可能未运行，
     urllib 会静默继承导致 10061 拒连 / 走死代理超时（实测两轮）；
     curl 默认不读注册表，-C - 原生断点续传，-L 跟随镜像站 307。
     """
@@ -71,8 +74,11 @@ def fetch(repo: str, model_dir: Path, base: str, proxy: str | None) -> list[tupl
         except (OSError, IOError, TimeoutError) as ex:
             if proxy:
                 raise
-            print(f"  直连失败（{type(ex).__name__}），尝试代理 127.0.0.1:7897")
-            size = download(url, dest, proxy="http://127.0.0.1:7897")
+            fallback = os.environ.get("AGENTMEMHUB_DL_PROXY", "").strip()
+            if not fallback:
+                raise
+            print(f"  直连失败（{type(ex).__name__}），尝试代理 {fallback}")
+            size = download(url, dest, proxy=fallback)
         results.append((rel, size))
     return results
 

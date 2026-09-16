@@ -277,3 +277,34 @@ def test_task_log_single_line_append(tmp_path, monkeypatch):
     text = logs.task_log_tail("t1")
     assert "第一行" in text and "第二行" in text
     assert logs.task_log_tail("no_such_job") == ""
+
+def test_admin_distill_offline_503():
+    """索引不可用（无 LLM 或库缺失之外的硬前提）→ 503 且不提交任务。"""
+    c = _client()
+    with mock.patch("agentmemhub.memos_daemon.auth_state", return_value=None):
+        r = c.post("/api/admin/distill")
+    assert r.status_code == 503
+    assert "记忆索引不可用" in r.json()["detail"]
+    assert c.get("/api/admin/job").json()["job"] is None
+
+
+def test_admin_distill_reports_missing_llm():
+    """LLM 未配置：任务照常提交，但终态文案给出明确补齐指引（不抛异常）。"""
+    from agentmemhub.web import tasks
+
+    c = _client()
+    with mock.patch("agentmemhub.memos_daemon.auth_state", return_value={"ok": 1}), \
+         mock.patch("agentmemhub.rag_bridge.settings", return_value=object()), \
+         mock.patch("agentmemhub.distill.run_distill",
+                    return_value={"error": "LLM 未配置完整，缺少：endpoint、api_key、model"}):
+        r = c.post("/api/admin/distill")
+    assert r.status_code == 200
+    job = r.json()["job"]
+    for _ in range(30):
+        st = tasks.status()
+        if st and st["status"] != "running":
+            break
+        time.sleep(0.1)
+    st = tasks.status()
+    assert st["status"] == "done"
+    assert "LLM 未配置完整" in st["output"]

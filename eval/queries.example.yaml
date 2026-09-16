@@ -1,0 +1,71 @@
+# 召回评测集（示例）：query 用同义转述（与标题/原文不同形），保证全文档路与向量路公平对比。
+# expect_any：top-k 任一结果的 text 或 title 含其中任一关键词 → 该用例命中。
+#
+# 用法：
+#   uv run python -m agentmemhub.rag.cli eval  --file eval/queries.example.yaml
+#   uv run python -m agentmemhub.rag.cli bench --file eval/queries.example.yaml
+#   uv run python scripts/check_eval_grounding.py --file eval/queries.example.yaml
+#
+# 说明：仓库只带这份示例集（覆盖语义转述 / 关键词 / 精确串 / 中英混合等意图）。
+# 自建评测集请另存为 eval/queries.yaml——该文件名已 gitignore，不会入库。
+cases:
+  - id: config-unify
+    query: 项目的可调参数散落在各处怎么收口
+    expect_any: [配置, 收口, yaml]
+  - id: log-by-module
+    query: 把运行日志按功能拆成不同文件
+    expect_any: [日志, 拆分, 分文件]
+  - id: pagination-api
+    query: 列表接口数据太多要分页和筛选
+    expect_any: [分页, 筛选, page]
+  - id: index-join-degrade
+    query: 加了筛选条件以后查询突然变得很慢
+    expect_any: [索引, 全表扫描, 查询计划]
+  - id: truncation-recovery
+    query: 模型输出被截断导致解析失败怎么办
+    expect_any: [截断, 解析, token]
+  - id: idempotent-key
+    query: 重复执行任务时怎么避免写入重复数据
+    expect_any: [幂等, 重复, hash]
+  - id: retry-backoff
+    query: 网络请求偶发失败需要重试机制
+    expect_any: [重试, 退避, retry]
+  - id: wal-checkpoint
+    query: 数据库的日志文件越来越大拖慢了写入
+    expect_any: [WAL, 检查点, checkpoint]
+  - id: port-occupied
+    query: 启动服务提示端口被占用怎么处理
+    expect_any: [端口, 占用, 进程]
+  - id: ssl-handshake
+    query: 直连接口时安全握手被中断报错
+    expect_any: [SSL, 握手, urlopen]
+  - id: batch-syntax
+    query: 批处理脚本里的条件块老是直接退出
+    expect_any: [批处理, bat, 括号]
+  - id: commit-convention
+    query: 团队提交信息的格式规范怎么定
+    expect_any: [提交, 规范, commit]
+  - id: offline-vendor
+    query: 前端依赖怎么做到完全离线可用
+    expect_any: [离线, vendor, 本地化]
+  - id: session-uid
+    query: 跨表引用会话需要稳定不变的标识
+    expect_any: [会话, 唯一, ID]
+  - id: mcp-gateway
+    query: 让多个客户端共用同一个记忆服务
+    expect_any: [MCP, 网关, 传输]
+  - id: embedding-bucket
+    query: 批量向量化速度太慢怎么优化
+    expect_any: [向量, 分桶, batch]
+  - id: feedback-revoke
+    query: 用户点了赞又想取消应该怎么设计
+    expect_any: [反馈, 取消, 撤销]
+  - id: rate-limit-429
+    query: 调用外部接口被限流了怎么退避
+    expect_any: [限流, 429, 退避]
+  - id: ci-smoke
+    query: 提交前想自动跑一遍冒烟检查
+    expect_any: [冒烟, 测试, CI]
+  - id: never-match-topic
+    query: 一个完全不存在于本库的冷门话题
+    expect_any: [绝不命中的关键词组合xyz]

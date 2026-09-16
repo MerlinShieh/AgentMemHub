@@ -1,6 +1,6 @@
 # AgentMemHub 查询示例
 
-数据库（默认 `~/.agentmemhub/agentmemhub.db`）的三张核心表：
+数据库（默认 `database/agentmemhub.db`，可用 `agentmemhub.yaml` 的 `data_dir` 覆盖）的三张核心表：
 - `conversations` — 会话元数据（source / id / title / cwd / model / 时间 / event_count）
 - `events` — 全量事件流（role / content / tool / reasoning / patch / shell / raw_json）
 - `events_fts` — FTS5 全文索引

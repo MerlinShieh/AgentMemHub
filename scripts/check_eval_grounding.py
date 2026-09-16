@@ -1,4 +1,4 @@
-"""评测集落地校验：每题至少一个期望关键词必须真实存在于索引语料（text/title LIKE）。
+﻿"""评测集落地校验：每题至少一个期望关键词必须真实存在于索引语料（text/title LIKE）。
 
 防止出「语料里根本没有答案」的废题。用法：
   uv run python scripts/check_eval_grounding.py [--file eval/queries.yaml]
@@ -27,6 +27,8 @@ def like_hit(conn: sqlite3.Connection, kw: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     file = PROJECT_ROOT / "eval" / "queries.yaml"
+    if not file.exists():                       # 私有评测集不在仓库时用示例集
+        file = PROJECT_ROOT / "eval" / "queries.example.yaml"
     argv = argv or sys.argv[1:]
     if "--file" in argv:
         file = Path(argv[argv.index("--file") + 1])

@@ -19,14 +19,14 @@ import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Callable, Sequence
 
 import numpy as np
 
 from .config import Settings
 from .embedder import Embedder, OnnxEmbedder
 from .runtime import get_embedder
-from .ingest import open_index
+from .ingest import ensure_vec_table, open_index
 
 if TYPE_CHECKING:
     from .ext import Judge, ValueProvider
@@ -354,6 +354,8 @@ def hybrid_search(
     max_per_conversation: int = 2,
     exclude_session: tuple[str, str] | None = None,   # P1-3 (source, conv_id)
     value_provider: "ValueProvider | None" = None,    # P2-2 读侧价值 join
+    no_decay_ids: "Callable[[Sequence[int]], set[int]] | None" = None,
+    # 手动加权的 unit 集合查询器：锁定的价值不随时间衰减
     include_low_value: bool = False,                  # 复盘模式放开 value<=0
     judge: "Judge | None" = None,                     # P2-1 终审
     threshold_floor: float = THRESHOLD_FLOOR,
@@ -372,9 +374,17 @@ def hybrid_search(
 
         channels: dict[str, ChannelHits] = {}
         if mode in ("hybrid", "vector"):
-            qvec = embedder.encode_query(query)
-            channels["vec"] = vector_search(conn, spec.vec_table, qvec,
-                                            candidate_k, exclude_ids=excl)
+            # 多模型向量路：按 rag.retrieval.models 逐模型检索（配置语义落地）。
+            # active 模型通道名保持 "vec"（兼容 Hit.vec_rank 与既有行为），
+            # 其余模型用 "vec:<model_id>" —— 各路独立参与 RRF，一致命中信号更强。
+            for mid in settings.retrieval_models:
+                s = settings.model(mid)
+                ensure_vec_table(conn, s)
+                em = embedder if mid == spec.id else get_embedder(s, settings=settings)
+                qv = em.encode_query(query)
+                name = "vec" if mid == spec.id else f"vec:{mid}"
+                channels[name] = vector_search(conn, s.vec_table, qv,
+                                               candidate_k, exclude_ids=excl)
         if mode in ("hybrid", "fts"):
             channels["fts"] = fts_search(conn, query, candidate_k, exclude_ids=excl)
         if mode == "hybrid" and idents:
@@ -392,7 +402,8 @@ def hybrid_search(
                     _fetch_units(conn, list(rel)).items()}
             values = value_provider.values(list(rel))
             rel, dropped_low = apply_value_boost(
-                rel, meta, values, include_low_value=include_low_value)
+                rel, meta, values, include_low_value=include_low_value,
+                no_decay=(no_decay_ids(list(rel)) if no_decay_ids else None))
 
         if mode == "hybrid" and rel:
             rel, bypassed = threshold_filter(rel, cand, floor=threshold_floor)
@@ -411,11 +422,16 @@ def hybrid_search(
                        for i, m in metas.items()}
             emb_of: dict[int, np.ndarray] = {}
             if pool:
-                marks = ",".join("?" * len(pool))
-                for rid, blob in conn.execute(
-                    f"SELECT rowid, embedding FROM {spec.vec_table}"
-                    f" WHERE rowid IN ({marks})", [i for i, _ in pool]):
-                    emb_of[rid] = np.frombuffer(blob, dtype=np.float32)
+                # MMR 仅用 active 模型的向量（维度一致；多模型混合会维度冲突），
+                # 缺向量/表未建时该条不参与多样性计算（不影响召回本身）。
+                try:
+                    marks = ",".join("?" * len(pool))
+                    for rid, blob in conn.execute(
+                        f"SELECT rowid, embedding FROM {spec.vec_table}"
+                        f" WHERE rowid IN ({marks})", [i for i, _ in pool]):
+                        emb_of[rid] = np.frombuffer(blob, dtype=np.float32)
+                except sqlite3.OperationalError:
+                    pass    # active 向量表尚未建立（换模型首次写入前）→ 退化为无向量去重
             top = select_diverse(ranked, conv_of, emb_of,
                                  k=k, max_per_conversation=max_per_conversation)
         else:

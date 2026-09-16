@@ -1,4 +1,4 @@
-﻿"""AgentMemHub Web — FastAPI 应用。
+"""AgentMemHub Web — FastAPI 应用。
 
 只读为主的管理面：统计/筛选/分页列表/单会话事件流按需加载；
 管理操作仅限删除会话与改标题（显式接口，事务级联）。
@@ -277,6 +277,34 @@ def _run_score_fn(cli, limit: int, dry_run: bool):
     return _do
 
 
+def _run_distill_fn(source: str, limit: int, dry_run: bool):
+    """看板「蒸馏记忆」后台动作：切片 → LLM 提炼 → 同会话合并 → 去重投影。
+
+    run_distill 的 on_progress 本就是逐行文本，直接接到 emit（无需 redirect_stdout）。
+    """
+    def _do(emit, meta) -> str:
+        from agentmemhub import rag_bridge
+        from agentmemhub.distill import run_distill
+        r = run_distill(rag_bridge.settings(), source=source, limit=limit,
+                        dry_run=dry_run, on_progress=emit)
+        if r.get("error"):
+            msg = f"蒸馏未执行：{r['error']}"
+        else:
+            msg = (
+                f"会话 {r['conversations']} 个 · 切片 {r['slices']} 片"
+                f"（幂等跳过 {r['skipped_done']} / 失败 {r['failed']}）\n"
+                f"产出记忆 {r['memories_new']} 条 · 合并沉淀 {r['merged']} 个会话"
+                f"（失败 {r['merge_failed']}）\n"
+                f"投影 {r['projected']} 条 · 相似打标 {r['similar']} · "
+                f"判重丢弃 {r['duplicate']}\n"
+                f"脱敏 {r['sanitized']} 条 · 丢弃空壳 {r['dropped']} 条\n"
+                f"耗时 {r['seconds']}s · 模型 {r['model']}"
+                + ("（dry-run：未落库）" if r.get("dry_run") else ""))
+        emit("\n" + msg)          # tasks.submit 不使用返回值，汇总必须走 emit
+        return msg
+    return _do
+
+
 def _run_exclude_fn(items, turn_key: str = ""):
     """看板「批量排除记忆」后台动作：逐会话落标记 + 清索引（幂等）。"""
     from agentmemhub.store import Store
@@ -361,6 +389,8 @@ def _conv_to_dict(c: Any, *, excl_map: Optional[dict] = None) -> dict[str, Any]:
     d = {
         "source": c["source"],
         "id": c["id"],
+        # 全局唯一会话 ID（递增、只增不减）：记忆报表 ↔ 会话报表的绑定键
+        "sessionUid": c["session_uid"] if "session_uid" in c.keys() else None,
         "title": c["title"] or "",
         "cwd": c["cwd"] or "",
         "workspace": _workspace_of(c["cwd"]),
@@ -752,22 +782,25 @@ def create_app(db_path: Path | None = None):
 
     @app.post("/api/memos/feedback")
     def api_memos_feedback(traceId: str = Query(...),
-                           polarity: str = Query(..., pattern="^(positive|negative|neutral)$"),
+                           polarity: str = Query(default="neutral", pattern="^(positive|negative|neutral)$"),
                            magnitude: float = Query(default=1.0),
-                           channel: str = Query(default="explicit")):
-        """记忆打分（正/负反馈）。
+                           channel: str = Query(default="explicit"),
+                           state: bool = Query(default=True, description="状态式（面板默认）：一个 unit 一条当前表态，反复点不叠加"),
+                           revoke: bool = Query(default=False, description="state=1 时取消该条反馈（干净回退到初始分）")):
+        """记忆打分（面板 👍/👎）。
 
-        转发引擎 POST /api/v1/feedback 并带 traceId——引擎会立即按反馈
-        极性/幅度重算该条记忆的 value/rHuman/priority（无需 LLM）。
-        channel 必须是引擎约束的 explicit|implicit（面板人工评分=explicit）。
+        state=true（面板默认）：**状态式可撤销**——同一 unit 只保留一条当前
+        表态；再次点击同极性 = revoke 取消，回退到来源初始分（蒸馏 0.3 /
+        Agent 写入 0.6）。这解决"反复点赞只是历史均值被稀释、且无法取消"。
+        state=false：历史累加语义（MemOS 同源，MCP memory_score 走它）。
         """
         from agentmemhub import logs, memos_daemon
+        body = {"channel": channel, "polarity": polarity,
+                "magnitude": magnitude, "traceId": traceId,
+                "state": state, "revoke": revoke}
         try:
             res = memos_daemon.engine_request(
-                "POST", "/api/v1/feedback",
-                body={"channel": channel, "polarity": polarity,
-                      "magnitude": magnitude, "traceId": traceId},
-                timeout=15)
+                "POST", "/api/v1/feedback", body=body, timeout=15)
         except memos_daemon.EngineAuthError as e:
             raise HTTPException(status_code=503, detail=str(e))
         except Exception as e:
@@ -778,8 +811,230 @@ def create_app(db_path: Path | None = None):
             mark_scored(traceId)
         except Exception:
             pass
-        logs.record(f"记忆打分：trace={traceId} {polarity}（幅度 {magnitude}）")
+        logs.record(f"记忆打分：trace={traceId} "
+                    + ("取消反馈" if revoke else polarity)
+                    + f"（状态式={state}，幅度 {magnitude}）")
         return JSONResponse({"ok": True, "traceId": traceId, "feedback": res})
+
+    @app.get("/api/memories")
+    def api_memories(
+        source: Optional[str] = Query(default="", description="Agent 来源（逗号多选）"),
+        type: Optional[str] = Query(default="", description="类型多选：decision,fact,preference,lesson,manual"),
+        status: str = Query(default="active", description="active=new+similar | all | 单值 | 逗号多值（面板下拉）"),
+        conf: Optional[str] = Query(default="", description="置信度多选：high,medium,low"),
+        q: Optional[str] = Query(default="", description="关键字（内容/主题 LIKE）"),
+        conversationId: Optional[str] = Query(default="", description="按会话 id 筛选（会话→记忆联动）"),
+        sessionUid: Optional[int] = Query(default=None, description="按全局会话 uid 筛选"),
+        sort: str = Query(default="time", description="排序字段：time|value|type|confidence|status|source|conversation"),
+        order: str = Query(default="desc", description="排序方向：asc|desc"),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+    ):
+        """记忆报表数据源：蒸馏终稿（含归档可筛）+ Agent 手动写入的记忆。
+
+        每条带完整溯源：来源会话（sessionUid/标题）、轮次锚（turnKey）、
+        类型/主题/置信度、蒸馏模型与时间；并带记忆索引侧的定位与分值
+        （unit_id / value / manual_value）——面板 ⭐ 加权与 👍👎 反馈即
+        用 unit_id 定位（unit:<id> 是 resolve_unit_id 的稳定引用）。
+
+        未投影的归档条目（merged/duplicate 等）unit_id 为 null，面板据此
+        禁用加权（该条不在召回面上）。
+        """
+        import sqlite3 as _sq
+
+        from agentmemhub import rag_bridge
+        from agentmemhub.distill import DISTILLED_SRC_PREFIX
+        st = rag_bridge.settings()
+        # 跨库：蒸馏记忆/手动记忆在索引库，会话（sessionUid/标题）在采集库。
+        # 采集库用本应用持有的 store（与面板各端点同源，勿用 rag 配置的路径）
+        idx = _sq.connect(f"file:{Path(st.index_db).as_posix()}?mode=ro", uri=True)
+        idx.row_factory = _sq.Row
+        src = _sq.connect(f"file:{Path(store.db_path).as_posix()}?mode=ro", uri=True)
+        src.row_factory = _sq.Row
+        try:
+            # 采集库资产：source/id → (session_uid, title)
+            conv_meta = {r["k"]: (r["uid"], r["t"]) for r in src.execute(
+                "SELECT source || '/' || id AS k, session_uid AS uid, title AS t"
+                " FROM conversations")}
+
+            # 「来源会话」列排序需按会话标题（在采集库）→ ATTACH 采集库只读。
+            # 失败（文件锁/路径异常）则降级：标题由 Python 侧兜底、该列不支持排序
+            attached = True
+            try:
+                idx.execute("ATTACH DATABASE ? AS srcdb",
+                            (f"file:{Path(store.db_path).as_posix()}?mode=ro",))
+            except Exception:
+                attached = False
+
+            # 投影锚：units.src_id = 'dst_' || content_hash（distill 常量，
+            # 非用户输入，f-string 插值安全）；未投影条目 LEFT JOIN 得 NULL
+            _p = DISTILLED_SRC_PREFIX
+            conv_d = (" LEFT JOIN srcdb.conversations c"
+                      " ON c.source = m.source AND c.id = m.conversation_id"
+                      if attached else "")
+            conv_m = (" LEFT JOIN srcdb.conversations c"
+                      " ON c.source = u.source AND c.id = u.conversation_id"
+                      if attached else "")
+            title_col = " c.title AS conversation_title" if attached \
+                else " NULL AS conversation_title"
+            distill_sel = (
+                "SELECT 'distilled' AS origin, m.id, m.source, m.conversation_id,"
+                " m.type, m.topic, m.content, m.confidence, m.status, m.model,"
+                " m.created_at, m.turn_key, m.dedup_of,"
+                " u.id AS unit_id, v.value AS value,"
+                " v.manual_value AS manual_value," + title_col
+                + " FROM distilled_memories m"
+                f" LEFT JOIN units u ON u.src_id = ('{_p}' || m.content_hash)"
+                " LEFT JOIN unit_values v ON v.unit_id = u.id" + conv_d)
+            manual_sel = (
+                "SELECT 'manual' AS origin, u.id, u.source, u.conversation_id,"
+                " 'manual' AS type, NULL AS topic, u.text AS content,"
+                " NULL AS confidence, 'new' AS status, NULL AS model,"
+                " u.time AS created_at, NULL AS turn_key, NULL AS dedup_of,"
+                " u.id AS unit_id, v.value AS value,"
+                " v.manual_value AS manual_value," + title_col
+                + " FROM units u LEFT JOIN unit_values v ON v.unit_id = u.id"
+                + conv_m + " WHERE u.source='memory'")
+
+            where, args = [], []
+            srcs = [x.strip() for x in (source or "").split(",") if x.strip()]
+            if srcs:
+                where.append(f"t.source IN ({','.join('?' * len(srcs))})")
+                args += srcs
+            types = [x.strip() for x in (type or "").split(",") if x.strip()]
+            if types:
+                where.append(f"t.type IN ({','.join('?' * len(types))})")
+                args += types
+            if status == "active":
+                where.append("t.status IN ('new','similar')")
+            elif status and status != "all":
+                sts = [x.strip() for x in status.split(",") if x.strip()]
+                if sts:
+                    where.append(f"t.status IN ({','.join('?' * len(sts))})")
+                    args += sts
+            confs = [x.strip() for x in (conf or "").split(",") if x.strip()]
+            if confs:
+                where.append(f"t.confidence IN ({','.join('?' * len(confs))})")
+                args += confs
+            if conversationId:
+                where.append("t.conversation_id=?")
+                args.append(conversationId)
+            if sessionUid is not None:
+                # 全局会话 uid → (source, conversation_id) 集合（采集库反查）
+                pair_keys = [k for k, (uid_, _t) in conv_meta.items()
+                             if uid_ == sessionUid]
+                pairs = [tuple(k.split("/", 1)) for k in pair_keys]
+                if not pairs:
+                    return JSONResponse({"items": [], "total": 0, "page": page,
+                                         "pageSize": page_size, "stats": {}})
+                cond = " OR ".join(["(t.source=? AND t.conversation_id=?)"] * len(pairs))
+                where.append(f"({cond})")
+                args += [x for pr in pairs for x in pr]
+            if (q or "").strip():
+                # ESCAPE 字符用 \（Python 源码 '\\' → SQL 单字符）；like 值已由
+                # 前端原样传入，%/_ 通配按字面处理（报表关键字不做通配语义）
+                where.append("(t.content LIKE ? ESCAPE '\\' OR"
+                             " IFNULL(t.topic,'') LIKE ? ESCAPE '\\')")
+                like = f"%{(q or '').strip()}%"
+                args += [like, like]
+            wsql = (" WHERE " + " AND ".join(where)) if where else ""
+
+            union = f"({distill_sel} UNION ALL {manual_sel})"
+            titles = conv_meta
+            # 排序字段 → SQL 表达式（表头点击列；confidence/status 用语义权重，
+            # 而非字典序）。NULL 一律沉底；次级键保持稳定分页。
+            _SORT_EXPR = {
+                "time": "t.created_at",
+                "value": "COALESCE(t.manual_value, t.value)",
+                "type": "t.type",
+                "source": "t.source",
+                "confidence": "CASE t.confidence WHEN 'high' THEN 0"
+                              " WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END",
+                "status": "CASE t.status WHEN 'new' THEN 0 WHEN 'similar' THEN 1"
+                          " WHEN 'merged' THEN 2 WHEN 'duplicate' THEN 3 ELSE 4 END",
+                "conversation": "COALESCE(t.conversation_title, t.conversation_id)",
+            }
+            key = sort if sort in _SORT_EXPR else "time"
+            if key == "conversation" and not attached:
+                key = "time"          # 采集库未附上：该列无法按标题排，回退时间
+            direction = "ASC" if (order or "").lower() == "asc" else "DESC"
+            nulls = ("(t.value IS NULL AND t.manual_value IS NULL) ASC, "
+                     if key == "value" else "")
+            order = f"{nulls}{_SORT_EXPR[key]} {direction}, t.origin, t.id"
+            total = idx.execute(
+                f"SELECT COUNT(*) FROM {union} t{wsql}", args).fetchone()[0]
+            items = [dict(r) for r in idx.execute(
+                f"SELECT * FROM {union} t{wsql} ORDER BY {order}"
+                " LIMIT ? OFFSET ?",
+                args + [page_size, (page - 1) * page_size]).fetchall()]
+            stats = {
+                "byType": dict(idx.execute(
+                    f"SELECT t.type, COUNT(*) FROM {union} t{wsql}"
+                    " GROUP BY t.type", args).fetchall()),
+                "byStatus": dict(idx.execute(
+                    f"SELECT t.status, COUNT(*) FROM {union} t{wsql}"
+                    " GROUP BY t.status", args).fetchall()),
+                "bySource": dict(idx.execute(
+                    f"SELECT t.source, COUNT(*) FROM {union} t{wsql}"
+                    " GROUP BY t.source ORDER BY COUNT(*) DESC", args).fetchall()),
+            }
+            # 反馈状态（面板 👍/👎 高亮）与"有无真实会话"标记：
+            # MCP 写入的原子记忆 conversation_id='mcp'（占位、无采集库会话），
+            # 前端不得渲染成可点会话链接（否则跳转 404）
+            uids = [it["unit_id"] for it in items
+                    if it.get("unit_id") is not None]
+            fb_map: dict = {}
+            if uids:
+                marks = ",".join("?" * len(uids))
+                fb_map = {r[0]: r[1] for r in idx.execute(
+                    "SELECT unit_id, polarity FROM unit_feedback"
+                    " WHERE channel='explicit' AND id IN ("
+                    "  SELECT MAX(id) FROM unit_feedback WHERE channel='explicit'"
+                    f"   AND unit_id IN ({marks}) GROUP BY unit_id)", uids)}
+            for it in items:
+                key = f"{it['source']}/{it['conversation_id']}"
+                uid_, title_ = titles.get(key, (None, ""))
+                it["session_uid"] = uid_
+                it["conversation_title"] = it.get("conversation_title") or title_
+                it["has_conversation"] = key in titles
+                it["fb_polarity"] = fb_map.get(it.get("unit_id"))
+        finally:
+            idx.close()
+            src.close()
+        return JSONResponse({"items": items, "total": total, "page": page,
+                             "pageSize": page_size, "stats": stats})
+
+    @app.post("/api/memos/weight")
+    def api_memos_weight(traceId: str = Query(...),
+                         value: float | None = Query(default=None,
+                                                     ge=0.0, le=1.0)):
+        """手动加权：用户锁定某条记忆的价值分（0~1；不传=清除手动设定）。
+
+        锁定后的分**优先于自动聚合值，且不随时间衰减**——用户意志优先于
+        新陈代谢。value 与记忆来源初始分（Agent 主动写入 0.6 / 蒸馏 0.3）
+        的关系：初始分只是起点，手动加权是用户对起点的覆盖。
+        """
+        import sqlite3 as _sq
+
+        from agentmemhub import logs, memos_daemon
+        from agentmemhub.rag import memstore
+        from agentmemhub import rag_bridge
+        if memos_daemon.auth_state() is None:
+            raise HTTPException(
+                status_code=503,
+                detail="记忆索引不可用（检查 database/session_rag.db 与 models/）")
+        st = rag_bridge.settings()
+        conn = _sq.connect(str(st.index_db), timeout=15.0)
+        try:
+            uid = rag_bridge.resolve_unit_id(conn, traceId)
+            if uid is None:
+                raise HTTPException(status_code=404, detail=f"记忆不存在：{traceId}")
+            r = memstore.set_manual_value(conn, uid, value)
+        finally:
+            conn.close()
+        logs.record(f"记忆加权：trace={traceId} → "
+                    + ("清除手动设定" if value is None else f"锁定 {value}"))
+        return JSONResponse({"ok": True, "traceId": traceId, **r})
 
     @app.get("/api/memos/traces")
     def api_memos_traces(limit: int = Query(default=8, ge=1, le=50),
@@ -799,7 +1054,8 @@ def create_app(db_path: Path | None = None):
             {"id": t.get("id"), "ts": t.get("ts"),
              "userText": (t.get("userText") or "")[:200],
              "agentText": (t.get("agentText") or "")[:200],
-             "value": t.get("value"), "episodeId": t.get("episodeId")}
+             "value": t.get("value"), "episodeId": t.get("episodeId"),
+             "manualValue": t.get("manualValue")}
             for t in (res.get("traces") or [])
         ]
         return JSONResponse({"total": res.get("total"), "offset": offset,
@@ -882,6 +1138,29 @@ def create_app(db_path: Path | None = None):
         name = f"批量排除记忆（{len(body.items)} 个会话）"
         job = tasks.submit(name, _logged_task(
             name, _run_exclude_fn(body.items, body.turn_key)))
+        if job is None:
+            raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
+        logs.record(f"提交任务：{name}（id={job['id']}）")
+        return JSONResponse({"job": job})
+
+    @app.post("/api/admin/distill")
+    def api_admin_distill(source: str = Query(default=""),
+                          limit: int = Query(default=0, ge=0),
+                          dryRun: bool = Query(default=False)):
+        """记忆蒸馏：LLM 把原始会话提炼为结构化记忆（后台任务，实时进度）。
+
+        需 llm 段已配置；幂等（重跑跳过已完成切片），失败切片不登记、重跑可补。
+        """
+        from agentmemhub import logs, memos_daemon
+        from agentmemhub.web import tasks
+        if memos_daemon.auth_state() is None:
+            raise HTTPException(
+                status_code=503,
+                detail="记忆索引不可用（检查 database/session_rag.db 与 models/）")
+        name = ("记忆蒸馏" + ("（预览）" if dryRun else "")
+                + (f"（{source}）" if source else ""))
+        job = tasks.submit(name, _logged_task(
+            name, _run_distill_fn(source, limit, dryRun)))
         if job is None:
             raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
         logs.record(f"提交任务：{name}（id={job['id']}）")

@@ -1,7 +1,8 @@
 """AgentMemHub 交互式控制台（新用户入口）。
 
 零依赖交互菜单：环境检测 → 提取入库 → 关键字检索 → 网页看板 → 写入记忆 → 状态总览。
-复用 cli.py 的共享 helper（run_ingest / run_search_text / _vectorize_stage），不含业务逻辑。
+复用 cli.py 的共享 helper（run_ingest / run_search_text / _vectorize_stage），不含业务逻辑；
+action 收尾日志统一走本模块 _action_log（延迟导入 cli._cli_log，未导入即静默）。
 
 去耦约定：
 - 不出现任何绝对路径：数据位置走 Store 默认解析（HOME / 环境变量），
@@ -29,6 +30,19 @@ def _out(s: str) -> None:
     except Exception:
         pass
     print(s)
+
+
+def _action_log(msg: str) -> None:
+    """控制台操作落盘（logs/cli.log，复用 cli 实现，延迟导入防循环依赖）。
+
+    日志绝不影响交互：导入失败/写盘失败都静默跳过（cli._cli_log 内部亦已
+    兜异常）。各 action 必须经此记录，不得直接裸调 cli._cli_log。
+    """
+    try:
+        from agentmemhub.cli import _cli_log
+    except Exception:
+        return
+    _cli_log(msg)
 
 
 def dashboard_port() -> int:
@@ -110,14 +124,17 @@ MENU = """
   ── 数据流程（按顺序操作）────────────────────────
   [1] 提取所有 Agent 会话入库（可选单个 Agent）
   [2] 清洗数据（删除系统注入事件，先预览后确认）
-  [3] 写入记忆（向量化采集库会话到记忆索引）
-  [4] 自动评分（LLM 三轴批量补价值分，跳过已评）
+  [3] 蒸馏记忆（LLM 提炼原始会话为结构化记忆）
+  [4] 写入记忆（向量化采集库会话到记忆索引）
   ── 日常查询与看板 ──────────────────────────────
   [5] 检索关键字（跨 Agent 全文搜索）
   [6] 启动网页看板（后台运行，菜单不阻塞）
-  [7] 停止网页看板（结束占用看板端口的服务进程）
+  [7] 停止网页看板（结束看板服务进程，不限端口）
   [8] 状态总览（数据源 / 本地库 / 记忆索引）
   [0] 退出
+
+  提示：自动评分（LLM 三轴补价值分）入口已隐藏——蒸馏的置信度标注与
+  面板 👍/👎 已覆盖质量把关；确需批量评分用 CLI：python -m agentmemhub score
 """
 
 
@@ -159,10 +176,19 @@ def action_search() -> None:
 
 
 def action_dashboard() -> None:
+    # 先按进程特征找已有看板：端口以进程实际启动参数为准（面板可被手动
+    # serve --port XXXX 拉起，只按配置端口探测会「找不到、提示错 URL」）。
+    procs = _find_serve_processes()
+    if procs:
+        p = procs[0]
+        _out(f"  看板已在运行（PID {p['pid']}）→ http://127.0.0.1:{p['port']}/")
+        if len(procs) > 1:
+            _out(f"  ⚠ 另有 {len(procs) - 1} 个看板进程并存，可用 [7] 一并停止")
+        return
     port = dashboard_port()
     if _port_listening(port):
-        _out(f"  看板已在运行（端口 {port} 被占用，跳过重复启动）")
-        _out(f"  → 直接在浏览器打开 http://127.0.0.1:{port}/")
+        _out(f"  端口 {port} 已被其他程序占用，看板无法启动；"
+             f"可换端口启动：python -m agentmemhub serve --port <端口>")
         return
     # 独立子进程跑 serve：菜单不阻塞；同样继承当前解释器（uv venv 生效）
     proc = subprocess.Popen(
@@ -171,7 +197,8 @@ def action_dashboard() -> None:
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
     _out(f"  看板启动中（PID {proc.pid}）→ http://127.0.0.1:{port}/")
-    _out("  （在浏览器打开上面的地址；停止看板可关闭该进程或按 Ctrl+C 退出控制台）")
+    _out("  （在浏览器打开上面的地址；停止看板可用 [7] 或关闭该进程）")
+    _action_log(f"看板启动（控制台）→ PID {proc.pid} 端口 {port}")
 
 
 def _port_listening(port: int) -> bool:
@@ -181,52 +208,119 @@ def _port_listening(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+_PS_FIND_SERVE = ("Get-CimInstance Win32_Process | "
+                  "Where-Object { ($_.Name -like 'python*' -or "
+                  "$_.Name -like 'agentmemhub*') -and "
+                  "$_.CommandLine -match 'agentmemhub(\\.exe)?\\s+serve' } | "
+                  "Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress")
+
+
+def _parse_serve_port(cmdline: str) -> int:
+    """从 serve 命令行解析端口（--port 8099 / --port=8099），缺省回配置端口。"""
+    import re
+    m = re.search(r"--port[= ](\d+)", cmdline or "")
+    return int(m.group(1)) if m else dashboard_port()
+
+
+def _parse_ps_processes(raw: str) -> list[dict]:
+    """解析 PowerShell ConvertTo-Json 输出（单结果时是对象而非数组）。"""
+    import json
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return []
+    items = data if isinstance(data, list) else [data]
+    out = []
+    for it in items:
+        try:
+            out.append({"pid": int(it["ProcessId"]),
+                        "port": _parse_serve_port(it.get("CommandLine") or "")})
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _find_serve_processes() -> list[dict]:
+    """按命令行特征找看板进程（python -m agentmemhub serve），返回 [{pid, port}]。
+
+    端口以进程实际启动参数为准：面板可能被手动以任意端口拉起，只认配置
+    端口会导致 [7] 停不掉、提示的 URL 与实际不符。非 Windows 返回空，
+    由调用方回退端口探测。
+    """
+    if os.name != "nt":
+        return []
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", _PS_FIND_SERVE],
+                             capture_output=True, text=True, errors="replace",
+                             timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return _parse_ps_processes(out.stdout)
+
+
 def _dashboard_pid(port: int) -> Optional[int]:
-    """返回监听端口进程的 PID（Windows netstat；其他平台用 psutil 简化探测）。"""
+    """返回监听端口的进程 PID（Windows netstat；其他平台不支持返回 None）。
+
+    按列解析而非子串匹配：":8086" 子串会误命中 ":80861" 这类端口。
+    """
     if os.name == "nt":
         out = subprocess.run(["netstat", "-ano"], capture_output=True,
-                             text=True).stdout
+                             text=True, errors="replace").stdout
         for line in out.splitlines():
-            if "LISTENING" in line and f":{port}" in line:
-                parts = line.split()
-                if parts:
-                    try:
-                        return int(parts[-1])
-                    except ValueError:
-                        return None
+            parts = line.split()
+            if len(parts) >= 5 and parts[3] == "LISTENING" \
+                    and parts[1].rsplit(":", 1)[-1] == str(port):
+                try:
+                    return int(parts[-1])
+                except ValueError:
+                    return None
     return None
 
 
 def action_dashboard_stop() -> None:
-    """停止网页看板：结束占用看板端口的服务进程（确认后执行）。"""
+    """停止网页看板：按进程特征找 serve 进程结束之（确认后执行）。"""
     import time as _t
-    port = dashboard_port()
-    if not _port_listening(port):
-        _out(f"  看板未在运行（端口 {port} 空闲）")
-        return
-    pid = _dashboard_pid(port)
-    if pid is None:
-        _out(f"  端口 {port} 被占用但未能解析进程 PID，请手动关闭占用进程")
-        return
-    if not _confirm(f"  将停止看板进程（PID {pid}，端口 {port}）？"):
+    procs = _find_serve_processes()
+    if not procs:
+        # 兜底：进程特征没命中（非 Windows / 命令行变形）再按配置端口找
+        port = dashboard_port()
+        if not _port_listening(port):
+            _out("  看板未在运行")
+            return
+        pid = _dashboard_pid(port)
+        if pid is None:
+            _out(f"  端口 {port} 被占用但未能解析进程 PID，请手动关闭占用进程")
+            return
+        procs = [{"pid": pid, "port": port}]
+    where = "、".join(f"PID {p['pid']}（端口 {p['port']}）" for p in procs)
+    if not _confirm(f"  将停止看板进程 {where}？"):
         _out("  （已取消）")
         return
-    if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(pid), "/F"],
-                       capture_output=True, text=True)
-    else:
-        import signal as _sig
-        try:
-            os.kill(pid, _sig.SIGTERM)
-        except OSError:
-            _out("  ✗ 进程不存在（可能已退出）")
-            return
+    stopped = []
+    for p in procs:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(p["pid"]), "/F"],
+                           capture_output=True, text=True, errors="replace")
+        else:
+            import signal as _sig
+            try:
+                os.kill(p["pid"], _sig.SIGTERM)
+            except OSError:
+                continue
+        stopped.append(p)
+    if not stopped:
+        _out("  ✗ 未能结束任何看板进程（可能已退出）")
+        return
     for _ in range(20):                      # 等端口释放（最多 10 秒）
-        if not _port_listening(port):
-            _out(f"  ✓ 网页看板已停止（PID {pid}，端口 {port} 已释放）")
+        if all(not _port_listening(p["port"]) for p in stopped):
+            _out(f"  ✓ 网页看板已停止（{where}，端口已释放）")
+            _action_log(f"看板停止（控制台）→ {where}")
             return
         _t.sleep(0.5)
-    _out(f"  ⚠ 端口 {port} 仍在占用（进程可能未完全退出）")
+    _out(f"  ⚠ 看板进程可能未完全退出，可重试 [7] 或手动结束 {where}")
 
 
 def action_clean() -> None:
@@ -247,15 +341,17 @@ def action_clean() -> None:
             return
         deleted, convs = store.delete_system_events()
         _out(f"  ✓ 已删除 {deleted} 条注入事件（{convs} 个会话受影响）")
-        from agentmemhub.cli import _cli_log
-        _cli_log(f"clean（控制台）→ 删除 {deleted} 条")
+        _action_log(f"clean（控制台）→ 删除 {deleted} 条")
     finally:
         store.close()
 
 
 def action_score() -> None:
-    """自动评分：LLM 三轴评估记忆并写入价值分（增量优先，4 worker 并发）。"""
-    from agentmemhub.cli import _cli_log
+    """自动评分：LLM 三轴评估记忆并写入价值分（增量优先，4 worker 并发）。
+
+    **入口已从菜单隐藏**（蒸馏置信度 + 面板 👍/👎 已覆盖质量把关，且批量
+    评分实测多为 neutral/全跳过）；函数保留供 CLI `score` 与将来恢复使用。
+    """
     from agentmemhub.scoring import run_score_incremental
     limit_raw = _ask("  最多评分条数（回车=全部）> ", "0")
     try:
@@ -273,7 +369,32 @@ def action_score() -> None:
          f"positive={r['positive']} neutral={r['neutral']} "
          f"negative={r['negative']} errors={r['errors']}"
          + ("（dry-run）" if r["dryRun"] else ""))
-    _cli_log(f"score（控制台）→ {r}")
+    _action_log(f"score（控制台）→ {r}")
+
+
+def action_distill() -> None:
+    """蒸馏记忆：LLM 把原始会话提炼为结构化记忆（幂等，可反复执行）。"""
+    from agentmemhub import rag_bridge
+    from agentmemhub.distill import run_distill
+    if not _confirm("  调用 LLM 蒸馏原始会话为结构化记忆？"
+                    "（幂等：已蒸馏且内容未变的切片自动跳过）"):
+        _out("  （已取消）")
+        return
+    _out("  蒸馏中（可能耗时较长）…")
+    try:
+        r = run_distill(rag_bridge.settings(), on_progress=lambda m: _out("  " + m))
+    except Exception as e:
+        _out(f"  ✗ 蒸馏失败: {e}")
+        return
+    if r.get("error"):
+        _out(f"  ✗ 蒸馏未执行：{r['error']}")
+        return
+    _out(f"  ✓ 会话 {r['conversations']} · 切片 {r['slices']}"
+         f"（跳过 {r['skipped_done']} / 失败 {r['failed']}）")
+    _out(f"    产出记忆 {r['memories_new']} 条 · 合并 {r['merged']} 会话 · "
+         f"投影 {r['projected']}（判重 {r['duplicate']}）")
+    _out(f"    耗时 {r['seconds']}s · 模型 {r['model']}")
+    _action_log(f"蒸馏记忆（控制台）→ {r}")
 
 
 def action_memos() -> None:
@@ -290,7 +411,7 @@ def action_memos() -> None:
         if r.get("background"):
             _out(f"    提示：{r.get('background_hint', '')}")
             _out(f"    后台继续：{', '.join(r['background'])}")
-    _cli_log(f"写入记忆（控制台）→ {r.get('embedded')} 条")
+    _action_log(f"写入记忆（控制台）→ {r.get('embedded')} 条")
 
 
 def action_status() -> None:
@@ -301,8 +422,9 @@ def action_status() -> None:
 ACTIONS = {
     "1": ("提取会话入库", action_ingest),
     "2": ("清洗数据", action_clean),
-    "3": ("写入记忆", action_memos),
-    "4": ("自动评分", action_score),
+    "3": ("蒸馏记忆", action_distill),
+    "4": ("写入记忆", action_memos),
+    # 「自动评分」入口已隐藏（action_score 保留，供 CLI score 与将来恢复）
     "5": ("检索关键字", action_search),
     "6": ("启动网页看板", action_dashboard),
     "7": ("停止网页看板", action_dashboard_stop),

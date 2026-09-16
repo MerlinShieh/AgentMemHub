@@ -1,4 +1,4 @@
-# ==== 不纳入版本库的内容 ====
+﻿# ==== 不纳入版本库的内容 ====
 # 用户数据库（笔记/收藏/项目归类/摘要，体积大且持续变化）
 hub_notes.sqlite
 hub_notes.sqlite-wal
@@ -22,6 +22,9 @@ UserData/
 
 # 项目内默认数据目录（真实会话数据，严禁入库）
 database/
+
+# 蒸馏实验沙箱（生产数据快照副本，体积大且含真实会话，严禁入库）
+database_distill_test/
 
 # 旧增量分支沙箱目录（已废弃，可删）
 temp_path/
@@ -76,3 +79,11 @@ node_modules/
 
 # E2E 临时测试库
 _e2e_tmp/
+
+# 配置备份（含时间戳的 .bak 一律不入库；本机配置本体已由 agentmemhub.yaml 规则覆盖）
+agentmemhub.yaml.bak*
+*.bak-*
+
+# 私有评测集与基线（含个人会话主题，不入库；仓库只带 queries.example.yaml）
+eval/queries.yaml
+eval/*.json
