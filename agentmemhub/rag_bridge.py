@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import sqlite3
 import time
 from typing import Any, Optional
@@ -295,12 +296,19 @@ def import_bundle(traces: list[dict], *, embedder=None) -> dict:
                 for i, d in enumerate(pend_dtos):
                     seq += 1
                     ts = int((d.get("ts") or time.time() * 1000) // 1000)
+                    # 标签：MCP memory_save 的可选 tags → 存 JSON 数组文本；其它来源为 NULL。
+                    # 只接受序列，避免 bundle 里出现任意类型时写出脏数据。
+                    raw_tags = d.get("tags")
+                    tags_json = None
+                    if isinstance(raw_tags, (list, tuple)) and raw_tags:
+                        tags_json = json.dumps([str(x) for x in raw_tags],
+                                               ensure_ascii=False)
                     cur = conn.execute(
                         "INSERT INTO units(source, conversation_id, seq, role,"
-                        " turn_key, src_id, time, title, text, chars, legacy_id)"
-                        " VALUES('memory','mcp',?,'user','mcp',?,?,?,?,?,?)",
+                        " turn_key, src_id, time, title, text, chars, legacy_id, tags)"
+                        " VALUES('memory','mcp',?,'user','mcp',?,?,?,?,?,?,?)",
                         (seq, content_anchor(d["_text"]), ts,
-                         "记忆", d["_text"], len(d["_text"]), d["id"]))
+                         "记忆", d["_text"], len(d["_text"]), d["id"], tags_json))
                     for s, vecs in multi:
                         conn.execute(
                             f"INSERT OR REPLACE INTO {s.vec_table}"

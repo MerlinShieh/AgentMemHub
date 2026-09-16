@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 
 import pytest
@@ -234,6 +235,24 @@ def test_search_hits_include_conversation_location(rag_env):
     res2 = rag_bridge.search("h", "定位测试原子记忆", k=5)
     atomic = [h for h in res2["hits"] if h["atomic"]]
     assert atomic, "原子记忆须标记 atomic=True（无对应会话）"
+
+
+def test_import_bundle_stores_tags(rag_env):
+    """MCP memory_save 的 tags 落进 units.tags（JSON 数组文本）；缺省为 NULL。
+
+    tags 是纯透传字段（引擎不解释语义），供面板筛选与溯源使用。
+    """
+    rag_bridge.import_bundle([
+        {"id": "mcp_tags_a", "userText": "带标签的原子记忆", "ts": 1,
+         "tags": ["dsh", "mcp"]},
+        {"id": "mcp_tags_b", "userText": "无标签的原子记忆", "ts": 2},
+    ])
+    conn = rag_bridge._conn()
+    rows = dict(conn.execute(
+        "SELECT legacy_id, tags FROM units"
+        " WHERE legacy_id IN ('mcp_tags_a','mcp_tags_b')").fetchall())
+    assert json.loads(rows["mcp_tags_a"]) == ["dsh", "mcp"]
+    assert rows["mcp_tags_b"] is None, "未传 tags 应保持 NULL，而不是空字符串"
 
 
 def test_safe_cutoff_hits_rules():

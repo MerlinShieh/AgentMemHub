@@ -171,6 +171,21 @@ def _save(args: dict) -> str:
     content = str(args.get("content", "")).strip()
     if not content:
         raise _ToolError("memory_save 需要 content 参数")
+    # 初始价值：Agent 用当前推理顺手给一个档位（可选），省掉为写入再外挂评分模型。
+    # 用枚举而非连续分值——项目实证：Agent/LLM 对枚举的遵循率明显高于数字刻度。
+    # 不传 = normal（= BASE_VALUE_AGENT_WRITE），与历史行为完全一致。
+    # 引擎侧「存值不判值」，这里只是把策略层的判断翻译成起点值。
+    from agentmemhub.rag.memstore import AGENT_IMPORTANCE_VALUES
+    importance = str(args.get("importance") or "normal").strip().lower()
+    if importance not in AGENT_IMPORTANCE_VALUES:
+        raise _ToolError("importance 必须是 "
+                         + " | ".join(AGENT_IMPORTANCE_VALUES))
+    value = AGENT_IMPORTANCE_VALUES[importance]
+    # 可选标签：只做透传（引擎不解释其语义），供面板筛选与溯源使用。
+    # 非序列或空串一律忽略，避免写入脏数据。
+    raw_tags = args.get("tags")
+    tags = ([str(t).strip() for t in raw_tags if str(t).strip()]
+            if isinstance(raw_tags, (list, tuple)) else [])
     ts = int(time.time() * 1000)
     tid = _trace_id(content, ts)
     bundle = {
@@ -180,7 +195,9 @@ def _save(args: dict) -> str:
             "ts": ts, "turnId": ts,
             "userText": content, "agentText": "",
             "summary": content[:200],
-            "value": 0.5, "alpha": 0.3, "priority": 0.5,
+            "value": value, "alpha": 0.3,
+            "priority": value,
+            "tags": tags,
             "toolCalls": [], "agentThinking": None,
         }],
         "policies": [], "worldModels": [], "skills": [],
@@ -298,6 +315,25 @@ _TOOLS: list[dict] = [
             "type": "object",
             "properties": {
                 "content": {"type": "string", "description": "要保存的记忆内容（一句话结论或事实，可含少量上下文）"},
+                "importance": {
+                    "type": "string",
+                    "enum": ["high", "normal", "low"],
+                    "description": (
+                        "重要度档位（可选，不传=normal），决定记忆的初始价值分。"
+                        "high=技术沉淀/踩坑解法/架构决策/关键配置变更，或用户明确要求记住的；"
+                        "normal=一般结论；low=临时性、局部细节。"
+                        "请直接用自己的推理判断即可，无需外挂评分模型。"
+                        "注意这只是起点，后续仍由真实使用（召回/反馈）演化。"
+                    ),
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "可选标签（如项目名、领域、技术栈），存库供面板筛选与溯源。"
+                        "引擎不解释标签语义，纯透传。"
+                    ),
+                },
             },
             "required": ["content"],
         },

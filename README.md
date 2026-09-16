@@ -1,4 +1,4 @@
-﻿# AgentMemHub
+# AgentMemHub
 
 统一提取你电脑上所有 AI Agent Harness 的对话历史 → 归一为**全量事件流**（含工具链、思维链、Shell 执行、代码补丁）→ 本地 SQLite 存储可搜索 → **记忆蒸馏**（LLM 离线提炼为结构化记忆）→ **内置记忆引擎 `agentmemhub.rag`**（向量化 + 混合召回 + 价值评分，进程内直调、无独立服务）→ 面板双标签页浏览（统一会话 / 记忆报表）。
 
@@ -240,7 +240,7 @@ python -m agentmemhub sync
 
 **记忆索引库**（`database/session_rag.db`，由内置引擎管理）：
 
-- `units` — 记忆单元（消息级文本，模型无关；含 `turn_key` 轮次锚与 `legacy_id` 旧系统别名）
+- `units` — 记忆单元（消息级文本，模型无关；含 `turn_key` 轮次锚、`legacy_id` 旧系统别名与 `tags` 标签）
 - `vec_<model>` — 每模型独立的向量表（sqlite-vec，维度建表时固定）
 - `units_fts` — trigram 全文索引（中文友好，与标题列联合）
 - `unit_values` / `unit_feedback` — 价值评分与反馈明细（引擎存值，打分策略在 Hub 侧）
@@ -398,7 +398,7 @@ Claude Code 等支持 MCP 的 Agent harness 上——模型在会话进行中即
 | `memory_search(query, topK)` | 语义检索历史记忆（三路混合召回），返回命中条目 + 注入上下文 |
 | `memory_recent(limit)` | 最近写入的记忆时间线，快速了解近期积累 |
 | `memory_stats()` | 索引就绪状态 / 记忆总量 / 嵌入模型与 LLM 评分可用性 |
-| `memory_save(content)` | 写一条记忆（即时入库并补向量，写后验证 imported，失败明确报错不伪装）|
+| `memory_save(content, importance?, tags?)` | 写一条记忆。`importance` 为可选档位（`high`/`normal`/`low` → 初始价值 0.8/0.6/0.4，**不传即 normal**），由 Agent 用当前推理直接判断，**无需外挂评分模型**；`tags` 为可选标签数组（面板筛选/溯源用，引擎纯透传）。即时入库并补向量，写后验证 imported，失败明确报错不伪装 |
 | `memory_score(trace_id, polarity)` | 按需对任意一条记忆打分（反馈 → 引擎即时重算 value/priority；**写后即评流程已废除**，仅用户明确要求加权时使用）|
 
 ```bash

@@ -68,6 +68,17 @@ def content_anchor(content: str) -> str:
 BASE_VALUE_AGENT_WRITE = 0.6    # Agent 经 MCP memory_save 主动写入（有明确意图）
 BASE_VALUE_DISTILLED = 0.3      # 离线批量蒸馏（默认中等，靠使用升降）
 
+#: memory_save 的可选重要度档位 → 初始价值。
+#: 为什么用枚举而不是连续分值：Agent/LLM 对**枚举**的遵循率明显高于数字刻度
+#: （与 distill.CONFIDENCES 同一实证结论），且三档已足够表达意图。
+#: 不传 → normal，与历史行为一致（等于 BASE_VALUE_AGENT_WRITE）。
+#: 注意这仍只是**起点**：写高不代表终身高分，后续照旧由反馈/加权演化。
+AGENT_IMPORTANCE_VALUES = {
+    "high": 0.8,                        # 技术沉淀 / 踩坑解法 / 用户明确要求记住
+    "normal": BASE_VALUE_AGENT_WRITE,   # 默认：一般结论
+    "low": 0.4,                         # 临时性、局部细节
+}
+
 
 def ensure_base_value(conn: sqlite3.Connection, unit_id: int, base: float) -> None:
     """给新记忆写来源初始价值分（已有任何记录则不覆盖，保留演化结果）。"""

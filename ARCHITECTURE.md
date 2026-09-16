@@ -1,4 +1,4 @@
-﻿# AgentMemHub 架构
+# AgentMemHub 架构
 
 ## 定位
 
@@ -105,7 +105,7 @@ AgentMemHub/
   `events`（PK `(source, conversation_id, seq)`，含 raw_json）、`events_fts`（FTS5 + LIKE 兜底）、
   `memory_exclusions`（不写入记忆的会话/轮次）、`deleted_conversations`（删除墓碑防回灌）
 - **索引库**（`database/session_rag.db`，可由采集库重建）：
-  `units`（原子记忆 + 蒸馏投影 `role='distilled'`、`src_id='dst_<hash>'`）、
+  `units`（原子记忆 + 蒸馏投影 `role='distilled'`、`src_id='dst_<hash>'`、`tags` 标签）、
   `unit_vectors`（sqlite-vec）、`units_fts`、`unit_values`（`manual_value` ⭐ 锁定）、
   `unit_feedback`、`distilled_memories`（蒸馏终稿）、`distill_hashes`（幂等锚）
 
