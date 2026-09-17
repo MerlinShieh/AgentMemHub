@@ -52,10 +52,11 @@ AgentMemHub/
 │   ├── llm.py                  # OpenAI 兼容 LLM 客户端（重试/截断抢救/代理策略）
 │   ├── sanitize.py             # 脱敏（凭据/PII 扫描与剥离；has_substance 门限）
 │   ├── scoring.py              # LLM 三轴评分（入口已隐藏；与蒸馏共用 llm 段）
-│   ├── mcp_server.py           # MCP 记忆网关（stdio / Streamable HTTP）
+│   ├── mcp_server.py           # MCP 记忆网关（stdio / Streamable HTTP；含调用审计）
 │   ├── memos_daemon.py         # 引擎派发层（backend=rag 走 rag_bridge）
 │   ├── memos.py                # [回退] MemOS bundle 生成/推送
 │   ├── rag_bridge.py           # ★ 引擎接缝：MCP/面板/CLI 的统一调用入口
+│   ├── health.py               # 记忆库一致性巡检（面板健康卡片/CLI/测试共用判据）
 │   ├── rag/                    # ★ 内置记忆引擎（自有代码，可改可测）
 │   │   ├── config.py           #   引擎配置（模型注册/分桶/召回/写入策略）
 │   │   ├── ingest.py           #   摄取：unites 落库 + 向量 + FTS（含 schema/索引自愈）
@@ -73,7 +74,8 @@ AgentMemHub/
 │       └── static/index.html   #   双标签页面板（vendor 离线化）
 ├── models/                     # 嵌入模型（自带 bge-small；更大模型按需下载）
 ├── scripts/                    # fetch_model / sync_llm_from_zcode / sensitive_scan /
-│                               #   export_memories / distill_sandbox / web_verify / e2e
+│                               #   export_memories / distill_sandbox / web_verify /
+│                               #   health_check（记忆库一致性巡检）/ mcp_log（调用审计查询）/ e2e
 ├── docs/                       # 使用示例/蒸馏设计/召回融合/MCP 模板/截图
 ├── database/                   # 采集库 + 索引库（gitignore：真实数据）
 └── README.md / ARCHITECTURE.md / AGENTS.md / SECURITY.md / pyproject.toml
@@ -105,7 +107,8 @@ AgentMemHub/
   `events`（PK `(source, conversation_id, seq)`，含 raw_json）、`events_fts`（FTS5 + LIKE 兜底）、
   `memory_exclusions`（不写入记忆的会话/轮次）、`deleted_conversations`（删除墓碑防回灌）
 - **索引库**（`database/session_rag.db`，可由采集库重建）：
-  `units`（原子记忆 + 蒸馏投影 `role='distilled'`、`src_id='dst_<hash>'`、`tags` 标签）、
+  `units`（原子记忆 + 蒸馏投影 `role='distilled'`、`src_id='dst_<hash>'`、`tags` 标签、
+  `updated_at` 写入/改写时刻——注意 `time` 是**事件时间**，两者语义不同）、
   `unit_vectors`（sqlite-vec）、`units_fts`、`unit_values`（`manual_value` ⭐ 锁定）、
   `unit_feedback`、`distilled_memories`（蒸馏终稿）、`distill_hashes`（幂等锚）
 
@@ -139,6 +142,11 @@ ZCode / OpenCode 共享 `SqliteConversationAdapter`；新增 Agent = 一个 adap
 | S2 合并沉淀 | 同会话多片再合并去重（层级合并，批次化防超上下文） |
 | S3 跨会话去重 | 与既有蒸馏记忆向量近邻三档（new / similar / duplicate） |
 | S4 投影 | 新/相似条目写入 units → 立即可被召回 |
+
+**投影与状态必须一致**：`status` 只决定"要不要投影"，不决定"已有投影是否
+还在"。条目被 S2 归档为 `merged` 时，units 投影由 `save_merged` 即时回收，
+`reclaim_stale_projections` 再幂等兜底扫掉历史遗漏——否则被取代的旧稿会与
+新终稿同台召回（内容相近但不相同）。
 
 幂等键 = 「内容哈希 + 提示词版本」（切片级与合并级各一套 `distill_hashes`）；
 fail-open（失败不登记哈希，重跑自动补）；`PROMPT_VER` 升版自动清旧版产物。

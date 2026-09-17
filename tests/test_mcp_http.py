@@ -1,4 +1,4 @@
-﻿"""MCP Streamable HTTP 传输单元测试（fastapi TestClient 直连，不启真实端口）。"""
+"""MCP Streamable HTTP 传输单元测试（fastapi TestClient 直连，不启真实端口）。"""
 from __future__ import annotations
 
 from unittest import mock
@@ -6,6 +6,7 @@ from unittest import mock
 from fastapi.testclient import TestClient
 
 from agentmemhub import memos_daemon
+from agentmemhub.logs import read_mcp_audit
 from agentmemhub.mcp_server import build_http_app
 
 client = TestClient(build_http_app())
@@ -49,6 +50,19 @@ def test_http_tools_call_offline(_auth):
     res = r.json()["result"]
     assert res["isError"] is True
     assert "记忆引擎未运行" in res["content"][0]["text"]
+
+
+@mock.patch.object(memos_daemon, "auth_state", return_value=None)
+def test_http_tools_call_is_audited(_auth, audit_dir):
+    """HTTP 传输与 stdio 共用 _tools_call，因此同样留痕——审计不挑传输方式。"""
+    _post({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+           "params": {"name": "memory_stats",
+                      "arguments": {"note": "http 路径留痕验证"}}})
+    lines = read_mcp_audit(audit_dir)
+    assert [x["phase"] for x in lines] == ["call", "result"]
+    assert lines[0]["tool"] == "memory_stats"
+    assert lines[0]["args"]["note"] == "http 路径留痕验证"
+    assert lines[1]["ok"] is False        # 引擎离线，但依然留痕
 
 
 @mock.patch.object(memos_daemon, "auth_state", return_value={})

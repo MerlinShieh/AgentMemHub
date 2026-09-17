@@ -126,8 +126,10 @@ def save_memory(
                 " WHERE source='memory' AND conversation_id='mcp'").fetchone()[0]
             cur = conn.execute(
                 "INSERT INTO units(source, conversation_id, seq, role, turn_key,"
-                " src_id, time, title, text, chars) VALUES('memory','mcp',?,?,'mcp',?,?,?,?,?)",
-                (seq, "user", src_id, ts, title or "记忆", text, len(text)))
+                " src_id, time, title, text, chars, updated_at)"
+                " VALUES('memory','mcp',?,?,'mcp',?,?,?,?,?,?)",
+                (seq, "user", src_id, ts, title or "记忆", text, len(text),
+                 int(time.time())))
             conn.execute(
                 f"INSERT INTO {spec.vec_table}(rowid, embedding) VALUES(?,?)",
                 (cur.lastrowid, np.ascontiguousarray(vec, dtype=np.float32).tobytes()))

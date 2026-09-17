@@ -1,9 +1,10 @@
-"""AgentMemHub 统一日志（<data_dir>/logs/，按程序/接口分文件）。
+"""AgentMemHub 统一日志（<程序根>/logs/，按程序/接口分文件）。
 
 结构：
     logs/
     ├── web.log        看板操作/接口（引擎启停、任务提交/结果摘要；内存环形缓冲供面板）
     ├── cli.log        CLI / 控制台操作记录（终端命令与结果摘要）
+    ├── mcp.log        MCP 记忆调用审计（Agent 侧事实流，JSONL 只追加；见 audit_mcp）
     ├── engine.log     MemOS 引擎 daemon 输出（memos_daemon 日志）
     └── tasks/<id>.log 看板后台任务完整输出（逐行、带时间戳）
 """
@@ -95,6 +96,60 @@ def task_log_dir() -> Path:
 
 def task_log_path(job_id: str) -> Path:
     return task_log_dir() / f"{job_id}.log"
+
+
+# ---------------------------------------------------------------------------
+# MCP 调用审计：logs/mcp.log（只追加的事实流，供溯源与查询）
+#
+# 为什么不复用 web.log：web.log 是"看板操作"的展示通道（还进面板内存环形
+# 缓冲），而 MCP 调用是 Agent 侧的事实记录——读者、保留策略都不同。
+# 审计只追加，不采样、不丢弃。
+# ---------------------------------------------------------------------------
+
+def mcp_audit_file() -> Path:
+    return log_dir() / "mcp.log"
+
+
+def audit_mcp(entry: dict) -> None:
+    """追加一条 MCP 调用审计（JSONL）。
+
+    写失败一律静默：审计是旁路，绝不能因为它而让记忆操作本身失败。
+    """
+    try:
+        with _FILE_LOCK:
+            p = mcp_audit_file()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def read_mcp_audit(path: "Path | None" = None, limit: int = 0) -> list[dict]:
+    """读取 MCP 审计原始行（坏行跳过，不让一行损坏拖垮整个查询）。
+
+    path 默认 `logs/mcp.log`，也接受日志**目录**（便于测试传临时目录）。
+    limit>0 时只取末尾 N 行。解析放在生产侧而非各调用方：CLI 查询脚本、面板、
+    测试都要读它，多处各写一份解析迟早漂移。
+    """
+    p = Path(path) if path else mcp_audit_file()
+    if p.is_dir():
+        p = p / "mcp.log"
+    if not p.exists():
+        return []
+    lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+    if limit > 0:
+        lines = lines[-limit:]
+    out: list[dict] = []
+    for ln in lines:
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            out.append(json.loads(ln))
+        except Exception:
+            continue
+    return out
 
 
 def append_task_line(job_id: str, line: str) -> Path:

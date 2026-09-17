@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN" class="light">
 <head>
     <meta charset="UTF-8">
@@ -462,6 +462,30 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       </div>
     </section>
 
+    <!-- 记忆库健康（一致性巡检：三项不变量 + 一键回收滞留投影） -->
+    <section class="px-5 pb-4">
+      <div class="rounded-xl border border-border bg-card p-3.5 shadow-sm">
+        <div class="flex flex-wrap items-center gap-2">
+          <i data-lucide="activity" class="h-4 w-4 text-primary"></i>
+          <span class="text-xs font-medium text-foreground">记忆库健康</span>
+          <span id="healthBadge" class="rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">检测中…</span>
+          <span class="text-[10px] text-muted-foreground">一致性不变量巡检（写入时间覆盖 / 投影一致性 / 索引一致性）</span>
+          <span class="ml-auto flex items-center gap-1.5">
+            <button id="healthRefreshBtn" title="重新采集指标（只读）"
+                    class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
+              <i data-lucide="refresh-cw" class="h-3.5 w-3.5 text-primary"></i>刷新
+            </button>
+            <button id="healthReclaimBtn" title="删除已被合并取代、却仍留在召回面上的旧投影（幂等，可反复执行）"
+                    class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
+              <i data-lucide="trash-2" class="h-3.5 w-3.5 text-primary"></i>回收滞留投影
+            </button>
+          </span>
+        </div>
+        <div id="healthMetrics" class="mt-2.5 grid grid-cols-2 gap-x-5 gap-y-1.5 sm:grid-cols-4"></div>
+        <div id="healthIssues" class="mt-2 hidden space-y-0.5"></div>
+      </div>
+    </section>
+
     <!-- 语义检索（按相关度召回；结果可点开原始会话） -->
     <section class="px-5 pb-4">
       <div class="rounded-xl border border-border bg-card p-3.5 shadow-sm">
@@ -744,7 +768,9 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   function initMemTab(){
     buildMemFilters();                  // 状态下拉 + 来源下拉（含 MCP）+ 类型/置信 chips
     bindMemEvents();                    // 事件绑定 + 索引状态轮询（含按钮置灰）
+    bindHealthEvents();                 // 健康卡片：刷新 / 回收滞留投影
     loadMemories().catch(()=>{});       // 首次加载记忆列表
+    loadHealth().catch(()=>{});         // 首次采集一致性指标
   }
   function renderMemosStatus(s){
     const dot = $('#memosDot'), state = $('#memosState'),
@@ -765,6 +791,75 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       hint.textContent = '记忆索引不可用：检查 database/session_rag.db 与 models/ 是否就绪';
       hint.classList.remove('hidden');
     }
+  }
+  // ---- 记忆库健康（一致性巡检）----
+  // 把"是否正常"变成可断言的不变量，而不是靠肉眼感觉。指标来自 /api/health，
+  // 与 CLI `scripts/health_check.py` 共用 agentmemhub/health.py 的同一套判据，
+  // 避免两处 SQL 各写一遍后悄悄漂移。
+  const escHtml = s => String(s).replace(/[&<>"]/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  function healthMetric(label, value, ok){
+    const tone = ok===false ? 'text-amber-600'
+               : (ok===true ? 'text-emerald-600' : 'text-foreground');
+    return `<div class="flex items-baseline gap-1.5">
+      <span class="text-[10px] text-muted-foreground">${label}</span>
+      <span class="tnum text-xs font-semibold ${tone}">${value}</span>
+    </div>`;
+  }
+  function renderHealth(h){
+    const badge = $('#healthBadge'), issues = h.issues || [];
+    badge.textContent = h.healthy ? '正常' : `${issues.length} 项待处理`;
+    badge.className = 'rounded px-1.5 py-0.5 text-[10px] font-semibold '
+      + (h.healthy ? 'bg-emerald-500/15 text-emerald-600'
+                   : 'bg-amber-500/15 text-amber-600');
+    const orphans = Object.values(h.vec_tables||{})
+      .reduce((a,v)=>a+((v&&v.orphans)||0), 0);
+    $('#healthMetrics').innerHTML = [
+      healthMetric('units 总数', h.units, null),
+      healthMetric('写入时间缺失', h.updated_at_null, h.updated_at_null===0),
+      healthMetric('蒸馏投影', h.projections, null),
+      healthMetric('活跃记忆', h.active_with_projection,
+                   h.projections===h.active_with_projection),
+      healthMetric('滞留投影', h.stale_projections, h.stale_projections===0),
+      healthMetric('FTS 同步', h.fts_rows===h.units ? '一致' : `${h.fts_rows}/${h.units}`,
+                   h.fts_rows===h.units),
+      healthMetric('向量孤儿', orphans, orphans===0),
+    ].join('');
+    const box = $('#healthIssues');
+    if(h.healthy){ box.classList.add('hidden'); box.innerHTML=''; }
+    else{
+      box.innerHTML = issues.map(t =>
+        `<div class="text-[11px] leading-relaxed text-amber-600">· ${escHtml(t)}</div>`
+      ).join('');
+      box.classList.remove('hidden');
+    }
+  }
+  async function loadHealth(){
+    try{
+      const r = await fetchWithTimeout('/api/health', {}, 25000);
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok){ toast(typeof d.detail==='string' ? d.detail : '健康检查失败'); return; }
+      renderHealth(d);
+    }catch(e){ toast('健康检查失败：'+(e.message||e)); }
+  }
+  function bindHealthEvents(){
+    $('#healthRefreshBtn').onclick = ()=>loadHealth();
+    $('#healthReclaimBtn').onclick = async ()=>{
+      const btn = $('#healthReclaimBtn');
+      if(!confirm('回收滞留投影？\n\n将删除「已被合并取代、却仍留在召回面上」的旧投影行，'
+                 +'\n它们与新终稿内容相近但不相同，会干扰召回。\n'
+                 +'该操作幂等，与蒸馏流程自动执行的是同一个函数。')) return;
+      btn.disabled = true;
+      try{
+        const r = await fetchWithTimeout('/api/health/reclaim', {method:'POST'}, 60000);
+        const d = await r.json().catch(()=>({}));
+        if(!r.ok){ toast(typeof d.detail==='string' ? d.detail : '回收失败'); return; }
+        if(d.health) renderHealth(d.health);
+        toast(d.reclaimed ? `已回收 ${d.reclaimed} 条滞留投影`
+                          : '没有需要回收的滞留投影');
+      }catch(e){ toast('回收失败：'+(e.message||e)); }
+      finally{ btn.disabled = false; }
+    };
   }
   // ⭐ 加权（两态：加权 1.0 ↔ 取消）。锁定值优先于自动聚合且不随时间衰减。
   // 成功后只改本地对象并重建 DOM——不重拉列表（不闪、不丢滚动与筛选位置）。

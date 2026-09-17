@@ -228,6 +228,10 @@ def _rag_dispatch(method: str, path: str, body: Optional[dict]) -> dict:
     if route == "/api/v1/embeddings/rebuild" and method == "POST":
         return rag_bridge.rebuild_embeddings(
             mode=str(body.get("mode", "repair")))
+    if route == "/api/v1/health" and method == "GET":
+        return rag_bridge.health()
+    if route == "/api/v1/health/reclaim" and method == "POST":
+        return rag_bridge.health_reclaim()
     if route == "/api/v1/auth/status" and method == "GET":
         # rag 无鉴权面：恒就绪（在线性由 probe 承载）
         return {"enabled": False, "needsSetup": False, "authenticated": True,

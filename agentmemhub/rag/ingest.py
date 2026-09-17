@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS units(
     text TEXT NOT NULL,
     chars INTEGER NOT NULL,
     tags TEXT,
+    updated_at INTEGER,
     UNIQUE(source, conversation_id, seq)
 );
 CREATE TABLE IF NOT EXISTS ingest_meta(
@@ -69,6 +70,21 @@ def ensure_bridge_schema(conn: sqlite3.Connection) -> None:
     # 只索引 text/title），故补列无需重建索引。
     if "tags" not in cols:
         conn.execute("ALTER TABLE units ADD COLUMN tags TEXT")
+    # updated_at：该行最后一次被**写入/改写**的时间戳（秒）。
+    # 为什么必须有：units 原本只有一个时间列，而 time 是**事件时间**（知识
+    # 产生时间，见 distill._origin_time），不是写入时间；蒸馏投影又会被原地
+    # 改写（_project_one 刷新 topic/title）。没有这个列，"这条记忆变过没有"
+    # 无法回答——任何按增量消费 units 的下游（如 wiki 投影）都只能全量重扫。
+    if "updated_at" not in cols:
+        conn.execute("ALTER TABLE units ADD COLUMN updated_at INTEGER")
+    # 自愈式回填（幂等，每次调用都兜一次）：覆盖两类 NULL —— 补列时的存量行，
+    # 以及任何绕过写入路径产生的行（例如仍在跑**旧代码的常驻 MCP 进程**写入
+    # 的记忆——实测真实发生过）。用发现时刻填充，不用 units.time（那是事件
+    # 时间，会让下游误判成"很久没变过"）。部分索引让"无 NULL 行"时几乎零成本。
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_units_updated_null"
+                 " ON units(updated_at) WHERE updated_at IS NULL")
+    conn.execute("UPDATE units SET updated_at=? WHERE updated_at IS NULL",
+                 (int(time.time()),))
     # src_id 业务锚索引：记忆报表 JOIN（'dst_'||content_hash）、投影幂等查询
     # （WHERE src_id=?）与 resolve_unit_id 都靠它。缺失时带 status 筛选的
     # 报表 JOIN 会退化为 units 全表扫描（实测单查询 20s）
@@ -291,6 +307,7 @@ def run_ingest(
                 kept = [(r, t) for r, t in zip(fresh, texts) if t]
                 if kept:
                     vecs = embedder.encode_passages([t for _, t in kept])
+                    now = int(time.time())      # 同批次统一写入时间戳
                     with idx:
                         for (r, t), v in zip(kept, vecs):
                             key = (r["source"], r["conversation_id"], r["seq"])
@@ -305,10 +322,10 @@ def run_ingest(
                                 uid = idx.execute(
                                     "INSERT INTO units(source, conversation_id, seq,"
                                     " role, turn_key, src_id, time, title, text,"
-                                    " chars) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                                    " chars, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                                     (r["source"], r["conversation_id"], r["seq"],
                                      r["role"], r["turn_key"], r["src_id"],
-                                     r["time"], r["title"], t, len(t)),
+                                     r["time"], r["title"], t, len(t), now),
                                 ).lastrowid
                             idx.execute(
                                 f"INSERT OR REPLACE INTO {spec.vec_table}"

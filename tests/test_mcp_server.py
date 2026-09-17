@@ -13,6 +13,7 @@ from unittest import mock
 import pytest
 
 from agentmemhub import memos_daemon
+from agentmemhub.logs import read_mcp_audit as _audit_lines
 from agentmemhub.mcp_server import MCPHandler, _engine_hint, run_stdio
 from agentmemhub.rag.memstore import AGENT_IMPORTANCE_VALUES, BASE_VALUE_AGENT_WRITE
 
@@ -358,3 +359,88 @@ def test_run_stdio_roundtrips_chinese_over_locale_streams(monkeypatch):
     payload = json.loads(text)
     assert payload["result"]["tools"]
     assert "语义检索" in text
+
+
+# ---------------------------------------------------------------------------
+# 调用审计（logs/mcp.log）：Agent 侧记忆操作必须留痕
+#
+# 为什么由服务端记而不是 Agent 手写：Skill 自己的记述是"这类依赖自觉的动作
+# 在高负载下会漏触发"，而审计的价值**全在完整性**——漏一条就无法区分"没做"
+# 与"没记"。放在 _tools_call（stdio 与 HTTP 的唯一分发点）即 100% 覆盖。
+# ---------------------------------------------------------------------------
+
+@mock.patch.object(memos_daemon, "auth_state", return_value={})
+@mock.patch.object(memos_daemon, "engine_request")
+def test_audit_records_call_and_result(engine_request, _auth, audit_dir):
+    """每次工具调用记两条（call / result），以 call_id 关联。
+
+    两条而非一条：只记结果的话，"发起了却没有返回"（超时、进程被杀）就无迹
+    可寻——那恰恰是审计最该抓到的情况。
+    """
+    engine_request.return_value = {"hits": [], "injectedContext": ""}
+    h, _ = _handler()
+    _call(h, _req("tools/call", {"name": "memory_search",
+                                 "arguments": {"query": "审计测试", "note": "给面板加校验"}}))
+
+    lines = _audit_lines(audit_dir)
+    assert [x["phase"] for x in lines] == ["call", "result"]
+    assert {x["tool"] for x in lines} == {"memory_search"}
+    assert lines[0]["call_id"] == lines[1]["call_id"]
+    assert lines[0]["args"]["query"] == "审计测试"
+    assert lines[0]["args"]["note"] == "给面板加校验"      # Agent 补充的意图
+    assert lines[1]["ok"] is True
+    assert lines[1]["elapsed_ms"] >= 0
+    assert lines[0]["ts"] <= lines[1]["ts"]
+
+
+@mock.patch.object(memos_daemon, "auth_state", return_value={})
+@mock.patch.object(memos_daemon, "engine_request")
+def test_audit_records_failure(engine_request, _auth, audit_dir):
+    """失败调用同样留痕（ok=False + 错误摘要）——失败比成功更需要溯源。"""
+    engine_request.side_effect = RuntimeError("engine down")
+    h, _ = _handler()
+    _call(h, _req("tools/call", {"name": "memory_search",
+                                 "arguments": {"query": "x"}}))
+
+    lines = _audit_lines(audit_dir)
+    assert len(lines) == 2
+    assert lines[1]["ok"] is False
+    assert "engine down" in lines[1]["error"]
+
+
+@mock.patch.object(memos_daemon, "auth_state", return_value=None)
+def test_audit_records_call_even_when_engine_offline(_auth, audit_dir):
+    """引擎离线导致调用被拒，也算一次留痕（否则"没做"与"做了但失败"无从区分）。"""
+    h, _ = _handler()
+    _call(h, _req("tools/call", {"name": "memory_stats", "arguments": {}}))
+
+    lines = _audit_lines(audit_dir)
+    assert [x["phase"] for x in lines] == ["call", "result"]
+    assert lines[1]["ok"] is False
+
+
+@mock.patch.object(memos_daemon, "auth_state", return_value={})
+@mock.patch.object(memos_daemon, "engine_request")
+@mock.patch("agentmemhub.memos.push_bundle")
+def test_audit_truncates_content(push_bundle, engine_request, _auth, audit_dir):
+    """正文只留摘要 + 字数：不重复存全文，也不让敏感内容二次落盘。"""
+    engine_request.return_value = {"imported": 1}
+    body = "很长的正文" * 300
+    h, _ = _handler()
+    _call(h, _req("tools/call", {"name": "memory_save",
+                                 "arguments": {"content": body, "note": "踩过坑"}}))
+
+    call = _audit_lines(audit_dir)[0]
+    assert "content" not in call["args"]                   # 不存全文
+    assert call["args"]["content_chars"] == len(body)
+    assert len(call["args"]["content_head"]) <= 80
+    assert call["args"]["note"] == "踩过坑"
+
+
+def test_audit_digest_extracts_ids():
+    """结果文本里的关键标识被提取出来，便于结构化查询；提取不到就留空。"""
+    from agentmemhub.mcp_server import _audit_digest
+
+    assert _audit_digest("记忆已写入（id=mcp_abc123，value=0.6）")["trace_id"] == "mcp_abc123"
+    assert _audit_digest("记忆检索「x」：3 条命中")["hits"] == 3
+    assert _audit_digest("与标识无关的文本") == {}

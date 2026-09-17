@@ -104,7 +104,8 @@ AgentMemHub/
 │   ├── rag/                      # ★ 内置记忆引擎（v2.0）
 │   │                             #   config/embedder/ingest/search/memstore/runtime
 │   ├── rag_bridge.py             # ★ 引擎接缝：MCP/面板/cli 的统一调用入口
-│   ├── mcp_server.py             # MCP 记忆网关（stdio / Streamable HTTP）
+│   ├── health.py                 # 记忆库一致性巡检（面板健康卡片/CLI/测试共用判据）
+│   ├── mcp_server.py             # MCP 记忆网关（stdio / Streamable HTTP；含调用审计）
 │   ├── scoring.py                # LLM 三轴评分（策略层，与引擎的存值层分工）
 │   ├── adapters/                 # 8 个 Agent 数据源适配器（src_id/turn_key/注入识别）
 │   ├── web/                      # FastAPI 记忆面板 + 前端 + /api/memos 网关
@@ -117,9 +118,11 @@ AgentMemHub/
 │   ├── check_eval_grounding.py   #   召回评测集落地校验
 │   ├── sensitive_scan.py         #   推送前敏感信息扫描
 │   ├── web_verify.py             #   面板前后端接口联调自检（对运行中的服务）
+│   ├── health_check.py           #   记忆库一致性巡检（与面板「记忆库健康」同判据）
+│   ├── mcp_log.py                #   MCP 调用审计查询（logs/mcp.log 的读取端）
 │   └── e2e/                      #   浏览器级端到端测试
 ├── eval/                         # 召回评测示例集（queries.example.yaml；私有集不入库）
-├── tests/                        # pytest（262 项）
+├── tests/                        # pytest（488 项通过 / 1 项条件跳过）
 ├── docs/                         # 设计文档（架构/迁移/召回融合等）
 ├── memOS/                        # 回退用的上游引擎（gitignore，默认不参与运行）
 ├── start.bat                     # 启动控制台（Windows）
@@ -395,11 +398,15 @@ Claude Code 等支持 MCP 的 Agent harness 上——模型在会话进行中即
 
 | 工具 | 说明 |
 |---|---|
-| `memory_search(query, topK)` | 语义检索历史记忆（三路混合召回），返回命中条目 + 注入上下文 |
+| `memory_search(query, topK?, note?)` | 语义检索历史记忆（三路混合召回），返回命中条目 + 注入上下文 |
 | `memory_recent(limit)` | 最近写入的记忆时间线，快速了解近期积累 |
 | `memory_stats()` | 索引就绪状态 / 记忆总量 / 嵌入模型与 LLM 评分可用性 |
-| `memory_save(content, importance?, tags?)` | 写一条记忆。`importance` 为可选档位（`high`/`normal`/`low` → 初始价值 0.8/0.6/0.4，**不传即 normal**），由 Agent 用当前推理直接判断，**无需外挂评分模型**；`tags` 为可选标签数组（面板筛选/溯源用，引擎纯透传）。即时入库并补向量，写后验证 imported，失败明确报错不伪装 |
-| `memory_score(trace_id, polarity)` | 按需对任意一条记忆打分（反馈 → 引擎即时重算 value/priority；**写后即评流程已废除**，仅用户明确要求加权时使用）|
+| `memory_save(content, importance?, tags?, note?)` | 写一条记忆。`importance` 为可选档位（`high`/`normal`/`low` → 初始价值 0.8/0.6/0.4，**不传即 normal**），由 Agent 用当前推理直接判断，**无需外挂评分模型**；`tags` 为可选标签数组（面板筛选/溯源用，引擎纯透传）。即时入库并补向量，写后验证 imported，失败明确报错不伪装 |
+| `memory_score(trace_id, polarity, note?)` | 按需对任意一条记忆打分（反馈 → 引擎即时重算 value/priority；**写后即评流程已废除**，仅用户明确要求加权时使用）|
+
+> 表中 `note?` 是这三个工具共有的**可选**参数：写一句话**操作意图**（例：`note="排查用户说的召回异常"`）。
+> 它只进审计日志 `logs/mcp.log`，不参与检索与存储——调用本身由服务端自动记录，`note` 补充的是"**为什么**"。
+> 查询日志：`python scripts/mcp_log.py [--tool X] [--failed] [--grep 词]`。
 
 ```bash
 # 0. 确保记忆索引已建立（v2.0 起引擎内置，无需启动任何服务）：
@@ -713,6 +720,11 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
   两种操作都为**就地更新**（不重拉列表、不丢滚动与筛选位置）且带防连点。
   反馈语义与 MCP `memory_score` 的"历史累加"分开：面板是**当前表态**（一 unit 一条），
   累加均值会越点越钝、且无法取消，不适合人工按钮
+- **记忆库健康卡片**：把"是否正常"变成可断言的不变量——`units.updated_at` 覆盖率、
+  蒸馏投影一致性（投影数须等于有投影的活跃记忆数）、FTS 与向量索引一致性。
+  异常时列出**可执行**的处置建议，并提供一键「回收滞留投影」（幂等，与蒸馏流程
+  自动执行的是同一个函数）。同一套判据也能从命令行跑：`scripts/health_check.py`
+  （退出码 0/1，可挂 CI）。
 - 来源列区分 **`MCP`**（Agent 主动写入的原子记忆，无原始会话、会话列不可点）与采集来源；
   每行标注「召回单元」与「有无原始会话」，避免误点失效链接
 - **语义检索**框（向量+全文混合评分召回，结果可点开原始会话）
@@ -758,7 +770,7 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 - [x] MCP 记忆网关（stdio / Streamable HTTP 双传输，供 ZCode/OpenCode 等 harness 检索/写入记忆）
 - [x] 记忆清洗（clean：删除系统注入事件，预览→执行并重建 FTS/计数）
 - [x] ~~LLM 批量自动评分~~（score：三轴评估写价值分——**入口已隐藏**：实测多为 neutral/全跳过，质量把关改由蒸馏置信度 + 面板 👍/👎 承担；命令保留备查）
-- [x] 统一日志（`<程序根>/logs/`：web/cli/engine/tasks 分文件，面板可查历史）
+- [x] 统一日志（`<程序根>/logs/`：web/cli/mcp/engine/tasks 分文件，面板可查历史；`mcp.log` 为 MCP 调用审计）
 - [x] MCP 写后即评（memory_score 工具 + save-memory Skill 独立仓：触发纪律/生效前提/逻辑归属）
 - [x] 导入数据质量（meta 幽灵轮剔除、纯工具轮标题兜底、恢复环境整源丢失修复）
 - [x] 增量同步架构（会话级清单对比 → upsert → watermarks 变更集贯通 clean/push；评分增量优先·定点读零全量枚举；cap 超限回退全量；默认数据目录收进项目内 database/）
@@ -775,6 +787,7 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 - [x] 统一配置 `agentmemhub.yaml`（模型注册/分桶/召回/写入策略/后端开关单文件）
 - [x] 记忆蒸馏（离线，四入口：Python/CLI/start.bat 控制台/面板）：S0 窗口化切片 → S1 段级蒸馏 → S2 同会话合并 → S3 跨会话去重 → S4 投影为可召回 unit；幂等增量、脱敏、失败可重跑
 - [x] 权重体系：来源初始分 → 反馈演化（状态式可撤销）→ 手动加权（⭐ 两态锁定不衰减，有界 boost）
+- [x] **MCP 调用审计**：每次记忆调用（save / search / recent / stats / score）由服务端在**唯一分发点**自动留痕到 `logs/mcp.log`（每次两条 `call`/`result` + `call_id`，含参数摘要、耗时、成败），**不依赖 Agent 记得写**；Agent 可用可选参数 `note` 补充意图（为什么）；查询走 `scripts/mcp_log.py`
 - [x] 带标签的版本锚点（`v0-pre-rag` 回滚点 / `v1-rag-backend-only` / v2.0）
 
 - [ ] 更多 Agent（Claude Code / Cursor / Gemini CLI / CodeBuddy）
