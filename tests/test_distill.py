@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import time
 
 import pytest
 
@@ -26,6 +27,7 @@ from agentmemhub.distill import (
     Slice,
     Turn,
     _batch_entries,
+    _project_one,
     build_slices,
     check_memory_fields,
     conversation_turns,
@@ -40,6 +42,7 @@ from agentmemhub.distill import (
     normalize_memories,
     project_memories,
     purge_stale_memories,
+    reclaim_stale_projections,
     run_distill,
     save_memories,
     save_merged,
@@ -169,7 +172,7 @@ def test_check_memory_fields_rejects_invalid():
 
 def test_constants_shape():
     assert MEMORY_TYPES == ("decision", "fact", "preference", "lesson")
-    assert MEMORY_STATUSES == ("new", "similar", "duplicate")
+    assert MEMORY_STATUSES == ("new", "similar", "duplicate", "merged")
     assert DISTILLED_ROLE == "distilled"
     assert DISTILLED_SRC_PREFIX == "dst_"
     assert SLICE_WHOLE == "whole"
@@ -1165,6 +1168,126 @@ def test_purge_stale_noop_when_all_current(idx_conn, real_settings):
     project_memories(idx_conn, real_settings, [m])
     assert purge_stale_memories(idx_conn, real_settings, PROMPT_VER) == 0
     assert _unit_count(idx_conn) == 1
+
+
+# ── S2 归档：来源条目的 units 投影必须同步回收 ──
+
+def test_save_merged_reclaims_source_projections(idx_conn, real_settings):
+    """关键回归：来源条目归档为 merged 后，其 units 投影必须一并回收。
+
+    修复前 save_merged 只改 distilled_memories.status，留下 units 投影：
+    被合并取代的旧稿与新终稿内容相近但不相同，会同时留在召回面上
+    —— 重复召回与噪音回归的直接来源。声明"不再参与召回"就必须真的落地。
+    """
+    m1 = _add_memory(idx_conn, content="条目甲：切片预算按字符数上限控制")
+    m2 = _add_memory(idx_conn, content="条目乙：话题边界用 trigram 相似度检测")
+    project_memories(idx_conn, real_settings, [m1, m2])
+    assert _unit_count(idx_conn) == 2
+
+    result = DistillResult(memories=[_mem(content="合并终稿：切片与边界策略")],
+                           rejected=[])
+    save_merged(idx_conn, "zcode", "conv-a", result,
+                source_ids=[m1["id"], m2["id"]], created_at=1)
+
+    assert _unit_count(idx_conn) == 0          # 来源投影已回收
+    # FTS 由 units 上的触发器随 DELETE 同步，旧内容不应再被命中
+    hits = idx_conn.execute(
+        "SELECT rowid FROM units_fts WHERE units_fts MATCH ?",
+        ('"切片预算"',)).fetchall()
+    assert not hits
+    # 向量也不得残留孤儿行（vec0 无触发器）
+    for vt in [r[0] for r in idx_conn.execute(
+            "SELECT name FROM sqlite_master"
+            " WHERE type='table' AND sql LIKE '%USING vec0%'")]:
+        assert idx_conn.execute(
+            f"SELECT COUNT(*) FROM {vt} v WHERE v.rowid NOT IN"
+            " (SELECT id FROM units)").fetchone()[0] == 0
+
+
+def test_reclaim_stale_projections_clears_legacy_residue(idx_conn, real_settings):
+    """存量自愈：修复前已归档的条目，其滞留投影由幂等扫描清掉。
+
+    不能写成一次性迁移脚本——归档条目是持续产生的，扫描必须可重复执行。
+    """
+    m1 = _add_memory(idx_conn, content="旧稿甲：召回融合采用 RRF")
+    m2 = _add_memory(idx_conn, content="旧稿乙：向量与 trigram 两路并召回")
+    project_memories(idx_conn, real_settings, [m1, m2])
+    assert _unit_count(idx_conn) == 2
+    # 复现修复前的行为：只归档状态，不回收投影
+    idx_conn.execute(
+        "UPDATE distilled_memories SET status='merged' WHERE id IN (?,?)",
+        (m1["id"], m2["id"]))
+    idx_conn.commit()
+
+    assert reclaim_stale_projections(idx_conn) == 2
+    assert _unit_count(idx_conn) == 0
+    assert reclaim_stale_projections(idx_conn) == 0        # 幂等：二次执行为空操作
+
+
+def test_reclaim_keeps_projection_still_needed_by_valid_entry(idx_conn, real_settings):
+    """同内容 hash 若仍有有效条目（new/similar），其投影不得被回收。
+
+    不同会话可能蒸馏出**完全相同**的内容（content_hash 相同 → 同一个
+    src_id / 同一条投影）。此时归档其中一个会话的条目，不足以判定投影作废。
+    """
+    m1 = _add_memory(idx_conn, content="两会话产出的相同结论", cid="conv-a")
+    m2 = _add_memory(idx_conn, content="两会话产出的相同结论", cid="conv-b")
+    assert m1["content_hash"] == m2["content_hash"]
+    project_memories(idx_conn, real_settings, [m1])
+    assert _unit_count(idx_conn) == 1
+
+    idx_conn.execute("UPDATE distilled_memories SET status='merged' WHERE id=?",
+                     (m1["id"],))
+    idx_conn.commit()
+
+    assert reclaim_stale_projections(idx_conn) == 0        # m2 仍有效 → 保留
+    assert _unit_count(idx_conn) == 1
+
+
+# ── units.updated_at：写入时间必须被维护 ──
+
+def test_projection_sets_updated_at_on_insert(idx_conn, real_settings):
+    """投影写入即带 updated_at。
+
+    units 原本只有 time，而 time 是**事件时间**（知识产生时间），不是写入
+    时间——两者语义不同，不能互相代替。
+    """
+    m = _mem_dict(idx_conn, content="投影时间戳：写入即应可见")
+    project_memories(idx_conn, real_settings, [m])
+    row = idx_conn.execute(
+        "SELECT updated_at FROM units WHERE role=?", (DISTILLED_ROLE,)).fetchone()
+    assert row[0] is not None and row[0] > 0
+
+
+def test_project_one_refreshes_updated_at_on_rewrite(idx_conn, real_settings):
+    """原地改写必须刷新 updated_at —— 下游据此感知"这行变过"。
+
+    `_project_one` 命中同 src_id 时走 UPDATE 分支（改 text/title）。修复前
+    units 不留任何"何时被改"的痕迹，按增量消费 units 的下游只能全量重扫。
+    """
+    from agentmemhub.rag.ingest import ensure_vec_table
+    from agentmemhub.rag.runtime import get_active_embedder
+
+    spec = real_settings.active_spec
+    ensure_vec_table(idx_conn, spec)      # 直调 _project_one 绕过了 project_memories 的建表
+    emb = get_active_embedder(real_settings)
+    m = _mem_dict(idx_conn, content="原地改写时间戳测试内容", topic="原主题")
+    vec = emb.encode_passages([m["content"]])[0]
+
+    uid = _project_one(idx_conn, m, vec, spec)
+    idx_conn.commit()
+    ts1 = idx_conn.execute(
+        "SELECT updated_at FROM units WHERE id=?", (uid,)).fetchone()[0]
+    assert ts1 is not None and ts1 > 0
+
+    time.sleep(1.1)                     # updated_at 是秒级精度
+    uid2 = _project_one(idx_conn, dict(m, topic="改写后的主题"), vec, spec)
+    idx_conn.commit()
+    assert uid2 == uid                  # 同 src_id → 原地更新而非新建
+    row = idx_conn.execute(
+        "SELECT updated_at, text FROM units WHERE id=?", (uid,)).fetchone()
+    assert row[0] > ts1                 # 时间戳已刷新
+    assert row[1].startswith("改写后的主题：")
 
 
 def test_run_distill_idempotent_with_merge(distill_env, monkeypatch):

@@ -13,6 +13,22 @@ import os
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def audit_dir(tmp_path, monkeypatch):
+    """日志目录隔离：任何测试都不写真实 `logs/`。
+
+    项目原有的做法是"需要写日志的测试自己 monkeypatch `logs.log_dir`"，但 MCP
+    调用审计是新的**高频写入点**（每次工具调用都写），靠逐个自觉迟早漏——
+    实测已经漏过一次：`test_mcp_http.py` 的调用把 mock 数据写进了真实
+    `logs/mcp.log`。所以改成全局兜底，需要时再在测试内覆盖。
+
+    同时作为审计用例的读取入口：`def test_x(audit_dir)` 拿到临时目录。
+    """
+    d = tmp_path / "logs"
+    monkeypatch.setattr("agentmemhub.logs.log_dir", lambda: d)
+    return d
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _sandbox_data_dir(tmp_path_factory):
     d = tmp_path_factory.mktemp("agentmemhub-data")

@@ -1,4 +1,4 @@
-﻿# 记忆蒸馏方案（Memory Distillation）
+# 记忆蒸馏方案（Memory Distillation）
 
 > 状态：**已完成并应用于生产**（2026-09-11，分支 `feat/memory-distillation`）。
 > 实施记录：D1–D7 全流程 —— 沙箱隔离 / 配置解析 / LLM 客户端 (`agentmemhub/llm.py`) /
@@ -322,7 +322,8 @@ distilled_memories(status IN ('new','similar'))
           turn_key=该记忆归属轮,
           src_id='dst_' + content_hash,        ← 幂等锚（重复投影则原地更新）
           text=('topic：' if topic else '') + content,
-          title=会话标题)
+          title=会话标题,
+          updated_at=写入/改写时刻)             ← time 是**事件时间**，两者语义不同
   → FTS 触发器自动同步 → 三路召回 / MCP / 面板全部沿用现有管线
 ```
 
@@ -335,6 +336,21 @@ source/conversation_id 后，三者天然生效，零额外代码。
 **待投影判据**：`distilled_memories.status IN ('new','similar')` 且 units 中
 不存在对应 `src_id`。用这个判据而非额外的"已投影"标记，好处是 units 被
 误删或被排除机制清掉后，重跑会自动补回（自愈）。
+
+**归档必须同步回收投影**：`status` 只决定"要不要投影"，**不决定"已有投影
+是否还在"**。条目被 S2 归档为 `merged` 后若 units 行滞留，被取代的旧稿会与
+新终稿同时进入召回面（内容相近但不相同）→ 重复召回与噪音回归。三条规则：
+
+- **即时回收**：`save_merged` 归档来源条目时同步 `drop_projection`（删 units
+  行，FTS 由触发器同步，vec0 需显式删向量）；
+- **幂等兜底**：`reclaim_stale_projections` 扫掉 `merged`/`duplicate` 条目残留
+  的投影，可重复执行，用于自愈历史遗漏；
+- **不误伤**：判据是 `_hash_still_needed` —— 不同会话可能蒸馏出**完全相同**
+  的结论（`content_hash` 相同 → 共享同一个 `src_id`／同一条投影），只要还有
+  `new`/`similar` 条目需要它，投影就不得回收。
+
+**实测**：修复前生产库 2799 条蒸馏投影中滞留 **1256 条（45%）**；回收后
+1543 条，与「有投影的活跃记忆数」完全一致。
 
 ### 6.3 S3 去重池的选择
 

@@ -738,6 +738,26 @@ def create_app(db_path: Path | None = None):
         from agentmemhub import memos_daemon
         return JSONResponse(memos_daemon.daemon_status())
 
+    @app.get("/api/health")
+    def api_health():
+        """记忆库一致性指标（只读）。引擎离线时 503。"""
+        from agentmemhub import memos_daemon
+        try:
+            return JSONResponse(memos_daemon.engine_request(
+                "GET", "/api/v1/health", timeout=15))
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"health check failed: {e}")
+
+    @app.post("/api/health/reclaim")
+    def api_health_reclaim():
+        """回收滞留投影（幂等）——与蒸馏流程里自动执行的是同一个函数。"""
+        from agentmemhub import memos_daemon
+        try:
+            return JSONResponse(memos_daemon.engine_request(
+                "POST", "/api/v1/health/reclaim", timeout=60))
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"reclaim failed: {e}")
+
     def _require_engine() -> dict:
         """引擎在线且鉴权可过则返回 overview；否则 503（detail 含原因）。"""
         from agentmemhub import memos_daemon

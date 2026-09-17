@@ -305,10 +305,12 @@ def import_bundle(traces: list[dict], *, embedder=None) -> dict:
                                                ensure_ascii=False)
                     cur = conn.execute(
                         "INSERT INTO units(source, conversation_id, seq, role,"
-                        " turn_key, src_id, time, title, text, chars, legacy_id, tags)"
-                        " VALUES('memory','mcp',?,'user','mcp',?,?,?,?,?,?,?)",
+                        " turn_key, src_id, time, title, text, chars, legacy_id,"
+                        " tags, updated_at)"
+                        " VALUES('memory','mcp',?,'user','mcp',?,?,?,?,?,?,?,?)",
                         (seq, content_anchor(d["_text"]), ts,
-                         "记忆", d["_text"], len(d["_text"]), d["id"], tags_json))
+                         "记忆", d["_text"], len(d["_text"]), d["id"], tags_json,
+                         int(time.time())))
                     for s, vecs in multi:
                         conn.execute(
                             f"INSERT OR REPLACE INTO {s.vec_table}"
@@ -429,6 +431,34 @@ def overview() -> dict:
                 "uptimeMs": 0,
                 "rag": {"units": units, "vectors": vecs, "model": st.active_model,
                         "coverage": round(vecs / units, 4) if units else 1.0}}
+    finally:
+        conn.close()
+
+
+def health() -> dict:
+    """GET /api/v1/health 的 rag 实现：记忆库一致性指标（只读）。
+
+    走 `_conn()`，因此顺带执行幂等 schema 迁移 —— 面板任一次调用都会把
+    `units.updated_at` 的 NULL 行自愈补齐（旧进程写入的遗留）。
+    """
+    from agentmemhub import health as health_mod
+    conn = _conn()
+    try:
+        return {"ok": True, **health_mod.collect(conn)}
+    finally:
+        conn.close()
+
+
+def health_reclaim() -> dict:
+    """POST /api/v1/health/reclaim 的 rag 实现：回收滞留投影（幂等）。
+
+    与 `run_distill` 里自动执行的是同一个 `reclaim_stale_projections`，
+    所以手动点一次和跑一次蒸馏效果一致，且可反复执行。
+    """
+    from agentmemhub import health as health_mod
+    conn = _conn()
+    try:
+        return {"ok": True, **health_mod.reclaim(conn)}
     finally:
         conn.close()
 

@@ -39,8 +39,10 @@ from agentmemhub.rag.memstore import BASE_VALUE_DISTILLED, ensure_base_value
 MEMORY_TYPES = ("decision", "fact", "preference", "lesson")
 #: 置信度枚举（枚举比数字刻度更稳定：LLM 对枚举的遵循率明显更高）
 CONFIDENCES = ("high", "medium", "low")
-#: 入库状态：new=新增；similar=与既有条目相似（入库但打标互链）；duplicate=重复（丢弃）
-MEMORY_STATUSES = ("new", "similar", "duplicate")
+#: 入库状态：new=新增；similar=与既有条目相似（入库但打标互链）；
+#: duplicate=重复（丢弃，不投影）；merged=已被 S2 合并取代（归档，不投影）。
+#: 注意：只有 new/similar 会进入 units —— 见 `_pending_projection`。
+MEMORY_STATUSES = ("new", "similar", "duplicate", "merged")
 
 #: units.role 的蒸馏取值 —— 刻意**不占用 units.source**：蒸馏投影沿用原会话的
 #: source/conversation_id，使既有的排除（memory_exclusions）、删除
@@ -809,10 +811,14 @@ def save_merged(idx: sqlite3.Connection, source: str, conversation_id: str,
     from agentmemhub import sanitize
     ensure_distill_schema(idx)
     ts = int(created_at or time.time())
-    inserted = sanitized = dropped = 0
+    inserted = sanitized = dropped = reclaimed = 0
     with idx:
+        stale_hashes: list[str] = []
         if source_ids:
             qs = ",".join("?" * len(source_ids))
+            stale_hashes = [r[0] for r in idx.execute(
+                f"SELECT content_hash FROM distilled_memories WHERE id IN ({qs})",
+                source_ids).fetchall()]
             idx.execute(
                 f"UPDATE distilled_memories SET status='merged'"
                 f" WHERE id IN ({qs})", source_ids)
@@ -850,7 +856,15 @@ def save_merged(idx: sqlite3.Connection, source: str, conversation_id: str,
                  m.get("topic") or None, content, m["confidence"], "new", h,
                  prompt_ver, model, json.dumps(source_ids), ts))
             inserted += 1
-    return {"inserted": inserted, "sanitized": sanitized, "dropped": dropped}
+        # 归档条目的 units 投影必须同步回收：status 只决定"要不要投影"，
+        # 不决定"已有投影是否还在"。留在召回面上就是新终稿的重复竞争项。
+        # 放在终稿写入之后 —— 终稿可能复用来源的 content_hash（上面的
+        # "复活"分支），那种情况下投影仍被需要。
+        for h in stale_hashes:
+            if not _hash_still_needed(idx, h):
+                reclaimed += drop_projection(idx, h)
+    return {"inserted": inserted, "sanitized": sanitized, "dropped": dropped,
+            "reclaimed": reclaimed}
 
 def list_conversations(src: sqlite3.Connection, *, source: str = "",
                        limit: int = 0) -> list[dict]:
@@ -952,7 +966,7 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
         "memories_new": 0, "sanitized": 0, "dropped": 0,
         "merged": 0, "merge_skipped": 0, "merge_failed": 0, "merge_seconds": 0.0,
         "projected": 0, "similar": 0, "duplicate": 0,
-        "purged_stale": 0, "backfilled": 0,
+        "purged_stale": 0, "reclaimed": 0, "backfilled": 0,
         "seconds": 0.0, "dry_run": dry_run, "prompt_ver": prompt_ver,
         "model": client.cfg.model, "samples": [],
     }
@@ -1068,9 +1082,19 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
                 stats["memories_new"] += mst["inserted"]
                 stats["sanitized"] += mst["sanitized"]
                 stats["dropped"] += mst["dropped"]
+                stats["reclaimed"] += mst["reclaimed"]
             stats["merge_seconds"] = round(time.perf_counter() - t_merge, 1)
             emit(f"合并沉淀 {stats['merged']} 个会话（失败 {stats['merge_failed']}，"
                  f"跳过 {stats['merge_skipped']}）")
+
+        # ── 阶段 D 前置：回收已归档条目的滞留投影（存量自愈，幂等）──
+        # save_merged 已保证"本次归档"同步回收；这一步兜住历史遗漏，
+        # 否则被取代的旧稿会与新终稿同台召回。
+        if not dry_run:
+            rc = reclaim_stale_projections(idx, log=log)
+            if rc:
+                stats["reclaimed"] += rc
+                emit(f"回收已归档条目的滞留投影 {rc} 条")
 
         # ── 阶段 D：跨会话去重 + 投影进 units（走既有三路召回）──
         if not dry_run:
@@ -1149,6 +1173,94 @@ def backfill_base_values(idx: sqlite3.Connection) -> int:
     return n
 
 
+# ══════════════════════════════════════════════════════════════════════
+# 投影回收：条目一旦退出召回候选，units 里的投影必须同步失效
+#
+# 为什么单列一节：units（role='distilled'）才是召回面的直接来源。条目的
+# status 只决定"要不要投影"，不决定"已有投影是否还在"——两者一旦脱节，
+# 被取代的旧稿会与新终稿同时被召回（内容相近但不相同），正是重复召回与
+# 噪音回归的来源。
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _vec_tables(idx: sqlite3.Connection) -> list[str]:
+    """库中现存的 vec0 向量表名。
+
+    不依赖 settings.active_spec：换模型会留下多张向量表，而只建 distill
+    schema 的轻量连接一张都没有。按建表语句识别最稳。
+    """
+    return [str(r[0]) for r in idx.execute(
+        "SELECT name FROM sqlite_master"
+        " WHERE type='table' AND sql LIKE '%USING vec0%'").fetchall()]
+
+
+def _has_units(idx: sqlite3.Connection) -> bool:
+    """units 投影表是否存在（只建 distill schema 的轻量连接里没有）。"""
+    return idx.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='units'"
+    ).fetchone() is not None
+
+
+def drop_projection(idx: sqlite3.Connection, content_hash: str) -> int:
+    """回收某个内容 hash 在 units 里的蒸馏投影（含向量）。返回删除条数。
+
+    FTS 由 units 上的触发器随 DELETE 同步；vec0 无触发器，必须显式删。
+    """
+    if not _has_units(idx):
+        return 0
+    row = idx.execute("SELECT id FROM units WHERE src_id=?",
+                      (DISTILLED_SRC_PREFIX + content_hash,)).fetchone()
+    if not row:
+        return 0
+    uid = int(row[0])
+    idx.execute("DELETE FROM units WHERE id=?", (uid,))
+    for vt in _vec_tables(idx):
+        idx.execute(f"DELETE FROM {vt} WHERE rowid=?", (uid,))
+    return 1
+
+
+def _hash_still_needed(idx: sqlite3.Connection, content_hash: str) -> bool:
+    """该内容 hash 是否仍有**有效**条目需要投影。
+
+    不同会话可能蒸馏出完全相同的内容（content_hash 相同 → 同一个 src_id、
+    同一条投影）。归档其中一个会话的条目，不足以判定投影作废。
+    """
+    return idx.execute(
+        "SELECT 1 FROM distilled_memories WHERE content_hash=?"
+        " AND status IN ('new','similar') LIMIT 1",
+        (content_hash,)).fetchone() is not None
+
+
+def reclaim_stale_projections(idx: sqlite3.Connection, *,
+                              log: logging.Logger | None = None) -> int:
+    """扫掉已归档条目（merged/duplicate）残留的 units 投影（幂等自愈）。
+
+    与 `_pending_projection` 成对：后者只投影 new/similar，本函数则保证
+    其余状态的投影不存在。做成"扫一遍"而非一次性迁移脚本——归档条目是
+    持续产生的，历史上（修复 save_merged 之前）归档的存量也要能自愈。
+    """
+    log = log or logging.getLogger("agentmemhub.distill")
+    ensure_distill_schema(idx)
+    if not _has_units(idx):
+        return 0
+    rows = idx.execute(
+        "SELECT DISTINCT m.content_hash FROM distilled_memories m"
+        " WHERE m.status IN ('merged','duplicate')"
+        "   AND EXISTS (SELECT 1 FROM units u"
+        "        WHERE u.src_id = ? || m.content_hash)",
+        (DISTILLED_SRC_PREFIX,)).fetchall()
+    hashes = [h for (h,) in rows if not _hash_still_needed(idx, h)]
+    if not hashes:
+        return 0
+    n = 0
+    with idx:
+        for h in hashes:
+            n += drop_projection(idx, h)
+    if n:
+        log.info("回收已归档条目的滞留投影 %d 条", n)
+    return n
+
+
 def purge_stale_memories(idx: sqlite3.Connection, settings, prompt_ver: int,
                          *, log: logging.Logger | None = None) -> int:
     """作废旧 prompt_ver 的蒸馏产物及其 units 投影（提示词升版后调用）。
@@ -1171,12 +1283,7 @@ def purge_stale_memories(idx: sqlite3.Connection, settings, prompt_ver: int,
     ensure_vec_table(idx, spec)
     with idx:
         for _mid, h in rows:
-            u = idx.execute("SELECT id FROM units WHERE src_id=?",
-                            (DISTILLED_SRC_PREFIX + h,)).fetchone()
-            if u:
-                uid = int(u[0])
-                idx.execute("DELETE FROM units WHERE id=?", (uid,))    # FTS 触发器同步
-                idx.execute(f"DELETE FROM {spec.vec_table} WHERE rowid=?", (uid,))
+            drop_projection(idx, h)     # units 投影 + 向量（FTS 触发器同步）
         idx.execute("DELETE FROM distilled_memories WHERE prompt_ver != ?",
                     (prompt_ver,))
     log.info("清理旧提示词版本（!=%d）的蒸馏产物 %d 条", prompt_ver, len(rows))
@@ -1203,17 +1310,24 @@ def _project_one(idx: sqlite3.Connection, m: dict, vec: np.ndarray,
     if existing:
         uid = int(existing[0])
         idx.execute(
-            "UPDATE units SET text=?, chars=?, title=?, turn_key=?, time=? WHERE id=?",
-            (body, len(body), title, m.get("turn_key"), origin_time, uid))
+            "UPDATE units SET text=?, chars=?, title=?, turn_key=?, time=?,"
+            " updated_at=? WHERE id=?",
+            (body, len(body), title, m.get("turn_key"), origin_time,
+             int(time.time()), uid))
         # 自愈：旧版本投影的记忆可能缺来源初始分（列后加/逻辑后补），幂等补上
         ensure_base_value(idx, uid, BASE_VALUE_DISTILLED)
+        # vec0 是虚拟表，**不支持 INSERT OR REPLACE 的主键替换语义**（同一
+        # rowid 重复插入直接抛 UNIQUE 冲突）。原地更新必须先显式删掉旧向量，
+        # 否则这条 UPDATE 分支一旦被走到就会让整个投影阶段中断。
+        idx.execute(f"DELETE FROM {spec.vec_table} WHERE rowid=?", (uid,))
     else:
         uid = int(idx.execute(
             "INSERT INTO units(source, conversation_id, seq, role, turn_key,"
-            " src_id, time, title, text, chars) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            " src_id, time, title, text, chars, updated_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (m["source"], m["conversation_id"], -abs(int(m["id"])),
              DISTILLED_ROLE, m.get("turn_key"), src_id, origin_time, title,
-             body, len(body))).lastrowid)
+             body, len(body), int(time.time()))).lastrowid)
     # 来源初始置信度：离线蒸馏默认中等（Agent 主动写入的更高，见 memstore 常量）
     ensure_base_value(idx, uid, BASE_VALUE_DISTILLED)
     idx.execute(

@@ -175,3 +175,30 @@ def test_memos_traces_online_or_offline(client):
     if r.status_code == 200:
         d = r.json()
         assert "total" in d and isinstance(d["traces"], list)
+
+
+def test_health_shape(client):
+    """健康检查端点：形状契约（面板「记忆库健康」卡片强依赖字段名）。"""
+    r = client.get("/api/health")
+    assert r.status_code in (200, 503)
+    if r.status_code != 200:
+        return
+    d = r.json()
+    assert {"healthy", "issues", "units", "updated_at_null", "has_fts",
+            "fts_rows", "projections", "active_with_projection",
+            "stale_projections", "vec_tables", "recent"} <= set(d)
+    assert isinstance(d["issues"], list)
+    assert isinstance(d["healthy"], bool)
+    # healthy 与 issues 必须自洽——面板据此决定徽标文案与配色
+    assert d["healthy"] == (not d["issues"])
+
+
+def test_health_reclaim_shape(client):
+    """回收端点：幂等；空库应回 0，并带回回收后的指标。"""
+    r = client.post("/api/health/reclaim")
+    assert r.status_code in (200, 502, 503)
+    if r.status_code != 200:
+        return
+    d = r.json()
+    assert d["reclaimed"] == 0
+    assert "health" in d and isinstance(d["health"]["issues"], list)

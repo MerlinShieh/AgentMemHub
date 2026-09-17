@@ -11,6 +11,7 @@ import pytest
 
 from agentmemhub.rag.embedder import OnnxEmbedder
 from agentmemhub.rag.ingest import (
+    ensure_bridge_schema,
     ensure_vec_table,
     open_index,
     run_ingest,
@@ -232,3 +233,46 @@ def test_open_index_busy_timeout(project_settings, tmp_path):
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     finally:
         conn.close()
+
+
+def test_ensure_bridge_schema_adds_updated_at_and_backfills(tmp_path):
+    """老库迁移：units 缺 updated_at 时补列，并用**迁移时刻**回填存量。
+
+    updated_at = 该行最后一次被写入/改写的时间（秒）。不能用 units.time
+    回填——那是**事件时间**，会让下游误判成"很久没变过"。
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(tmp_path / "legacy.db")
+    # 复现补列之前的 units 结构（无 legacy_id / tags / updated_at）
+    conn.execute(
+        "CREATE TABLE units("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " source TEXT NOT NULL, conversation_id TEXT NOT NULL,"
+        " seq INTEGER NOT NULL, role TEXT NOT NULL, turn_key TEXT,"
+        " src_id TEXT, time INTEGER, title TEXT, text TEXT NOT NULL,"
+        " chars INTEGER NOT NULL, UNIQUE(source, conversation_id, seq))")
+    conn.execute(
+        "INSERT INTO units(source, conversation_id, seq, role, text, chars, time)"
+        " VALUES('zcode','c1',1,'user','历史内容',4,1000)")
+    conn.commit()
+
+    ensure_bridge_schema(conn)
+
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(units)")]
+    assert "updated_at" in cols
+    ts = conn.execute("SELECT updated_at FROM units").fetchone()[0]
+    assert ts is not None and ts > 1000      # 迁移时刻，而非事件时间 1000
+
+    # 自愈：迁移后由旧代码写入的 NULL 行，再次调用会被补齐
+    # （真实场景：仍在跑旧代码的常驻 MCP 进程写入了新记忆）
+    conn.execute(
+        "INSERT INTO units(source, conversation_id, seq, role, text, chars)"
+        " VALUES('zcode','c1',2,'user','后补内容',4)")
+    conn.commit()
+    assert conn.execute(
+        "SELECT updated_at FROM units WHERE seq=2").fetchone()[0] is None
+    ensure_bridge_schema(conn)
+    assert conn.execute(
+        "SELECT updated_at FROM units WHERE seq=2").fetchone()[0] is not None
+    conn.close()

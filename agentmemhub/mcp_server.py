@@ -29,8 +29,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 import time
+import uuid
 from typing import Any, Callable, Optional
 
 from agentmemhub import memos_daemon
@@ -280,6 +282,12 @@ _TOOL_HANDLERS: dict[str, Callable[[dict], str]] = {
     "memory_score": _score,
 }
 
+#: `note` 参数说明：Agent 补充的**意图**（为什么做这次操作）。
+#: 调用本身（是什么、参数、结果、耗时）已由服务端在 _tools_call 自动记录，
+#: 这个参数补充的是"为什么"——那部分只有 Agent 知道。
+_NOTE_DESC = ("（可选）本次操作的意图/理由——为什么查这个、为什么值得记、"
+              "为什么这样评分。只写入审计日志 logs/mcp.log，不参与检索与存储。")
+
 _TOOLS: list[dict] = [
     {
         "name": "memory_search",
@@ -289,6 +297,7 @@ _TOOLS: list[dict] = [
             "properties": {
                 "query": {"type": "string", "description": "检索查询，自然语言描述想找的记忆主题"},
                 "topK": {"type": "integer", "description": "返回条数（默认 8，最大 30）"},
+                "note": {"type": "string", "description": _NOTE_DESC},
             },
             "required": ["query"],
         },
@@ -334,6 +343,7 @@ _TOOLS: list[dict] = [
                         "引擎不解释标签语义，纯透传。"
                     ),
                 },
+                "note": {"type": "string", "description": _NOTE_DESC},
             },
             "required": ["content"],
         },
@@ -346,6 +356,7 @@ _TOOLS: list[dict] = [
             "properties": {
                 "trace_id": {"type": "string", "description": "memory_save 返回的 trace id"},
                 "polarity": {"type": "string", "description": "positive | neutral | negative"},
+                "note": {"type": "string", "description": _NOTE_DESC},
             },
             "required": ["trace_id", "polarity"],
         },
@@ -356,6 +367,77 @@ _TOOLS: list[dict] = [
 # ---------------------------------------------------------------------------
 # JSON-RPC / MCP 处理
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 调用审计：logs/mcp.log（Agent 侧记忆操作的事实记录，供溯源与查询）
+#
+# 为什么放在 _tools_call 而不是各工具内部：它是 stdio 与 Streamable HTTP
+# **共用的唯一分发点**，包一层即 100% 覆盖，且五个工具零改动。
+# 为什么不让 Agent 手动写日志：Skill 自己的记述是"这类依赖自觉的动作在高负载
+# 下会漏触发"，而审计的价值全在完整性——漏一条就无法区分"没做"与"没记"。
+# Agent 的**意图**（为什么）由可选参数 note 补充，随同一次调用一起落盘。
+# ---------------------------------------------------------------------------
+
+_AUDIT_TEXT_CAP = 400
+
+
+def _audit_args(args: dict) -> dict:
+    """审计用参数：正文只留摘要 + 字数。
+
+    正文全文已在记忆库（凭结果里的 trace id 可回查），日志里再存一份既冗余，
+    也让敏感内容二次落盘。
+    """
+    out: dict = {}
+    for k, v in args.items():
+        if k == "content" and isinstance(v, str):
+            out["content_chars"] = len(v)
+            out["content_head"] = v[:80]
+        elif isinstance(v, str) and len(v) > 300:
+            out[k] = v[:300] + "…"
+        else:
+            out[k] = v
+    return out
+
+
+def _audit_digest(text: str) -> dict:
+    """从结果文本里轻量提取关键标识（提不到就留空，绝不影响主流程）。"""
+    d: dict = {}
+    m = re.search(r"\bid=(\S+?)[\s，,、)）]", text)
+    if m:
+        d["trace_id"] = m.group(1)
+    m = re.search(r"(\d+)\s*条命中", text)
+    if m:
+        d["hits"] = int(m.group(1))
+    return d
+
+
+def _audited(name: str, args: dict, fn: Callable[[dict], str]) -> str:
+    """执行工具并写审计（call + result 两条，以 call_id 关联）。
+
+    记两条而不是一条：只记结果的话，"发起了却没有返回"（超时、进程被杀）就
+    完全无迹可寻——而那恰恰是审计最该抓到的情况。
+    """
+    from agentmemhub.logs import audit_mcp
+
+    cid = uuid.uuid4().hex[:12]
+    t0 = time.perf_counter()
+    base = {"kind": "mcp", "call_id": cid, "tool": name, "agent": _AGENT}
+    audit_mcp({**base, "ts": round(time.time(), 3), "phase": "call",
+               "args": _audit_args(args)})
+    try:
+        text = fn(args)
+    except Exception as e:
+        audit_mcp({**base, "ts": round(time.time(), 3), "phase": "result",
+                   "ok": False,
+                   "elapsed_ms": round((time.perf_counter() - t0) * 1000),
+                   "error": f"{type(e).__name__}: {e}"[:300]})
+        raise
+    audit_mcp({**base, "ts": round(time.time(), 3), "phase": "result", "ok": True,
+               "elapsed_ms": round((time.perf_counter() - t0) * 1000),
+               "digest": _audit_digest(text),
+               "result_head": text[:_AUDIT_TEXT_CAP]})
+    return text
+
 
 def _err(mid: Any, code: int, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": mid,
@@ -438,10 +520,16 @@ class MCPHandler:
         fn = _TOOL_HANDLERS.get(name)
         if fn is None:
             raise LookupError(f"unknown tool: {name}")
-        # 引擎未运行时所有工具统一返回明确指引（网关不代管引擎生命周期）
-        if memos_daemon.auth_state() is None:
-            raise _ToolError(_engine_hint())
-        return {"content": [{"type": "text", "text": fn(args)}]}
+
+        def _run(a: dict) -> str:
+            # 引擎未运行时所有工具统一返回明确指引（网关不代管引擎生命周期）
+            if memos_daemon.auth_state() is None:
+                raise _ToolError(_engine_hint())
+            return fn(a)
+
+        # 审计包在引擎可用性检查**之外**：Agent 试图操作但引擎离线，同样是
+        # 必须留痕的事实（否则"没做"与"做了但失败"无从区分）。
+        return {"content": [{"type": "text", "text": _audited(name, args, _run)}]}
 
 
 def _force_utf8_stdio() -> None:
