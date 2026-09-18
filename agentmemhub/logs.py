@@ -5,8 +5,13 @@
     ├── web.log        看板操作/接口（引擎启停、任务提交/结果摘要；内存环形缓冲供面板）
     ├── cli.log        CLI / 控制台操作记录（终端命令与结果摘要）
     ├── mcp.log        MCP 记忆调用审计（Agent 侧事实流，JSONL 只追加；见 audit_mcp）
+    ├── wiki.log       LLM Wiki 编译事件（阶段/目标/token/成败/断点；见 audit_wiki）
     ├── engine.log     MemOS 引擎 daemon 输出（memos_daemon 日志）
     └── tasks/<id>.log 看板后台任务完整输出（逐行、带时间戳）
+
+**为什么 wiki 要单独一个文件**：wiki 编译是长任务（实测第二级 39 分钟、246 次
+LLM 调用），控制台输出一关就没了；而长任务必须能回答"跑到哪了 / 哪些失败了 /
+花了多少 / 上次断在哪"。这与 mcp.log 的读者和保留策略都不同，所以不混用。
 """
 from __future__ import annotations
 
@@ -132,9 +137,14 @@ def read_mcp_audit(path: "Path | None" = None, limit: int = 0) -> list[dict]:
     limit>0 时只取末尾 N 行。解析放在生产侧而非各调用方：CLI 查询脚本、面板、
     测试都要读它，多处各写一份解析迟早漂移。
     """
-    p = Path(path) if path else mcp_audit_file()
+    return _read_jsonl(path, "mcp.log", limit)
+
+
+def _read_jsonl(path: "Path | None", default_name: str, limit: int) -> list[dict]:
+    """读 JSONL 日志（坏行跳过，不让一行损坏拖垮整个查询）。"""
+    p = Path(path) if path else (log_dir() / default_name)
     if p.is_dir():
-        p = p / "mcp.log"
+        p = p / default_name
     if not p.exists():
         return []
     lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -150,6 +160,41 @@ def read_mcp_audit(path: "Path | None" = None, limit: int = 0) -> list[dict]:
         except Exception:
             continue
     return out
+
+
+# ---------------------------------------------------------------------------
+# LLM Wiki 编译事件：logs/wiki.log（只追加的事实流）
+#
+# 为什么单独一个文件：wiki 编译是**长任务**——实测第二级跑了 39 分钟、246 次
+# LLM 调用。控制台输出一关就没了，而长任务必须能回答四件事：跑到哪了、
+# 哪些失败了、花了多少、上次断在哪。这三件都只能靠落盘。
+#
+# 与 mcp.log 的分工：mcp.log 记 Agent 的记忆调用（事实流），wiki.log 记编译
+# 流水线自己的事件（阶段 / 目标 / token / 成败 / 断点）。读者与保留策略都不同。
+# ---------------------------------------------------------------------------
+
+def wiki_log_file() -> Path:
+    return log_dir() / "wiki.log"
+
+
+def audit_wiki(entry: dict) -> None:
+    """追加一条 wiki 编译事件（JSONL）。
+
+    写失败一律静默：审计是旁路，绝不能因为它让编译本身失败。
+    """
+    try:
+        with _FILE_LOCK:
+            p = wiki_log_file()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def read_wiki_audit(path: "Path | None" = None, limit: int = 0) -> list[dict]:
+    """读 wiki 编译事件（坏行跳过）。path 默认 `logs/wiki.log`，也接受日志目录。"""
+    return _read_jsonl(path, "wiki.log", limit)
 
 
 def append_task_line(job_id: str, line: str) -> Path:

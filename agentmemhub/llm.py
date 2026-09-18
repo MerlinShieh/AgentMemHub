@@ -18,12 +18,68 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 import unicodedata
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Optional
+
+
+# ---------------------------------------------------------------------------
+# 累计用量统计（成本可见性）
+#
+# 为什么放模块级而不是实例上：`LLMClient` 被刻意设计成"无共享可变状态、
+# 每线程一个实例"（批量编译时每个会话新建一个）。统计必须跨实例汇总，
+# 否则并发跑完各算各的、无法回答"这批花了多少钱"。用锁保护，开销可忽略。
+# ---------------------------------------------------------------------------
+_USAGE_LOCK = threading.Lock()
+_USAGE: dict[str, int] = {
+    "calls": 0, "prompt": 0, "completion": 0, "reasoning": 0,
+    "cached_hit": 0, "cached_miss": 0,
+}
+
+
+def usage_snapshot() -> dict[str, int]:
+    """当前累计用量（线程安全）。"""
+    with _USAGE_LOCK:
+        return dict(_USAGE)
+
+
+def usage_reset() -> None:
+    """清零累计用量（测试，或单次批量任务开始前）。"""
+    with _USAGE_LOCK:
+        for k in _USAGE:
+            _USAGE[k] = 0
+
+
+def _record_usage(usage: dict | None) -> None:
+    """把一次响应的 usage 计入累计（字段缺失按 0）。"""
+    if not isinstance(usage, dict):
+        return
+    det = usage.get("completion_tokens_details") or {}
+    with _USAGE_LOCK:
+        _USAGE["calls"] += 1
+        _USAGE["prompt"] += int(usage.get("prompt_tokens") or 0)
+        _USAGE["completion"] += int(usage.get("completion_tokens") or 0)
+        _USAGE["reasoning"] += int(det.get("reasoning_tokens") or 0)
+        _USAGE["cached_hit"] += int(usage.get("prompt_cache_hit_tokens") or 0)
+        _USAGE["cached_miss"] += int(usage.get("prompt_cache_miss_tokens") or 0)
+
+
+def estimate_cost(usage: dict[str, int], *, price_in_miss: float = 2.0,
+                  price_in_hit: float = 0.04, price_out: float = 8.0) -> float:
+    """按"元 / 百万 tokens"估算花费（默认取 DeepSeek **高峰时段**价）。
+
+    注意高峰时段为北京时间周一至周五 9:00-12:00 / 14:00-18:00，其余时段
+    输入输出均为半价。想按空闲价估算就把三个单价都除以 2。
+    """
+    return (
+        usage.get("cached_miss", 0) / 1e6 * price_in_miss
+        + usage.get("cached_hit", 0) / 1e6 * price_in_hit
+        + usage.get("completion", 0) / 1e6 * price_out
+    )
 
 
 class LLMError(Exception):
@@ -159,6 +215,15 @@ class LLMConfig:
     # reasoning 吃满、content 为空（finish_reason=length, reasoning_tokens=8192）。
     # 按生成量计费，上限提高不增加成本（除非真用到），留足更划算。
     temperature: float = 0.0      # 蒸馏/抽取类任务恒 0，保证可复现
+    #: **思考模式开关**（DeepSeek 系）：`""`=不传（用 provider 默认，即开启）、
+    #: `"enabled"` / `"disabled"`。请求体顶层发 `{"thinking": {"type": ...}}`。
+    #: 为什么要这个开关：思考模式下思维链（reasoning token）**计入输出计费**，
+    #: 实测在一次 45 条记忆的编译里 reasoning 占 completion 的 67%（21483/32002）；
+    #: 而"归纳 / 整理 / 改写"类任务并不需要深度推理——关闭可省约一半以上成本。
+    #: 注意：思考模式下 `temperature` 不生效（传入不报错但被忽略），关闭后才生效。
+    thinking: str = ""
+    #: 思考强度（仅思考模式生效）：`low` / `high` / `max`；`""`=不传。
+    reasoning_effort: str = ""
     #: provider 特定的额外请求头（配置驱动，不硬编码在客户端里）。
     #: 实测 OpenCode Go（opencode.ai/zen/go）需要 User-Agent（过 Cloudflare 1010）
     #: 与 x-opencode-session（路由亲和，缺失时 400 MissingSessionID）。
@@ -180,6 +245,14 @@ class LLMConfig:
         d = dict(cfg or {})
         d.update({k: v for k, v in overrides.items() if v is not None})
         headers = d.get("headers") or {}
+        thinking = str(d.get("thinking") or "").strip().lower()
+        if thinking and thinking not in ("enabled", "disabled"):
+            raise ValueError(
+                f"llm.thinking 只能是 enabled / disabled（或留空不传），收到：{thinking!r}")
+        effort = str(d.get("reasoning_effort") or "").strip().lower()
+        if effort and effort not in ("low", "high", "max"):
+            raise ValueError(
+                f"llm.reasoning_effort 只能是 low / high / max（或留空不传），收到：{effort!r}")
         return cls(
             endpoint=str(d.get("endpoint") or ""),
             api_key=str(d.get("api_key") or ""),
@@ -189,6 +262,8 @@ class LLMConfig:
             backoff_base=float(d.get("backoff_base") or 1.5),
             max_tokens=int(d.get("max_tokens") or 16384),
             temperature=float(d.get("temperature") if d.get("temperature") is not None else 0.0),
+            thinking=thinking,
+            reasoning_effort=effort,
             headers={str(k): str(v) for k, v in headers.items()} if isinstance(headers, dict) else {},
         )
 
@@ -225,7 +300,9 @@ class LLMClient:
             raise LLMError(f"LLM endpoint 非法（检查配置）：{e}") from None
         try:
             with self._opener.open(req, timeout=timeout) as r:
-                return json.loads(r.read().decode("utf-8"))
+                data = json.loads(r.read().decode("utf-8"))
+                _record_usage(data.get("usage"))      # 成本可见性：累计用量
+                return data
         except urllib.error.HTTPError as e:
             detail = ""
             try:
@@ -263,6 +340,12 @@ class LLMClient:
                             else float(temperature)),
             "max_tokens": int(max_tokens or self.cfg.max_tokens),
         }
+        # 思考模式（DeepSeek 系）：请求体顶层 `thinking`。留空则完全不下发，
+        # 用 provider 默认（DeepSeek 默认 **开启** 且 effort=high）。
+        if self.cfg.thinking:
+            body["thinking"] = {"type": self.cfg.thinking}
+        if self.cfg.reasoning_effort:
+            body["reasoning_effort"] = self.cfg.reasoning_effort
         last: Optional[Exception] = None
         for attempt in range(self.cfg.max_retries + 1):
             try:

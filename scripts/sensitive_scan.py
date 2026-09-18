@@ -15,6 +15,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Windows 控制台默认 GBK，结果里的 ✅/❌ 会抛 UnicodeEncodeError 中断脚本——
+# 而它恰好发生在**打印结论**那一步，等于"扫描完却看不到结论"。统一改 UTF-8 容错。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 
 def _username_patterns() -> dict[str, re.Pattern]:
     """本机用户名 → 扫描规则（动态取自环境，不把真实用户名写进源码）。"""

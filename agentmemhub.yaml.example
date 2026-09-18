@@ -1,4 +1,4 @@
-﻿# AgentMemHub 配置文件模板
+# AgentMemHub 配置文件模板
 #
 # 用法：复制本文件为 agentmemhub.yaml（项目根），按需修改；不复制则全部用
 # 官方默认路径，功能与现状一致。
@@ -77,12 +77,57 @@ llm:
   endpoint: ""
   # api_key: 只读不打印；也可用环境变量 AGENTMEMHUB_LLM_API_KEY
   api_key: ""
-  model: ""               # 如 deepseek-v4-flash / glm-5.3-flash
+  model: ""               # 如 deepseek-flash / deepseek-v4.1-flash / glm-5.3-flash
+  # thinking: 思考模式开关（DeepSeek 系）。留空 = 不下发该参数，用 provider 默认
+  #   （DeepSeek 默认**开启**思考且 effort=high）。
+  #   "disabled" = 关闭思维链。归纳 / 整理 / 改写类任务不需要深度推理，而
+  #     reasoning token **计入输出计费**——实测一次 45 条记忆的编译里 reasoning
+  #     占 completion 的 67%（21483 / 32002），关闭可省一半以上成本。
+  #   "enabled"  = 显式开启（等价于 provider 默认）。
+  #   注意：思考模式下 `temperature` 不生效（传了不报错但被忽略），关闭后才生效。
+  # thinking: "disabled"
+  # reasoning_effort: 思考强度 low / high / max（仅思考模式生效；留空不传）
+  # reasoning_effort: "low"
   # headers: provider 特定请求头（多数 provider 不需要）。
   #   部分 provider 有硬性要求（自定义 User-Agent 过 WAF、会话标识头等），
   #   按服务商文档填写；也可用 scripts/sync_llm_from_zcode.py 从 ZCode 配置自动同步。
   # headers:
   #   User-Agent: "AgentMemHub/1.0"
+
+# ---------------------------------------------------------------------------
+# LLM Wiki 编译：零散记忆 → 可读页面
+#   第一级 scripts/wiki_compile.py   逐会话编译（碎片 → 会话内页面）
+#   第二级 scripts/wiki_aggregate.py 跨会话聚合（会话内页面 → 主题实体页）
+#
+# **两级各自相对顶层 `llm` 覆盖，不是级联继承。** 级联会让第一级换 provider
+# 时连带改掉第二级（实测踩过：第一级切到 DeepSeek 官方关推理，第二级因此
+# 丢掉了 Command Code 的凭据）。所以 `wiki.l2.llm` 的继承链是
+# 顶层 llm → wiki.l2.llm，刻意跳过 wiki.llm。
+#
+# 为什么两级要分开配：推理需求相反——第一级是"把已经想清楚的结论归纳成页面"，
+# 第二级是"把已有页面合并去重"，都不需要长时间思考，而 reasoning token
+# **计入输出计费**（实测第一级思维链占其输出的 66%）。
+# ---------------------------------------------------------------------------
+wiki:
+  enabled: true
+  # ---- 第一级：逐会话编译 ----
+  llm:
+    # 留空 = 全部继承顶层 llm。只写需要覆盖的字段，例：
+    # endpoint: "https://api.deepseek.com/chat/completions"
+    # model: "deepseek-flash"
+    # thinking: "disabled"          # DeepSeek 官方：彻底关闭推理（最省）
+    # reasoning_effort: "low"       # 只能调强度的 provider（Command Code 等）
+  single_shot_max: 12               # 记忆数 ≤ 此值时单次编译（省一次分组调用）
+  workers: 4
+  # ---- 第二级：跨会话聚合 ----
+  l2:
+    llm:
+      # 同样留空即继承顶层 llm。聚合是"合并已有结论"，通常只调低强度：
+      # reasoning_effort: "low"
+      # timeout: 900                # 默认 60s 对"输入几万字符"的归域调用必然读超时
+    workers: 6
+    min_pages: 2                    # 一个分组少于这么多页就不值得合并成新页
+    domain_max: 60                  # 主题域数量上限（控制归域调用的输出规模）
 
 # ---------------------------------------------------------------------------
 # 记忆蒸馏：原始会话 → 结构化记忆（详见 docs/memory-distillation.md）

@@ -1,4 +1,4 @@
-﻿"""AgentMemHub 统一配置体系。
+"""AgentMemHub 统一配置体系。
 
 原则：所有路径/端口默认采用官方默认；用户可在配置文件里覆盖（优先最小化配置）。
 优先级（高 → 低）：
@@ -51,6 +51,32 @@ DEFAULT_DISTILL = {
         "max_concurrent": 4,
         "timeout": 60,
         "dry_run": False,
+    },
+}
+
+#: LLM Wiki 编译（把零散记忆归纳成可读页面）。
+#:
+#: **为什么必须与 distillation 分开配 llm**：两条链路的推理需求是相反的——
+#: 蒸馏 / 评分要"想清楚"（思考提升结论质量），而 wiki 编译只是把**已经想清楚的
+#: 结论**归纳成页面，相对不需要思考。共用一份 llm 配置会让 wiki 白白付推理开销
+#: （实测思维链占其输出的 66%，单次编译 105K → 326K 输出 token）。
+#:
+#: llm 子段留空 = 全部继承顶层 llm；只写需要覆盖的字段：
+#:     llm: {thinking: "disabled"}       # DeepSeek 官方：彻底关闭推理（最省）
+#:     llm: {reasoning_effort: "low"}    # 只能调强度的 provider（如 Command Code）
+DEFAULT_WIKI = {
+    "enabled": True,
+    "llm": {},
+    "single_shot_max": 12,   # 记忆数 ≤ 此值时单次编译（省一次分组调用）
+    "workers": 4,            # 全量编译的并发数
+    # 第二级：跨会话聚合（第一级的会话内页面 → 主题实体页）。
+    # 它的 llm 子段**继承顶层 llm 而非 wiki.llm** —— 两级是独立的覆盖关系，
+    # 级联继承会让第一级的 provider 选择牵连第二级（见 Config.wiki_l2）。
+    "l2": {
+        "llm": {},
+        "workers": 6,        # 聚合阶段调用密集，并发可高于第一级
+        "min_pages": 2,      # 一个分组至少这么多页才值得合并成新页
+        "domain_max": 60,    # 主题域数量上限（控制归域调用的输出规模）
     },
 }
 
@@ -217,6 +243,13 @@ class Config:
 
     # -- LLM（蒸馏 / 评分共用）-------------------------------------------
 
+    #: 可以从 `llm` 段原样透传的标量字段。
+    #: **新增 provider 开关时务必加到这里** —— 本段是白名单过滤，漏加会让配置
+    #: 静默失效（实测踩过：`thinking` / `reasoning_effort` 写进了 yaml 却读不到，
+    #: 表现为"开关不生效"，排查成本很高）。
+    _LLM_SCALAR_KEYS = ("timeout", "max_tokens", "temperature",
+                        "thinking", "reasoning_effort")
+
     @property
     def llm(self) -> dict[str, Any]:
         """LLM 接入配置：{endpoint, api_key, model} + 可选的 headers/超参。
@@ -227,6 +260,7 @@ class Config:
         **使用方**：记忆蒸馏（distill.py）与批量评分（scoring.read_engine_llm）
         共用本段——换模型/换服务商只改这一处；蒸馏如需单独覆盖写 distillation.llm。
         headers：provider 特定请求头（部分服务商有硬性要求）。
+        thinking / reasoning_effort：思考模式与强度（DeepSeek 系）。
         """
         sec = self._get("llm", {}) or {}
         if not isinstance(sec, dict):
@@ -242,13 +276,13 @@ class Config:
         headers = sec.get("headers")
         if isinstance(headers, dict) and headers:
             out["headers"] = {str(k): str(v) for k, v in headers.items()}
-        for k in ("timeout", "max_tokens", "temperature"):
+        for k in self._LLM_SCALAR_KEYS:
             if sec.get(k) is not None:
                 out[k] = sec[k]
         return out
 
-    @staticmethod
-    def _merge_llm(top: dict[str, Any], sub: dict[str, Any]) -> dict[str, Any]:
+    @classmethod
+    def _merge_llm(cls, top: dict[str, Any], sub: dict[str, Any]) -> dict[str, Any]:
         """蒸馏的 llm 子段：标量留空继承顶层；headers 合并（子段优先）。"""
         out: dict[str, Any] = {
             k: (str(sub.get(k) or "") or str(top.get(k) or ""))
@@ -261,7 +295,7 @@ class Config:
             headers.update(sub["headers"])
         if headers:
             out["headers"] = headers
-        for k in ("timeout", "max_tokens", "temperature"):
+        for k in cls._LLM_SCALAR_KEYS:
             v = sub.get(k) if sub.get(k) is not None else top.get(k)
             if v is not None:
                 out[k] = v
@@ -279,6 +313,33 @@ class Config:
         merged = _deep_merge(DEFAULT_DISTILL, self._get("distillation", {}) or {})
         merged["llm"] = self._merge_llm(self.llm, merged.get("llm") or {})
         return merged
+
+    # -- LLM Wiki 编译 ----------------------------------------------------
+
+    @property
+    def wiki(self) -> dict[str, Any]:
+        """LLM Wiki 编译配置（已合并默认值，调用方无需处理缺键）。
+
+        `llm` 子段留空的字段继承顶层 `llm` —— 顶层配 provider / 密钥 / 请求头，
+        这里只覆盖"要不要思考"这类差异项（见 DEFAULT_WIKI 的说明）。
+        """
+        merged = _deep_merge(DEFAULT_WIKI, self._get("wiki", {}) or {})
+        merged["llm"] = self._merge_llm(self.llm, merged.get("llm") or {})
+        return merged
+
+    @property
+    def wiki_l2(self) -> dict[str, Any]:
+        """第二级（跨会话聚合）配置。
+
+        `llm` 的继承链是 **顶层 llm → wiki.l2.llm**，刻意**跳过 wiki.llm**：
+        `wiki.llm` 是"第一级用什么模型"的选择，级联下去会让第一级换 provider
+        时连带改掉第二级（实测踩过：第一级用 DeepSeek 官方关推理，第二级
+        因此丢掉了 Command Code 的凭据）。两级各自相对顶层覆盖，互不牵连。
+        """
+        merged = _deep_merge(DEFAULT_WIKI, self._get("wiki", {}) or {})
+        l2 = dict(merged.get("l2") or {})
+        l2["llm"] = self._merge_llm(self.llm, l2.get("llm") or {})
+        return l2
 
     # -- 内部 -------------------------------------------------------------
 

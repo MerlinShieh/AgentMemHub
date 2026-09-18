@@ -610,6 +610,75 @@ llm:
     User-Agent: "AgentMemHub/1.0"
 ```
 
+## LLM Wiki（把碎片记忆编译成可读知识库）
+
+RAG 之外的第二条路径。RAG 在查询时从原始碎片检索，**每次重新推导、无累积**，
+优化的是「能不能捞到」；LLM Wiki 把已经沉淀的结论**编译**成结构化、互相链接的
+markdown 页面，人和 Agent 都能直接读，优化的是「有没有结构」。
+
+两层是**单向**关系：原始记忆可以影响 wiki，**wiki 不会反向影响 RAG**。
+
+```
+1496 条蒸馏记忆
+      │
+      ├─ 第一级  scripts/wiki_compile.py    逐会话编译   → 217 份 md / 874 页
+      │                                      压缩比仅 1.67:1
+      └─ 第二级  scripts/wiki_aggregate.py  跨会话聚合   → 主题实体页
+```
+
+两级都**只读运行**：打开索引库副本、产出独立 markdown、不写任何数据表。
+
+### 第一级：会话内编译
+
+```bash
+uv run python scripts/wiki_compile.py --list                    # 列出候选会话
+uv run python scripts/wiki_compile.py --all --out DIR \
+    --index-db database/session_rag.db --workers 8              # 全量
+uv run python scripts/wiki_compile.py --source X --conversation-id Y --out DIR
+```
+
+先让 LLM 把会话内的记忆**按主题分组**（没有现成的分组键可用：`topic` 几乎唯一、
+`slice_key` 是会话级的），再逐组编译成页面。长会话强制走两段式——推理模型的
+**思维链计入 `max_tokens`**，一次喂 45 条记忆会在 32K 上限处被截断。
+
+支撑断点续跑：已有产出的会话自动跳过，失败不中断整批。
+
+### 第二级：跨会话聚合
+
+```bash
+# 只归域（便宜，先看域表质量）
+uv run python scripts/wiki_aggregate.py --src 一级产出目录 --out DIR \
+    --db database/session_rag.db --stage domains
+# 单域试跑
+uv run python scripts/wiki_aggregate.py --src ... --out DIR --db ... --domain DSH
+```
+
+三阶段：**归域**（874 个标题 → 主题域）→ **域内细分**（决定哪几页合并成一页）→
+**重新编译**（把同一主题散在多个会话里的页面重写成一篇，不是拼接）。
+
+第一级的页面按**会话**切，所以同一主题会散成好几页（`AgentMemHub` 一个实体就散在
+21 个会话、40 个标题里）；第二级按**主题**合回来，这才是真正的收敛点。
+
+> 第二级会把正文里的会话内序号引用提升成**全局记忆编号** `[m123]`——
+> 聚合后编号不冲突，且直接可追溯回 `distilled_memories`。
+
+详见 [docs/llm-wiki.md](docs/llm-wiki.md)。
+
+### 配置：两级刻意不级联
+
+```yaml
+wiki:
+  llm:                    # 第一级（继承顶层 llm，只覆盖差异）
+    thinking: "disabled"  # DeepSeek 官方支持彻底关推理
+  l2:
+    llm:                  # 第二级：**同样继承顶层 llm**，刻意跳过 wiki.llm
+      reasoning_effort: "low"
+      timeout: 900        # 默认 60s 对"输入几万字符"的调用必然读超时
+```
+
+级联继承会让第一级换 provider 时连带改掉第二级——实测踩过：第一级切到
+DeepSeek 官方关推理后，第二级因此丢掉了 Command Code 的凭据。
+
 ## 统一配置
 
 所有路径/端口默认采用官方默认；需要覆盖时创建 `agentmemhub.yaml`（模板见 `agentmemhub.yaml.example`）。优先级：环境变量 > 配置文件 > 内置默认。
