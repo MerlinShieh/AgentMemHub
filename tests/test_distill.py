@@ -13,6 +13,7 @@ import pytest
 
 from agentmemhub.distill import (
     CONFIDENCES,
+    CONTENT_MAX,
     DISTILLED_ROLE,
     DISTILLED_SRC_PREFIX,
     MEMORY_STATUSES,
@@ -30,6 +31,7 @@ from agentmemhub.distill import (
     _project_one,
     build_slices,
     check_memory_fields,
+    clamp_content,
     conversation_turns,
     distill_slice,
     ensure_distill_schema,
@@ -1093,17 +1095,21 @@ def test_merge_hierarchical_empty_input_no_llm_call():
 
 def test_merge_hierarchical_truncates_when_not_converging():
     """LLM 不去重（每批原样等量返回）→ 轮数用尽后保底截断，不无限调用。"""
-    long_text = "内容" * 200                      # 400 字符/条 → 每批仅装 2 条
+    # 注意：content 必须留在 CONTENT_MAX 之内 —— 超长会被 normalize_memories
+    # 截短，每批能装的条数随之变化，就制造不出"不收敛"了（实测踩过）。
+    # 这里改用较小的 max_chars 来保证"每批仅 2 条"。
+    long_text = "内容" * 50                       # 100 字符/条
     entries = [{"type": "fact", "confidence": "high", "content": long_text}
                for _ in range(400)]
-    # 每批返回等量同长度条目（不收敛）；两轮各约 200 批
+    # 每批返回等量同长度条目（不收敛）
     responses = []
     for i in range(200):
         responses.append({"memories": [
             {"type": "fact", "topic": "t", "confidence": "high",
              "content": f"{long_text}-{i}-{j}"} for j in range(2)]})
     client = _FakeLLM(*(responses * 2))
-    r = merge_hierarchical(client, entries, max_chars=1000, max_rounds=2)
+    # 每条 cost = content 长度 + _ENTRY_OVERHEAD(60) = 160；350 恰好装 2 条
+    r = merge_hierarchical(client, entries, max_chars=350, max_rounds=2)
     assert client.calls <= 400                     # 调用次数受轮数封顶，不爆炸
     assert len(r.memories) <= MERGE_FALLBACK_CAP   # 保底截断
     assert any("未收敛" in x for x in r.rejected)
@@ -1496,3 +1502,50 @@ def test_project_time_uses_origin_turn_time(idx_conn, real_settings):
     row = idx_conn.execute(
         "SELECT time FROM units WHERE role=?", (DISTILLED_ROLE,)).fetchone()
     assert row[0] == old_ts, f"应取原轮次时间 {old_ts}，实得 {row[0]}"
+
+
+# ---------------------------------------------------------------------------
+# content 硬截断（提示词约束的代码级兜底）
+#
+# 背景：CONTENT_MAX=120 原先只是**提示词里的要求**，实测没有模型稳定遵守——
+# 同一份提示词、同一批 12 个切片跑下来：MiMo 24% 超标、LongCat 44%、
+# deepseek-v4.1-flash 52%、ling-3.0-flash 53%。超长条目往往一条讲好几个结论，
+# 反而损害自包含性与召回质量（命中后更难用），所以必须由代码兜底。
+# ---------------------------------------------------------------------------
+
+def test_clamp_content_短文本原样返回():
+    assert clamp_content("一条正常长度的记忆", 120) == "一条正常长度的记忆"
+
+
+def test_clamp_content_恰等于上限不截断():
+    assert clamp_content("x" * 120, 120) == "x" * 120
+
+
+def test_clamp_content_超长时断在句读处():
+    text = "第一句结论。" * 8 + "后续内容" * 20   # 前 40 字里有 6 个句号
+    out = clamp_content(text, 40)
+    assert len(out) <= 40
+    assert out.endswith("。"), "应断在句读处，而不是句子中间"
+
+
+def test_clamp_content_句读太靠前则硬切加省略号():
+    text = "好。" + "x" * 200        # 句读在第 2 字，远不足 limit 的 60%
+    out = clamp_content(text, 50)
+    assert len(out) <= 51            # 50 字 + 省略号
+    assert out.endswith("…")
+
+
+def test_clamp_content_空值安全():
+    assert clamp_content("", 120) == ""
+    assert clamp_content(None, 120) == ""
+
+
+def test_normalize_memories_对超长content兜底():
+    """复现：LLM 无视 120 字约束时，入库的 content 必须已经被收缩。"""
+    long_text = "结论：这是一条远超上限的记忆。" + "补充说明" * 40
+    raw = {"memories": [{"type": "fact", "topic": "测试",
+                         "content": long_text, "confidence": "high"}]}
+    mems, rejected = normalize_memories(raw)
+    assert not rejected
+    assert len(mems) == 1
+    assert len(mems[0]["content"]) <= CONTENT_MAX, "超长 content 必须被截断"

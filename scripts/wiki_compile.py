@@ -48,6 +48,9 @@ for _s in (sys.stdout, sys.stderr):
 #: 记忆条数不超过此值就单次编译（省一次分组调用）
 SINGLE_SHOT_MAX = 12
 
+#: 失败清单类型（仅用于标注，避免顶层重复 import 拖慢启动）
+from agentmemhub.failures import FailureLog  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # 提示词 —— 整个方案成败在这里
 #
@@ -273,6 +276,31 @@ def compile_session(client, memories: list[dict], log=print) -> dict:
             "unclassified": plan.get("unclassified") or []}
 
 
+def _norm_nums(v) -> list[int]:
+    """把 LLM 给的 `sources` 规范化成整数列表。
+
+    实测 MiMo 偶尔返回**嵌套数组**（如 `[[1,2],3]`），直接拿去查 dict 会抛
+    `TypeError: unhashable type: 'list'` —— 整页渲染因此失败。这里拍平并只保留
+    能转成整数的值，恒不抛异常。
+    """
+    out: list[int] = []
+
+    def walk(x) -> None:
+        if isinstance(x, (list, tuple)):
+            for y in x:
+                walk(y)
+        elif isinstance(x, bool):
+            pass
+        else:
+            try:
+                out.append(int(x))
+            except (TypeError, ValueError):
+                pass
+
+    walk(v)
+    return out
+
+
 def render(result: dict, meta: dict) -> str:
     """JSON → markdown。页面标题用 `#`，正文内标题由 LLM 用 `##`，避免层级冲突。"""
     pages = result.get("pages") or []
@@ -300,7 +328,7 @@ def render(result: dict, meta: dict) -> str:
         rel = p.get("related") or []
         if rel:
             L += ["**相关**：" + " · ".join("[[%s]]" % r for r in rel), ""]
-        nums = p.get("sources") or p.get("_members") or []
+        nums = _norm_nums(p.get("sources") or p.get("_members") or [])
         if nums:
             L += ["**来源**：" + " ".join("[%s]" % src_map.get(n, "?") for n in nums), ""]
         L += ["---", ""]
@@ -309,8 +337,9 @@ def render(result: dict, meta: dict) -> str:
     if unc:
         L += ["# 未归类（不成页）", ""]
         for u in unc:
-            L.append("- [%s] %s" % (src_map.get(u.get("n"), u.get("n")),
-                                    u.get("why", "")))
+            ns = _norm_nums([u.get("n")])
+            key = ns[0] if ns else u.get("n")
+            L.append("- [%s] %s" % (src_map.get(key, key), u.get("why", "")))
         L.append("")
     return "\n".join(L)
 
@@ -392,10 +421,13 @@ def compile_one(db: Path, source: str, cid: str, out_dir: Path,
 
 def compile_all(db: Path, out_dir: Path, *, workers: int = 4, limit: int = 0,
                 resume: bool = True, min_n: int = 1,
-                thinking: str = "") -> list[dict]:
-    """全量编译（并发 + 断点续跑）。
+                thinking: str = "", only: set | None = None,
+                failures: "FailureLog | None" = None) -> list[dict]:
+    """全量编译（并发 + 断点续跑 + 失败清单）。
 
     resume=True 时跳过已有产出的会话 —— 200+ 个会话跑一小时，中途失败必须能续。
+    only：只跑这些 (source, conversation_id)（用于 --retry-failed 定向补跑）。
+    failures：失败清单；单会话失败记一条，成功则把历史失败标记为已解决。
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -406,6 +438,8 @@ def compile_all(db: Path, out_dir: Path, *, workers: int = 4, limit: int = 0,
     todo = []
     skipped = 0
     for s, cid, n, _t in sessions:
+        if only is not None and (s, cid) not in only:
+            continue
         if resume and (out_dir / (_out_stem(s, cid) + ".md")).exists():
             skipped += 1
             continue
@@ -433,13 +467,18 @@ def compile_all(db: Path, out_dir: Path, *, workers: int = 4, limit: int = 0,
                 r = {"source": s, "cid": cid, "n_in": n, "pages": 0,
                      "error": "%s: %s" % (type(e).__name__, str(e)[:180])}
             results.append(r)
+            key = "%s/%s" % (s, cid)
             if r.get("error"):
                 _wlog(event="session_fail", script="wiki_compile", source=s,
                       cid=cid, memories=r.get("n_in"), error=r["error"])
+                if failures is not None:
+                    failures.record(stage="l1", target=key, error=r["error"])
             elif not r.get("skipped"):
                 _wlog(event="session_done", script="wiki_compile", source=s,
                       cid=cid, memories=r.get("n_in"), pages=r.get("pages"),
                       seconds=r.get("seconds"))
+                if failures is not None:
+                    failures.resolve("l1", key)   # 补跑成功 → 销掉历史失败
             tag = ("失败 " + r["error"][:60]) if r.get("error") else (
                 "跳过" if r.get("skipped") else "%d 页 %.0fs"
                 % (r.get("pages", 0), r.get("seconds", 0)))
@@ -458,6 +497,9 @@ def compile_all(db: Path, out_dir: Path, *, workers: int = 4, limit: int = 0,
         print("\n失败清单（可重跑，脚本会自动跳过已成功的）：")
         for r in bad:
             print("  %s/%s  %s" % (r["source"], r["cid"][:40], r.get("error", "")[:100]))
+    if failures is not None:
+        print()
+        print(failures.summary("l1"))
     from agentmemhub.llm import usage_snapshot
     _wlog(event="run_end", script="wiki_compile", ok=len(ok), failed=len(bad),
           pages=sum(r.get("pages", 0) for r in ok), skipped=skipped,
@@ -479,6 +521,8 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0, help="最多编译多少个会话")
     ap.add_argument("--no-resume", action="store_true",
                     help="不跳过已有产出（默认跳过，便于断点续跑）")
+    ap.add_argument("--retry-failed", action="store_true", dest="retry_failed",
+                    help="只重跑失败清单里未解决的会话（读 --out 下的 failures.jsonl）")
     ap.add_argument("--thinking", default="", choices=["", "enabled", "disabled"],
                     help="覆盖思考模式（默认用配置）；disabled 可显著省 token")
     args = ap.parse_args()
@@ -504,9 +548,24 @@ def main() -> int:
             conn.close()
             return 2
         conn.close()
-        compile_all(db, Path(args.out), workers=args.workers,
+        out = Path(args.out)
+        out.mkdir(parents=True, exist_ok=True)
+        fl = FailureLog(out / "failures.jsonl")
+        only = None
+        if args.retry_failed:
+            tg = fl.targets("l1")
+            if not tg:
+                print("没有待重跑的失败项（%s）" % (out / "failures.jsonl"))
+                return 0
+            only = set()
+            for t in tg:
+                s, _, c = t.partition("/")
+                if s and c:
+                    only.add((s, c))
+            print("定向补跑 %d 个失败会话（不全量重来）" % len(only))
+        compile_all(db, out, workers=args.workers,
                     limit=args.limit, resume=not args.no_resume, min_n=args.min,
-                    thinking=args.thinking)
+                    thinking=args.thinking, only=only, failures=fl)
         return 0
 
     if not (args.source and args.cid):

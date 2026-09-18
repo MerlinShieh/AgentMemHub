@@ -248,7 +248,7 @@ class Config:
     #: 静默失效（实测踩过：`thinking` / `reasoning_effort` 写进了 yaml 却读不到，
     #: 表现为"开关不生效"，排查成本很高）。
     _LLM_SCALAR_KEYS = ("timeout", "max_tokens", "temperature",
-                        "thinking", "reasoning_effort")
+                        "thinking", "reasoning_effort", "repair_model")
 
     @property
     def llm(self) -> dict[str, Any]:
@@ -286,7 +286,7 @@ class Config:
         """蒸馏的 llm 子段：标量留空继承顶层；headers 合并（子段优先）。"""
         out: dict[str, Any] = {
             k: (str(sub.get(k) or "") or str(top.get(k) or ""))
-            for k in ("endpoint", "api_key", "model")
+            for k in ("endpoint", "api_key", "model", "repair_model")
         }
         headers: dict[str, Any] = {}
         if isinstance(top.get("headers"), dict):

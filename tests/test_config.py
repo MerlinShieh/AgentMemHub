@@ -133,8 +133,11 @@ def test_distillation_llm_inherits_top_level(tmp_path):
         "llm:\n  endpoint: https://top/v1\n  api_key: k\n  model: m\n"
         "distillation:\n  enabled: true\n", encoding="utf-8")
     c = _cfg(path=f)
-    assert c.distillation["llm"] == {"endpoint": "https://top/v1",
-                                     "api_key": "k", "model": "m"}
+    # 逐字段断言，不用整字典相等 —— 否则每加一个可选 llm 字段都要改这条测试
+    d = c.distillation["llm"]
+    assert d["endpoint"] == "https://top/v1"
+    assert d["api_key"] == "k"
+    assert d["model"] == "m"
 
 
 def test_distillation_llm_partially_overrides_top_level(tmp_path):

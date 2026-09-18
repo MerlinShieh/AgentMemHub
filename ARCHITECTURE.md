@@ -57,6 +57,7 @@ AgentMemHub/
 │   ├── memos.py                # [回退] MemOS bundle 生成/推送
 │   ├── rag_bridge.py           # ★ 引擎接缝：MCP/面板/CLI 的统一调用入口
 │   ├── health.py               # 记忆库一致性巡检（面板健康卡片/CLI/测试共用判据）
+│   ├── failures.py             # ★ 长任务失败清单（分类/汇总/单独重跑；wiki 两级共用）
 │   ├── rag/                    # ★ 内置记忆引擎（自有代码，可改可测）
 │   │   ├── config.py           #   引擎配置（模型注册/分桶/召回/写入策略）
 │   │   ├── ingest.py           #   摄取：unites 落库 + 向量 + FTS（含 schema/索引自愈）
@@ -73,10 +74,12 @@ AgentMemHub/
 │       ├── tasks.py            #   后台任务（单并发 + 进度 + 日志落盘）
 │       └── static/index.html   #   双标签页面板（vendor 离线化）
 ├── models/                     # 嵌入模型（自带 bge-small；更大模型按需下载）
-├── scripts/                    # fetch_model / sync_llm_from_zcode / sensitive_scan /
+├── scripts/                    # fetch_model / sync_llm_from_zcode / sync_llm_from_dsh /
 │                               #   export_memories / distill_sandbox / web_verify /
-│                               #   health_check（记忆库一致性巡检）/ mcp_log（调用审计查询）/ e2e
-├── docs/                       # 使用示例/蒸馏设计/召回融合/MCP 模板/截图
+│                               #   health_check（记忆库一致性巡检）/ mcp_log（调用审计查询）/
+│                               #   wiki_compile + wiki_aggregate + wiki_linkfix（LLM Wiki 两级编译）/
+│                               #   e2e
+├── docs/                       # 使用示例/蒸馏设计/召回融合/LLM Wiki/MCP 模板/截图
 ├── database/                   # 采集库 + 索引库（gitignore：真实数据）
 └── README.md / ARCHITECTURE.md / AGENTS.md / SECURITY.md / pyproject.toml
 ```
@@ -170,6 +173,36 @@ fail-open（失败不登记哈希，重跑自动补）；`PROMPT_VER` 升版自�
   `units(src_id)` 索引（避免 JOIN 退化为全表扫描）；统计聚合 SQL 下推 + TTL 缓存
 - **用户修改保护**：改标题/删除落 `title_custom` 与墓碑表，后续 ingest 不覆盖
 - **安全**：只绑 127.0.0.1；删除/加权为显式接口；无外发通道
+
+### 8. LLM Wiki 两级编译（派生层，不反向影响上面各层）
+
+把已沉淀的**蒸馏记忆**编译成结构化、互相链接、人可读的 markdown 页面。
+与 RAG 是**互补**关系：RAG 优化「能不能捞到」，wiki 优化「有没有结构」。
+
+设计约束（决定了实现形态）：
+
+- **单向**：记忆可以影响 wiki，**wiki 绝不反向改写记忆**；产物是纯 markdown，
+  随时可全量重建，删掉无副作用。
+- **只读运行**：脚本以 `mode=ro` 打开索引库，不写任何数据表。
+- **必须两级**：输出长度有硬上限。实测 45 条记忆一次性编译时 prompt 15150 +
+  思维链 21483 tokens，输出到 32K 仍被截断（`finish_reason=length`）。
+  所以先**逐会话**编译（第一级），再**跨会话**聚合（第二级）。
+- **编号必须提升**：页面正文的溯源从**会话内序号** `[n]` 提升为
+  **全局记忆号** `[m<id>]` —— 聚合后不会撞号，且能直接追回 `distilled_memories`。
+  重建映射**必须查库**（按 `created_at, id` 重算会话内序号），
+  只靠产物 json 的 `sources` 会漏掉一批引用（该数组没列全，实测 250/5552）。
+
+三个脚本的分工：
+
+| 脚本 | 职责 |
+|---|---|
+| `scripts/wiki_compile.py` | 第一级：逐会话「先分组、再编译」，两段式 |
+| `scripts/wiki_aggregate.py` | 第二级：归域 → 域内细分 → 重新编译（按最终页并发） |
+| `scripts/wiki_linkfix.py` | 收尾：按「被合并页 → 合并后页」重定向失效链接（92.6% → 0%） |
+
+**长任务可运维性**：两级都可能跑几十分钟、数百次 LLM 调用，因此
+每次调用落 `logs/wiki.log`、每次失败落 `failures.jsonl`（可 `--retry-failed` 定向补跑）。
+详见 [docs/llm-wiki.md](docs/llm-wiki.md)。
 
 ## 使用
 

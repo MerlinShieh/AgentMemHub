@@ -42,7 +42,7 @@
   （记忆排除 UI 已下线，后端能力保留）；记忆页承载筛选/溯源/⭐加权/👍👎/蒸馏入口。
   会话与记忆通过 `session_uid`（全局递增）双向绑定跳转。
 - **测试纪律**：每次改动带测试；bug 修复先写复现测试（红→绿）；
-  `uv run pytest` 全绿是提交门槛（数量以实测为准，当前 508 passed / 1 skipped）。
+  `uv run pytest` 全绿是提交门槛（数量以实测为准，当前 541 passed / 1 skipped）。
 - **日志纪律**：统一 `logs/` 按程序分文件；测试必须隔离日志与数据目录
   （`conftest` 的 autouse 夹具已强制把 `logs.log_dir` 指向临时目录）。
   **MCP 调用审计由服务端在唯一分发点自动写 `logs/mcp.log`，不依赖 Agent 手动记**
@@ -60,5 +60,6 @@
 - `README.md` — 使用说明与快速开始（含「记忆蒸馏」「Agent 协作配置」章节）
 - `ARCHITECTURE.md` — 架构说明
 - `docs/memory-distillation.md` — 记忆蒸馏的设计与实施记录
+- `docs/llm-wiki.md` — LLM Wiki 两级编译、失败兜底与格式修复的实测记录
 - `docs/recall-fusion.md` — 三路召回融合的机制与实测数据
 - `docs/EXAMPLES.md` — SQL / CLI / Python 查询示例

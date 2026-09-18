@@ -222,8 +222,16 @@ class LLMConfig:
     #: 而"归纳 / 整理 / 改写"类任务并不需要深度推理——关闭可省约一半以上成本。
     #: 注意：思考模式下 `temperature` 不生效（传入不报错但被忽略），关闭后才生效。
     thinking: str = ""
-    #: 思考强度（仅思考模式生效）：`low` / `high` / `max`；`""`=不传。
+    #: 思考强度（仅思考模式生效）：low / medium / high / xhigh / max；`""`=不传。
+    #: Command Code 只接受这五档（传 none 直接 400），DeepSeek 官方只认 low/high/max。
     reasoning_effort: str = ""
+    #: **格式修复模型**：主模型返回了内容、但 JSON 解析失败时，把**原始输出**
+    #: 交给它转成规范 JSON（留空 = 不修复，保持原来的"直接抛错"行为）。
+    #:
+    #: 为什么值得单配一个：便宜的主模型偶发用 ```json 围栏包裹、或输出被截断，
+    #: 但**内容本身是有价值的** —— 丢弃或退化成拼接都可惜。而"把已有内容转成
+    #: 指定格式"对强模型是简单任务，且只在失败时才触发，成本可以忽略。
+    repair_model: str = ""
     #: provider 特定的额外请求头（配置驱动，不硬编码在客户端里）。
     #: 实测 OpenCode Go（opencode.ai/zen/go）需要 User-Agent（过 Cloudflare 1010）
     #: 与 x-opencode-session（路由亲和，缺失时 400 MissingSessionID）。
@@ -250,9 +258,10 @@ class LLMConfig:
             raise ValueError(
                 f"llm.thinking 只能是 enabled / disabled（或留空不传），收到：{thinking!r}")
         effort = str(d.get("reasoning_effort") or "").strip().lower()
-        if effort and effort not in ("low", "high", "max"):
+        if effort and effort not in ("low", "medium", "high", "xhigh", "max"):
             raise ValueError(
-                f"llm.reasoning_effort 只能是 low / high / max（或留空不传），收到：{effort!r}")
+                "llm.reasoning_effort 只能是 low / medium / high / xhigh / max"
+                f"（或留空不传），收到：{effort!r}")
         return cls(
             endpoint=str(d.get("endpoint") or ""),
             api_key=str(d.get("api_key") or ""),
@@ -264,6 +273,7 @@ class LLMConfig:
             temperature=float(d.get("temperature") if d.get("temperature") is not None else 0.0),
             thinking=thinking,
             reasoning_effort=effort,
+            repair_model=str(d.get("repair_model") or ""),
             headers={str(k): str(v) for k, v in headers.items()} if isinstance(headers, dict) else {},
         )
 
@@ -320,6 +330,60 @@ class LLMClient:
 
     # -- 对外：取结构化 JSON ---------------------------------------------
 
+    #: 格式修复提示词：**只转格式，不重新生成内容**。把任务要求也给它是为了让
+    #: 它知道"该转成什么形状"，而不是自由发挥。
+    _REPAIR_SYSTEM = """你是格式修复器。下面给出一次 LLM 调用的**任务要求**和它
+返回的**原始内容**。原始内容里已经有需要的信息，只是格式不符合要求。
+
+请把原始内容转换成任务要求的 JSON：
+1. **只做格式转换，不要增删信息** —— 不要自己编造字段或内容。
+2. 如果原始内容被截断（JSON 不完整），尽力从已有部分恢复出完整对象；
+   确实无法恢复的部分，宁缺勿滥。
+3. **只输出 JSON**，不要解释、不要 markdown 围栏。"""
+
+    def _repair_json(self, system: str, user: str, raw: str,
+                     max_tokens: int | None = None) -> Optional[dict]:
+        """把"有内容但格式不对"的原始输出交给 `repair_model` 转成 JSON。
+
+        只在 `complete_json` 解析失败时触发，且**不再递归修复**（内部直接用
+        `_post` + `extract_json`），避免无限套娃。任何失败都返回 None，
+        让调用方走原有路径（抛错 / 跳过），绝不改变"失败"的语义。
+        """
+        model = (self.cfg.repair_model or "").strip()
+        raw = (raw or "").strip()
+        if not model or not raw:
+            return None
+        # 任务输入截断：修复器只需要知道"要转成什么形状"，
+        # 不必把几万字的原始输入整份再喂一遍（那是成本大头）。
+        ctx = user if len(user) <= 4000 else user[:4000] + "\n…（任务输入过长，已截断）"
+        if len(raw) > 20000:
+            raw = raw[:20000] + "\n…（原始内容过长，已截断）"
+        body = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": self._REPAIR_SYSTEM},
+                {"role": "user", "content": scrub_text(
+                    "【任务要求（system）】\n%s\n\n【任务输入（节选）】\n%s\n\n"
+                    "【主模型返回的原始内容】\n%s" % (system, ctx, raw))},
+            ],
+            "temperature": 0.0,
+            "max_tokens": int(max_tokens or self.cfg.max_tokens),
+        }
+        try:
+            data = self._post(body, self.cfg.timeout)
+            choices = data.get("choices") or []
+            if not choices:
+                return None
+            content = ((choices[0].get("message") or {}).get("content") or "")
+            out = extract_json(content)
+            self.log.info("格式修复成功：repair_model=%s，原始内容 %d 字",
+                          model, len(raw))
+            return out
+        except Exception as e:
+            self.log.warning("格式修复失败（repair_model=%s）：%s", model,
+                             str(e)[:150])
+            return None
+
     def complete_json(self, system: str, user: str, *,
                       max_tokens: int | None = None,
                       temperature: float | None = None) -> dict:
@@ -354,7 +418,14 @@ class LLMClient:
                 if not choices:
                     raise LLMTransientError(f"响应缺少 choices：{str(data)[:200]}")
                 content = ((choices[0].get("message") or {}).get("content") or "")
-                return extract_json(content)
+                try:
+                    return extract_json(content)
+                except ValueError:
+                    # 有内容但格式不对 → 交给修复模型转格式（未配置则维持原行为）
+                    repaired = self._repair_json(system, user, content, max_tokens)
+                    if repaired is not None:
+                        return repaired
+                    raise
             except ContentFilterRejected:
                 raise
             except LLMTransientError as e:

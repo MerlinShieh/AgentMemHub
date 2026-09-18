@@ -44,6 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from wiki_compile import _usage_report  # noqa: E402  （复用用量/成本统计）
+from agentmemhub.failures import FailureLog  # noqa: E402
 
 # Windows 控制台默认 GBK，用量报告里的 ¥ 会抛 UnicodeEncodeError。
 for _s in (sys.stdout, sys.stderr):
@@ -591,6 +592,7 @@ def run(args) -> None:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     t_all = time.time()
+    fl = FailureLog(out / "failures.jsonl")
     _wlog(event="run_start", script="wiki_aggregate", stage=args.stage,
           src=str(src), out=str(out), db=(args.db or "(配置默认)"),
           limit=args.limit, domain=args.domain, batch=args.batch)
@@ -660,6 +662,14 @@ def run(args) -> None:
     if args.domain:
         dom_list = [(n, m) for n, m in dom_list if args.domain.lower() in n.lower()]
         print("\n（只跑匹配 %r 的 %d 个域）" % (args.domain, len(dom_list)))
+    if args.retry_failed:
+        bad = set(fl.targets("l2-plan")) | set(fl.targets("l2-compile"))
+        if not bad:
+            print("\n没有待重跑的失败域（%s）" % (out / "failures.jsonl"))
+            return
+        dom_list = [(n, m) for n, m in dom_list if n in bad]
+        print("\n定向补跑 %d 个失败域（不全量重来）：%s"
+              % (len(dom_list), [n[:18] for n, _ in dom_list][:5]))
 
     all_titles = [p["title"] for p in pages]
     min_pages = int(args.min_pages)
@@ -693,11 +703,14 @@ def run(args) -> None:
                 print("[%3d/%3d] 细分 %-26s 失败：%s: %s"
                       % (i, len(dom_list), nm[:26], type(e).__name__, str(e)[:80]),
                       flush=True)
+                fl.record(stage="l2-plan", target=nm,
+                          error="%s: %s" % (type(e).__name__, str(e)[:200]))
                 continue
             domain_plans.append((name, plans))
             print("[%3d/%3d] 细分 %-26s → %d 页"
                   % (i, len(dom_list), nm[:26], len(plans)), flush=True)
             _wlog(event="domain_planned", name=name, pages=len(plans))
+            fl.resolve("l2-plan", name)
 
     # ---- ③ 逐最终页编译（**按最终页并发**）----
     # 不能按域并发：一个域可能有上百个最终页（实测最大的域 213 页），
@@ -748,6 +761,9 @@ def run(args) -> None:
                          str(e)[:80]), flush=True)
                 _wlog(event="page_fail", domain=name, title=pl["title"],
                       error="%s: %s" % (type(e).__name__, str(e)[:200]))
+                fl.record(stage="l2-compile", target=name,
+                          error="%s: %s" % (type(e).__name__, str(e)[:200]),
+                          title=pl["title"])
                 continue
             by_domain_pages.setdefault(name, []).append(page)
             _wlog(event="page_done", domain=name, title=page["title"],
@@ -776,6 +792,8 @@ def run(args) -> None:
     n_pages = sum(len(p) for _, p in results)
     print("\n完成：%d 域 / %d 页，用时 %.0fs" % (len(results), n_pages, time.time() - t0))
     print(_usage_report("第二级"))
+    print()
+    print(fl.summary())
     from agentmemhub.llm import usage_snapshot
     _wlog(event="run_end", script="wiki_aggregate", domains=len(results),
           pages=n_pages, seconds=round(time.time() - t_all, 1),
@@ -793,6 +811,8 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=0, help="并发数（0=用配置）")
     ap.add_argument("--limit", type=int, default=0, help="只处理前 N 页（试跑）")
     ap.add_argument("--domain", default="", help="只跑名称匹配该串的域（试跑）")
+    ap.add_argument("--retry-failed", action="store_true", dest="retry_failed",
+                    help="只重跑失败清单里未解决的域（读 --out 下的 failures.jsonl）")
     ap.add_argument("--dmin", type=int, default=20, help="主题域数量下限")
     ap.add_argument("--dmax", type=int, default=60, help="主题域数量上限")
     ap.add_argument("--batch", type=int, default=120,

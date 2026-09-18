@@ -105,6 +105,7 @@ AgentMemHub/
 │   │                             #   config/embedder/ingest/search/memstore/runtime
 │   ├── rag_bridge.py             # ★ 引擎接缝：MCP/面板/cli 的统一调用入口
 │   ├── health.py                 # 记忆库一致性巡检（面板健康卡片/CLI/测试共用判据）
+│   ├── failures.py               # ★ 长任务失败清单（分类/汇总/单独重跑，供 wiki 两级使用）
 │   ├── mcp_server.py             # MCP 记忆网关（stdio / Streamable HTTP；含调用审计）
 │   ├── scoring.py                # LLM 三轴评分（策略层，与引擎的存值层分工）
 │   ├── adapters/                 # 8 个 Agent 数据源适配器（src_id/turn_key/注入识别）
@@ -120,10 +121,14 @@ AgentMemHub/
 │   ├── web_verify.py             #   面板前后端接口联调自检（对运行中的服务）
 │   ├── health_check.py           #   记忆库一致性巡检（与面板「记忆库健康」同判据）
 │   ├── mcp_log.py                #   MCP 调用审计查询（logs/mcp.log 的读取端）
+│   ├── wiki_compile.py           #   LLM Wiki 第一级：逐会话把零散记忆编译成页面
+│   ├── wiki_aggregate.py         #   LLM Wiki 第二级：跨会话按主题聚合成实体页
+│   ├── wiki_linkfix.py           #   wiki 链接修复（按合并关系重定向失效链接）
+│   ├── sync_llm_from_dsh.py      #   从 DSH 配置同步 LLM 接入参数（密钥只写本地 yaml）
 │   └── e2e/                      #   浏览器级端到端测试
 ├── eval/                         # 召回评测示例集（queries.example.yaml；私有集不入库）
-├── tests/                        # pytest（488 项通过 / 1 项条件跳过）
-├── docs/                         # 设计文档（架构/迁移/召回融合等）
+├── tests/                        # pytest（541 项通过 / 1 项条件跳过）
+├── docs/                         # 设计文档（架构/迁移/召回融合/LLM Wiki 等）
 ├── memOS/                        # 回退用的上游引擎（gitignore，默认不参与运行）
 ├── start.bat                     # 启动控制台（Windows）
 ├── ClearData.bat / ClearTest.bat # 清空数据 / 恢复干净测试环境
@@ -135,6 +140,14 @@ AgentMemHub/
 1. **采集**：`ingest` 从各 Agent 的官方数据位置读取会话（路径可经 `agents.*` 配置覆盖），归一为全量事件流（含工具链/思维链/Shell/补丁，每事件带 `src_id`/`turn_key` 稳定锚与系统注入标记）写入本地 SQLite
 2. **消费**：CLI/控制台/Web 看板检索、浏览、导出、管理会话——全部读本地库，不上传任何数据
 3. **记忆**：`sync` 把事件流向量化写入内置索引（按长度分桶批处理、多模型并发、`src_id` 幂等）→ 对话时经三路召回（向量/全文/标识符）融合命中
+
+**派生层（只读，不改写上面三层）**
+
+4. **编译**：`scripts/wiki_compile.py` 把蒸馏记忆**逐会话**编译成页面
+   → `scripts/wiki_aggregate.py` **跨会话**聚合成主题实体页
+   → `scripts/wiki_linkfix.py` 按合并关系修链接。
+   产物是独立 markdown，**随时可全量重建**；RAG 与用户数据可以影响 wiki，
+   **wiki 不会反向影响 RAG**。详见 [docs/llm-wiki.md](docs/llm-wiki.md)。
 
 ## 快速开始
 
@@ -858,6 +871,40 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 - [x] 权重体系：来源初始分 → 反馈演化（状态式可撤销）→ 手动加权（⭐ 两态锁定不衰减，有界 boost）
 - [x] **MCP 调用审计**：每次记忆调用（save / search / recent / stats / score）由服务端在**唯一分发点**自动留痕到 `logs/mcp.log`（每次两条 `call`/`result` + `call_id`，含参数摘要、耗时、成败），**不依赖 Agent 记得写**；Agent 可用可选参数 `note` 补充意图（为什么）；查询走 `scripts/mcp_log.py`
 - [x] 带标签的版本锚点（`v0-pre-rag` 回滚点 / `v1-rag-backend-only` / v2.0）
+
+### v2.1（2026-09-18）LLM Wiki 两级编译 + 调用兜底
+
+**LLM Wiki（碎片 → 可读知识库）**：在 RAG 之外增加一条**派生**路径——把已沉淀的
+蒸馏记忆编译成结构化、互相链接、人和 Agent 都能直接读的 markdown 页面。
+RAG 优化「能不能捞到」，wiki 优化「有没有结构」；**wiki 不会反向改写记忆**。
+
+- [x] 第一级 `scripts/wiki_compile.py`：逐会话把零散记忆归纳成页面（先分组再编译，两段式）
+- [x] 第二级 `scripts/wiki_aggregate.py`：跨会话按主题聚合成实体页（归域 → 域内细分 → 重新编译）
+- [x] `scripts/wiki_linkfix.py`：按「被合并页 → 合并后页」重定向，死链 **92.6% → 0%**
+- [x] 溯源提升：正文引用从**会话内序号** `[n]` 提升为**全局记忆号** `[m<id>]`，可直接追回 `distilled_memories`
+- [x] 实测：223 会话 / 1562 条记忆 → 第一级 **660 页** → 第二级 **20 域 / 233 页**（压缩比 2.8:1）
+
+**调用兜底（长任务可运维性）**：
+
+- [x] 长任务日志 `logs/wiki.log`：每次 LLM 调用（阶段/目标/重试/耗时/**token 增量**）、
+      每会话与每页成败、运行汇总——跑几十分钟的任务必须能从日志回答
+      "跑到哪了、哪些失败了、花了多少、上次断在哪"
+- [x] 失败清单 `agentmemhub/failures.py`：JSONL 落盘、**跨次累积**、按原因分类；
+      `quota`/`auth`/`model` 三类**醒目提示"重试与继续跑都无意义"**
+- [x] **`--retry-failed`**：只重跑清单里未解决的失败项，不必全量重来（两级都支持）
+- [x] **格式修复模型**（`llm.repair_model`）：主模型返回了内容但 JSON 解析失败时，
+      把**原始输出**交给 JSON 遵从性更好的模型转格式——**救回被截断的内容**，
+      而不是丢弃或退化成拼接
+- [x] 记忆内容硬截断：`CONTENT_MAX=120` 从"提示词软约束"改为**代码级兜底**
+      （实测没有任何模型稳定遵守，超标率 38–53%）
+
+**成本优化**：
+
+- [x] LLM 接入切换为 `xiaomi/mimo-v2.5`（实测思维链仅 24–37%，
+      算上推理 token 的真实成本约为 deepseek 的一半）
+- [x] `thinking` / `reasoning_effort` 开关 + 用量与成本统计（`usage_snapshot` / `estimate_cost`）
+- [x] 两级 wiki **各自相对顶层 `llm` 覆盖**，互不牵连
+      （级联会让第一级换 provider 时连带改掉第二级，已实测踩过）
 
 - [ ] 更多 Agent（Claude Code / Cursor / Gemini CLI / CodeBuddy）
 - [ ] 记忆折叠压缩（超长会话压缩、相邻轮折叠）

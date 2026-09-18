@@ -86,8 +86,20 @@ llm:
   #   "enabled"  = 显式开启（等价于 provider 默认）。
   #   注意：思考模式下 `temperature` 不生效（传了不报错但被忽略），关闭后才生效。
   # thinking: "disabled"
-  # reasoning_effort: 思考强度 low / high / max（仅思考模式生效；留空不传）
+  # reasoning_effort: 思考强度 low / medium / high / xhigh / max（仅思考模式生效）
+  #   · Command Code 只接受这五档（传 "none" 直接 400）
+  #   · DeepSeek 官方只认 low / high / max
+  #   ⚠️ 低档**不等于低推理量**：实测 reasoning_effort=low 时思维链仍占输出的 63%。
+  #      能真正归零的只有 DeepSeek 官方的 thinking=disabled。
   # reasoning_effort: "low"
+  # repair_model: **格式修复模型**。主模型返回了内容、但 JSON 解析失败时，
+  #   把**原始输出**交给它转成规范 JSON；留空 = 关闭（退回直接抛错）。
+  #   为什么值得配：便宜的主模型偶发输出被截断（```json 围栏本身 extract_json
+  #     就能剥，真正修不好的是截断），但那份内容是有价值的——丢弃或退化成
+  #     拼接都可惜。而"把已有内容转成指定格式"对强模型是简单任务，
+  #     且只在失败时触发，成本可忽略。
+  #   建议填一个 JSON 遵从性好的模型（实测 deepseek 系 12/12 无格式问题）。
+  # repair_model: "deepseek/deepseek-v4.1-flash"
   # headers: provider 特定请求头（多数 provider 不需要）。
   #   部分 provider 有硬性要求（自定义 User-Agent 过 WAF、会话标识头等），
   #   按服务商文档填写；也可用 scripts/sync_llm_from_zcode.py 从 ZCode 配置自动同步。

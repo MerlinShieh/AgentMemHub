@@ -495,6 +495,33 @@ class DistillResult:
     rejected: list[str]       # 被丢弃的非法条目及原因
 
 
+#: content 收缩时优先断开的句读 —— 保留完整句子优于硬切
+_BREAK_CHARS = "。！？；!?;\n"
+
+
+def clamp_content(text: str, limit: int = CONTENT_MAX) -> str:
+    """把 content 收缩到 limit 字以内（超长时在句读处断开）。
+
+    提示词里写了 120 字上限，但**实测没有任何模型稳定遵守**：同一份提示词、
+    同一批 12 个切片，MiMo 24% 超标、LongCat 44%、deepseek 52%、ling 53%。
+    超长条目会同时损害自包含性与召回质量——一条记忆讲了好几个结论，
+    检索命中后反而更难用。所以这里做**代码级兜底**，不再指望提示词。
+
+    优先在窗口内**最后一个句读**处断开（尽量不破坏句子）；若句读太靠前
+    （不足 limit 的 60%）则退化为硬切并加省略号——宁可截断，也不放一条
+    300 字的记忆进库。
+    """
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    cut = max(head.rfind(ch) for ch in _BREAK_CHARS)
+    if cut >= int(limit * 0.6):
+        return head[:cut + 1].strip()
+    # 硬切要给省略号留出位置，否则结果会是 limit+1 字（实测踩过）
+    return head[:limit - 1].rstrip() + "…"
+
+
 def normalize_memories(raw: object) -> tuple[list[dict], list[str]]:
     """校验并规范化 LLM 输出。返回 (合法条目, 拒绝原因列表)。
 
@@ -524,6 +551,7 @@ def normalize_memories(raw: object) -> tuple[list[dict], list[str]]:
         if not content:
             rejected.append(f"[{i}] content 为空")
             continue
+        content = clamp_content(content)
         out.append({"type": mtype, "topic": topic,
                     "content": content, "confidence": conf})
     return out, rejected
