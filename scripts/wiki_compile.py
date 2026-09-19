@@ -504,6 +504,21 @@ def compile_all(db: Path, out_dir: Path, *, workers: int = 4, limit: int = 0,
     _wlog(event="run_end", script="wiki_compile", ok=len(ok), failed=len(bad),
           pages=sum(r.get("pages", 0) for r in ok), skipped=skipped,
           seconds=round(time.time() - t0, 1), usage=usage_snapshot())
+
+    # 编译清单：记录本次输入快照（id → content_hash + 会话归属）。
+    # 这是 wiki 与 RAG 库对齐的锚 —— 没有它，库后来发生了什么变更 wiki 无从得知
+    # （实测：编译后库改写了 688 条内容、恢复了 163 条输入，wiki 全部无感知）。
+    # 补跑（only 非空）也会走到这里：快照是全库口径，补跑后仍然准确。
+    try:
+        from agentmemhub import wiki_manifest as wm
+        mf = wm.build_manifest("l1", db)
+        wm.write_manifest(wm.manifest_path(out_dir, "l1"), mf)
+        print("\n编译清单已写：%s（输入 %d 条）" % (wm.manifest_path(out_dir, "l1"),
+                                                  mf["n_inputs"]))
+        _wlog(event="manifest", script="wiki_compile", stage="l1",
+              n_inputs=mf["n_inputs"])
+    except Exception as e:                      # 旁路：清单失败不碰编译产物
+        print("⚠️ 编译清单写入失败（不影响产物）：%s: %s" % (type(e).__name__, e))
     return results
 
 

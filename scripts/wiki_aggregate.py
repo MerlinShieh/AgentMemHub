@@ -585,6 +585,126 @@ def render_index(domains: list[tuple[str, list[dict]]]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 增量模式辅助
+# ---------------------------------------------------------------------------
+
+def render_index_from_disk(out: Path, include: list[tuple[str, list[dict]]],
+                           skip_dirs: set[str]) -> str:
+    """增量模式重建顶层索引：本轮域用内存结果，其余域从磁盘读。
+
+    域名读各域 index.md 的首行（render_domain_index 写成 `# 域名`）；
+    页的 title/summary 读各页 json 产物。磁盘是唯一真相 —— 不在内存里的域
+    不能靠猜。
+    """
+    rows: list[tuple[str, list[tuple[str, str, str, str]]]] = []
+    for name, pages_out in include:
+        rows.append((name, [(p["_dir"], p["_file"], p["title"], p["summary"])
+                            for p in pages_out]))
+    for d in sorted(out.iterdir()):
+        if not d.is_dir() or d.name in skip_dirs or not d.name[:1].isdigit():
+            continue
+        name = d.name
+        idx = d / "index.md"
+        if idx.exists():
+            try:
+                first = idx.read_text(encoding="utf-8").splitlines()[0]
+                if first.startswith("# "):
+                    name = first[2:].strip()
+            except Exception:
+                pass
+        pages: list[tuple[str, str, str, str]] = []
+        for jf in sorted(d.glob("*.json")):
+            try:
+                j = json.loads(jf.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            pages.append((d.name, jf.name, j.get("title") or "(无标题)",
+                          (j.get("summary") or "").strip()))
+        if pages:
+            rows.append((name, pages))
+    total = sum(len(p) for _, p in rows)
+    L = ["# 知识库索引", "",
+         "共 %d 个主题域 / %d 页。" % (len(rows), total), ""]
+    for name, pages in rows:
+        L += ["## %s" % name, ""]
+        for dname, fname, title, summary in pages:
+            L.append("- [%s](%s/%s) — %s" % (title, dname, fname, summary))
+        L.append("")
+    return "\n".join(L)
+
+
+def assign_new_pages(client, table: list[dict], new_pages: list[dict],
+                     rep_pages: dict[str, list[str]] | None = None) -> dict[str, list[dict]]:
+    """把新增 L1 页归入**现有**域表（一次调用，便宜）。
+
+    增量模式刻意不重跑全量归域：域结构稳定比全局最优更重要（域名/目录不变，
+    互链和索引才稳定）。实在无处的页归入「待整理」。
+
+    rep_pages：{域名: [该域现有页的代表性标题]}。归类视野若只有域名+一句话
+    why，新页容易被塞进语义不准确的域、被聚合进错误主题页且要到下次全量才
+    修正 —— 给每域几个真实页标题，让 LLM 看到域内内容"长什么样"。
+    返回 {域名: [页,...]}。
+    """
+    if not new_pages:
+        return {}
+    table = list(table) + [{"name": "待整理", "why": "归类时遗漏的页面"}]
+    rep = rep_pages or {}
+    tl = "\n".join(
+        "[%d] %s —— %s%s" % (i, d["name"], d.get("why") or "",
+                             ("（现有页如：%s）" % "、".join(rep.get(d["name"], [])[:3]))
+                             if rep.get(d["name"]) else "")
+        for i, d in enumerate(table, 1))
+    lines = "\n".join("[%d] (%s) %s" % (i, p["source"], p["title"])
+                      for i, p in enumerate(new_pages, 1))
+    r = call_json(client, SYSTEM_ASSIGN,
+                  USER_ASSIGN.format(n=len(new_pages), listing=lines, table=tl)
+                  # 增量归类专用的宽容出口：新内容可能不属于任何现有域（外部
+                  # 投喂、全新主题）。不放开这个口子，LLM 会按模板里"必须有
+                  # 归属"的要求硬塞进最接近的域 —— 错误聚合比待整理更难修正。
+                  + "\n\n注意：若某页与任何现有域都不相关或你没有把握，"
+                    "将其归入「待整理」域，**不要强行归类**。",
+                  max_tokens=24000, tag="增量归类 ")
+    out: dict[str, list[dict]] = {}
+    for k, v in (r.get("assign") or {}).items():
+        try:
+            i, dv = int(k), int(v)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= i <= len(new_pages) and 1 <= dv <= len(table):
+            out.setdefault(table[dv - 1]["name"], []).append(new_pages[i - 1])
+    return out
+
+
+def _refresh_domains_file(dom_file: Path, args, pages: list[dict]) -> None:
+    """增量收尾：把 _domains.json 的 members 重写为最新平铺序号。
+
+    args.domain_map 是服务层给的全量归属 {域name: [L1文件名,...]} —— 必须覆盖
+    **全部**域（含本轮没重编的），否则缺的域会被写丢。
+    """
+    dmap = getattr(args, "domain_map", None) or {}
+    if not dmap:
+        return
+    whys: dict[str, str] = {}
+    if dom_file.exists():
+        try:
+            for d in json.loads(dom_file.read_text(encoding="utf-8")):
+                whys[d.get("name") or ""] = d.get("why") or ""
+        except Exception:
+            pass
+    doms = []
+    for name, files in sorted(dmap.items()):
+        if not files:
+            continue
+        fs = set(files)
+        doms.append({"name": name, "why": whys.get(name, ""),
+                     "members": [i for i, p in enumerate(pages, 1)
+                                 if p["file"] in fs]})
+    dom_file.write_text(json.dumps(doms, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+    print("  域成员已按最新页序重写 → %s" % dom_file)
+
+
+# ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
 
@@ -629,40 +749,50 @@ def run(args) -> None:
     client = make_client(args.thinking)
 
     # ---- ① 归域 ----
+    # 增量模式（服务层经 preset_domains 传入域成员）跳过归域：域结构保持稳定，
+    # 成员由服务层按 manifest 的 file→域 映射组装。不能增量复用 stage_domains ——
+    # 它的归类缓存按批次序号键控，L1 页数一变序号整体漂移，缓存全错位。
     dom_file = out / "_domains.json"
-    if args.stage in ("domains", "all") and not (args.resume and dom_file.exists()):
-        print("\n① 归域…")
-        t0 = time.time()
-        domains = stage_domains(client, pages, args.dmin, args.dmax,
-                                batch=args.batch,
-                                cache_file=out / "_assign_cache.json")
-        dom_file.write_text(json.dumps(domains, ensure_ascii=False, indent=2),
-                            encoding="utf-8")
-        print("  用时 %.0fs → %s" % (time.time() - t0, dom_file))
-        print(_usage_report("归域"))
+    preset = getattr(args, "preset_domains", None) or None
+    partial = bool(getattr(args, "partial", False))
+    if preset:
+        dom_list = [(name, members) for name, _dn, members in preset]
+        preset_dirs = {name: dn for name, dn, _ in preset}
+        print("\n① 归域：增量模式 —— 使用给定的 %d 个域，跳过归域" % len(preset))
     else:
-        domains = json.loads(dom_file.read_text(encoding="utf-8"))
-        print("\n① 归域：复用 %s（%d 个域）" % (dom_file, len(domains)))
+        if args.stage in ("domains", "all") and not (args.resume and dom_file.exists()):
+            print("\n① 归域…")
+            t0 = time.time()
+            domains = stage_domains(client, pages, args.dmin, args.dmax,
+                                    batch=args.batch,
+                                    cache_file=out / "_assign_cache.json")
+            dom_file.write_text(json.dumps(domains, ensure_ascii=False, indent=2),
+                                encoding="utf-8")
+            print("  用时 %.0fs → %s" % (time.time() - t0, dom_file))
+            print(_usage_report("归域"))
+        else:
+            domains = json.loads(dom_file.read_text(encoding="utf-8"))
+            print("\n① 归域：复用 %s（%d 个域）" % (dom_file, len(domains)))
 
-    if args.stage == "domains":
+        if args.stage == "domains":
+            for d in domains:
+                print("   %-30s %d 页  %s" % (d.get("name", "")[:30],
+                                              len(d.get("members") or []),
+                                              (d.get("why") or "")[:40]))
+            return
+
+        # ---- ② 逐域细分（域级并发）----
+        assigned = set()
+        dom_list = []
         for d in domains:
-            print("   %-30s %d 页  %s" % (d.get("name", "")[:30],
-                                          len(d.get("members") or []),
-                                          (d.get("why") or "")[:40]))
-        return
-
-    # ---- ② 逐域细分（域级并发）----
-    assigned = set()
-    dom_list = []
-    for d in domains:
-        idx = [int(x) for x in (d.get("members") or [])
-               if str(x).isdigit() and 1 <= int(x) <= len(pages) and int(x) not in assigned]
-        assigned.update(idx)
-        if idx:
-            dom_list.append((d.get("name") or "未命名", [pages[i - 1] for i in idx]))
-    if args.domain:
-        dom_list = [(n, m) for n, m in dom_list if args.domain.lower() in n.lower()]
-        print("\n（只跑匹配 %r 的 %d 个域）" % (args.domain, len(dom_list)))
+            idx = [int(x) for x in (d.get("members") or [])
+                   if str(x).isdigit() and 1 <= int(x) <= len(pages) and int(x) not in assigned]
+            assigned.update(idx)
+            if idx:
+                dom_list.append((d.get("name") or "未命名", [pages[i - 1] for i in idx]))
+        if args.domain:
+            dom_list = [(n, m) for n, m in dom_list if args.domain.lower() in n.lower()]
+            print("\n（只跑匹配 %r 的 %d 个域）" % (args.domain, len(dom_list)))
     if args.retry_failed:
         bad = set(fl.targets("l2-plan")) | set(fl.targets("l2-compile"))
         if not bad:
@@ -775,26 +905,40 @@ def run(args) -> None:
                      len(page["from_titles"])), flush=True)
 
     # ---- 写盘 ----
-    # 先算出本轮的域目录名，再清掉**不属于本轮**的旧域目录。
+    # 全量模式：先算出本轮的域目录名，再清掉**不属于本轮**的旧域目录。
     # 不清的后果：重跑时域划分/命名一变就生成新目录，旧目录原地不动，
     # 两轮产出混在一起（实测踩过：227 页的产出目录里躺着 449 个 md，
     # 核验与 linkfix 全都被污染）。产物是纯派生物，清掉随时可重建。
-    plan = [(name, "%02d-%s" % (i, _slug(name)))
+    # 增量模式（partial）：**绝不清目录** —— 本轮只编了少数域，其它域的
+    # 产物都在磁盘上，清了就是把整个知识库删掉；目录名沿用现有映射，
+    # 不让域集合的编号重排波及未重编的域。
+    plan = [(name, (preset_dirs.get(name) if preset
+                    else "%02d-%s" % (i, _slug(name))))
             for i, name in enumerate(sorted(by_domain_pages), 1)]
     keep = {dirname for _, dirname in plan}
     removed = 0
-    for d in list(out.iterdir()):
-        if d.is_dir() and d.name not in keep:
-            shutil.rmtree(d, ignore_errors=True)
-            removed += 1
-    if removed:
-        print("  清理上一轮的 %d 个旧域目录（避免两轮产出混在一起）" % removed)
+    if not partial:
+        for d in list(out.iterdir()):
+            if d.is_dir() and d.name not in keep:
+                shutil.rmtree(d, ignore_errors=True)
+                removed += 1
+        if removed:
+            print("  清理上一轮的 %d 个旧域目录（避免两轮产出混在一起）" % removed)
 
     results: list[tuple[str, list[dict]]] = []
+    dir_of = {name: dirname for name, dirname in plan}
     for di, name in enumerate(sorted(by_domain_pages), 1):
         pages_out = sorted(by_domain_pages[name], key=lambda p: p["_file"])
-        ddir = out / ("%02d-%s" % (di, _slug(name)))
+        ddir = out / dir_of[name]
         ddir.mkdir(parents=True, exist_ok=True)
+        # 清掉本域上一轮的页产物：重编后页数/标题可能变化，旧文件名不再出现，
+        # 不清就新旧混杂（index 只列新页，幽灵文件却还在 —— linkfix、
+        # 对齐审计与阅读目录的人都会被误导）。index.md 随后覆盖，无需处理。
+        for old in ddir.glob("*.md"):
+            if old.name != "index.md":
+                old.unlink()
+        for old in ddir.glob("*.json"):
+            old.unlink()
         for p in pages_out:
             p["_dir"] = ddir.name
             (ddir / p["_file"]).write_text(render_page(p, name), encoding="utf-8")
@@ -804,7 +948,15 @@ def run(args) -> None:
                                        encoding="utf-8")
         results.append((name, pages_out))
 
-    (out / "index.md").write_text(render_index(results), encoding="utf-8")
+    if partial:
+        # 增量：顶层索引 = 本轮域（内存）+ 其余域（磁盘，域名读各域 index.md 首行）
+        (out / "index.md").write_text(
+            render_index_from_disk(out, results, keep), encoding="utf-8")
+        # 域成员重写为最新平铺序号 —— L1 页数变化会让旧 members 序号漂移失效，
+        # 不修正的话下次全量跑会按错误成员聚合。
+        _refresh_domains_file(dom_file, args, pages)
+    else:
+        (out / "index.md").write_text(render_index(results), encoding="utf-8")
     n_pages = sum(len(p) for _, p in results)
     print("\n完成：%d 域 / %d 页，用时 %.0fs" % (len(results), n_pages, time.time() - t0))
     print(_usage_report("第二级"))
@@ -814,6 +966,40 @@ def run(args) -> None:
     _wlog(event="run_end", script="wiki_aggregate", domains=len(results),
           pages=n_pages, seconds=round(time.time() - t_all, 1),
           usage=usage_snapshot())
+
+    # 编译清单：与第一级同口径（全库输入快照），另附 域 → L1源文件/记忆 的映射，
+    # 供对齐审计把"哪些记忆变了"映射成"哪些主题域需要重编"。
+    # 没有索引库就没有可靠的 m-id，清单失去意义 —— 此时明确跳过而不是写空壳。
+    if db_path and Path(db_path).exists():
+        try:
+            from agentmemhub import wiki_manifest as wm
+            dom_map = {}
+            for name, pages_out in results:
+                mids: set[int] = set()
+                files: set[str] = set()
+                for p in pages_out:
+                    files.add(p.get("file") or "")
+                    mids.update(int(x) for x in
+                                re.findall(r"\[m(\d+)\]", p.get("body") or ""))
+                    mids.update(int(t[1:]) for t in (p.get("mids") or [])
+                                if t[1:].isdigit())
+                dom_map[name] = {
+                    "dir": (pages_out[0].get("_dir") if pages_out else ""),
+                    "pages": len(pages_out),
+                    "l1_files": sorted(f for f in files if f),
+                    "mids": sorted(mids),
+                }
+            mf = wm.build_manifest("l2", db_path, extra={
+                "src_dir": str(src), "n_pages": n_pages, "domains": dom_map})
+            wm.write_manifest(wm.manifest_path(out, "l2"), mf)
+            print("编译清单已写：%s（输入 %d 条 / %d 域）"
+                  % (wm.manifest_path(out, "l2"), mf["n_inputs"], len(dom_map)))
+            _wlog(event="manifest", script="wiki_aggregate", stage="l2",
+                  n_inputs=mf["n_inputs"], domains=len(dom_map))
+        except Exception as e:                  # 旁路：清单失败不碰编译产物
+            print("⚠️ 编译清单写入失败（不影响产物）：%s: %s" % (type(e).__name__, e))
+    else:
+        print("⚠️ 未提供索引库，跳过编译清单（对齐审计将没有 diff 锚点）")
 
 
 def main() -> None:

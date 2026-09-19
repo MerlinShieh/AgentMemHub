@@ -126,22 +126,14 @@ def resolve(name: str, titles: set[str], idx: dict[str, set[str]],
     return None
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="修复 wiki 产出里的 [[标题]] 死链")
-    ap.add_argument("--dir", required=True, help="产出目录（页面 md 所在）")
-    ap.add_argument("--dry-run", action="store_true", help="只报告，不改文件")
-    args = ap.parse_args()
+def run_fix(root: Path, dry_run: bool = False) -> dict:
+    """执行链接修复（可编程入口 —— 服务层增量更新复用，不走 argparse）。
 
-    root = Path(args.dir)
-    if not root.is_dir():
-        print("目录不存在：%s" % root)
-        return 2
-
+    返回统计：total/ok/fixed/redir/dropped/files_changed + 样例。
+    """
     titles, files = collect_titles(root)
     idx = build_index(titles)
     redirects = collect_redirects(root)
-    print("页面 %d 个 / 标题 %d 个 / 合并重定向 %d 条"
-          % (len(files), len(titles), len(redirects)))
 
     n_total = n_ok = n_fixed = n_dropped = n_redir = 0
     fixed_samples: list[tuple[str, str]] = []
@@ -177,26 +169,47 @@ def main() -> int:
             return "[[%s]]" % tgt
 
         new = LINK_RE.sub(repl, text)
-        if changed and not args.dry_run:
+        if changed and not dry_run:
             f.write_text(new, encoding="utf-8")
         if changed:
             n_files_changed += 1
 
+    return {"total": n_total, "ok": n_ok, "fixed": n_fixed, "redir": n_redir,
+            "dropped": n_dropped, "files_changed": n_files_changed,
+            "pages": len(files), "titles": len(titles),
+            "redirects": len(redirects),
+            "fixed_samples": fixed_samples, "dropped_samples": dropped_samples}
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="修复 wiki 产出里的 [[标题]] 死链")
+    ap.add_argument("--dir", required=True, help="产出目录（页面 md 所在）")
+    ap.add_argument("--dry-run", action="store_true", help="只报告，不改文件")
+    args = ap.parse_args()
+
+    root = Path(args.dir)
+    if not root.is_dir():
+        print("目录不存在：%s" % root)
+        return 2
+
+    r = run_fix(root, dry_run=args.dry_run)
+    print("页面 %d 个 / 标题 %d 个 / 合并重定向 %d 条"
+          % (r["pages"], r["titles"], r["redirects"]))
     print()
-    print("相关链接引用：%d 处（涉及 %d 个文件）" % (n_total, n_files_changed))
-    print("  原本就有效      ：%d" % n_ok)
-    print("  自动修复        ：%d（其中按合并关系重定向 %d）" % (n_fixed, n_redir))
+    print("相关链接引用：%d 处（涉及 %d 个文件）" % (r["total"], r["files_changed"]))
+    print("  原本就有效      ：%d" % r["ok"])
+    print("  自动修复        ：%d（其中按合并关系重定向 %d）" % (r["fixed"], r["redir"]))
     print("  无法确定（去链）：%d（%.1f%%）"
-          % (n_dropped, 100.0 * n_dropped / max(n_total, 1)))
-    if fixed_samples:
+          % (r["dropped"], 100.0 * r["dropped"] / max(r["total"], 1)))
+    if r["fixed_samples"]:
         print()
         print("修复样例：")
-        for a, b in fixed_samples:
+        for a, b in r["fixed_samples"]:
             print("  %s  →  %s" % (a, b))
-    if dropped_samples:
+    if r["dropped_samples"]:
         print()
         print("去链样例（歧义或无对应页）：")
-        for a in dropped_samples:
+        for a in r["dropped_samples"]:
             print("  %s" % a)
     if args.dry_run:
         print()
