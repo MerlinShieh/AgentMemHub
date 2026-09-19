@@ -66,7 +66,6 @@ uv run python scripts/fetch_model.py Xenova/bge-base-zh-v1.5
 > 产物清单 + 项目记忆），**拿不到用户/助手的完整输入输出**——等待官方开放接口后补全。
 
 ## 项目架构
-
 ```
    ┌───────────────────────────── AgentMemHub（本项目） ─────────────────────────────┐
    │                                                                                 │
@@ -123,12 +122,16 @@ AgentMemHub/
 │   └── e2e/                      #   浏览器级端到端测试
 ├── eval/                         # 召回评测示例集（queries.example.yaml；私有集不入库）
 ├── tests/                        # pytest（488 项通过 / 1 项条件跳过）
-├── docs/                         # 设计文档（架构/迁移/召回融合等）
+├── docs/                         # 设计文档（架构/迁移/召回融合/接口契约等）
 ├── memOS/                        # 回退用的上游引擎（gitignore，默认不参与运行）
 ├── start.bat                     # 启动控制台（Windows）
 ├── ClearData.bat / ClearTest.bat # 清空数据 / 恢复干净测试环境
 └── AGENTS.md / ARCHITECTURE.md   # 协作约定 / 架构说明
 ```
+
+**接口文档**：对外接口（HTTP API / MCP 工具 / CLI）的完整契约见
+**[docs/API.md](./docs/API.md)**；服务运行时还有交互式文档 `/api/docs`（Swagger UI）
+与机器可读的 `/openapi.json`。
 
 **数据流（三阶段闭环）**
 
