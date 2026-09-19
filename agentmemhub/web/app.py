@@ -564,23 +564,23 @@ def create_app(db_path: Path | None = None):
             return JSONResponse(f)
 
     @app.get("/api/folders", summary="按文件夹统计各 Agent 会话数")
-    def api_folders(source: Optional[str] = Query(default="")):
+    def api_folders(source: Optional[str] = Query(default="", description="限定某个 Agent 来源（留空=全部）")):
         with _LOCK:
             return JSONResponse({"folders": agg.folders(source or None)})
 
     @app.get("/api/conversations", summary="会话列表（筛选 + 分页）")
     def api_conversations(
-        sources: Optional[str] = Query(default="", description="逗号分隔"),
-        workspace: Optional[str] = Query(default="", description="逗号分隔多选（文件夹名）"),
-        q: Optional[str] = Query(default=""),
+        sources: Optional[str] = Query(default="", description="按 Agent 来源筛选，逗号分隔多选"),
+        workspace: Optional[str] = Query(default="", description="按文件夹筛选，逗号分隔多选"),
+        q: Optional[str] = Query(default="", description="关键字（会话标题 / 正文）"),
         days: int = Query(default=0, ge=0, description="近 N 天（0=不限，按 createdAt）"),
         dateFrom: Optional[float] = Query(default=None, description="精确起始时间戳（Unix 秒）"),
         dateTo: Optional[float] = Query(default=None, description="精确截止时间戳（Unix 秒）"),
         all_: bool = Query(default=False, alias="all", description="返回全部匹配项（不分页）"),
-        page: int = Query(default=1, ge=1),
-        page_size: int = Query(default=20, ge=1, le=100),
-        sort: str = Query(default="updated"),
-        order: str = Query(default="desc"),
+        page: int = Query(default=1, ge=1, description="页码，从 1 起"),
+        page_size: int = Query(default=20, ge=1, le=100, description="每页条数（上限 100）"),
+        sort: str = Query(default="updated", description="排序字段：updated|created|events|title"),
+        order: str = Query(default="desc", description="排序方向：asc|desc"),
     ):
         src_filter = [s.strip() for s in (sources or "").split(",") if s.strip()]
         ws_filter = [w.strip() for w in (workspace or "").split(",") if w.strip()]
@@ -645,8 +645,8 @@ def create_app(db_path: Path | None = None):
 
     @app.get("/api/conversations/{source}/{cid}/events", summary="会话事件流（按需分页）")
     def api_events(source: str, cid: str,
-                   offset: int = Query(default=0, ge=0),
-                   limit: int = Query(default=_MAX_EVENTS, ge=1, le=500)):
+                   offset: int = Query(default=0, ge=0, description="从第几条事件开始（分页游标）"),
+                   limit: int = Query(default=_MAX_EVENTS, ge=1, le=500, description="本次返回条数")):
         """标准分页返回该会话事件流（按 seq 升序；前端倒序显示）。"""
         with _LOCK:
             conv = store.get_conversation(source, cid)
@@ -799,8 +799,8 @@ def create_app(db_path: Path | None = None):
             raise HTTPException(status_code=503, detail="memory engine offline")
 
     @app.get("/api/memos/search", summary="语义检索记忆（三路融合召回）")
-    def api_memos_search(q: str = Query(default="", min_length=1),
-                         top: int = Query(default=20, ge=1, le=50)):
+    def api_memos_search(q: str = Query(default="", min_length=1, description="检索词"),
+                         top: int = Query(default=20, ge=1, le=50, description="返回条数上限（1~50）")):
         """语义检索：返回 hits（含会话定位信息，前端可点击跳转）。"""
         import json as _json
         from agentmemhub import memos_daemon
@@ -831,10 +831,10 @@ def create_app(db_path: Path | None = None):
                              "traces": ov.get("traces")})
 
     @app.post("/api/memos/feedback", summary="记忆反馈 👍/👎（状态式，可撤销）")
-    def api_memos_feedback(traceId: str = Query(...),
-                           polarity: str = Query(default="neutral", pattern="^(positive|negative|neutral)$"),
-                           magnitude: float = Query(default=1.0),
-                           channel: str = Query(default="explicit"),
+    def api_memos_feedback(traceId: str = Query(..., description="记忆 id（mcp_* / dst_* / msg:* 等）"),
+                           polarity: str = Query(default="neutral", pattern="^(positive|negative|neutral)$", description="极性：positive / negative / neutral"),
+                           magnitude: float = Query(default=1.0, description="强度（越大影响越显著）"),
+                           channel: str = Query(default="explicit", description="反馈渠道：explicit（面板）/ implicit（行为推断）"),
                            state: bool = Query(default=True, description="状态式（面板默认）：一个 unit 一条当前表态，反复点不叠加"),
                            revoke: bool = Query(default=False, description="state=1 时取消该条反馈（干净回退到初始分）")):
         """记忆打分（面板 👍/👎）。
@@ -877,8 +877,8 @@ def create_app(db_path: Path | None = None):
         sessionUid: Optional[int] = Query(default=None, description="按全局会话 uid 筛选"),
         sort: str = Query(default="time", description="排序字段：time|value|type|confidence|status|source|conversation"),
         order: str = Query(default="desc", description="排序方向：asc|desc"),
-        page: int = Query(default=1, ge=1),
-        page_size: int = Query(default=20, ge=1, le=100),
+        page: int = Query(default=1, ge=1, description="页码，从 1 起"),
+        page_size: int = Query(default=20, ge=1, le=100, description="每页条数（上限 100）"),
     ):
         """记忆报表数据源：蒸馏终稿（含归档可筛）+ Agent 手动写入的记忆。
 
@@ -1055,9 +1055,10 @@ def create_app(db_path: Path | None = None):
                              "pageSize": page_size, "stats": stats})
 
     @app.post("/api/memos/weight", summary="记忆手动加权 ⭐（锁定不衰减）")
-    def api_memos_weight(traceId: str = Query(...),
+    def api_memos_weight(traceId: str = Query(..., description="记忆 id"),
                          value: float | None = Query(default=None,
-                                                     ge=0.0, le=1.0)):
+                                                     ge=0.0, le=1.0,
+                                                     description="权重 0~1；不传=仅查看当前权重")):
         """手动加权：用户锁定某条记忆的价值分（0~1；不传=清除手动设定）。
 
         锁定后的分**优先于自动聚合值，且不随时间衰减**——用户意志优先于
@@ -1087,8 +1088,8 @@ def create_app(db_path: Path | None = None):
         return JSONResponse({"ok": True, "traceId": traceId, **r})
 
     @app.get("/api/memos/traces", summary="近期记忆轨迹")
-    def api_memos_traces(limit: int = Query(default=8, ge=1, le=50),
-                         offset: int = Query(default=0, ge=0)):
+    def api_memos_traces(limit: int = Query(default=8, ge=1, le=50, description="返回条数（1~50）"),
+                         offset: int = Query(default=0, ge=0, description="跳过前 N 条（分页）")):
         """转发最近记忆列表（时间线，纯 SQL 侧）。"""
         from agentmemhub import memos_daemon
         _require_engine()
@@ -1117,8 +1118,8 @@ def create_app(db_path: Path | None = None):
     # ------------------------------------------------------------------
 
     @app.post("/api/admin/ingest", summary="采集入库（长任务，默认会话级增量）")
-    def api_admin_ingest(source: str = Query(default=""),
-                         signature: str = Query(default="")):
+    def api_admin_ingest(source: str = Query(default="", description="限定某个 Agent 来源（留空=全部）"),
+                         signature: str = Query(default="", description="并发签名（防止重复提交）")):
         from agentmemhub import adapters, cli
         from agentmemhub import logs
         from agentmemhub.web import tasks
@@ -1131,7 +1132,7 @@ def create_app(db_path: Path | None = None):
         return JSONResponse({"job": job})
 
     @app.post("/api/admin/push", summary="向量化写入记忆索引（长任务）")
-    def api_admin_push(source: str = Query(default="")):
+    def api_admin_push(source: str = Query(default="", description="限定某个 Agent 来源（留空=全部）")):
         """写入记忆：把采集库会话向量化写入记忆索引（后台任务）。"""
         from agentmemhub import cli, memos_daemon
         from agentmemhub import logs
@@ -1151,8 +1152,8 @@ def create_app(db_path: Path | None = None):
         return JSONResponse({"job": tasks.status()})
 
     @app.post("/api/admin/score", summary="LLM 批量评分（长任务；当前入口已隐藏）")
-    def api_admin_score(limit: int = Query(default=0, ge=0),
-                        dryRun: bool = Query(default=False)):
+    def api_admin_score(limit: int = Query(default=0, ge=0, description="最多评多少条（0=全部）"),
+                        dryRun: bool = Query(default=False, description="只评估不写分")):
         """LLM 批量自动评分历史记忆（后台任务，实时进度）。需记忆索引可用且已配置 LLM。"""
         from agentmemhub import cli, logs, memos_daemon
         from agentmemhub.web import tasks
@@ -1167,7 +1168,7 @@ def create_app(db_path: Path | None = None):
         return JSONResponse({"job": job})
 
     @app.post("/api/admin/clean", summary="清洗系统注入事件（长任务）")
-    def api_admin_clean(source: str = Query(default="")):
+    def api_admin_clean(source: str = Query(default="", description="限定某个 Agent 来源（留空=全部）")):
         """清洗数据：删除系统注入事件（后台任务，先打印统计再执行）。"""
         from agentmemhub import cli
         from agentmemhub import logs
@@ -1194,9 +1195,9 @@ def create_app(db_path: Path | None = None):
         return JSONResponse({"job": job})
 
     @app.post("/api/admin/distill", summary="记忆蒸馏（长任务，幂等可重跑）")
-    def api_admin_distill(source: str = Query(default=""),
-                          limit: int = Query(default=0, ge=0),
-                          dryRun: bool = Query(default=False)):
+    def api_admin_distill(source: str = Query(default="", description="限定某个 Agent 来源（留空=全部）"),
+                          limit: int = Query(default=0, ge=0, description="最多处理多少个会话（0=全部，按正文量降序）"),
+                          dryRun: bool = Query(default=False, description="只蒸馏不落库（预览产物与成本）")):
         """记忆蒸馏：LLM 把原始会话提炼为结构化记忆（后台任务，实时进度）。
 
         需 llm 段已配置；幂等（重跑跳过已完成切片），失败切片不登记、重跑可补。
@@ -1218,7 +1219,8 @@ def create_app(db_path: Path | None = None):
 
     @app.post("/api/admin/rebuild", summary="补 / 重建向量（长任务）")
     def api_admin_rebuild(mode: str = Query(default="repair",
-                                            pattern="^(repair|rebuild)$")):
+                                            pattern="^(repair|rebuild)$",
+                                            description="repair=只补缺失向量；rebuild=全量重算")):
         """补向量：给缺向量的记忆补嵌（后台任务，逐轮进度）。"""
         from agentmemhub import logs, memos_daemon
         from agentmemhub.web import tasks
@@ -1232,7 +1234,8 @@ def create_app(db_path: Path | None = None):
         return JSONResponse({"job": job})
 
     @app.get("/api/wiki/failures", summary="查询 LLM Wiki 失败清单（按原因分类）")
-    def api_wiki_failures(out: str = Query(...), stage: str = Query(default="")):
+    def api_wiki_failures(out: str = Query(..., description="wiki 产出目录（失败清单在其下）"),
+                          stage: str = Query(default="", description="l1 / l2；留空=全部阶段")):
         """查 LLM Wiki 编译的失败清单（结构化）。
 
         `needs_manual=True` 表示存在 quota/auth/model 这类**重试无意义**的错误，
@@ -1242,9 +1245,10 @@ def create_app(db_path: Path | None = None):
         return JSONResponse(wiki.failures_summary(out, stage))
 
     @app.post("/api/wiki/retry", summary="定向补跑 wiki 失败项（长任务）")
-    def api_wiki_retry(out: str = Query(...), stage: str = Query(default=""),
-                       src: str = Query(default=""),
-                       workers: int = Query(default=0, ge=0)):
+    def api_wiki_retry(out: str = Query(..., description="wiki 产出目录（失败清单在其下）"),
+                       stage: str = Query(default="", description="l1 / l2；留空=按依赖顺序补两级"),
+                       src: str = Query(default="", description="第二级补跑必需：第一级产出目录"),
+                       workers: int = Query(default=0, ge=0, description="并发数（0=用配置）")):
         """定向补跑 wiki 失败项（后台任务，实时进度）。
 
         只重跑失败清单里**未解决**的目标，不全量重来。
@@ -1264,7 +1268,7 @@ def create_app(db_path: Path | None = None):
         return JSONResponse({"job": job})
 
     @app.get("/api/logs", summary="近期操作日志")
-    def api_logs(limit: int = Query(default=100, ge=1, le=500)):
+    def api_logs(limit: int = Query(default=100, ge=1, le=500, description="返回条数（上限 500）")):
         """统一操作日志（面板控制/任务执行的最近记录，内存 + JSONL 留痕）。"""
         from agentmemhub import logs
         return JSONResponse({"logs": logs.recent(limit)})
