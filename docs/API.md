@@ -28,7 +28,7 @@
 
 ### 长任务约定（重要）
 
-`/api/admin/*` 与 `/api/wiki/retry` 走**后台任务**，模式统一：
+`/api/admin/*` 走**后台任务**，模式统一：
 
 ```
 POST /api/admin/xxx  →  立即返回 {"job": {"id", "name", "status", ...}}   （不阻塞）
@@ -138,28 +138,6 @@ GET  /api/admin/job  →  轮询进度
 | `POST` | `/api/admin/rebuild` | `mode`（`repair`/`rebuild`）| 补/重建向量 |
 | `GET` | `/api/admin/job` | — | 查当前任务状态 |
 
-### 3.6 LLM Wiki（v2.1 新增）
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| `GET` | `/api/wiki/failures` | 失败清单摘要（`out` 必填；`stage` 可选 `l1`/`l2`）|
-| `POST` | `/api/wiki/retry` | **定向补跑**失败项（`out`、`stage`、`src`、`workers`）|
-
-**`GET /api/wiki/failures` 响应要点**
-
-```json
-{
-  "out": "...", "log": ".../failures.jsonl", "exists": true,
-  "total": 3,
-  "by_kind": {"transient": 2, "format": 1},
-  "fatal": [],                    // quota/auth/model —— 重试无意义
-  "needs_manual": false,          // true 时调用方应提示用户先处理，而非继续补跑
-  "stages": {"l1": 3, "l2-plan": 0, "l2-compile": 0},
-  "items": [{"stage": "l1", "target": "qwen/xxx", "kind": "transient",
-             "attempts": 1, "error": "...", "ts": 1789000000}]
-}
-```
-
 ---
 
 ## 四、MCP 工具（Agent 侧，5 个）
@@ -186,12 +164,10 @@ GET  /api/admin/job  →  轮询进度
 
 ## 五、CLI
 
-见 README「命令行」章节的完整表格。与接口相关的三条运维入口：
+见 README「命令行」章节的完整表格。与接口相关的一条运维入口：
 
 ```bash
-python -m agentmemhub wiki --action failures --out DIR          # 查 wiki 失败清单
-python -m agentmemhub wiki --action retry --out DIR --stage l2   # 定向补跑
-python -m agentmemhub health_check                              # 记忆库一致性巡检
+python -m agentmemhub health_check    # 记忆库一致性巡检
 ```
 
 ---
@@ -199,7 +175,7 @@ python -m agentmemhub health_check                              # 记忆库一�
 ## 六、接口使用现状（面板未调用的接口）
 
 一次一致性排查（前端 `fetch` ↔ 后端路由 ↔ MCP 工具 ↔ CLI ↔ 本文）发现
-**11 个后端接口面板前端没有调用**。这**不是缺陷**，而是设计选择 —— 但必须写清楚，
+**9 个后端接口面板前端没有调用**。这**不是缺陷**，而是设计选择 —— 但必须写清楚，
 否则下次排查又会当成"未完成"。
 
 ### 6.1 保留**供外部调用**（面板走 `/api/bootstrap`）
@@ -221,21 +197,16 @@ python -m agentmemhub health_check                              # 记忆库一�
 表被 `ingest` 与 `distill` 读取，用于跳过不写入记忆的会话/轮次）。
 **UI 下线 ≠ 能力下线**，且它随时可能重新上架。
 
-### 6.3 **新加的后端服务接口**（UI 待后续）
-
-| 接口 | 说明 |
-|---|---|
-| `GET /api/wiki/failures`、`POST /api/wiki/retry` | v2.1 新增。按"暂时只提供服务接口"的需求，前端 UI 尚未做 |
-
-### 6.4 已知的**前端缺口**（后端没问题）
+### 6.3 已知的**前端缺口**（后端没问题）
 
 | 接口 | 说明 |
 |---|---|
 | `POST /api/admin/rebuild` | 后端可用，**面板没有对应按钮** —— 补向量目前只能走 CLI `rebuild` 或直接调接口。属**未做**，非不做 |
 
-### 6.5 复查手段
+### 6.4 复查手段
 
-一次性脚本 `exports/wiki_work/check_api_gaps.py`（工作区，未入库）会输出五份清单的差异。
+按"前端 `fetch` 调用 ↔ 后端 OpenAPI 路由 ↔ MCP 工具 ↔ CLI handler ↔ 本文"
+四份清单交叉比对即可（`app.openapi()` 给出全部路由，正则抓前端调用）。
 
 > ⚠️ **静态扫描前端调用一定有漏网**：URL 若写在变量里
 > （如 `` const u = `/api/memos/feedback?...`; fetch(u) ``），正则匹配不到。
@@ -246,7 +217,7 @@ python -m agentmemhub health_check                              # 记忆库一�
 
 - **改了接口必须同步本文与 docstring**：Swagger 的内容来自代码里的
   `summary` / `description` —— 端点不写描述，`/api/docs` 里就只剩 `Api Xxx`
-  这种自动名（本文档诞生时 31 个端点里多数如此，现已全部补齐 `summary`）。
+  这种自动名（本文档诞生时 28 个端点里多数如此，现已全部补齐 `summary`）。
 - **新增端点请补三样**：装饰器上的 `summary`、每个 Query 参数的 `description`、
   以及本文对应分组的表格行。
 - **响应契约不得破坏**：MCP 五工具与面板网关的字段是 Skill / 前端强依赖
