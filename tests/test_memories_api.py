@@ -22,8 +22,9 @@ def memories_env(tmp_path, monkeypatch):
     from pathlib import Path
 
     from agentmemhub.rag.config import load_settings
-    from agentmemhub.rag.ingest import open_index
+    from agentmemhub.rag.ingest import open_index, ensure_bridge_schema
     from agentmemhub.distill import ensure_distill_schema
+    from agentmemhub.rag.memstore import ensure_memstore_schema
 
     src_path = tmp_path / "agentmemhub.db"
     store = Store(src_path)
@@ -38,8 +39,8 @@ def memories_env(tmp_path, monkeypatch):
     conn = open_index(idx_path)
     conn.row_factory = sqlite3.Row
     ensure_distill_schema(conn)
-    from agentmemhub.rag.memstore import ensure_memstore_schema
     ensure_memstore_schema(conn)
+    ensure_bridge_schema(conn)   # units.legacy_id/tags 补列——api_memories 去重依赖
     # 两条蒸馏记忆（不同会话/类型）+ 一条手动记忆
     for i, (cid, mtype, content) in enumerate(
             (("c1", "decision", "会话一的蒸馏结论"),
@@ -56,16 +57,16 @@ def memories_env(tmp_path, monkeypatch):
     for i, h in enumerate(("h0", "h1")):
         cur = conn.execute(
             "INSERT INTO units(source, conversation_id, seq, role, turn_key,"
-            " src_id, time, text, chars) VALUES(?,?,?,?,?,?,?,?,?)",
+            " src_id, time, text, chars, legacy_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
             ("zcode", "c1", -1 - i, "distilled", f"tk{i}", f"dst_{h}",
-             1000 + i, f"投影条目{i}", 5))
+             1000 + i, f"投影条目{i}", 5, f"mcp_leg{i}"))
         conn.execute(
             "INSERT INTO unit_values(unit_id, value, updated_at) VALUES(?,?,?)",
             (cur.lastrowid, 0.3, 1000))
     cur = conn.execute(
         "INSERT INTO units(source, conversation_id, seq, role, turn_key,"
-        " src_id, time, text, chars) VALUES('memory','mcp',1,'user','mcp',"
-        "'mcp_manual1',500,'Agent 手动写入的记忆',9)")
+        " src_id, time, text, chars, legacy_id) VALUES('memory','mcp',1,'user','mcp',"
+        "'mcp_manual1',500,'Agent 手动写入的记忆',9,'mcp_manual1')")
     conn.execute(
         "INSERT INTO unit_values(unit_id, value, updated_at) VALUES(?,?,?)",
         (cur.lastrowid, 0.6, 500))

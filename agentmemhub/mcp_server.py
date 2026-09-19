@@ -239,8 +239,80 @@ def _save(args: dict) -> str:
             body={"mode": "repair"}, timeout=300)
     except Exception:
         pass
+    # 同步一条蒸馏表记录：MCP 直写的记忆此前不进 distilled_memories —— 记忆
+    # 报表看不见、wiki 编译输入（status IN new/similar）完全不可见。落表后
+    # 报表与 wiki 才能覆盖 Agent 主动写入的记忆（投影由下次蒸馏统一补齐）。
+    # 全程旁路：失败只记日志，不影响 memory_save 的返回。
+    try:
+        from agentmemhub import distill as _distill
+        from agentmemhub.rag.config import load_settings
+        from agentmemhub.rag.ingest import open_index
+        conf_map = {"high": "high", "normal": "medium", "low": "low"}
+        # 可选 type：Agent 写记忆时通常知道类型（decision/lesson/...），默认 fact。
+        mem_type = str(args.get("type") or "fact").strip().lower() or "fact"
+        idx = open_index(load_settings().index_db)
+        try:
+            saved = _distill.save_direct_memory(
+                idx, content=content, type_=mem_type,
+                confidence=conf_map.get(importance, "medium"),
+                # tid 形如 'mcp_<hash>'；面板去重与回填的口径是 'mcp:<hash>'
+                #（substr 去掉 units.src_id 的 'mcp_' 前缀），这里必须对齐，
+                # 否则 slice_key 变 'mcp:mcp_<hash>'，去重匹配不上 → 面板重复
+                slice_key=f"mcp:{tid.removeprefix('mcp_')}",
+                model="memory_save(mcp)")
+            # 落表即补齐检索面：来源初始分 + 增量投影（含跨会话去重判定），
+            # 评分/加权/召回立即可用，不等下次蒸馏（阈值与蒸馏配置同源）。
+            # Agent 直写的初始分再按 importance 档位精调（0.8/0.6/0.4）——
+            # 投影默认只给来源语义分，importance 是 Agent 对重要性的明确判断
+            if saved in ("inserted", "revived"):
+                from agentmemhub.rag.memstore import AGENT_IMPORTANCE_VALUES
+                _distill.backfill_base_values(idx)
+                pending = _distill._pending_projection(idx)
+                if pending:
+                    dedup = ((load_settings().distill or {}).get("dedup")
+                             or {}) if hasattr(load_settings(), "distill") else {}
+                    _distill.project_memories(
+                        idx, load_settings(), pending,
+                        duplicate_threshold=float(
+                            dedup.get("cosine_duplicate") or 0.92),
+                        similar_threshold=float(
+                            dedup.get("cosine_similar") or 0.80))
+                idx.execute(
+                    "UPDATE unit_values SET value=? WHERE unit_id IN"
+                    " (SELECT u.id FROM units u JOIN distilled_memories dm"
+                    "  ON u.src_id = 'dst_' || dm.content_hash"
+                    "  WHERE dm.slice_key=?)",
+                    (AGENT_IMPORTANCE_VALUES[importance],
+                     f"mcp:{tid.removeprefix('mcp_')}"))
+        finally:
+            idx.close()
+    except Exception as e:                      # noqa: BLE001
+        saved = f"error: {e}"
+        try:
+            from agentmemhub import logs
+            logs.record(f"memory_save 蒸馏表同步失败 id={tid}: {e}",
+                        level="error", actor="mcp", dest="cli")
+        except Exception:
+            pass
+    # wiki 增量更新触发检测：挂在 MCP 写入时（用户定下的模型——每次写入
+    # 过一遍检测，满足规则才触发，无后台定时任务）。异步 daemon 线程，
+    # 不阻塞 MCP 响应；update 单飞行锁 + manifest 基线天然防重复。
+    try:
+        import threading as _th
+        _th.Thread(target=_wiki_trigger_probe, daemon=True).start()
+    except Exception:
+        pass
     return (f"记忆已写入（id={tid}，imported={imported}）\n"
             f"内容：{content[:120]}" + ("…" if len(content) > 120 else ""))
+
+
+def _wiki_trigger_probe() -> None:
+    """wiki 触发器检测（daemon 线程入口）——全程旁路，绝不影响 MCP 响应。"""
+    try:
+        from agentmemhub import wiki_triggers
+        wiki_triggers.on_memories_written()
+    except Exception:
+        pass
 
 
 def _score(args: dict) -> str:
@@ -347,6 +419,15 @@ _TOOLS: list[dict] = [
                     "description": (
                         "可选标签（如项目名、领域、技术栈），存库供面板筛选与溯源。"
                         "引擎不解释标签语义，纯透传。"
+                    ),
+                },
+                "type": {
+                    "type": "string",
+                    "enum": ["decision", "fact", "preference", "lesson"],
+                    "description": (
+                        "（可选）记忆类型，不传=fact。decision=做出的决策/选型；"
+                        "fact=事实/结论/技术沉淀；preference=偏好/约定；"
+                        "lesson=踩坑/教训。落在蒸馏表供面板筛选与 wiki 编译。"
                     ),
                 },
                 "note": {"type": "string", "description": _NOTE_DESC},

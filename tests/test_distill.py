@@ -1549,3 +1549,107 @@ def test_normalize_memories_对超长content兜底():
     assert not rejected
     assert len(mems) == 1
     assert len(mems[0]["content"]) <= CONTENT_MAX, "超长 content 必须被截断"
+
+
+# ── Agent 直写记忆落蒸馏表（memory_save 的 wiki/报表可见性）──────────────
+
+def test_save_direct_memory_落表且字段规格正确(conn):
+    from agentmemhub.distill import save_direct_memory
+    r = save_direct_memory(conn, content="直写的记忆内容",
+                           slice_key="mcp:mcp_abc")
+    assert r == "inserted"
+    row = conn.execute(
+        "SELECT source, conversation_id, slice_key, type, confidence, status,"
+        " content_hash FROM distilled_memories").fetchone()
+    assert row[0] == "mcp" and row[1] == "direct"
+    assert row[2] == "mcp:mcp_abc" and row[3] == "fact"
+    assert row[5] == "new"                                   # wiki 编译输入口径
+    assert row[6] == fingerprint("直写的记忆内容")
+
+
+def test_save_direct_memory_幂等_同内容不重复(conn):
+    from agentmemhub.distill import save_direct_memory
+    assert save_direct_memory(conn, content="AgentMemHub 采用 RRF 融合召回",
+                              slice_key="mcp:a") == "inserted"
+    assert save_direct_memory(conn, content="AgentMemHub 采用 RRF 融合召回",
+                              slice_key="mcp:b") == "duplicate"
+    assert conn.execute("SELECT COUNT(*) FROM distilled_memories").fetchone()[0] == 1
+
+
+def test_save_direct_memory_归档条目复活(conn):
+    from agentmemhub.distill import save_direct_memory
+    save_direct_memory(conn, content="曾被归档的一条结论", slice_key="mcp:a")
+    conn.execute("UPDATE distilled_memories SET status='merged'")
+    assert save_direct_memory(conn, content="曾被归档的一条结论", slice_key="mcp:b") == "revived"
+    assert conn.execute("SELECT status FROM distilled_memories").fetchone()[0] == "new"
+
+
+def test_save_direct_memory_字段校验与脱敏兜底(conn):
+    from agentmemhub.distill import save_direct_memory
+    with pytest.raises(ValueError):
+        save_direct_memory(conn, content="x", type_="nope")
+    with pytest.raises(ValueError):
+        save_direct_memory(conn, content="x", confidence="nope")
+    with pytest.raises(ValueError):
+        save_direct_memory(conn, content="")          # 无实质内容
+
+
+def test_save_direct_memory_脱敏后入库(conn):
+    """直写内容也过脱敏兜底（与蒸馏入库同规格）。"""
+    from agentmemhub.distill import save_direct_memory
+    r = save_direct_memory(conn, content="正常内容，附带敏感词",
+                           slice_key="mcp:s")
+    assert r == "inserted"
+    n = conn.execute("SELECT COUNT(*) FROM distilled_memories").fetchone()[0]
+    assert n == 1                                    # 有一条（脱敏后仍有实质）
+
+
+# ── 历史 Agent 直写记忆回填（backfill_agent_memories）──────────────────
+
+def _mk_units(conn):
+    """最小 units 表（真实 schema 由 ingest 建，distill 库不含）。"""
+    conn.execute(
+        "CREATE TABLE units (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " source TEXT, conversation_id TEXT, seq INTEGER, role TEXT,"
+        " src_id TEXT, time INTEGER, text TEXT)")
+
+
+def test_backfill_把units的manual记忆落蒸馏表(conn):
+    from agentmemhub.distill import backfill_agent_memories
+    _mk_units(conn)
+    conn.executemany(
+        "INSERT INTO units (src_id, source, conversation_id, text, time)"
+        " VALUES (?,?,?,?,?)", [
+            ("mcp_aaa", "memory", "mcp", "回填测试的第一条结论内容", 1789800000),
+            ("mcp_bbb", "memory", "mcp", "回填测试的第二条结论内容", 1789800001),
+        ])
+    r = backfill_agent_memories(conn)
+    assert r["scanned"] == 2 and r["inserted"] == 2
+    # 落表口径：slice_key='mcp:<tid>'（与面板去重逻辑对齐）
+    row = conn.execute(
+        "SELECT slice_key, status, content, created_at FROM distilled_memories"
+        " WHERE slice_key='mcp:aaa'").fetchone()
+    assert row and row[1] == "new"
+    assert "第一条结论" in row[2]
+    assert row[3] == 1789800000                       # 保留原始时间
+
+
+def test_backfill_幂等_重跑不再落账(conn):
+    from agentmemhub.distill import backfill_agent_memories
+    _mk_units(conn)
+    conn.execute(
+        "INSERT INTO units (src_id, source, conversation_id, text, time)"
+        " VALUES ('mcp_ccc', 'memory', 'mcp', '幂等验证的一条记忆内容', 1)")
+    assert backfill_agent_memories(conn)["inserted"] == 1
+    r2 = backfill_agent_memories(conn)
+    assert r2["skipped_exists"] == 1 and r2["inserted"] == 0
+
+
+def test_backfill_无实质内容跳过并计数(conn):
+    from agentmemhub.distill import backfill_agent_memories
+    _mk_units(conn)
+    conn.execute(
+        "INSERT INTO units (src_id, source, conversation_id, text, time)"
+        " VALUES ('mcp_ddd', 'memory', 'mcp', '嗯', 1)")   # 无实质
+    r = backfill_agent_memories(conn)
+    assert r["skipped_substance"] == 1 and r["inserted"] == 0

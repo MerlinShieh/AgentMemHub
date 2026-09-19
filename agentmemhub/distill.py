@@ -33,7 +33,8 @@ import numpy as np
 # 话题边界检测复用 FTS 侧的分词口径（3-gram 步长 1 + 中文噪音表），
 # 保证"切片看到的话题"与"检索命中时看到的话题"是同一套词法。
 from agentmemhub.rag.search import TRIGRAM_MIN_LEN, _CJK_NOISE
-from agentmemhub.rag.memstore import BASE_VALUE_DISTILLED, ensure_base_value
+from agentmemhub.rag.memstore import (
+    BASE_VALUE_AGENT_WRITE, BASE_VALUE_DISTILLED, ensure_base_value)
 
 #: 记忆类型枚举（LLM 输出受限，避免自由发挥导致分类不可用）
 MEMORY_TYPES = ("decision", "fact", "preference", "lesson")
@@ -695,6 +696,97 @@ def save_memories(idx: sqlite3.Connection, sl: Slice, result: DistillResult,
     return {"inserted": inserted, "sanitized": sanitized, "dropped": dropped}
 
 
+def save_direct_memory(idx: sqlite3.Connection, *, content: str,
+                       type_: str = "fact", confidence: str = "medium",
+                       topic: str | None = None, model: str = "",
+                       source: str = "mcp", conversation_id: str = "direct",
+                       slice_key: str = "", created_at: int | None = None) -> str:
+    """Agent 直写记忆落蒸馏表（`memory_save` 的 wiki/报表可见性缺口修复）。
+
+    背景：MCP `memory_save` 此前只写引擎与消息层投影（units 有 `mcp_` 前缀
+    投影），**不进 `distilled_memories`** —— 记忆报表看不见它，wiki 编译输入
+    （`status IN ('new','similar')`）更是完全不可见：直写的记忆永远进不了 wiki。
+
+    规格：与 `save_memories` 同口径 —— 脱敏兜底、内容指纹幂等
+    （UNIQUE(source, conversation_id, content_hash)）、归档条目复活。
+    会话语义：全部直写归入一个固定会话（source='mcp' / conversation_id='direct'），
+    wiki L1 按"Agent 主动记忆"这一个会话编译，slice_key 携带 trace_id 可溯源。
+
+    返回 "inserted" | "revived" | "duplicate"；投影不在此处做（units 向量由
+    下一次蒸馏的 S4 阶段统一补齐，`_pending_projection` 会捞到 status='new'）。
+    抛出 ValueError 表示字段非法/无实质内容，调用方决定是否吞掉。
+    """
+    from agentmemhub import sanitize
+    if type_ not in MEMORY_TYPES:
+        raise ValueError(f"type 非法：{type_!r}（允许 {MEMORY_TYPES}）")
+    if confidence not in CONFIDENCES:
+        raise ValueError(f"confidence 非法：{confidence!r}（允许 {CONFIDENCES}）")
+    content, findings = sanitize.redact(" ".join((content or "").split()))
+    if findings:
+        pass                                    # 直写场景：脱敏后继续（内容是 Agent 精炼过的）
+    if not sanitize.has_substance(content):
+        raise ValueError("脱敏后无实质内容，拒绝入库")
+    ensure_distill_schema(idx)
+    h = fingerprint(content)
+    ts = int(created_at or time.time())
+    with idx:
+        exist = idx.execute(
+            "SELECT id, status FROM distilled_memories"
+            " WHERE source=? AND conversation_id=? AND content_hash=?",
+            (source, conversation_id, h)).fetchone()
+        if exist:
+            if exist[1] in ("merged", "duplicate"):
+                idx.execute(
+                    "UPDATE distilled_memories SET status='new', type=?,"
+                    " confidence=?, created_at=? WHERE id=?",
+                    (type_, confidence, ts, exist[0]))
+                return "revived"
+            return "duplicate"
+        idx.execute(
+            "INSERT INTO distilled_memories"
+            "(source, conversation_id, slice_key, turn_key, type, topic,"
+            " content, confidence, status, content_hash, prompt_ver, model,"
+            " created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (source, conversation_id, slice_key, None, type_, topic, content,
+             confidence, "new", h, PROMPT_VER, model, ts))
+        return "inserted"
+
+
+def backfill_agent_memories(idx: sqlite3.Connection) -> dict[str, int]:
+    """历史 Agent 直写记忆回填蒸馏表（一次性补账，幂等可重跑）。
+
+    背景：`memory_save` 落蒸馏表是后来才通的——之前的直写记忆只存在于
+    引擎 traces 与 units（source='memory'，src_id='mcp_<trace_id>'）投影，
+    蒸馏表无行 → wiki 编译不可见。本函数把它们按原样落账（**不经 LLM**，
+    内容本就是记忆形态），与面板去重逻辑（slice_key='mcp:<tid>'）对齐。
+
+    幂等：已落账（slice_key 命中）跳过；内容重复走 save_direct_memory 的
+    duplicate；脱敏后无实质的跳过并计数。逐条独立事务，部分失败可重跑。
+    """
+    rows = idx.execute(
+        "SELECT src_id, text, time FROM units"
+        " WHERE source='memory' AND src_id LIKE 'mcp\\_%' ESCAPE '\\'"
+        " ORDER BY time").fetchall()
+    stats = {"scanned": len(rows), "inserted": 0, "revived": 0,
+             "duplicate": 0, "skipped_substance": 0, "skipped_exists": 0}
+    for src_id, text, ts in rows:
+        tid = src_id[4:]
+        if idx.execute(
+                "SELECT 1 FROM distilled_memories WHERE slice_key=?",
+                (f"mcp:{tid}",)).fetchone():
+            stats["skipped_exists"] += 1
+            continue
+        try:
+            r = save_direct_memory(
+                idx, content=text or "", slice_key=f"mcp:{tid}",
+                created_at=ts, model="backfill")
+        except ValueError:
+            stats["skipped_substance"] += 1     # 脱敏后无实质（极少数）
+            continue
+        stats[r] = stats.get(r, 0) + 1
+    return stats
+
+
 # ══════════════════════════════════════════════════════════════════════
 # 编排：扫描 → 切片 → 段级蒸馏 → 落库（幂等 + fail-open）
 # ══════════════════════════════════════════════════════════════════════
@@ -1146,6 +1238,18 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
         stats["seconds"] = round(time.perf_counter() - t0, 1)
         if dry_run:
             stats["samples"] = stats["samples"][:SAMPLE_CAP]
+
+        # 写入钩子：wiki 增量更新触发器。检测（align 毫秒级只读）挂在写入时，
+        # 满足规则（时点档/定量阈值/每日首次）才同步跑 update；全程旁路，
+        # 任何异常都不影响蒸馏结果。
+        if not dry_run and stats.get("memories_new"):
+            from agentmemhub import wiki_triggers
+            tr = wiki_triggers.on_memories_written()
+            if tr.get("checked") and tr.get("should_run"):
+                emit("wiki 增量更新已触发（%s）"
+                     % "；".join(tr.get("reasons") or []))
+            elif tr.get("error"):
+                emit(f"wiki 触发器检测异常（不影响蒸馏）：{tr['error']}")
         return stats
     finally:
         idx.close()
@@ -1356,8 +1460,11 @@ def _project_one(idx: sqlite3.Connection, m: dict, vec: np.ndarray,
             (m["source"], m["conversation_id"], -abs(int(m["id"])),
              DISTILLED_ROLE, m.get("turn_key"), src_id, origin_time, title,
              body, len(body), int(time.time()))).lastrowid)
-    # 来源初始置信度：离线蒸馏默认中等（Agent 主动写入的更高，见 memstore 常量）
-    ensure_base_value(idx, uid, BASE_VALUE_DISTILLED)
+    # 来源初始分：按来源语义区分 —— Agent 主动写入（0.6，有明确人工意图）
+    # 高于离线蒸馏（0.3，默认中等靠使用升降）。直写记忆被错当蒸馏产物压到
+    # 0.3 会系统性低估用户亲自保存的内容（实测反馈）。
+    base = BASE_VALUE_AGENT_WRITE if m["source"] == "mcp" else BASE_VALUE_DISTILLED
+    ensure_base_value(idx, uid, base)
     idx.execute(
         f"INSERT OR REPLACE INTO {spec.vec_table}(rowid, embedding) VALUES(?,?)",
         (uid, np.ascontiguousarray(vec, dtype=np.float32).tobytes()))
