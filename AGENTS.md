@@ -58,5 +58,6 @@
 - `README.md` — 使用说明与快速开始（含「记忆蒸馏」「Agent 协作配置」章节）
 - `ARCHITECTURE.md` — 架构说明
 - `docs/memory-distillation.md` — 记忆蒸馏的设计与实施记录
+- `docs/API.md` — 对外接口契约（HTTP / MCP / CLI；含长任务约定与错误语义）
 - `docs/recall-fusion.md` — 三路召回融合的机制与实测数据
 - `docs/EXAMPLES.md` — SQL / CLI / Python 查询示例
