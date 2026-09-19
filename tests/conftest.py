@@ -29,6 +29,25 @@ def audit_dir(tmp_path, monkeypatch):
     return d
 
 
+@pytest.fixture(autouse=True)
+def _no_wiki_side_effects(monkeypatch):
+    """wiki 侧效应隔离：任何测试都不得触碰真实 wiki 产物目录。
+
+    （实测事故：run_distill 测试触发蒸馏收尾钩子 → 钩子用真实 yaml 的
+    wiki.out_l1/out_l2 + 测试 tmp 库跑了增量更新，把真实 manifest 覆盖成
+    tmp 库快照、真实 L1 页面被测试编译产物覆盖。）
+
+    做法：把 wiki_triggers._targets 钉为报错——钩子链路在测试里必然早退；
+    需要测触发器/update 的用例自己 monkeypatch _targets 指向 tmp（栈顶覆盖）。
+    """
+    import agentmemhub.wiki_triggers as wt
+
+    def _forbidden(*a, **kw):
+        raise RuntimeError("测试环境禁止解析真实 wiki 产出目录")
+
+    monkeypatch.setattr(wt, "_targets", _forbidden)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _sandbox_data_dir(tmp_path_factory):
     d = tmp_path_factory.mktemp("agentmemhub-data")
