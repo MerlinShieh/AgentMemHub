@@ -55,7 +55,7 @@ GET  /api/admin/job  →  轮询进度
 | `GET` | `/api/conversations` | 会话列表（分页）|
 | `GET` | `/api/conversations/{source}/{cid}/events` | 某会话的事件流（`offset`/`limit`）|
 | `DELETE` | `/api/conversations/{source}/{cid}` | 删除会话（**级联**：会话+事件+FTS+索引投影，并写删除墓碑）|
-| `PUT` | `/api/conversations/{source}/{cid}` | 改标题（置 `title_custom`，ingest 重写时保留）|
+| `PATCH` | `/api/conversations/{source}/{cid}/title` | 改标题（置 `title_custom`，ingest 重写时保留）|
 
 **`GET /api/conversations` 参数**
 
@@ -199,9 +199,9 @@ python -m agentmemhub health_check                              # 记忆库一�
 ## 六、维护约定
 
 - **改了接口必须同步本文与 docstring**：Swagger 的内容来自代码里的
-  `summary` / `description`，函数不写描述，`/api/docs` 里就是空的（本文档诞生时
-  29 个端点里多数没写）。
-- **新增端点请补三样**：端点函数的 docstring、每个 Query 参数的 `description`、
+  `summary` / `description` —— 端点不写描述，`/api/docs` 里就只剩 `Api Xxx`
+  这种自动名（本文档诞生时 31 个端点里多数如此，现已全部补齐 `summary`）。
+- **新增端点请补三样**：装饰器上的 `summary`、每个 Query 参数的 `description`、
   以及本文对应分组的表格行。
 - **响应契约不得破坏**：MCP 五工具与面板网关的字段是 Skill / 前端强依赖
   （见 AGENTS.md「架构不变量」）。
