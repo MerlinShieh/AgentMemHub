@@ -525,6 +525,7 @@ def create_app(db_path: Path | None = None):
 
     @app.get("/api/stats")
     def api_stats():
+        """总览统计：会话数、事件数、来源与角色分布（面板顶部卡片用）。"""
         with _LOCK:
             return JSONResponse(agg.stats_bundle())
 

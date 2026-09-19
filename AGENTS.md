@@ -61,5 +61,6 @@
 - `ARCHITECTURE.md` — 架构说明
 - `docs/memory-distillation.md` — 记忆蒸馏的设计与实施记录
 - `docs/llm-wiki.md` — LLM Wiki 两级编译、失败兜底与格式修复的实测记录
+- `docs/API.md` — 对外接口契约（HTTP / MCP / CLI；含长任务约定与错误语义）
 - `docs/recall-fusion.md` — 三路召回融合的机制与实测数据
 - `docs/EXAMPLES.md` — SQL / CLI / Python 查询示例
