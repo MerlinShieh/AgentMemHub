@@ -309,13 +309,19 @@ _TOOLS: list[dict] = [
             "type": "object",
             "properties": {
                 "limit": {"type": "integer", "description": "条数（默认 8，最大 30）"},
+                "note": {"type": "string", "description": _NOTE_DESC},
             },
         },
     },
     {
         "name": "memory_stats",
         "description": "查询记忆引擎在线状态、记忆总量（episodes/traces）、语义检索与 LLM 评分可用性、记忆模式与鉴权状态。任何会话开始时先调用它以确认记忆功能可用。",
-        "inputSchema": {"type": "object", "properties": {}},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "note": {"type": "string", "description": _NOTE_DESC},
+            },
+        },
     },
     {
         "name": "memory_save",
