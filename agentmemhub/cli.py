@@ -33,6 +33,20 @@ def _stdout(s: str) -> None:
     print(s)
 
 
+def _force_utf8_stdio() -> None:
+    """CLI 入口统一强制 UTF-8（errors=replace 兜底）。
+
+    Windows 控制台默认 GBK，输出含 ✓ ✅ ¥ 这类字符直接 UnicodeEncodeError，
+    把本已算完、正要打印的结果整个丢掉 —— 此坑已在脚本/审计/MCP 三处踩过，
+    这里在唯一入口一次修掉，各命令不再各自设防。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def _cli_log(msg: str, level: str = "info") -> None:
     """CLI/控制台操作落盘（logs/cli.log），不干扰终端输出。"""
     try:
@@ -864,6 +878,77 @@ def cmd_wiki(args) -> int:
                   % "、".join(s["fatal"]))
         return 0
 
+    if args.action == "align":
+        r = wiki.align(args.out, args.stage, args.db)
+        print("对齐审计：%s" % r["out"])
+        print("索引库  ：%s" % r["db"])
+        print("页面引用：%d 个 m-id / %d 个文件" % (r["refs"]["ids"], r["refs"]["files"]))
+        inv = r["invalid_refs"]
+        if inv["missing_total"] or inv["not_input_total"]:
+            print("失效引用：%d 个不存在（库中已删）、%d 个已不是输入（转 merged/duplicate）"
+                  % (inv["missing_total"], inv["not_input_total"]))
+        cov = r["coverage"]
+        if cov["ratio"] is not None:
+            print("正向覆盖：%d/%d = %.1f%%（被至少一个页面引用的当前输入）"
+                  % (cov["covered"], cov["current_inputs"], cov["ratio"] * 100))
+        print()
+        for st, s in r["stages"].items():
+            if not s.get("manifest"):
+                print("manifest_%s：缺失 —— 编译于该功能上线前，无 diff 锚点" % st)
+                continue
+            print("manifest_%s（%s 编译，输入 %d 条）：" % (st, s["generated_at"], s["n_inputs"]))
+            print("   新增 %d / 内容变更 %d / 失去输入 %d（其中真删除 %d、状态迁移 %d）"
+                  % (s["added_total"], s["changed_total"], s["removed_total"],
+                     s["removed_total"] - len(s["removed_reclassified"]),
+                     len(s["removed_reclassified"])))
+            if s["dirty_session_total"]:
+                print("   脏会话 %d 个（受影响的会话重编 L1，其所在域重编 L2）"
+                      % s["dirty_session_total"])
+                for sess, d in list(s["dirty_sessions"].items())[:10]:
+                    print("     %-52s +%d ~%d -%d"
+                          % (sess[:52], d["added"], d["changed"], d["removed"]))
+                if s["dirty_session_total"] > 10:
+                    print("     … 其余 %d 个见 JSON 输出" % (s["dirty_session_total"] - 10))
+        print()
+        print(r["message"])
+        return 0
+
+    # ---- triggers（触发器查看/手动触发）----
+    if args.action == "triggers":
+        from agentmemhub import wiki_triggers
+        print(_json.dumps(wiki_triggers.status(), ensure_ascii=False, indent=2, default=str))
+        return 0
+    if args.action == "trigger":
+        from agentmemhub import wiki_triggers
+        res = wiki_triggers.run_manual(force=args.force)
+        print(_json.dumps(res, ensure_ascii=False, indent=2, default=str))
+        return 0
+
+    # ---- backfill-manual（历史 Agent 直写记忆回填蒸馏表）----
+    if args.action == "backfill-manual":
+        from agentmemhub import distill as _distill
+        from agentmemhub.rag.config import load_settings
+        from agentmemhub.rag.ingest import open_index
+        idx = open_index(load_settings().index_db)
+        try:
+            res = _distill.backfill_agent_memories(idx)
+        finally:
+            idx.close()
+        print("回填完成：", _json.dumps(res, ensure_ascii=False))
+        print("（幂等，可重复执行；落账条目将由下次蒸馏统一补投影）")
+        return 0
+
+    # ---- update（增量更新）----
+    if args.action == "update":
+        if not (args.l1 and args.l2):
+            print("增量更新需要 --l1（第一级产出目录）与 --l2（第二级产出目录）")
+            return 2
+        import json as _j
+        res = wiki.update(l1_dir=args.l1, l2_dir=args.l2, db=args.db,
+                          workers=args.workers)
+        print(_j.dumps(res, ensure_ascii=False, indent=2, default=str))
+        return 0
+
     # ---- retry ----
     if args.stage == "l2" and not args.src:
         print("第二级补跑需要 --src（第一级产出目录）")
@@ -880,6 +965,37 @@ def cmd_wiki(args) -> int:
                              workers=args.workers)
     print(_json.dumps(res, ensure_ascii=False, indent=2, default=str))
     return 0
+
+
+def cmd_snapshot(args) -> int:
+    """快照与回滚：索引库整库（含蒸馏表/units/评分）+ wiki 产物目录。"""
+    import json as _json
+    from agentmemhub import snapshot
+
+    if args.snapshot_action == "create":
+        r = snapshot.create(reason=args.reason or "手动")
+        print(_json.dumps(r, ensure_ascii=False, indent=2))
+        return 0
+    if args.snapshot_action == "list":
+        snaps = snapshot.list_snapshots()
+        if not snaps:
+            print("暂无快照")
+            return 0
+        for s in snaps:
+            print("%s  %s  %6.1f MB  %s" % (
+                s["id"], (s["reason"] or "")[:24], s["size_mb"],
+                "、".join(s["parts"])))
+        return 0
+    if args.snapshot_action == "restore":
+        if not args.snapshot_id:
+            print("restore 需要 --snapshot-id（用 snapshot --action list 查看可用快照）")
+            return 2
+        r = snapshot.restore(args.snapshot_id, wiki_only=args.wiki_only,
+                             db_only=args.db_only)
+        print(_json.dumps(r, ensure_ascii=False, indent=2))
+        print("回滚完成。当前状态已自动保存为保护快照：", r["guard_snapshot"])
+        return 0
+    return 2
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -989,18 +1105,32 @@ def build_parser() -> argparse.ArgumentParser:
     pd.add_argument("--dry-run", action="store_true",
                     help="只蒸馏不落库（预览产物与成本，可反复执行）")
 
-    pwk = sub.add_parser("wiki", help="LLM Wiki 运维：查看失败清单 / 定向补跑失败项")
-    pwk.add_argument("--action", default="failures", choices=["failures", "retry"],
-                     help="failures=查看失败清单（默认）；retry=只重跑失败项（不全量）")
+    _register_snapshot_parser(sub)
+
+    pwk = sub.add_parser("wiki", help="LLM Wiki 运维：对齐审计 / 增量更新 / 查看失败清单 / 定向补跑")
+    pwk.add_argument("--action", default="failures",
+                     choices=["failures", "retry", "align", "update",
+                              "triggers", "trigger", "backfill-manual"],
+                     help="failures=查看失败清单（默认）；retry=只重跑失败项；"
+                          "align=审计 wiki 产物与索引库的差距（只读）；"
+                          "update=增量更新（只重编脏会话 L1 与受影响 L2 域）；"
+                          "triggers=查看触发器配置与状态；trigger=手动执行一次触发检测；"
+                          "backfill-manual=历史 Agent 直写记忆回填蒸馏表（幂等）")
     pwk.add_argument("--out", required=True, help="wiki 产出目录（失败清单在其下）")
     pwk.add_argument("--stage", default="", choices=["", "l1", "l2"],
                      help="限定阶段：l1=第一级；l2=第二级；留空=全部")
     pwk.add_argument("--src", default="", help="第二级补跑必需：第一级产出目录")
+    pwk.add_argument("--l1", default="", help="update 用：第一级产出目录")
+    pwk.add_argument("--l2", default="", help="update 用：第二级产出目录")
     pwk.add_argument("--workers", type=int, default=0, help="并发数（0=用配置）")
+    pwk.add_argument("--db", default="", help="索引库路径（align/update 用；默认读配置）")
+    pwk.add_argument("--force", action="store_true",
+                     help="trigger 用：绕过规则强制执行一次增量更新")
     return p
 
 
 def main() -> None:
+    _force_utf8_stdio()
     args = build_parser().parse_args()
     if not args.command:
         # 无参数 = 进入交互式控制台（新用户入口）
@@ -1015,12 +1145,24 @@ def main() -> None:
         "sync": cmd_sync, "clean": cmd_clean, "score": cmd_score, "rebuild": cmd_rebuild,
         "distill": cmd_distill, "weight": cmd_weight,
         "wiki": cmd_wiki,
+        "snapshot": cmd_snapshot,
     }
     fn = handlers.get(args.command)
     if fn is None:
         build_parser().print_help()
         return
     fn(args)
+
+
+def _register_snapshot_parser(sub) -> None:
+    ps = sub.add_parser("snapshot", help="快照与回滚：索引库整库 + wiki 产物目录")
+    ps.add_argument("--snapshot-action", dest="snapshot_action", default="list",
+                    choices=["create", "list", "restore"],
+                    help="create=创建快照（默认 list）；restore=回滚到指定快照")
+    ps.add_argument("--reason", default="", help="create 用：快照原因（记录在 meta）")
+    ps.add_argument("--snapshot-id", default="", help="restore 用：目标快照 id")
+    ps.add_argument("--wiki-only", action="store_true", help="restore 时只回滚 wiki 产物")
+    ps.add_argument("--db-only", action="store_true", help="restore 时只回滚索引库")
 
 
 if __name__ == "__main__":

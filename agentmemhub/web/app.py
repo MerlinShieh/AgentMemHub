@@ -498,7 +498,7 @@ def create_app(db_path: Path | None = None):
     """创建 FastAPI 应用（独立于核心功能，serve 子命令调用）。"""
     import threading
 
-    from fastapi import FastAPI, HTTPException, Query
+    from fastapi import Body, FastAPI, HTTPException, Query
     from fastapi.middleware.gzip import GZipMiddleware
     from fastapi.responses import JSONResponse
     from fastapi.staticfiles import StaticFiles
@@ -944,7 +944,14 @@ def create_app(db_path: Path | None = None):
                 " u.id AS unit_id, v.value AS value,"
                 " v.manual_value AS manual_value," + title_col
                 + " FROM units u LEFT JOIN unit_values v ON v.unit_id = u.id"
-                + conv_m + " WHERE u.source='memory'")
+                + conv_m + " WHERE u.source='memory'"
+                # memory_save 落蒸馏表后（save_direct_memory，slice_key='mcp:<tid>'），
+                # 同一条记忆会同时出现在 manual 路（units 投影）与蒸馏路 —— 面板
+                # 只显示蒸馏行（元数据更全）。关联锚必须是 **legacy_id**（引擎存的
+                # trace id，= memory_save 的 tid）：units.src_id 是内容锚
+                #（content_anchor，另一套 hash），用它永远匹配不上（实测踩坑）。
+                + " AND NOT EXISTS (SELECT 1 FROM distilled_memories dm"
+                "   WHERE dm.slice_key = 'mcp:' || substr(u.legacy_id, 5))")
 
             where, args = [], []
             srcs = [x.strip() for x in (source or "").split(",") if x.strip()]
@@ -1265,6 +1272,115 @@ def create_app(db_path: Path | None = None):
         if job is None:
             raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
         logs.record(f"提交任务：{name}（id={job['id']}）")
+        return JSONResponse({"job": job})
+
+    @app.get("/api/wiki/align", summary="对齐审计：wiki 产物与索引库的差距（只读）")
+    def api_wiki_align(out: str = Query(..., description="wiki 产出目录（L1 或 L2）"),
+                       stage: str = Query(default="", description="l1 / l2；留空=两级都查"),
+                       db: str = Query(default="", description="索引库路径；留空=用配置默认")):
+        """审计 wiki 与 RAG 库的对齐状态：引用有效性、覆盖度、编译后库的变更。
+
+        有编译清单（manifest_*.json）时能精确 diff 出 新增/变更/失去输入 的记忆
+        与脏会话，并给出 `needs_recompile`；无清单则退回引用反推模式。
+        只读操作，同步返回。
+        """
+        from agentmemhub import wiki
+        return JSONResponse(wiki.align(out, stage, db))
+
+    @app.post("/api/wiki/update", summary="增量更新 wiki（长任务：只重编脏会话与受影响域）")
+    def api_wiki_update(l1: str = Query(..., description="第一级产出目录"),
+                        l2: str = Query(..., description="第二级产出目录"),
+                        db: str = Query(default="", description="索引库路径；留空=用配置默认"),
+                        workers: int = Query(default=0, ge=0, description="并发数（0=用配置）")):
+        """RAG 库变化后的增量更新：只重编脏会话的 L1 页与受影响的 L2 域。
+
+        前提：两级都有编译清单（manifest_*.json）。链路：
+        align 定位脏会话 → L1 整页重编 → 域映射定位脏域 → L2 增量重编
+        → linkfix → manifest 刷新。长任务，后台执行。
+        """
+        from agentmemhub import logs, wiki
+        from agentmemhub.web import tasks
+        name = "LLM Wiki 增量更新"
+        job = tasks.submit(name, _logged_task(
+            name, lambda: wiki.update(l1_dir=l1, l2_dir=l2, db=db, workers=workers)))
+        if job is None:
+            raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
+        logs.record(f"提交任务：{name}")
+        return JSONResponse({"job": job})
+
+    @app.get("/api/wiki/triggers", summary="查看 wiki 增量更新触发器的配置与状态")
+    def api_wiki_triggers_get():
+        """触发规则（时点档/定量阈值/每日首次）、当前状态与目标目录。
+
+        规则修改走 PUT 本接口（运行时覆盖，优先级最高，不改动 yaml 文件）。
+        检测本身挂在蒸馏写入时，没有后台定时任务。
+        """
+        from agentmemhub import wiki_triggers
+        return JSONResponse(wiki_triggers.status())
+
+    @app.put("/api/wiki/triggers", summary="编辑 wiki 增量更新触发规则")
+    def api_wiki_triggers_put(patch: dict = Body(...)):
+        """运行时覆盖触发规则（写入状态文件的 overrides 段）。
+
+        可编辑字段：`enabled`、`schedule`（HH:MM 列表）、
+        `dirty_memories`（脏记忆阈值）、`first_write_daily`。
+        """
+        from agentmemhub import wiki_triggers
+        try:
+            cfg = wiki_triggers.set_overrides(patch)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        return JSONResponse({"config": cfg})
+
+    @app.post("/api/wiki/trigger/run", summary="手动执行一次触发检测（可强制）")
+    def api_wiki_trigger_run(force: bool = Query(default=False, description="绕过规则强制更新")):
+        """立即做一次检测；命中规则（或 force）则执行增量更新（同步，分钟级）。
+
+        常规触发挂在蒸馏写入时，此接口用于手动补一次。
+        """
+        from agentmemhub import wiki_triggers
+        return JSONResponse(wiki_triggers.run_manual(force=force))
+
+    @app.get("/api/snapshots", summary="列出可回滚快照（索引库 + wiki 产物）")
+    def api_snapshots_list():
+        """当前全部快照（最新在前）：id、时间、原因、包含部件、大小。
+
+        一份快照 = 索引库整库（蒸馏表/units/评分/向量）+ wiki 产物全目录，
+        回滚时作为整体恢复——所有跨库引用关系（dst_ 锚、[m<id>] 溯源、
+        manifest 指纹）随之回到同一时点。
+        """
+        from agentmemhub import snapshot
+        return JSONResponse({"snapshots": snapshot.list_snapshots()})
+
+    @app.post("/api/snapshots/create", summary="创建快照（同步，秒级）")
+    def api_snapshots_create(reason: str = Query(default="", description="快照原因（记录在 meta）")):
+        """手动创建一份快照。增量更新前会自动创建，此接口用于其它关键操作前。"""
+        from agentmemhub import snapshot
+        return JSONResponse(snapshot.create(reason=reason or "手动（面板）"))
+
+    @app.post("/api/snapshots/restore", summary="回滚到指定快照（长任务）")
+    def api_snapshots_restore(
+            snapshot_id: str = Query(..., description="目标快照 id（见 /api/snapshots）"),
+            wiki_only: bool = Query(default=False, description="只回滚 wiki 产物"),
+            db_only: bool = Query(default=False, description="只回滚索引库")):
+        """回滚 = 索引库整库覆盖 + wiki 产物目录整体替换（先自动保存当前状态
+        为保护快照，防误恢复不可逆）。
+
+        ⚠️ 回滚会覆盖索引库文件——执行前请确保 MCP server 无并发写入；
+        面板 serve 自身持有的是短连接，后台任务内执行安全。"""
+        from agentmemhub import snapshot
+        from agentmemhub.web import tasks
+
+        def _do(emit, meta) -> str:
+            import json as _j
+            emit(f"回滚到快照 {snapshot_id} …")
+            r = snapshot.restore(snapshot_id, wiki_only=wiki_only, db_only=db_only)
+            emit(f"已恢复：{r['restored']}")
+            return _j.dumps(r, ensure_ascii=False)
+
+        job = tasks.submit(f"回滚快照（{snapshot_id}）", _logged_task("回滚快照", _do))
+        if job is None:
+            raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
         return JSONResponse({"job": job})
 
     @app.get("/api/logs", summary="近期操作日志")
