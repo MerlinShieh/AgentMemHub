@@ -196,7 +196,53 @@ python -m agentmemhub health_check                              # 记忆库一�
 
 ---
 
-## 六、维护约定
+## 六、接口使用现状（面板未调用的接口）
+
+一次一致性排查（前端 `fetch` ↔ 后端路由 ↔ MCP 工具 ↔ CLI ↔ 本文）发现
+**11 个后端接口面板前端没有调用**。这**不是缺陷**，而是设计选择 —— 但必须写清楚，
+否则下次排查又会当成"未完成"。
+
+### 6.1 保留**供外部调用**（面板走 `/api/bootstrap`）
+
+| 接口 | 现状与保留理由 |
+|---|---|
+| `GET /api/stats` | 面板用 `/api/bootstrap`（其中已含统计）。外部程序只需要统计时，不必拉整个引导包 |
+| `GET /api/facets` | 同上：面板筛选项来自 bootstrap；外部可单独取 |
+| `GET /api/folders` | 同上 |
+
+### 6.2 保留但**对应 UI 已下线**
+
+| 接口 | 现状 |
+|---|---|
+| `POST /api/admin/score` | 入口已隐藏（实测评为 neutral 居多，质量把关改由蒸馏置信度 + 面板 👍/👎 承担） |
+| `POST /api/admin/exclude`、`GET /api/exclusions/summary`、`GET/POST/DELETE /api/conversations/{source}/{cid}/memory-exclusion` | **记忆排除 UI 已下线**（2026-09 起），后端能力完整保留 |
+
+**为什么后端能力保留**：排除机制是**摄取与蒸馏的硬依赖**（`memory_exclusions`
+表被 `ingest` 与 `distill` 读取，用于跳过不写入记忆的会话/轮次）。
+**UI 下线 ≠ 能力下线**，且它随时可能重新上架。
+
+### 6.3 **新加的后端服务接口**（UI 待后续）
+
+| 接口 | 说明 |
+|---|---|
+| `GET /api/wiki/failures`、`POST /api/wiki/retry` | v2.1 新增。按"暂时只提供服务接口"的需求，前端 UI 尚未做 |
+
+### 6.4 已知的**前端缺口**（后端没问题）
+
+| 接口 | 说明 |
+|---|---|
+| `POST /api/admin/rebuild` | 后端可用，**面板没有对应按钮** —— 补向量目前只能走 CLI `rebuild` 或直接调接口。属**未做**，非不做 |
+
+### 6.5 复查手段
+
+一次性脚本 `exports/wiki_work/check_api_gaps.py`（工作区，未入库）会输出五份清单的差异。
+
+> ⚠️ **静态扫描前端调用一定有漏网**：URL 若写在变量里
+> （如 `` const u = `/api/memos/feedback?...`; fetch(u) ``），正则匹配不到。
+> 本次就误报过一次"feedback 没被调用"——**关键接口必须交叉验证**
+> （用关键字 grep 确认），不能只信脚本结论。
+
+## 七、维护约定
 
 - **改了接口必须同步本文与 docstring**：Swagger 的内容来自代码里的
   `summary` / `description` —— 端点不写描述，`/api/docs` 里就只剩 `Api Xxx`
