@@ -384,11 +384,133 @@ grep '"session_done"' logs/wiki.log | tail -1      # ④ 上次断在哪
 > ⚠️ 修复必须放在**标题定稿之后**：第二级会重写页面标题，先修第一级的链接
 > 会全部作废。所以顺序只能是「第二级聚合 → 链接修复 → 索引」。
 
+## 对齐审计与编译清单：wiki 知不知道自己过时了
+
+wiki 是一次性离线编译的产物，RAG 库是活的。此前两边**没有任何同步概念**：
+页面只有 `compiled_at` 时间戳，不知道自己"基于哪些记忆的哪些版本"建成。
+实测教训：编译完成后真实库发生了三类变更（overlong 截断改写 681 条输入、
+qwen 会话删除 -327、投影修复恢复 163 条输入），wiki 全部无感知 ——
+163 条有效记忆至今没进 wiki，纯靠"被删的记忆恰好没被引用"才没出死链事故。
+
+### 编译清单（manifest）
+
+两级编译收尾自动写 `manifest_l1.json` / `manifest_l2.json`（产出目录下），
+内容是**编译时的输入快照**：记忆 id → 内容指纹（现算 md5）+ 会话归属；
+L2 另附 域 → L1 源文件/记忆 的映射。
+
+指纹刻意**不用**库里的 `content_hash` 字段：它只在蒸馏写入时生成，绕过蒸馏
+链路的直接改库（overlong 修复 UPDATE 了 content，hash 没重算）会让它失真漏报。
+
+### 对齐审计（只读）
+
+```bash
+# CLI
+uv run python -m agentmemhub wiki --action align --out <产出目录> [--stage l1|l2] [--db <索引库>]
+
+# HTTP（面板/程序化调用）
+GET /api/wiki/align?out=<产出目录>&stage=l2&db=<索引库，可省>
+```
+
+回答四个问题：
+
+| 问题 | 指标 |
+|---|---|
+| 页面引用还有效吗 | `invalid_refs`：库中已删（missing）/ 已转 merged（not_input） |
+| 当前输入被覆盖了多少 | `coverage.ratio`（被至少一个页面引用的输入占比） |
+| 编译后库变了什么 | `stages.l2.added/changed/removed` + 脏会话清单（有 manifest 时） |
+| 要不要重编 | `needs_recompile` |
+
+实测（对齐审计首跑，manifest 以副本库为锚、diff 对真实库）：
+新增 163 / 内容变更 681 / 失去输入 26（真删 16 + 状态迁移 10），
+脏会话 188 个 —— 与人工考古的数字完全吻合。
+
+### 增量更新（已实现）
+
+align 现在能回答"差多少"，`update` 则直接动手（**不全量重来**）：
+
+```bash
+# CLI：只重编脏会话的 L1 页 + 受影响的 L2 域
+uv run python -m agentmemhub wiki --action update --l1 <第一级产出目录> --l2 <第二级产出目录>
+
+# HTTP（长任务，后台执行）
+POST /api/wiki/update?l1=<第一级>&l2=<第二级>
+```
+
+链路（会话为脏单位）：
+
+```
+align 定位脏会话 → L1 整页重编（会话隔离，无副作用）
+  → manifest_l2 的 域→L1文件 映射定位脏域 → 只重编脏域（partial 模式）
+  → 新 L1 文件归入现有域（一次便宜的归类调用，不重跑全量归域）
+  → linkfix（L2 标题可能变）→ 索引刷新 → 两级 manifest 刷新成新基线
+```
+
+几个关键设计：
+
+- **partial 模式绝不清域目录**：全量模式会清掉"不属于本轮"的目录防止新旧混叠，
+  增量模式本轮只编少数域，其它域产物都在磁盘上——清了等于删库。顶层索引
+  从磁盘（各域 index.md + 页 json）重建。
+- **单成员页沿用源页**：域内细分若某最终页只有一个来源页，直接沿用不再调
+  LLM（与全量一致的成本优化）。
+- **`_domains.json` 成员按最新页序重写**：L1 页数变化会让旧 members 序号漂移，
+  不修正的话下次全量跑会按错误成员聚合。
+- **成本**：一次会话蒸馏几条新记忆 → 重编 1 个 L1 页 + 1~2 个 L2 页，
+  与全量 20 分钟 / ¥7 不是一个量级。
+
+**触发策略（攒批，已实现）**：更新不跟随每次编译——检测便宜（align 毫秒级只读）、
+编译昂贵（LLM）。**检测挂在两个写入入口上**（无后台定时任务）：
+
+- **MCP `memory_save`**：每成功写入一条记忆，异步过一次检测（daemon 线程，
+  不阻塞 MCP 响应）；
+- **蒸馏收尾**：批量蒸馏落库后同样过一次检测。
+
+前置修复：MCP 直写的记忆此前**不进 `distilled_memories`**（只有引擎与消息层
+投影有）——记忆报表看不见、wiki 编译输入完全不可见。现已在 `memory_save`
+成功后同步落蒸馏表（`distill.save_direct_memory`：脱敏兜底 + 指纹幂等 +
+归档复活，source='mcp' / conversation_id='direct' / slice_key='mcp:<trace_id>'），
+units 向量投影由下次蒸馏统一补齐。
+
+三条规则（命中任一且有脏数据即触发，**互不干扰、各自独立判定**）：
+
+| 规则 | 默认 | 语义 |
+|---|---|---|
+| `schedule` | `["09:00","12:00","18:00"]` | **时点档**而非时钟触发：当天第一次发生在某档位之后的写入，补触发该档 |
+| `dirty_memories` | `10` | 脏记忆（新增+变更）达到阈值触发一次 |
+| `first_write_daily` | `true` | 每自然日第一次蒸馏写入后触发 |
+
+标记语义：**update 成功才打标记**（时点档/每日首次记录在 `logs/wiki_trigger_state.json`）；
+失败不记，下次写入自然重试。update 会把 manifest 刷新成新基线，align 归零，
+天然防止重复编译。单飞行锁保证两个触发点撞上时后到者跳过。
+
+规则编辑（运行时覆盖，优先级最高，不改 yaml）：
+
+```bash
+# CLI：查看配置与状态
+uv run python -m agentmemhub wiki --action triggers
+# CLI：手动执行一次检测（--force 绕过规则强制更新）
+uv run python -m agentmemhub wiki --action trigger [--force]
+
+# HTTP
+GET /api/wiki/triggers          # 查看
+PUT /api/wiki/triggers          # 编辑 {"schedule": [...], "dirty_memories": N, ...}
+POST /api/wiki/trigger/run?force=   # 手动触发
+```
+
+配置位置：`wiki.out_l1` / `wiki.out_l2`（产出目录正式配置位）与
+`wiki.update`（规则默认值，yaml 可改）——见 `config.DEFAULT_WIKI`。
+
+**后续路线**：把 wiki 页作为**第三路召回源**（RAG 碎片路实时 + wiki 聚合路
+滞后互补）——知识库与记忆本质是同一种数据，这与 second-brain-skill、
+Karpathy wiki 两个参考项目的理念一致。
+
 ## 已知问题与待办
 
-- [ ] 第二级首轮全量结果未验证
+- [x] ~~第二级首轮全量结果未验证~~（2026-09-19 已验证：4635 引用 / 死链 0）
+- [x] ~~第一级的 7 个失败会话未补跑~~（MiMo 全量重跑后 223/223）
+- [x] ~~增量编译~~（2026-09-19 已实现：`wiki --action update` / `POST /api/wiki/update`）
+- [ ] 触发器自动化：蒸馏落库后挂免费 align 检测 + 定量/定期触发条件（执行端已就绪）
+- [ ] wiki 作为第三路召回源（碎片路实时 + 聚合路滞后互补）
 - [ ] `[[ ]]` 链接修复（别名表 + 模糊匹配）应放在**标题定稿之后**
-- [ ] `index.md` 顶层索引、孤儿页检查尚未系统化
 - [ ] 合并记忆的溯源要多一跳：`slice_key='*merge*'` 的记忆 `turn_key` 为空，
       需经 `merged_from_json`（纯整数 id 数组）回到来源记忆再追原始轮次
-- [ ] 第一级的 7 个失败会话未补跑
+- [ ] 用户投喂通道：已有现成开源方案可借鉴（second-brain-skill），优先级较低
