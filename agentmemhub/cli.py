@@ -832,6 +832,56 @@ def cmd_mcp(args) -> None:
         run_stdio()
 
 
+def cmd_wiki(args) -> int:
+    """LLM Wiki 运维：查看失败清单、定向补跑失败项。
+
+    补跑不该只能靠人敲 `scripts/wiki_*.py` —— 这里与服务层
+    (`agentmemhub.wiki`) 共用同一份实现，面板走的是同一个入口。
+    """
+    import json as _json
+
+    from agentmemhub import wiki
+
+    if args.action == "failures":
+        s = wiki.failures_summary(args.out, args.stage)
+        if not s["exists"]:
+            print("未找到失败清单：%s" % s["log"])
+            print("（说明还没跑过该产出目录，或那一轮没有失败）")
+            return 0
+        print("失败清单：%s" % s["log"])
+        print("未解决 %d 条：" % s["total"])
+        for k, n in s["by_kind"].items():
+            mark = "   ← 需人工处理" if k in s["fatal"] else ""
+            print("   %-10s %4d%s" % (k, n, mark))
+        if s["stages"]:
+            print("按阶段：")
+            for st, label in wiki.STAGES.items():
+                if s["stages"].get(st):
+                    print("   %-11s %4d  %s" % (st, s["stages"][st], label))
+        if s["needs_manual"]:
+            print()
+            print("❌ 存在 %s 类错误 —— 重试与继续跑都无意义，请先解决再补跑"
+                  % "、".join(s["fatal"]))
+        return 0
+
+    # ---- retry ----
+    if args.stage == "l2" and not args.src:
+        print("第二级补跑需要 --src（第一级产出目录）")
+        return 2
+    print("开始定向补跑（只跑失败项，不全量重来）…")
+    if args.stage == "l1":
+        res = wiki.retry_failed(stage="l1", out_dir=args.out,
+                                workers=args.workers)
+    elif args.stage == "l2":
+        res = wiki.retry_failed(stage="l2", out_dir=args.out, src=args.src,
+                                workers=args.workers)
+    else:
+        res = wiki.retry_all(out_dir=args.out, src=args.src,
+                             workers=args.workers)
+    print(_json.dumps(res, ensure_ascii=False, indent=2, default=str))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="agentmemhub", description="AgentMemHub 统一 Agent 会话提取")
     sub = p.add_subparsers(dest="command")
@@ -938,6 +988,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="最多处理多少个会话（按正文量降序，0=全部）")
     pd.add_argument("--dry-run", action="store_true",
                     help="只蒸馏不落库（预览产物与成本，可反复执行）")
+
+    pwk = sub.add_parser("wiki", help="LLM Wiki 运维：查看失败清单 / 定向补跑失败项")
+    pwk.add_argument("--action", default="failures", choices=["failures", "retry"],
+                     help="failures=查看失败清单（默认）；retry=只重跑失败项（不全量）")
+    pwk.add_argument("--out", required=True, help="wiki 产出目录（失败清单在其下）")
+    pwk.add_argument("--stage", default="", choices=["", "l1", "l2"],
+                     help="限定阶段：l1=第一级；l2=第二级；留空=全部")
+    pwk.add_argument("--src", default="", help="第二级补跑必需：第一级产出目录")
+    pwk.add_argument("--workers", type=int, default=0, help="并发数（0=用配置）")
     return p
 
 
@@ -955,6 +1014,7 @@ def main() -> None:
         "serve": cmd_serve, "mcp": cmd_mcp,
         "sync": cmd_sync, "clean": cmd_clean, "score": cmd_score, "rebuild": cmd_rebuild,
         "distill": cmd_distill, "weight": cmd_weight,
+        "wiki": cmd_wiki,
     }
     fn = handlers.get(args.command)
     if fn is None:

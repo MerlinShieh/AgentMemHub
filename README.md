@@ -308,6 +308,7 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 | `clean [--source x] [--apply]` | 记忆清洗：删除系统注入事件（默认预览，`--apply` 才执行并重建 FTS/计数；sync 会自动只清变更会话）|
 | `score [--pending] [--limit N] [--dry-run] [--workers N] [--ids id1,id2] [--unscored-count] [--sync-episodes]` | ⚠️ **当前不生效**（入口已从控制台/面板隐藏；实测评为 neutral 居多且跑批全跳过，质量把关由蒸馏置信度 + 面板 👍/👎 承担）——命令保留备查。原功能：LLM 批量自动评分历史记忆（**增量优先**：pending_score 队列非空只评队列·定点读零全量枚举，队列空则先筛未评 id 再读正文；`--pending` 仅评队列，`--ids` 只评指定条（写后即评），`--unscored-count` 统计未评条数（只读 id），`--sync-episodes` 回填 episode.r_task；**三档 verdict 均记入跳过清单**——positive/negative 写 value、neutral 不写值但仍标记「已评」避免下次重评（dry-run 一律不记录）；网关**内容审核拒评（如智谱 1301）自动归 neutral 并记账**，不再每次卡该条报错；LLM 调用**强制直连**、不受系统代理影响，确需代理设 `AGENTMEMHUB_LLM_PROXY`）|
 | `rebuild [--mode repair\|rebuild]` | 补向量：触发引擎 embedding rebuild（导入记忆后修复语义检索）|
+| `wiki --action failures\|retry --out DIR [--stage l1\|l2] [--src DIR_L1] [--workers N]` | **LLM Wiki 运维**：查看失败清单（按原因分类）/ 定向补跑失败项（只跑失败的，不全量重来）|
 | `stats` / `adapters` | 统计 / adapter 状态 |
 
 > 更完整的代码与 SQL 示例（按 Agent 查询、按文件夹跨 Agent 统计、会话角色分布、直连数据库等）见 **[docs/EXAMPLES.md](./docs/EXAMPLES.md)**。
@@ -891,7 +892,10 @@ RAG 优化「能不能捞到」，wiki 优化「有没有结构」；**wiki 不�
       "跑到哪了、哪些失败了、花了多少、上次断在哪"
 - [x] 失败清单 `agentmemhub/failures.py`：JSONL 落盘、**跨次累积**、按原因分类；
       `quota`/`auth`/`model` 三类**醒目提示"重试与继续跑都无意义"**
-- [x] **`--retry-failed`**：只重跑清单里未解决的失败项，不必全量重来（两级都支持）
+- [x] **补跑服务接口**（`agentmemhub/wiki.py`）——补跑不能只靠人敲脚本：
+      CLI `python -m agentmemhub wiki --action failures|retry`、
+      HTTP `GET /api/wiki/failures` + `POST /api/wiki/retry`（后台任务）、
+      以及 Python `wiki.retry_failed() / retry_all()`；**CLI 与面板共用同一份实现**
 - [x] **格式修复模型**（`llm.repair_model`）：主模型返回了内容但 JSON 解析失败时，
       把**原始输出**交给 JSON 遵从性更好的模型转格式——**救回被截断的内容**，
       而不是丢弃或退化成拼接

@@ -353,6 +353,35 @@ def _run_rebuild_fn(mode: str):
     return _emit_task(_run)
 
 
+def _run_wiki_retry_fn(out: str, stage: str, src: str, workers: int):
+    """看板「LLM Wiki 补跑」后台动作：只重跑失败清单里未解决的项。
+
+    与服务层 `agentmemhub.wiki` 共用同一份实现 —— CLI、面板、脚本三条入口
+    走的是同一个补跑逻辑，不各写一份。
+    """
+    import json as _json
+
+    from agentmemhub import wiki
+
+    def _run(emit, _meta) -> str:
+        def prog(line: str) -> None:
+            emit(str(line))
+
+        if stage == "l1":
+            r = wiki.retry_failed(stage="l1", out_dir=out, workers=workers,
+                                  on_progress=prog)
+        elif stage == "l2":
+            r = wiki.retry_failed(stage="l2", out_dir=out, src=src,
+                                  workers=workers, on_progress=prog)
+        else:
+            r = wiki.retry_all(out_dir=out, src=src, workers=workers,
+                               on_progress=prog)
+        emit(_json.dumps(r, ensure_ascii=False, default=str))
+        return "补跑结束：%s" % r
+
+    return _run
+
+
 def _logged_task(name: str, fn) -> Any:
     """任务包装：开始/完成/失败写统一操作日志（web.log）；完整输出逐行落盘
     <data_dir>/tasks/<job_id>.log（页面关掉/进程中断也可追溯）。"""
@@ -1196,6 +1225,38 @@ def create_app(db_path: Path | None = None):
             raise HTTPException(status_code=503, detail="记忆索引不可用（检查 database/session_rag.db 与 models/）")
         name = f"补向量（{mode}）"
         job = tasks.submit(name, _logged_task(name, _run_rebuild_fn(mode)))
+        if job is None:
+            raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
+        logs.record(f"提交任务：{name}（id={job['id']}）")
+        return JSONResponse({"job": job})
+
+    @app.get("/api/wiki/failures")
+    def api_wiki_failures(out: str = Query(...), stage: str = Query(default="")):
+        """查 LLM Wiki 编译的失败清单（结构化）。
+
+        `needs_manual=True` 表示存在 quota/auth/model 这类**重试无意义**的错误，
+        调用方应直接提示用户去处理，而不是继续补跑。
+        """
+        from agentmemhub import wiki
+        return JSONResponse(wiki.failures_summary(out, stage))
+
+    @app.post("/api/wiki/retry")
+    def api_wiki_retry(out: str = Query(...), stage: str = Query(default=""),
+                       src: str = Query(default=""),
+                       workers: int = Query(default=0, ge=0)):
+        """定向补跑 wiki 失败项（后台任务，实时进度）。
+
+        只重跑失败清单里**未解决**的目标，不全量重来。
+        stage 留空 = 按依赖顺序补跑两级（第一级在前，它的产出是第二级的输入）。
+        """
+        from agentmemhub import logs, wiki
+        from agentmemhub.web import tasks
+        if stage == "l2" and not src:
+            raise HTTPException(status_code=400,
+                                detail="第二级补跑需要 src（第一级产出目录）")
+        name = f"LLM Wiki 补跑失败项（{stage or '全部'}）"
+        job = tasks.submit(name, _logged_task(
+            name, _run_wiki_retry_fn(out, stage, src, workers)))
         if job is None:
             raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
         logs.record(f"提交任务：{name}（id={job['id']}）")

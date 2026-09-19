@@ -74,9 +74,16 @@ class FailureLog:
         self._load()
 
     def _load(self) -> None:
-        """载入既有条目 —— 支持"多轮补跑"时把历史失败也纳入汇总。"""
+        """载入既有条目 —— 支持"多轮补跑"时把历史失败也纳入汇总。
+
+        `resolved` 用**追加一条 tombstone**（`kind="resolved"`）表达，读时回放：
+        该 (stage, target) 的历史失败统一标记为已解决。这么设计是因为
+        CLI 与面板可能**同时**持有清单，重写整个文件会互相覆盖；追加天然并发安全。
+        """
+        self._entries = []
         if not self.path.exists():
             return
+        raw: list[dict] = []
         try:
             for line in self.path.read_text(encoding="utf-8",
                                             errors="replace").splitlines():
@@ -84,11 +91,19 @@ class FailureLog:
                 if not line:
                     continue
                 try:
-                    self._entries.append(json.loads(line))
+                    raw.append(json.loads(line))
                 except Exception:
                     continue
         except Exception:
-            pass
+            return
+        resolved = {(e.get("stage"), e.get("target")) for e in raw
+                    if e.get("kind") == "resolved" or e.get("resolved") is True}
+        for e in raw:
+            if e.get("kind") == "resolved":
+                continue                      # tombstone 本身不是失败记录
+            if (e.get("stage"), e.get("target")) in resolved:
+                e = dict(e, resolved=True)
+            self._entries.append(e)
 
     def record(self, *, stage: str, target: str, error: Any,
                attempts: int = 1, resolved: bool = False,
@@ -106,16 +121,15 @@ class FailureLog:
         entry.update(extra)
         with self._lock:
             self._entries.append(entry)
-            try:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                with open(self.path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-            except Exception:
-                pass          # 记录失败绝不能反过来影响主流程
+        self._append(entry)
         return entry
 
     def resolve(self, stage: str, target: str) -> int:
-        """把某目标的历史失败标记为已解决（重跑成功时调用）。返回标记条数。"""
+        """把某目标的历史失败标记为已解决（重跑成功时调用）。返回影响条数。
+
+        **追加一条 tombstone 落盘**，而不是只改内存 —— 否则"销账"只对当前进程
+        有效，下次读清单失败又回来了（实测踩过，是测试抓出来的）。
+        """
         with self._lock:
             n = 0
             for e in self._entries:
@@ -123,7 +137,20 @@ class FailureLog:
                         and not e.get("resolved"):
                     e["resolved"] = True
                     n += 1
-            return n
+        if n:
+            self._append({"ts": time.time(), "stage": stage, "target": target,
+                          "kind": "resolved", "resolved": True,
+                          "error": "", "attempts": 0})
+        return n
+
+    def _append(self, entry: dict) -> None:
+        """追加一行（写失败静默：记录绝不能反过来影响主流程）。"""
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
 
     def entries(self, stage: str | None = None,
                 unresolved_only: bool = False) -> list[dict]:

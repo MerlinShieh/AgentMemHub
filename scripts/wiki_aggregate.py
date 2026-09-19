@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import sqlite3
 import sys
 import time
@@ -774,6 +775,21 @@ def run(args) -> None:
                      len(page["from_titles"])), flush=True)
 
     # ---- 写盘 ----
+    # 先算出本轮的域目录名，再清掉**不属于本轮**的旧域目录。
+    # 不清的后果：重跑时域划分/命名一变就生成新目录，旧目录原地不动，
+    # 两轮产出混在一起（实测踩过：227 页的产出目录里躺着 449 个 md，
+    # 核验与 linkfix 全都被污染）。产物是纯派生物，清掉随时可重建。
+    plan = [(name, "%02d-%s" % (i, _slug(name)))
+            for i, name in enumerate(sorted(by_domain_pages), 1)]
+    keep = {dirname for _, dirname in plan}
+    removed = 0
+    for d in list(out.iterdir()):
+        if d.is_dir() and d.name not in keep:
+            shutil.rmtree(d, ignore_errors=True)
+            removed += 1
+    if removed:
+        print("  清理上一轮的 %d 个旧域目录（避免两轮产出混在一起）" % removed)
+
     results: list[tuple[str, list[dict]]] = []
     for di, name in enumerate(sorted(by_domain_pages), 1):
         pages_out = sorted(by_domain_pages[name], key=lambda p: p["_file"])

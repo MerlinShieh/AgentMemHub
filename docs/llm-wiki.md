@@ -272,6 +272,39 @@ llm:
 - **不给修复器无限套娃**：修复调用内部直接用 `_post` + `extract_json`。
 - **修复提示词禁止编造内容** —— 修复只该转格式，自己造内容会污染知识库。
 
+### 服务接口（补跑不该只能靠人敲脚本）
+
+补跑能力**不能只存在于脚本参数里** —— 那样面板、定时任务、其它程序化调用方
+都够不到。所以有一层服务接口（`agentmemhub/wiki.py`），**CLI 与面板走同一份实现**：
+
+```bash
+# 查：有哪些未解决的失败、分几类、要不要人工介入
+uv run python -m agentmemhub wiki --action failures --out DIR
+
+# 做：只重跑失败项（--stage 留空 = 按依赖顺序补跑两级）
+uv run python -m agentmemhub wiki --action retry --out DIR --stage l2 --src DIR_L1
+```
+
+**HTTP 接口**（长任务走后台任务，返回 `job` 可轮询进度）：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/wiki/failures?out=DIR[&stage=l1]` | 失败清单摘要（结构化，含 `needs_manual`） |
+| `POST` | `/api/wiki/retry?out=DIR[&stage=&src=][&workers=]` | 提交定向补跑任务 |
+
+**Python**：
+
+```python
+from agentmemhub import wiki
+wiki.failures_summary(out_dir)            # → dict，可直接 JSON 序列化
+wiki.retry_targets(out_dir, "l1")         # → ["qwen/xxx", ...]
+wiki.retry_failed(stage="l2", out_dir=..., src=..., on_progress=print)
+wiki.retry_all(out_dir=..., src=...)      # 按依赖顺序补跑两级
+```
+
+**`needs_manual=True`** 表示存在 `quota`/`auth`/`model` 这类**重试无意义**的错误 ——
+调用方应当直接提示用户去处理，而不是继续补跑。
+
 ## 运行日志（`logs/wiki.log`）
 
 编译是长任务（第二级实测 39 分钟 / 246 次 LLM 调用），**控制台输出一关就没了**。
