@@ -204,6 +204,10 @@ prompt 15150 tokens、思维链 21483 tokens，输出到 32K 上限仍被截断
 
 ## 配置：两级刻意不级联
 
+> **选哪个模型**：主力推荐 `xiaomi/mimo-v2.5`（实测质量与成本综合最优），
+> 批量/多次重跑可用免费的 `meituan/LongCat-2.0:free`——完整对比与定价见
+> [`docs/model-selection.md`](model-selection.md)。
+
 ```yaml
 llm:                    # 顶层：provider / 密钥 / 请求头
   endpoint: ...
@@ -499,17 +503,20 @@ POST /api/wiki/trigger/run?force=   # 手动触发
 配置位置：`wiki.out_l1` / `wiki.out_l2`（产出目录正式配置位）与
 `wiki.update`（规则默认值，yaml 可改）——见 `config.DEFAULT_WIKI`。
 
-**后续路线**：把 wiki 页作为**第三路召回源**（RAG 碎片路实时 + wiki 聚合路
-滞后互补）——知识库与记忆本质是同一种数据，这与 second-brain-skill、
-Karpathy wiki 两个参考项目的理念一致。
+**后续路线**：~~把 wiki 页作为**第三路召回源**~~ —— **已完成**（2026-09-20）：
+L2 页面整页投影为 `wiki_<crc32>` 单元，走**页面专属的两条通道**（子集向量 +
+子集全文）参与六路融合，另有页面准入策略；权威描述见
+[`data-architecture.md` §4](data-architecture.md)。知识库与记忆本质是同一种数据，
+这与 second-brain-skill、Karpathy wiki 两个参考项目的理念一致。
 
 ## 已知问题与待办
 
 - [x] ~~第二级首轮全量结果未验证~~（2026-09-19 已验证：4635 引用 / 死链 0）
 - [x] ~~第一级的 7 个失败会话未补跑~~（MiMo 全量重跑后 223/223）
 - [x] ~~增量编译~~（2026-09-19 已实现：`wiki --action update` / `POST /api/wiki/update`）
+- [x] ~~wiki 作为召回源~~（2026-09-20 已实现：页面层投影 + 独立通道 + 准入策略，
+      见 `data-architecture.md` §4.1/§4.2）
 - [ ] 触发器自动化：蒸馏落库后挂免费 align 检测 + 定量/定期触发条件（执行端已就绪）
-- [ ] wiki 作为第三路召回源（碎片路实时 + 聚合路滞后互补）
 - [ ] `[[ ]]` 链接修复（别名表 + 模糊匹配）应放在**标题定稿之后**
 - [ ] 合并记忆的溯源要多一跳：`slice_key='*merge*'` 的记忆 `turn_key` 为空，
       需经 `merged_from_json`（纯整数 id 数组）回到来源记忆再追原始轮次

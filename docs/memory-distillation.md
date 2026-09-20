@@ -33,7 +33,7 @@
 [S3 跨会话去重] 纯本地：入库前向量化近邻查询，三档标记 new/similar/duplicate
    ▼
 [S4 入库] ────── memories 表（真相源）+ units 投影（source='distilled'）
-                 → 三路召回 / MCP / 面板零改动；脱敏正则在入库前兜底
+                 → 六路通道召回 / MCP / 面板零改动；脱敏正则在入库前兜底
 ```
 
 幂等基石：**content_hash**（会话/切片内容指纹）。同内容重跑零重复；
@@ -324,7 +324,7 @@ distilled_memories(status IN ('new','similar'))
           text=('topic：' if topic else '') + content,
           title=会话标题,
           updated_at=写入/改写时刻)             ← time 是**事件时间**，两者语义不同
-  → FTS 触发器自动同步 → 三路召回 / MCP / 面板全部沿用现有管线
+  → FTS 触发器自动同步 → 六路通道召回 / MCP / 面板全部沿用现有管线
 ```
 
 **关键决策：用 `units.role='distilled'` 而不是独立 `source`。** 现有排除

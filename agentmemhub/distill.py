@@ -12,7 +12,7 @@
 - `distill_hashes`：幂等层。内容 hash + prompt_ver 相同 → 重跑跳过
   （用户要求：同一会话重复执行不得产生重复记忆）；
 - `distilled_memories`：蒸馏真相源（type/topic/confidence/去重链完整保留）；
-- `units`（source='distilled'）：检索投影 —— 走既有三路召回 / MCP / 面板，
+- `units`（source='distilled'）：检索投影 —— 走既有六路通道召回 / MCP / 面板，
   召回侧零改动。
 
 表名用 `distilled_memories` 而非 `memories`：与 `memstore.py` 的手动原子记忆
@@ -1216,7 +1216,7 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
                 stats["reclaimed"] += rc
                 emit(f"回收已归档条目的滞留投影 {rc} 条")
 
-        # ── 阶段 D：跨会话去重 + 投影进 units（走既有三路召回）──
+        # ── 阶段 D：跨会话去重 + 投影进 units（走既有六路通道召回）──
         if not dry_run:
             todo = _pending_projection(idx)
             if todo:
@@ -1257,7 +1257,7 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
 
 
 # ══════════════════════════════════════════════════════════════════════
-# S3 跨会话去重 + S4 投影（写进 units，走既有三路召回）
+# S3 跨会话去重 + S4 投影（写进 units，走既有六路通道召回）
 #
 # 去重池 = **已投影的蒸馏条目**（它们已在 units 里带向量），因此：
 #   · 不需要额外的向量表；

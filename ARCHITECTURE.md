@@ -63,7 +63,7 @@ AgentMemHub/
 │   │   ├── ingest.py           #   摄取：unites 落库 + 向量 + FTS（含 schema/索引自愈）
 │   │   ├── embedder.py         #   ONNX 推理（长度分桶批处理）
 │   │   ├── runtime.py          #   embedder 进程级单例缓存
-│   │   ├── search.py           #   三路混合召回（向量/FTS/精确串 + RRF 融合）
+│   │   ├── search.py           #   六路通道召回（向量/FTS/标识符/短语 + 页面×2 + RRF）
 │   │   ├── memstore.py         #   原子记忆写侧 + 价值分（含状态式反馈/手动加权）
 │   │   ├── ext.py              #   召回增强（价值 boost、轮次扩展、安全截断）
 │   │   ├── eval.py             #   评测（71 题集 + MRR/precision）
@@ -128,8 +128,10 @@ ZCode / OpenCode 共享 `SqliteConversationAdapter`；新增 Agent = 一个 adap
 ### 4. 内置记忆引擎（rag/）
 
 - **摄取**：units 落库 + 向量（长度分桶批量推理）+ FTS 三处同步；`src_id` 归一化去重
-- **召回**：三路信号（向量 KNN / FTS5 / 精确串）→ RRF 融合 → 价值 boost（有界 ≤0.3）
-  → 同会话限席 → 轮次扩展（命中轮自动带上相邻上下文）
+- **召回**：六路通道（向量 KNN / FTS5 / 标识符 / 多词短语 + 页面专属两路）→ RRF 融合
+  → 价值 boost（有界 ≤0.3）→ 阈值截断（**页面豁免**）→ 页面准入 → 同会话限席
+  → 页面保位 → 轮次扩展（命中轮自动带上相邻上下文）。
+  权威描述见 `docs/data-architecture.md` §4
 - **价值**：`unit_values.value`（反馈演化）+ `manual_value`（用户 ⭐ 锁定，不衰减，优先）
 - **接缝**：`rag_bridge.py` 以原 MemOS 端点语义实现进程内调用，
   MCP 五工具 / 面板网关 / CLI 三方契约零改动（`backend.backend: memos` 可整体回退）

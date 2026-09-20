@@ -166,7 +166,7 @@ GET  /api/admin/job  →  轮询进度
 
 | 工具 | 参数 | 说明 |
 |---|---|---|
-| `memory_search` | `query`（必填）、`topK`、`note` | 语义检索历史记忆 |
+| `memory_search` | `query`（必填）、`topK`、`origin`、`note` | 语义检索历史记忆（六路通道融合，见 `data-architecture.md` §4） |
 | `memory_save` | `content`（必填）、`importance`、`tags`、`note` | 写入一条记忆 |
 | `memory_recent` | `limit`、`note` | 最近记忆时间线 |
 | `memory_stats` | `note` | 引擎在线状态与记忆总量 |
@@ -179,6 +179,19 @@ GET  /api/admin/job  →  轮询进度
 - **调用审计由服务端在唯一分发点自动写**，不依赖 Agent 手动记
 - `importance` 档位：`high` 0.8 / `normal` 0.6 / `low` 0.4（不传即 `normal`）
 - **写后不立即评分** —— 价值分由真实使用演化
+
+**`memory_search` 的返回形态**：
+
+- 每条带**层级**与**来源**标注：`[知识页·自有]` / `[记忆·自有]` / `[对话·投喂]`…
+  —— `kind` 区分 page / memory / message（聚合答案 / 具体结论 / 原始细节），
+  `origin` 区分 native（自有沉淀）/ external（外部投喂）
+- 知识页额外给**摘要**与 `wikiPath`（两阶段召回：需要细节时按路径读整页）
+- `origin` 参数可只召回某一来源（`native` / `external`），留空 = 全部
+- `topK` 只控制**列出多少条**；引擎可能返回更多（curate 只做相关度截断、不硬砍
+  条数），此时头部会注明"引擎共返回 N 条，按相关度取前 M 条"
+
+**召回严格度**由配置 `rag.retrieval.recall_level`（1 最严格 … 5 最宽松，
+**默认 3**）统一控制，见 `data-architecture.md` §4.3。
 
 **注册配置**见 `docs/mcp-register.example.json`。
 

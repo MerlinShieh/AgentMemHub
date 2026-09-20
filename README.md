@@ -48,6 +48,26 @@ uv run python scripts/fetch_model.py Xenova/bge-base-zh-v1.5
 [Xenova/bge-base-zh-v1.5](https://huggingface.co/Xenova/bge-base-zh-v1.5)（均为量化 ONNX）。
 网络受限时脚本自动回退代理；国内可加 `--base https://hf-mirror.com`。
 
+## LLM 模型选型（记忆蒸馏 / Wiki 编译用）
+
+上面是**嵌入模型**（负责检索）。蒸馏与 wiki 编译还要配一个**生成模型**（`llm` 段），
+选型直接决定质量与成本：
+
+| 模型 | 输入 / 输出（USD/百万 token） | 说明 |
+|---|---|---|
+| **`xiaomi/mimo-v2.5`** ⭐ **推荐** | **0.14 / 0.28** | 实测质量与成本综合最优：12/12 稳定、**思维链仅占输出 24~37%**（推理 token 计入输出计费，这是省钱关键）、算上推理的**真实成本≈deepseek 的一半**；配 `repair_model` 补 JSON 遵从性 |
+| **`meituan/LongCat-2.0:free`** ⭐ **次选** | **免费**（100 请求/天） | 适合**放后台大批量、多次重跑**——同一批目标跑多轮取更优结果，零成本提质量 |
+| `deepseek/deepseek-v4.1-flash` | 0.15 / 0.60（低谷） | **247 tok/s**（全表最快）；注意**峰谷计价**（国内工作时段翻倍） |
+| `z-ai/glm-5.3-flash` | 0.15 / 0.50 | 官网 Intelligence **41.9**（全表最高），付费档质量优先 |
+| `zai-org/GLM-5.2-Fast` | 3.00 / 10.25 | ⚠️ **"Fast"是高吞吐定位不是便宜**——比同厂 glm-5.3-flash 贵 20 倍，极易误选 |
+
+免费档还有 `inclusionai/ling-3.0-flash-sante:free`（100 请求/天）与
+`poolside/laguna-s-2.1-free`（**唯一无日限**）。**完整对标（含计费模式与三个坑）
+见 [docs/model-selection.md](docs/model-selection.md)**。
+
+配置位置：`agentmemhub.yaml` 的 `llm` 段；两级 wiki 编译**刻意不级联**
+（`wiki.llm` 与 `wiki.l2.llm` 各自相对顶层覆盖，见 [docs/llm-wiki.md](docs/llm-wiki.md)）。
+
 ## 支持的 Agent
 
 | Agent | 数据来源 | 格式 |
@@ -84,7 +104,7 @@ uv run python scripts/fetch_model.py Xenova/bge-base-zh-v1.5
    │            │             ┌──────────────────────────────────┐                   │
    │            │             │ 内置记忆引擎 agentmemhub/rag      │                   │
    │            └────────────▶│ units + vec_<model> + trigram FTS │                   │
-   │          （检索/看板/导出）│ 三路召回 RRF 融合 + 价值评分       │                   │
+   │          （检索/看板/导出）│ 六路通道 RRF 融合 + 价值评分       │                   │
    │                          └──────────────────────────────────┘                   │
    │                                                                                 │
    │   配置层：agentmemhub.yaml（全路径可配置）＋ 环境变量覆盖                           │
@@ -127,7 +147,7 @@ AgentMemHub/
 │   └── e2e/                      #   浏览器级端到端测试
 ├── eval/                         # 召回评测示例集（queries.example.yaml；私有集不入库）
 ├── tests/                        # pytest（541 项通过 / 1 项条件跳过）
-├── docs/                         # 设计文档（架构/迁移/召回融合/LLM Wiki/接口契约等）
+├── docs/                         # 技术文档（架构全景/蒸馏/召回/wiki/模型选型/接口契约）
 ├── memOS/                        # 回退用的上游引擎（gitignore，默认不参与运行）
 ├── start.bat                     # 启动控制台（Windows）
 ├── ClearData.bat / ClearTest.bat # 清空数据 / 恢复干净测试环境
@@ -142,7 +162,7 @@ AgentMemHub/
 
 1. **采集**：`ingest` 从各 Agent 的官方数据位置读取会话（路径可经 `agents.*` 配置覆盖），归一为全量事件流（含工具链/思维链/Shell/补丁，每事件带 `src_id`/`turn_key` 稳定锚与系统注入标记）写入本地 SQLite
 2. **消费**：CLI/控制台/Web 看板检索、浏览、导出、管理会话——全部读本地库，不上传任何数据
-3. **记忆**：`sync` 把事件流向量化写入内置索引（按长度分桶批处理、多模型并发、`src_id` 幂等）→ 对话时经三路召回（向量/全文/标识符）融合命中
+3. **记忆**：`sync` 把事件流向量化写入内置索引（按长度分桶批处理、多模型并发、`src_id` 幂等）→ 对话时经**六路通道**召回（向量 / 全文 / 标识符 / 多词短语 + 页面专属两路）融合命中
 
 **派生层（只读，不改写上面三层）**
 
@@ -415,7 +435,7 @@ Claude Code 等支持 MCP 的 Agent harness 上——模型在会话进行中即
 
 | 工具 | 说明 |
 |---|---|
-| `memory_search(query, topK?, note?)` | 语义检索历史记忆（三路混合召回），返回命中条目 + 注入上下文 |
+| `memory_search(query, topK?, origin?, note?)` | 语义检索历史记忆（六路通道融合），返回命中条目（带**层级与来源**标注）+ 注入上下文 |
 | `memory_recent(limit)` | 最近写入的记忆时间线，快速了解近期积累 |
 | `memory_stats()` | 索引就绪状态 / 记忆总量 / 嵌入模型与 LLM 评分可用性 |
 | `memory_save(content, importance?, tags?, note?)` | 写一条记忆。`importance` 为可选档位（`high`/`normal`/`low` → 初始价值 0.8/0.6/0.4，**不传即 normal**），由 Agent 用当前推理直接判断，**无需外挂评分模型**；`tags` 为可选标签数组（面板筛选/溯源用，引擎纯透传）。即时入库并补向量，写后验证 imported，失败明确报错不伪装 |
@@ -764,6 +784,25 @@ distillation:                         # 记忆蒸馏全部可调（不硬编码�
 
 相对路径相对项目根解析，`~` 展开为用户目录。
 
+## 技术文档
+
+按"想知道什么"索引（架构细节一律以第一份为准）：
+
+| 文档 | 内容 |
+|---|---|
+| **[docs/data-architecture.md](docs/data-architecture.md)** | **架构全景（权威）**：三层数据模型、表矩阵、ID 锚体系、六路召回与准入、价值体系、快照回滚、运维速查、演进时间线 |
+| [docs/branch-milestones.md](docs/branch-milestones.md) | **分支里程碑时间线**：三个大里程碑做了什么 + 即将做的事（Roadmap） |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | 代码结构与模块职责（速览） |
+| [docs/recall-fusion.md](docs/recall-fusion.md) | 多路召回融合的机制、算法与评测数据 |
+| [docs/memory-distillation.md](docs/memory-distillation.md) | 记忆蒸馏：切片 / 合并 / 去重 / 投影全流程 |
+| [docs/llm-wiki.md](docs/llm-wiki.md) | LLM Wiki 两级编译、增量更新、触发器、失败兜底与格式修复 |
+| [docs/model-selection.md](docs/model-selection.md) | LLM 模型选型与定价（含免费档与跑批注意事项） |
+| [docs/API.md](docs/API.md) | 对外契约：HTTP / MCP / CLI（含错误语义与长任务约定） |
+| [docs/EXAMPLES.md](docs/EXAMPLES.md) | SQL / CLI / Python 查询示例 |
+| [docs/branch-divergence.md](docs/branch-divergence.md) | 分支差异记录（`feat/llm-wiki` 相对 `main`） |
+
+服务运行时另有交互式接口文档 `/api/docs`（Swagger UI）。
+
 ## 需求
 
 - **Python 3.10+**（推荐用 [uv](https://docs.astral.sh/uv/) 管理：`uv sync` 即可装齐依赖）
@@ -862,7 +901,7 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 - [x] 增量同步架构（会话级清单对比 → upsert → watermarks 变更集贯通 clean/push；评分增量优先·定点读零全量枚举；cap 超限回退全量；默认数据目录收进项目内 database/）
 ### v2.0（2026-09-10）记忆引擎自研内核
 
-- [x] 内置记忆引擎 `agentmemhub.rag`（向量化 / 三路混合召回 / 价值评分，进程内直调、无独立服务）
+- [x] 内置记忆引擎 `agentmemhub.rag`（向量化 / 六路通道融合召回 / 价值评分，进程内直调、无独立服务）
 - [x] 引擎接缝 `rag_bridge`：原 MemOS 端点语义的进程内实现，MCP 五工具与面板契约零改动
 - [x] 一行配置回退 MemOS（`backend.backend: memos`），vendored `memOS/` 保留
 - [x] 存量零丢失迁移（MemOS 2286 traces / 3836 feedback → 新索引）
@@ -912,6 +951,27 @@ RAG 优化「能不能捞到」，wiki 优化「有没有结构」；**wiki 不�
 - [x] `thinking` / `reasoning_effort` 开关 + 用量与成本统计（`usage_snapshot` / `estimate_cost`）
 - [x] 两级 wiki **各自相对顶层 `llm` 覆盖**，互不牵连
       （级联会让第一级换 provider 时连带改掉第二级，已实测踩过）
+
+### v2.2（2026-09-20）Wiki 页面进召回面 + 召回调优
+
+**页面层进召回面**：L2 知识页整页投影为 `wiki_<crc32>` 单元，走**页面专属两条
+通道**（子集向量 + 子集全文），与消息层/记忆层**同池融合**——知识库与记忆本质是
+同一种数据，一次检索同时拿到"聚合答案"（page）与"具体结论"（memory）。
+
+- [x] 页面层投影（`agentmemhub/wiki_index.py`：全量对齐、幂等收敛）
+- [x] 召回结果带**层级与来源**标注（`kind` = page/memory/message × `origin` = native/external）
+- [x] **页面准入策略**：高分优先 + 低分字面兜底 + 席位。三轮实测迭代——
+      "分数不能当门槛" → "证据也不能当门槛" → "证据等级绝对优先仍不行"，
+      每次都靠真实查询证伪（详见 `docs/data-architecture.md` §4.2）
+- [x] **召回严格度档位** `rag.retrieval.recall_level`（1 最严格 … 5 最宽松，**默认 3**）：
+      把候选宽度 / 相对阈值 / 终审阈值 / 页面席位收成**一条单调刻度**，带单调性测试守卫
+- [x] **短语精确匹配通道**：`command code`、`api key` 这类**多词英文专名**——
+      此前 12 个含 "Command Code" 的单元有 11 个连候选池都进不去（§4.4）
+- [x] 两处链路级修复：页面**豁免**通用相对阈值；页面保位用**替换**而非追加
+      （否则会被下游"取前 N 条"截断切掉，§4.0）
+- [x] **快照保留份数配置化**（`snapshot.keep`，默认 5，非法值回退默认）+ 补一份全量统一版本快照
+- [x] 文档：新增 **`docs/data-architecture.md`（架构全景·权威）**、
+      `docs/model-selection.md`（模型选型与定价）；六路通道表述同步进 README / ARCHITECTURE / API
 
 - [ ] 更多 Agent（Claude Code / Cursor / Gemini CLI / CodeBuddy）
 - [ ] 记忆折叠压缩（超长会话压缩、相邻轮折叠）

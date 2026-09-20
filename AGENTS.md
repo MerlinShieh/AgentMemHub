@@ -42,7 +42,7 @@
   （记忆排除 UI 已下线，后端能力保留）；记忆页承载筛选/溯源/⭐加权/👍👎/蒸馏入口。
   会话与记忆通过 `session_uid`（全局递增）双向绑定跳转。
 - **测试纪律**：每次改动带测试；bug 修复先写复现测试（红→绿）；
-  `uv run pytest` 全绿是提交门槛（数量以实测为准，当前 554 passed / 1 skipped）。
+  `uv run pytest` 全绿是提交门槛（数量以实测为准，当前 664 passed / 1 skipped）。
 - **日志纪律**：统一 `logs/` 按程序分文件；测试必须隔离日志与数据目录
   （`conftest` 的 autouse 夹具已强制把 `logs.log_dir` 指向临时目录）。
   **MCP 调用审计由服务端在唯一分发点自动写 `logs/mcp.log`，不依赖 Agent 手动记**
@@ -57,10 +57,15 @@
 
 ## 相关文档
 
+- **`docs/data-architecture.md` — 架构全景（权威）**：三层数据模型、表矩阵、ID 锚体系、
+  六路召回与准入、价值体系、快照回滚、运维速查、演进时间线（**改动架构先读它**）
+- `docs/branch-milestones.md` — 分支里程碑时间线（三个大里程碑 + 即将做的事）
 - `README.md` — 使用说明与快速开始（含「记忆蒸馏」「Agent 协作配置」章节）
 - `ARCHITECTURE.md` — 架构说明
 - `docs/memory-distillation.md` — 记忆蒸馏的设计与实施记录
 - `docs/llm-wiki.md` — LLM Wiki 两级编译、失败兜底与格式修复的实测记录
+- `docs/model-selection.md` — LLM 模型选型与定价（推荐 MiMo / 免费 LongCat）
 - `docs/API.md` — 对外接口契约（HTTP / MCP / CLI；含长任务约定与错误语义）
-- `docs/recall-fusion.md` — 三路召回融合的机制与实测数据
+- `docs/recall-fusion.md` — 召回融合的机制与实测数据（**最新权威描述见 `docs/data-architecture.md` §4**）
+- `docs/branch-divergence.md` — 分支差异记录（`feat/llm-wiki` 相对 `main`）
 - `docs/EXAMPLES.md` — SQL / CLI / Python 查询示例
