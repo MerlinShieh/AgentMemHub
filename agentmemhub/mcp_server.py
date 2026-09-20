@@ -117,10 +117,18 @@ def _search(args: dict) -> str:
 
     hits = res.get("hits") or []
     scope = {"native": "（仅自有记忆沉淀）", "external": "（仅外部投喂）"}.get(org, "")
-    lines = [f"记忆检索「{q}」{scope}：{len(hits)} 条命中"
-             f"（引擎在线，episodes={ov.get('episodes')}, traces={ov.get('traces')}）", ""]
+    shown = hits[:top]
+    head = (f"记忆检索「{q}」{scope}：{len(shown)} 条命中"
+            f"（引擎在线，episodes={ov.get('episodes')}, traces={ov.get('traces')}）")
+    if len(hits) > len(shown):
+        # 引擎实际返回更多（curate 只做相关度截断、不硬砍条数）——必须说清
+        # "共多少 / 给了多少"，否则 Agent 会以为库里只有这几条（实测踩过：
+        # 头部写"19 条命中"却只列 8 条）。
+        head += (f"\n（引擎共返回 {len(hits)} 条，按相关度取前 {len(shown)} 条；"
+                 f"需要更多可调大 topK）")
+    lines = [head, ""]
     tier_label = {"page": "知识页", "memory": "记忆", "message": "对话"}
-    for h in hits[:top]:
+    for h in shown:
         kind = h.get("kind") or "message"
         origin = h.get("origin") or "native"
         src_tag = "自有" if origin == "native" else "投喂"

@@ -160,29 +160,36 @@ _SELECT_TRACE = (
 
 
 def safe_cutoff_hits(hits: list[dict], *, max_keep: int = 5,
-                     floor_ratio: float = 0.7) -> list[dict]:
-    """机械终审（dict 版 ext.safe_cutoff 同规则）：≥0.7×top 且 ≤max_keep，至少保 1。
+                     floor_ratio: float = 0.7,
+                     page_max_keep: int = 3) -> list[dict]:
+    """机械终审（dict 版 ext.safe_cutoff 同规则）：≥floor_ratio×top 且 ≤max_keep。
 
-    **页面层例外**（kind='page'）：L2 知识页是聚合产物、篇幅长（中位 1639 字符），
-    单一向量对长文本的相似度天然低于短条目（实测 0.64 vs 记忆 1.04）——
-    用"同质候选"的阈值衡量它会把它系统性误杀，而它恰恰是信息量最大的
-    聚合答案。所以页面用**更宽松的相对阈值**（0.5×top 而非 0.7×top）：
-    够格的页面留下，明显不相干的仍会被滤掉（避免刷屏）。
+    **页面层准入**（kind='page'）：这里曾是页面刷屏的直接推手——给页面
+    0.5×top 的宽松门限，并且**从 max_keep 之外把页面捞回结果**，等于"页面
+    永远进结果"。实测（12 个真实查询）：12/12 出现页面、结果里平均 4.2 条
+    是页面，与知识库无关的查询也整条全是页面。
+
+    现在分两步：**该不该进结果**已由 `search.apply_page_policy` 用"证据类型"
+    判定（分数不可用——页面融合分与相关性甚至反相关：相关页 0.21×top、
+    噪声页 0.63×top）。所以这里对页面**不再套分数门限**，只执行配额，并且
+    **不参与 `max_keep` 窗口截断**——页面分数天然低、排在末尾，按窗口切会
+    正好把它切掉（实测：k=20 时页面掉出 `hits[:20]` 窗口而消失，k=8 时正常）。
     """
     if not hits:
         return []
-    top = max(h["score"] for h in hits[:1]) or 0.0
-    kept = [h for h in hits[:max_keep] if h["score"] >= floor_ratio * top]
-    page_floor = top * 0.5
-    pages = [h for h in hits
-             if h.get("kind") == "page" and h not in kept
-             and h["score"] >= page_floor]
-    for p in pages:
-        if len(kept) >= max_keep:
-            break
-        kept.append(p)
-    kept.sort(key=lambda h: -h["score"])
-    return kept or [hits[0]]
+    top = hits[0]["score"] or 0.0
+    pages = [h for h in hits if h.get("kind") == "page"][:page_max_keep]
+    others = [h for h in hits if h.get("kind") != "page"]
+    # 页面占名额（不是额外叠加），总数守恒 ≤ max_keep——否则调用方按 max_keep
+    # 再截一次就会把末尾的页面切掉（面板 top 截断实测踩过）
+    room = max(max_keep - len(pages), 0)
+    kept = [h for h in others[:room] if h["score"] >= floor_ratio * top]
+    out = sorted(kept + pages, key=lambda h: -h["score"])   # 页面按分数落位
+    if out:
+        return out
+    # 兜底：非页面条目即使低于门限也保 1 条（"至少给一条"的既有语义）；
+    # 一条都没有时不硬塞噪声页。
+    return others[:1]
 
 
 # ── 端点语义实现 ───────────────────────────────────────────────────────
@@ -205,8 +212,10 @@ def search(agent: str, query: str, *, k: int = SEARCH_MAX_HITS,
     t0 = time.perf_counter()
     st = settings()
     vstore = memstore.ValueStore(st.index_db)
+    # 候选宽度与相对阈值由**召回档位**（rag.retrieval.recall_level）统一给，
+    # 这里不再自行推算，避免"代码里的隐式默认"与配置里的档位各说各话。
     hits = hybrid_search(
-        st, query, k=k, candidate_k=max(k * 4, 30), expand_turns=False,
+        st, query, k=k, expand_turns=False,
         exclude_session=exclude_session,
         value_provider=vstore,
         no_decay_ids=vstore.no_decay_ids,
@@ -259,8 +268,14 @@ def search(agent: str, query: str, *, k: int = SEARCH_MAX_HITS,
             "origin": h.origin,
         })
     if curate:
-        # 相关度截断（≥0.7×top）但不再硬砍到 5 条，上限放宽到 SEARCH_MAX_HITS
-        dto_hits = safe_cutoff_hits(dto_hits, max_keep=SEARCH_MAX_HITS)
+        # 相关度截断：阈值与页面席位都来自**召回档位**（rag.retrieval.recall_level）
+        # ——档位越高越宽松（详见 rag/config.py 的 RECALL_LEVELS）
+        policy = st.page_policy
+        profile = st.recall_profile
+        dto_hits = safe_cutoff_hits(
+            dto_hits, max_keep=SEARCH_MAX_HITS,
+            floor_ratio=float(profile.get("curate_floor", 0.7)),
+            page_max_keep=int(policy.get("max_in_results", 5)))
     ctx = "\n".join(f"- {d['snippet'][:160]}" for d in dto_hits[:3])
     return {"hits": dto_hits, "injectedContext": ctx,
             "tierLatencyMs": {"rag": round((time.perf_counter() - t0) * 1000)}}

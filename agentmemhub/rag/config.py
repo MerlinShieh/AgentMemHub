@@ -22,11 +22,116 @@ DEFAULT_EMBED = {
 }
 DEFAULT_RETRIEVAL = {
     "models": [],                # 空 = 仅用 active
+    #: 召回严格度档位（1 最严格 … 5 最宽松）——统一控制候选宽度/阈值/页面席位，
+    #: 见 RECALL_LEVELS。默认 **3（均衡）**：实测 1~2 档要求字面证据 + 终审
+    #: 0.85~0.90，会让 windowsctrol/AI助手/deskflow 这类查询**各只返回 1 条**，
+    #: 接近"查了没结果"；3 档起才是"严格但可用"（每查询 2~4 条、页面 1~3 条）。
+    #: 要更严或更松，只改这一个数字。
+    "recall_level": 3,
     "candidate_k": 30,
     "threshold_floor": 0.2,
     "max_per_conversation": 2,
     "search_max_hits": 20,
     "rrf_k": 60,
+}
+
+#: 召回严格度档位表：**1 最严格 … 5 最宽松**（`rag.retrieval.recall_level`）。
+#:
+#: 为什么要有档位：调优过程中攒下了三类互相牵制的旋钮，散着配很容易配出
+#: 自相矛盾的组合（比如"页面只给 1 席"配"必须无证据才入选"）。档位把它们
+#: 收成一条单调的刻度，调用方只回答一个问题："我现在要少而准，还是全而杂？"
+#:
+#: 三类参数：
+#:   · candidate_k       各通道取多少候选（越大越容易捞到长尾）
+#:   · threshold_floor   **非页面**条目的相对阈值（越高越严）
+#:   · curate_floor      终审截断的相对阈值（桥接层 safe_cutoff）
+#:   · page.*            页面层席位与证据要求（见 DEFAULT_PAGE_POLICY）
+#:
+#: 档位与"证据"的关系（实测教训的固化，见 search.apply_page_policy）：
+#:   **证据只对低分页面生效**（`literal_required_below` 之下必须有字面证据），
+#:   高分页面一律只看分数——所以档位表里**不设** `min_evidence` 硬门槛：
+#:   实测档 3 曾用 min_evidence="vector"，结果把「网络环境确认与连接故障排查」
+#:   （仅池内信号、但分数 0.668 是候选里最高的页面）挡在门外，而 0.334/0.197
+#:   两条低分字面页入选——**正好与"高分语义优先"相反**。
+#:   各档的"严/松"由 `literal_required_below`（多少分以上可只看分数）与席位表达。
+#:
+#: **默认 3（均衡）**：1~2 档实测过于极端（三个查询各只返回 1 条），
+#: 3 档是"严格但可用"的下沿；需要极限精度时手动下调，需要宽召回时上调。
+DEFAULT_RECALL_LEVEL = 3
+
+RECALL_LEVELS = {
+    1: {"name": "最严格", "candidate_k": 20, "threshold_floor": 0.35,
+        "curate_floor": 0.90,
+        "page": {"max_in_results": 1, "literal_seats": 1,
+                 "literal_required_below": 0.95, "floor_ratio": 0.5}},
+    2: {"name": "严格", "candidate_k": 25, "threshold_floor": 0.30,
+        "curate_floor": 0.85,
+        "page": {"max_in_results": 2, "literal_seats": 1,
+                 "literal_required_below": 0.85, "floor_ratio": 0.3}},
+    3: {"name": "均衡", "candidate_k": 30, "threshold_floor": 0.20,
+        "curate_floor": 0.80,
+        "page": {"max_in_results": 3, "literal_seats": 1,
+                 "literal_required_below": 0.70, "floor_ratio": 0.1}},
+    4: {"name": "宽松", "candidate_k": 40, "threshold_floor": 0.15,
+        "curate_floor": 0.75,
+        "page": {"max_in_results": 4, "literal_seats": 2,
+                 "literal_required_below": 0.50, "floor_ratio": 0.0}},
+    5: {"name": "最宽松", "candidate_k": 60, "threshold_floor": 0.10,
+        "curate_floor": 0.70,
+        "page": {"max_in_results": 5, "literal_seats": 3,
+                 "literal_required_below": 0.30, "floor_ratio": 0.0}},
+}
+
+#: 页面层（L2 知识页）准入策略——见 search.apply_page_policy 的实测依据。
+#:
+#: 为什么需要单独一套策略：页面是**长文本聚合产物**，池子只有几百条，
+#: "页面池内 KNN top-k"对任何查询都成立（哪怕查询与知识库毫不相关），
+#: 于是页面在结果里刷屏（实测 12/12 查询出现页面、平均 4.2 条、最差全页面）。
+DEFAULT_PAGE_POLICY = {
+    #: 页面独立通道的候选数（向量 + 全文各取这么多）
+    "channel_k": 8,
+    #: 最终结果里页面最多几条（配额——页面不能无限占位）。
+    #:
+    #: 配额是**唯一**的数量约束，所以它直接决定"会不会漏"。此处默认值与
+    #: 默认档（recall_level=3）一致；生产中总由档位覆盖。
+    "max_in_results": 3,
+    #: 其中**保底留给"低分但有字面证据"页面**的席位数（"低分模糊匹配"的兜底）。
+    #:
+    #: 为什么必须保底：中分的池内页（如拼错查询里的「Clink」0.627）会按分数把
+    #: 低分字面页（0.014~0.026）全部挤出配额——实测那样 `windowsctrol` 的 3 条
+    #: 真相关页只剩 0 条。保底席把它们救回来，同时不挤掉高分语义页。
+    "literal_seats": 1,
+    #: **低于此分数的页面必须命中字面证据（page_fts/fts/ident）才准入**；高于此分
+    #: 分数本身就作数（视为"高分语义相关"）。
+    #:
+    #: 这条规则取代了早先的"证据等级绝对优先"——后者实测会让**低分字面匹配挤掉
+    #: 高分语义相关**：查询 "github网络失败" 时，「GitHub 文件抓取方法」0.334 与
+    #: 「GitHub账户认证」0.197 占满了 3 个席位，而真正对症的「网络环境确认与连接
+    #: 故障排查」0.848、「opencode 卡在网络故障」0.841 因"没有字面证据"落选。
+    #:
+    #: 而字面兜底仍然必要：拼错/近义表达（"windowsctrol"）时，真相关页面往往只有
+    #: 0.014~0.026 的低分（靠 page_fts 残缺匹配），不认字面证据就会被高分噪声
+    #: （「Clink」0.627）全挤出局。所以规则是——**高分看分数，低分看字面证据**。
+    "literal_required_below": 0.7,
+    #: **不要用分数卡页面**：实测 231 页 × 12 查询，页面融合分与相关性甚至
+    #: 反相关——相关页落在 0.21~1.02×top，噪声页稳定在 0.52~0.68×top
+    #: （"LLM Wiki 工程化"页词面命中第 1 名却只有 0.21×top，而完全无关的
+    #: "Mobile_App_AutoTest 发布记录"有 0.63×top）。原因是页面作为长文本聚合
+    #: 产物，融合分被"短条目天然高分 + 价值加权"系统性压制，与记忆/消息
+    #: **不可比**。故默认 0 = 不设门限；需要时可收紧做二次过滤。
+    "floor_ratio": 0.0,
+    #: 页面的**最低证据等级**（any / vector / literal）。默认 any = 不设限，
+    #: 证据只用于**排序分层**，不剔除任何页面。
+    #:
+    #: 为什么默认不设限：实测查询 "windowsctrol"（拼错）时，语义最相关的
+    #: 「Windows Control Core 窗口控制内核」**只有最弱的池内信号**，而噪声
+    #: 「Clink」反而被全局向量池命中——把证据当门槛会**同时做错两件事**：
+    #: 把真相关的判死、把噪声放进来。拼错、换词、近义表达这些场景下，"真相关"
+    #: 恰恰最缺字面证据。要的是"相关的不遗漏 + 排得靠前"，不是"只留有证据的"。
+    "min_evidence": "any",
+    #: 准入页面保底占位：有证据的页面融合分天然低（0.21×top），纯按分数排
+    #: 会被记忆挤出最终 k 条——而页面通道的立身之本正是"异质候选源各自成路"。
+    "reserve_seats": True,
 }
 DEFAULT_WRITE = {
     "order": [],                 # 空 = 仅 active
@@ -115,6 +220,40 @@ class Settings:
         ms = [m for m in (self.retrieval.get("models") or [])
               if m in self.models]
         return ms or [self.active_model]
+
+    @property
+    def recall_level(self) -> int:
+        """生效的召回严格度档位（1 最严格 … 5 最宽松）。
+
+        非法值（非整数 / 越界）一律回退默认档——它决定的是"给不给结果"，
+        配置写错时宁可回到最保守的一档，也不要静默放宽。
+        """
+        raw = self.retrieval.get("recall_level", DEFAULT_RECALL_LEVEL)
+        try:
+            lv = int(raw)
+        except (TypeError, ValueError):
+            return DEFAULT_RECALL_LEVEL
+        return lv if lv in RECALL_LEVELS else DEFAULT_RECALL_LEVEL
+
+    @property
+    def recall_profile(self) -> dict:
+        """当前档位展开后的召回参数（带 level / name，便于日志与界面展示）。"""
+        lv = self.recall_level
+        return {"level": lv, **RECALL_LEVELS[lv]}
+
+    @property
+    def page_policy(self) -> dict:
+        """页面层策略：内置默认 < **档位** < yaml 显式 `retrieval.page.*`。
+
+        优先级这样排：档位是"整体旋钮"，而用户临时只想改某一项时（例如单独
+        把页面席位调大），yaml 里的显式配置应当能覆盖档位、不必换档。
+        `retrieval` 段本身只做浅合并，嵌套的 `page` 需要在这里再合一次。
+        """
+        raw = self.retrieval.get("page") or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        prof = self.recall_profile.get("page") or {}
+        return {**DEFAULT_PAGE_POLICY, **prof, **raw}
 
 
 def _load_rag_section(root: Path) -> tuple[dict, dict, dict, dict, str]:

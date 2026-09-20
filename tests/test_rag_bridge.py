@@ -190,19 +190,33 @@ class _FakeStore:
 
 # ── R5.1 验收修复回归 ──────────────────────────────────────────────────
 
-def test_search_curate_truncates_by_relevance_not_hard_5(rag_env):
-    """机械终审：按 ≥0.7×top 截断；上限放宽到 SEARCH_MAX_HITS=20（R6 体验反馈：
-    硬砍 5 条让用户以为"只有这么点相关"，改为相关度截断）。"""
-    rag_bridge.import_bundle([
-        {"id": f"mcp_c{i}", "userText": f"终审验证条目 编号{i} 内容递增一点点{i * 7}",
-         "ts": 100 + i} for i in range(8)])
-    all_hits = rag_bridge.search("h", "终审验证条目", k=8, curate=False)["hits"]
-    curated = rag_bridge.search("h", "终审验证条目", k=8, curate=True)["hits"]
-    assert len(all_hits) == 8
-    assert len(curated) <= rag_bridge.SEARCH_MAX_HITS
-    assert len(curated) > 5 or len(curated) == len(all_hits), "不再硬砍到 5 条"
-    top = curated[0]["score"]
-    assert all(h["score"] >= 0.7 * top - 1e-9 for h in curated)
+def test_search_curate_truncates_by_relevance_not_hard_5(tmp_path, monkeypatch):
+    """机械终审：按相对阈值截断，但上限放宽到 SEARCH_MAX_HITS=20（R6 体验反馈：
+    硬砍 5 条让用户以为"只有这么点相关"，改为相关度截断）。
+
+    本用例**显式固定最宽松档**（recall_level=5，终审阈值 0.7）：它验证的是
+    "上限不是硬编码 5"，与严格档无关——在默认的最严格档（0.9×top）下，
+    分数跨度大的构造数据本就只该保留 1 条。
+    """
+    monkeypatch.setenv("AGENTMEMHUB_BACKEND", "rag")
+    base = load_settings()
+    rag_bridge.configure(dataclasses.replace(
+        base, index_db=tmp_path / "rag.db", source_db=tmp_path / "src.db",
+        log_dir=tmp_path / "logs",
+        retrieval={**base.retrieval, "recall_level": 5}))
+    try:
+        rag_bridge.import_bundle([
+            {"id": f"mcp_c{i}", "userText": f"终审验证条目 编号{i} 内容递增一点点{i * 7}",
+             "ts": 100 + i} for i in range(8)])
+        all_hits = rag_bridge.search("h", "终审验证条目", k=8, curate=False)["hits"]
+        curated = rag_bridge.search("h", "终审验证条目", k=8, curate=True)["hits"]
+        assert len(all_hits) == 8
+        assert len(curated) <= rag_bridge.SEARCH_MAX_HITS
+        assert len(curated) > 5 or len(curated) == len(all_hits), "不再硬砍到 5 条"
+        top = curated[0]["score"]
+        assert all(h["score"] >= 0.7 * top - 1e-9 for h in curated)
+    finally:
+        rag_bridge.reset_settings()
 
 
 def test_search_hits_include_conversation_location(rag_env):
@@ -262,6 +276,39 @@ def test_safe_cutoff_hits_rules():
     assert rag_bridge.safe_cutoff_hits([]) == []
     one = [{"score": 1.0}, {"score": 0.01}]
     assert rag_bridge.safe_cutoff_hits(one) == one[:1]
+
+
+def test_safe_cutoff_hits_页面免分数门限():
+    """页面曾被 0.5×top 的宽松例外伺候 → 实测 12/12 查询都出现页面、平均 4.2 条。
+    现在"该不该进结果"由 search.apply_page_policy 按**证据类型**判定（分数对
+    页面不可用：相关页 0.21×top、噪声页 0.63×top），这里只执行配额。"""
+    hits = [{"score": 1.0, "kind": "memory"},
+            {"score": 0.3, "kind": "page"},      # 低分但有跨池证据 → 保留
+            {"score": 0.2, "kind": "page"}]
+    kept = rag_bridge.safe_cutoff_hits(hits, max_keep=10)
+    assert [h["kind"] for h in kept] == ["memory", "page", "page"]
+    # 非页面仍走 0.7×top 截断
+    mixed = [{"score": 1.0, "kind": "memory"}, {"score": 0.5, "kind": "memory"}]
+    assert len(rag_bridge.safe_cutoff_hits(mixed, max_keep=10)) == 1
+
+
+def test_safe_cutoff_hits_页面不受窗口截断():
+    """页面分数天然低、排在末尾；按 `hits[:max_keep]` 窗口切会正好切掉它。
+    实测：k=20 时页面掉出窗口而消失（k=8 时正常）。页面占名额、总数守恒。"""
+    hits = ([{"score": 1.0, "kind": "memory"}]
+            + [{"score": 0.9 - i * 0.01, "kind": "message"} for i in range(5)]
+            + [{"score": 0.2, "kind": "page"}])
+    kept = rag_bridge.safe_cutoff_hits(hits, max_keep=3)
+    assert [h["kind"] for h in kept] == ["memory", "message", "page"]
+    assert len(kept) == 3                       # 总数守恒（页面占掉 1 个名额）
+    assert kept == sorted(kept, key=lambda h: -h["score"])
+
+
+def test_safe_cutoff_hits_页面只受配额约束():
+    hits = [{"score": 1.0, "kind": "memory"}] + [
+        {"score": 0.9 - i * 0.01, "kind": "page"} for i in range(5)]
+    kept = rag_bridge.safe_cutoff_hits(hits, max_keep=2)
+    assert sum(1 for h in kept if h["kind"] == "page") == 3     # 配额 3
 
 
 def test_web_push_button_vectorizes_not_bundles(rag_env, monkeypatch):

@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Callable, Sequence
 
 import numpy as np
 
-from .config import Settings
+from .config import DEFAULT_PAGE_POLICY, DEFAULT_RETRIEVAL, Settings
 from .embedder import Embedder, OnnxEmbedder
 from .runtime import get_embedder
 from .ingest import ensure_vec_table, open_index
@@ -41,6 +41,14 @@ STRONG_BYPASS_SCORE = 0.35  # bypass 需 ≥2 通道且其中最好通道分达�
 # MemOS keyword.ts:36 同源噪音表
 _CJK_NOISE = set("我你他她它的了呢吗么还记得是有想请问谁哪帮")
 _IDENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_\-:.]{11,}")
+#: **多词短语**：2 个以上连续 ASCII 词（"command code" / "api key"）——见
+#: extract_phrases 的说明（这是 identifier 通道覆盖不到的盲区）。
+_PHRASE_RE = re.compile(
+    r"[A-Za-z][A-Za-z0-9_.\-]*(?:[ \t]+[A-Za-z][A-Za-z0-9_.\-]*)+")
+#: 短语最短长度（"is a"、"a b" 这类短组合做字面匹配会引入海量噪声）
+_PHRASE_MIN_LEN = 5
+#: 短语上限（防查询串拼接；2 词窗口优先，见 extract_phrases）
+_PHRASE_CAP = 4
 
 ChannelHits = list[tuple[int, float]]  # [(unit_id, score 越大越好)]
 
@@ -74,14 +82,18 @@ class Hit:
     #: **数据来源维度**（与 kind 的层级维度正交）：native=自有记忆沉淀，
     #: external=外部投喂。Agent 与用户据此分辨知识出处（谁说的、可信度语境）。
     origin: str = "native"
+    #: 命中的通道名集合（如 {"vec", "page_fts"}）。两个用途：页面准入判定
+    #: "有没有跨池可比的强信号"（见 apply_page_policy）；排查"这条为何被召回"。
+    signals: frozenset[str] = field(default_factory=frozenset)
 
 
 #: 页面层召回时返回的正文上限（字符）——整页中位 1639、最长 7221，
 #: 全塞进上下文会挤占空间；需要细节时按 wiki_path 读全文。
 PAGE_TEXT_CAP = 600
 
-#: 页面独立通道取前 N（213 页的池子里取 8，够用且不喧宾夺主）
-PAGE_CHANNEL_K = 8
+#: 页面独立通道取前 N（内置默认值；可由 `rag.retrieval.page.channel_k` 覆盖，
+#: 生效值走 settings.page_policy）
+PAGE_CHANNEL_K = DEFAULT_PAGE_POLICY["channel_k"]
 
 
 def kind_of(src_id: str | None) -> str:
@@ -115,16 +127,27 @@ def relevance_of(entry: dict[str, tuple[int, float]],
 def threshold_filter(
     rel: dict[int, float], cand: dict[int, dict[str, tuple[int, float]]],
     *, floor: float = THRESHOLD_FLOOR, strong: float = STRONG_BYPASS_SCORE,
+    exempt_ids: set[int] | None = None,
 ) -> tuple[dict[int, float], set[int]]:
     """相对阈值：rel < floor×top 剔除；≥2 通道且最好通道分 ≥ strong 可旁路
     （防"纯关键词 rank-0 命中被 cosine 尺度绞杀"，MemOS ranker.ts:462 同源思想）。
-    返回 (存活, 旁路id集)。"""
+    返回 (存活, 旁路id集)。
+
+    ``exempt_ids``（页面）不参与本阈值：页面的 rel 分天然低一个量级
+    （实测 0.014~0.03，因为长文本聚合分被压制），0.2×top 对它们是系统性误杀——
+    实测拼错查询 "windowsctrol" 下，两条**有字面证据**的真相关页面
+    （rel≈0.19）正好卡在这条线外被剔掉。页面已有自己的准入策略
+    （配额 + 证据排序，见 ``apply_page_policy``），职责不重复叠加。
+    """
     if not rel:
         return {}, set()
     top = max(rel.values())
     keep: dict[int, float] = {}
     bypassed: set[int] = set()
     for uid, r in rel.items():
+        if exempt_ids and uid in exempt_ids:
+            keep[uid] = r
+            continue
         entry = cand[uid]
         best = max(s for _, s in entry.values())
         if r >= floor * top:
@@ -137,6 +160,161 @@ def threshold_filter(
 
 def rank_by_relevance(rel: dict[int, float]) -> list[tuple[int, float]]:
     return sorted(rel.items(), key=lambda x: (-x[1], x[0]))
+
+
+#: 页面命中的**证据等级**（越小越优先）。判据是"这个信号是否跨池可比"：
+#:
+#: · ``literal`` 字面证据（phrase 短语整串 / ident 标识符 / page_fts 页面词面 /
+#:   fts 全局全文）：查询词确实出现在内容里，可信度最高；
+#: · ``vector`` 全局向量池（vec / vec:<model>）：语义邻近，但含偶然——实测
+#:   噪声「Clink」正是靠它混进来的；
+#: · ``pool`` 仅页面池 KNN（page）：池子只有几百条，对任何查询都能凑出 top-k，
+#:   单独出现几乎不构成证据，只能作为最后候选。
+_PAGE_LITERAL_SIGNALS = frozenset({"phrase", "ident", "page_fts", "fts"})
+_PAGE_EVIDENCE_ORDER = {"literal": 0, "vector": 1, "pool": 2}
+
+
+def page_evidence(cand_entry: dict | None) -> str:
+    """判定一条页面命中的证据等级（见 ``_PAGE_EVIDENCE_ORDER`` 的说明）。"""
+    sigs = set(cand_entry or {})
+    if sigs & _PAGE_LITERAL_SIGNALS:
+        return "literal"
+    if "vec" in sigs or any(s.startswith("vec:") for s in sigs):
+        return "vector"
+    return "pool"
+
+
+def apply_page_policy(
+    ranked: list[tuple[int, float]],
+    cand: dict[int, dict[str, tuple[int, float]]],
+    page_ids: set[int],
+    *,
+    policy: dict | None = None,
+) -> tuple[list[tuple[int, float]], list[int]]:
+    """页面层准入：**配额约束下的择优**——证据等级只影响排序，不剔除页面。
+
+    两轮实测（231 页 × 十余个真实查询）得出了这条规则的最终形态：
+
+    **① 分数不能用来判别**：页面融合分与相关性甚至反相关——"LLM Wiki 工程化"
+    页（词面命中第 1、真相关）只有 0.21×top，而完全无关的「Mobile_App_AutoTest
+    发布记录」有 0.63×top。页面作为长文本聚合产物，融合分被"短条目天然高分 +
+    价值加权"系统性压制，与记忆/消息不可比。
+
+    **② 证据也不能当门槛**（第一版踩的坑）：改成"无强信号即剔除"后，查询
+    "windowsctrol"（拼错）的结果同时做错了两件事——语义最相关的「Windows
+    Control Core 窗口控制内核」只有弱信号（page）被**判死**，而噪声「Clink」
+    因偶然进入全局向量池被**放行**。拼错、换词、近义表达时，"真相关"恰恰最
+    缺字面证据；用证据做门槛等于系统性惩罚这些场景。
+
+    **所以本函数做的是"高分优先 + 低分字面兜底"**：
+
+    ① 候选按**分数降序**——高分语义相关优先。实测 "github网络失败"：真正对症的
+       「网络环境确认与连接故障排查」0.848、「opencode 卡在网络故障」0.841 若按
+       证据等级排序，会输给 0.334/0.197 两条"只字面沾边"的页面；
+    ② **低分页面必须有字面证据**（低于 ``literal_required_below``）才算数——
+       拼错场景真相关页只有 0.014~0.026 分，靠的正是残缺的 `page_fts`；
+    ③ 给这类"低分模糊匹配"留 ``literal_seats`` 个**保底席位**，否则中分的池内页
+       （拼错查询里的「Clink」0.627）会按分数把它们全部挤出配额。
+
+    可选收紧：``min_evidence``（``literal`` / ``vector`` / ``pool`` / ``any``）
+    是证据硬门槛，默认 ``any``——**档位表刻意不使用它**：它是"对所有页面生效"
+    的门槛，会把高分页面一起挡掉（实测档 3 曾用它，结果把候选里分最高的
+    「网络环境确认与连接故障排查」0.668 挡在门外，而 0.334/0.197 两条低分字面
+    页入选）。``floor_ratio`` 默认 0。
+
+    返回 ``(存活列表, 被剔除的页面 id)``；非页面条目永不受本策略影响。
+    """
+    p = {**DEFAULT_PAGE_POLICY, **(policy or {})}
+    if not ranked or not page_ids:
+        return list(ranked), []
+    top = ranked[0][1]
+    floor = top * float(p.get("floor_ratio", 0.0) or 0.0)
+    quota = max(int(p.get("max_in_results", 3)), 0)
+    literal_seats = min(max(int(p.get("literal_seats", 1)), 0), quota)
+    weak_below = float(p.get("literal_required_below", 0.7))
+    limit = {"any": 2, "pool": 2, "vector": 1, "literal": 0}.get(
+        str(p.get("min_evidence", "any") or "any").lower(), 2)
+
+    candidates = [(uid, score) for uid, score in ranked
+                  if uid in page_ids and score >= floor
+                  and _PAGE_EVIDENCE_ORDER[page_evidence(cand.get(uid))] <= limit]
+    candidates.sort(key=lambda x: -x[1])          # 分数优先（高分语义相关在前）
+    high = [uid for uid, s in candidates if s >= weak_below]
+    low_literal = [uid for uid, s in candidates
+                   if s < weak_below and page_evidence(cand.get(uid)) == "literal"]
+
+    picked: list[int] = []
+    seen: set[int] = set()
+
+    def take(lst: list[int], cap: int) -> None:
+        for uid in lst:
+            if len(picked) >= cap:
+                return
+            if uid in seen:
+                continue
+            picked.append(uid)
+            seen.add(uid)
+
+    take(high, quota - literal_seats)   # ① 高分语义，给字面兜底留出席位
+    take(low_literal, quota)            # ② 低分但有字面证据的模糊匹配
+    take(high, quota)                   # ③ 某一类不足时另一类补齐
+    admitted = set(picked)
+
+    kept: list[tuple[int, float]] = []
+    dropped: list[int] = []
+    for uid, score in ranked:
+        if uid in page_ids and uid not in admitted:
+            dropped.append(uid)
+        else:
+            kept.append((uid, score))
+    return kept, dropped
+
+
+def reserve_pages(
+    top: list[tuple[int, float]],
+    ranked: list[tuple[int, float]],
+    page_ids: set[int],
+    *,
+    policy: dict | None = None,
+) -> list[tuple[int, float]]:
+    """给**已准入**的页面保底占位，防止被记忆/消息挤出最终 k 条。
+
+    为什么必须保位：相关页的融合分可能只有 0.21×top（"LLM Wiki 工程化"页
+    对记忆 1.007），纯按分数排序根本进不了前 k——可它是词面精确命中第 1 名的
+    聚合答案。页面通道的立身之本就是"异质候选源各自成路"，这条原则要贯彻到
+    最终排序，否则准入做得再准也白搭（保下来又挤出去）。
+
+    **占位方式：替换末尾的非页面条目，而不是追加**——总数必须保持 ≤ k。
+    实测踩过：追加会让 `len(hits) = k + 1`，而下游（`rag_bridge.safe_cutoff_hits`
+    的 `hits[:max_keep]` 窗口、面板 `/api/memos/search` 的 `top` 截断）都按
+    前 N 条切，排在末尾的页面**正好被切掉**（k=8 时页面在窗口内所以正常，
+    k=20 时页面掉出窗口就消失了）。
+
+    `ranked` 应为**准入过滤之后**的列表；返回结果保持分数降序。
+    """
+    p = {**DEFAULT_PAGE_POLICY, **(policy or {})}
+    if not p.get("reserve_seats", True):
+        return list(top)
+    quota = max(int(p.get("max_in_results", 3)), 0)
+    if not quota:
+        return list(top)
+    chosen = {u for u, _ in top}
+    room = quota - sum(1 for u, _ in top if u in page_ids)
+    if room <= 0:
+        return list(top)
+    reserve = [(u, s) for u, s in ranked
+               if u in page_ids and u not in chosen][:room]
+    if not reserve:
+        return list(top)
+    out = list(top)
+    for uid, score in reserve:
+        for i in range(len(out) - 1, -1, -1):      # 从末尾找一个非页面替换
+            if out[i][0] not in page_ids:
+                out[i] = (uid, score)
+                break
+        else:
+            out.append((uid, score))               # 全是被保页面时空位不足才追加
+    return sorted(out, key=lambda x: -x[1])
 
 
 # ── FTS schema（懒建/迁移/回填/触发器） ─────────────────────────────────
@@ -229,6 +407,44 @@ def extract_identifiers(query: str) -> list[str]:
             if tok not in out:
                 out.append(tok)
     return out[:IDENT_CAP]
+
+
+def extract_phrases(query: str) -> list[str]:
+    """提取查询中的**多词短语**（英文词组，如 "command code" / "api key"）。
+
+    为什么单独一路：FTS 的 trigram 片段是 **OR** 连接的（"com" OR "omm" …），
+    丢掉了"词组整体出现"这一强信号——实测库里 12 个含 "Command Code" 的单元
+    在查询 "command" 下**11 个连候选池都没进**（bm25 对长文本不利 + 中文向量
+    模型对英文短语弱），而内容里明明写着 `Command Code（api.commandcode.ai…）`。
+    单个长标识符（`wait_for_element`）已由 identifier 通道覆盖，**多词短语**是
+    盲区；两者合起来才把"字面精确证据"补齐。
+
+    只取 ASCII 词组：中文没有空格分词，其字面匹配由 trigram 覆盖；混排串
+    （"github网络失败"）里的英文部分交给 identifier/向量通道。
+
+    **连续英文串要拆成滑动窗口**，不能整串吃下：查询 "deep seek command code"
+    若当成一个短语，库里几乎不可能连着写这五个词；拆成 2 词窗口
+    （"deep seek" / "seek command" / "command code"）才能命中真正存在的词组。
+    2 词窗口优先（"command code"、"api key" 是最常见形态），再补 3 词窗口
+    （"wait for element" 这类）。
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(p: str) -> None:
+        key = p.lower()
+        if len(p) >= _PHRASE_MIN_LEN and key not in seen:
+            seen.add(key)
+            out.append(p)
+
+    for m in _PHRASE_RE.finditer(query):
+        tokens = m.group(0).split()
+        for size in (2, 3):
+            for i in range(len(tokens) - size + 1):
+                add(" ".join(tokens[i:i + size]))
+                if len(out) >= _PHRASE_CAP:
+                    return out
+    return out
 
 
 # ── 三路通道（均支持 exclude_session） ─────────────────────────────────
@@ -370,6 +586,34 @@ def identifier_search(conn: sqlite3.Connection, idents: list[str], k: int,
     return [(uid, 1.0) for uid, _ in ordered]  # 精确匹配恒强证据
 
 
+def phrase_search(conn: sqlite3.Connection, phrases: list[str], k: int,
+                  *, exclude_ids: set[int] | None = None) -> ChannelHits:
+    """**短语整体匹配**：查询中的多词短语必须在文本/标题里**连续出现**才算命中。
+
+    与 ``identifier_search`` 同源——都是"字面精确证据"，返回恒强分 1.0：命中的
+    单元几乎必然真的在讲那件事（`Command Code（api.commandcode.ai…）`）。
+
+    为什么用 LIKE 而不是 FTS：LIKE 是"整串连续出现"的判据，**不受 bm25 长文本
+    劣势影响**（记忆条目长 → bm25 低 → 被 FTS 候选截断挤出，正是实测里 11/12
+    个单元消失的原因），也**不受 FTS 候选 LIMIT 截断影响**。
+    """
+    if not phrases:
+        return []
+    excl = exclude_ids or set()
+    counts: dict[int, int] = {}
+    for ph in phrases:
+        like = f"%{_like_esc(ph)}%"
+        for (uid,) in conn.execute(
+            "SELECT id FROM units"
+            " WHERE text LIKE ? ESCAPE '\\' OR IFNULL(title,'') LIKE ? ESCAPE '\\'",
+            (like, like),
+        ).fetchall():
+            if uid not in excl:
+                counts[uid] = counts.get(uid, 0) + 1
+    ordered = sorted(counts.items(), key=lambda x: (-x[1], x[0]))[:k]
+    return [(uid, 1.0) for uid, _ in ordered]
+
+
 # ── 多样性选择（P0-4） ─────────────────────────────────────────────────
 
 def select_diverse(fused: list[tuple[int, float]],
@@ -452,7 +696,7 @@ def hybrid_search(
     *,
     embedder: Embedder | None = None,
     k: int = 10,
-    candidate_k: int = 30,
+    candidate_k: int | None = None,   # None = 用档位（rag.retrieval.recall_level）
     expand_turns: bool = True,
     mode: str = "hybrid",            # hybrid | vector | fts
     diversity: bool = True,
@@ -463,13 +707,22 @@ def hybrid_search(
     # 手动加权的 unit 集合查询器：锁定的价值不随时间衰减
     include_low_value: bool = False,                  # 复盘模式放开 value<=0
     judge: "Judge | None" = None,                     # P2-1 终审
-    threshold_floor: float = THRESHOLD_FLOOR,
+    threshold_floor: float | None = None,   # None = 用档位
     origin: str = "",          # ""=全部 | "native"=自有沉淀 | "external"=外部投喂
     log: logging.Logger | None = None,
 ) -> list[Hit]:
     log = log or logging.getLogger("asrag.search")
     spec = settings.active_spec
     t0 = time.perf_counter()
+    # **召回严格度档位**（统一配置）：候选宽度与相对阈值都由档位给，
+    # 调用方显式传参则优先（测试与特殊场景需要精确控制）。
+    profile = settings.recall_profile
+    if candidate_k is None:
+        candidate_k = int(profile.get("candidate_k",
+                                      DEFAULT_RETRIEVAL["candidate_k"]))
+    if threshold_floor is None:
+        threshold_floor = float(profile.get("threshold_floor",
+                                            THRESHOLD_FLOOR))
     conn = open_index(settings.index_db)
     conn.row_factory = sqlite3.Row
     embedder = embedder or get_embedder(spec, settings=settings)
@@ -477,6 +730,11 @@ def hybrid_search(
         ensure_search_schema(conn, log=log)
         excl = _excl_ids(conn, exclude_session)
         idents = extract_identifiers(query) if mode == "hybrid" else []
+        phrases = extract_phrases(query) if mode in ("hybrid", "fts") else []
+        # 页面池（L2 知识页）：通道隔离与末端准入都要用，这里查一次
+        page_policy = settings.page_policy
+        page_ids = {r[0] for r in conn.execute(
+            "SELECT id FROM units WHERE source='wiki'")}
 
         channels: dict[str, ChannelHits] = {}
         if mode in ("hybrid", "vector"):
@@ -496,6 +754,12 @@ def hybrid_search(
         if mode == "hybrid" and idents:
             channels["ident"] = identifier_search(conn, idents, candidate_k,
                                                   exclude_ids=excl)
+        # 短语整体匹配（多词英文词组如 "command code"）：与 ident 同为"字面精确
+        # 证据"。补的是中英混合专有名词的盲区——见 phrase_search 的实测说明。
+        if phrases:
+            ph = phrase_search(conn, phrases, candidate_k, exclude_ids=excl)
+            if ph:
+                channels["phrase"] = ph
 
         # 页面层独立通道（L2 知识页）：异质候选源各自成路——页面是长文本
         # 聚合产物，混在大池子里几乎排不进 top-k（实测 200 名内仅 2 页）。
@@ -503,17 +767,16 @@ def hybrid_search(
         # （相关 0.826 与不相干 0.686~0.785 重叠），全文能精确锁定含词页面，
         # 两路一起投票更可靠。页面命中后与向量/全文/标识符一起参与 RRF 融合。
         if mode in ("hybrid", "vector"):
-            page_ids = {r[0] for r in conn.execute(
-                "SELECT id FROM units WHERE source='wiki'")}
+            page_k = int(page_policy.get("channel_k", PAGE_CHANNEL_K))
             if page_ids:
                 try:
                     qv_page = embedder.encode_query(query)
                     channels["page"] = subset_vector_search(
-                        conn, spec.vec_table, qv_page, PAGE_CHANNEL_K, page_ids)
+                        conn, spec.vec_table, qv_page, page_k, page_ids)
                 except Exception:           # 页面通道失败不影响主召回
                     pass
                 try:
-                    pf = subset_fts_search(conn, query, PAGE_CHANNEL_K, page_ids)
+                    pf = subset_fts_search(conn, query, page_k, page_ids)
                     if pf:
                         channels["page_fts"] = pf
                 except Exception:
@@ -543,11 +806,18 @@ def hybrid_search(
                 no_decay=(no_decay_ids(list(rel)) if no_decay_ids else None))
 
         if mode == "hybrid" and rel:
-            rel, bypassed = threshold_filter(rel, cand, floor=threshold_floor)
+            # 页面不参与通用阈值（rel 天然低一个量级，会系统性误杀；页面有
+            # 自己的准入策略：配额 + 证据排序，见 apply_page_policy）
+            rel, bypassed = threshold_filter(rel, cand, floor=threshold_floor,
+                                             exempt_ids=page_ids)
         else:
             bypassed = set()
 
         ranked = rank_by_relevance(rel)
+        # 页面层准入（在多样性之前）：配额 + 门限 + 强信号一致性。见
+        # apply_page_policy 的实测依据——页面刷屏来自"从未判定该不该进结果"。
+        ranked, dropped_pages = apply_page_policy(
+            ranked, cand, page_ids, policy=page_policy)
         if diversity:
             pool = ranked[: max(k * 4, k)]
             metas = _fetch_units(conn, [i for i, _ in pool])
@@ -573,6 +843,9 @@ def hybrid_search(
                                  k=k, max_per_conversation=max_per_conversation)
         else:
             top = ranked[:k]
+
+        # 准入页面保底占位：相关页融合分可能只有 0.21×top，纯按分数会被挤出 k
+        top = reserve_pages(top, ranked, page_ids, policy=page_policy)
 
         by_id = _fetch_units(conn, [i for i, _ in top])
         first_rank = {ch: {uid: i for i, (uid, _) in enumerate(hits, 1)}
@@ -609,7 +882,7 @@ def hybrid_search(
                 ident_rank=entry.get("ident", (None,))[0],
                 bypassed=unit_id in bypassed,
                 kind=kind, wiki_path=wiki_path, summary=summary,
-                origin=origin,
+                origin=origin, signals=frozenset(entry),
             )
             if expand_turns and kind != "page":
                 # 页面层没有"轮次上下文"可展开（它是聚合产物）
@@ -623,11 +896,13 @@ def hybrid_search(
             log.info("judge applied in=%d out=%d", before, len(hits))
 
         log.info(
-            "search q=%r mode=%s k=%d idents=%s vec_n=%d fts_n=%d ident_n=%d"
-            " dropped_low=%d bypassed=%d excl=%d fused_ids=%s cost_ms=%d",
-            query, mode, k, idents, len(channels.get("vec", [])),
+            "search q=%r mode=%s k=%d idents=%s phrases=%s vec_n=%d fts_n=%d"
+            " ident_n=%d phrase_n=%d dropped_low=%d bypassed=%d page_dropped=%d"
+            " excl=%d fused_ids=%s cost_ms=%d",
+            query, mode, k, idents, phrases, len(channels.get("vec", [])),
             len(channels.get("fts", [])), len(channels.get("ident", [])),
-            len(dropped_low), len(bypassed), len(excl),
+            len(channels.get("phrase", [])),
+            len(dropped_low), len(bypassed), len(dropped_pages), len(excl),
             [i for i, _ in top], int((time.perf_counter() - t0) * 1000))
         return hits
     finally:
