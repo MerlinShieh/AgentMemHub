@@ -924,6 +924,25 @@ def cmd_wiki(args) -> int:
         print(_json.dumps(res, ensure_ascii=False, indent=2, default=str))
         return 0
 
+    # ---- index-pages（页面层投影：L2 知识页 → 召回面）----
+    if args.action == "index-pages":
+        from agentmemhub import wiki_index
+        from agentmemhub.rag.config import load_settings
+        from agentmemhub.rag.ingest import open_index
+        from agentmemhub import config as _cfg
+        l2 = args.out or (_cfg.config().wiki.get("out_l2") or "")
+        if not l2:
+            print("需要 --out 指定 L2 产出目录（或在 yaml 配置 wiki.out_l2）")
+            return 2
+        idx = open_index(load_settings().index_db)
+        try:
+            r = wiki_index.project_pages(idx, l2)
+        finally:
+            idx.close()
+        print(_json.dumps(r, ensure_ascii=False, indent=2))
+        print("页面层已进召回面：检索时与记忆、原始对话一起融合返回（kind=page）")
+        return 0
+
     # ---- backfill-manual（历史 Agent 直写记忆回填蒸馏表）----
     if args.action == "backfill-manual":
         from agentmemhub import distill as _distill
@@ -1110,12 +1129,14 @@ def build_parser() -> argparse.ArgumentParser:
     pwk = sub.add_parser("wiki", help="LLM Wiki 运维：对齐审计 / 增量更新 / 查看失败清单 / 定向补跑")
     pwk.add_argument("--action", default="failures",
                      choices=["failures", "retry", "align", "update",
-                              "triggers", "trigger", "backfill-manual"],
+                              "triggers", "trigger", "backfill-manual",
+                              "index-pages"],
                      help="failures=查看失败清单（默认）；retry=只重跑失败项；"
                           "align=审计 wiki 产物与索引库的差距（只读）；"
                           "update=增量更新（只重编脏会话 L1 与受影响 L2 域）；"
                           "triggers=查看触发器配置与状态；trigger=手动执行一次触发检测；"
-                          "backfill-manual=历史 Agent 直写记忆回填蒸馏表（幂等）")
+                          "backfill-manual=历史 Agent 直写记忆回填蒸馏表（幂等）；"
+                          "index-pages=L2 知识页投影进召回面（页级召回）")
     pwk.add_argument("--out", required=True, help="wiki 产出目录（失败清单在其下）")
     pwk.add_argument("--stage", default="", choices=["", "l1", "l2"],
                      help="限定阶段：l1=第一级；l2=第二级；留空=全部")

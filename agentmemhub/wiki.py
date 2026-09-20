@@ -470,6 +470,21 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
         "domains": dom_out})
     wm.write_manifest(wm.manifest_path(l2, "l2"), mf2)
 
+    # 页面层投影：知识页变了，召回面必须跟着变（否则 Agent 检索到的是旧知识）。
+    # 全量对齐、幂等——页面重编/改名/删除都会自动收敛。失败旁路不阻塞更新。
+    page_index: dict[str, Any] = {}
+    try:
+        from agentmemhub import wiki_index
+        from agentmemhub.rag.ingest import open_index
+        from agentmemhub.rag.config import load_settings
+        conn = open_index(load_settings().index_db)
+        try:
+            page_index = wiki_index.project_pages(conn, l2, log=lambda *_: None)
+        finally:
+            conn.close()
+    except Exception as e:                      # noqa: BLE001
+        page_index = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+
     hints: list[str] = []
     n_pending = len(domain_map.get("待整理") or [])
     if n_pending:
@@ -490,6 +505,7 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
                "pages": sum(len(m) for _, _, m in preset)},
         "linkfix": {k: fix[k] for k in ("total", "ok", "fixed", "dropped")},
         "manifest": {"l1_inputs": mf1["n_inputs"], "l2_inputs": mf2["n_inputs"]},
+        "page_index": page_index,
         "snapshot": {"id": snap.get("id"),
                      "error": snap.get("error")},
         "hints": hints,

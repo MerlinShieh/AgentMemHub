@@ -161,11 +161,27 @@ _SELECT_TRACE = (
 
 def safe_cutoff_hits(hits: list[dict], *, max_keep: int = 5,
                      floor_ratio: float = 0.7) -> list[dict]:
-    """机械终审（dict 版 ext.safe_cutoff 同规则）：≥0.7×top 且 ≤max_keep，至少保 1。"""
+    """机械终审（dict 版 ext.safe_cutoff 同规则）：≥0.7×top 且 ≤max_keep，至少保 1。
+
+    **页面层例外**（kind='page'）：L2 知识页是聚合产物、篇幅长（中位 1639 字符），
+    单一向量对长文本的相似度天然低于短条目（实测 0.64 vs 记忆 1.04）——
+    用"同质候选"的阈值衡量它会把它系统性误杀，而它恰恰是信息量最大的
+    聚合答案。所以页面用**更宽松的相对阈值**（0.5×top 而非 0.7×top）：
+    够格的页面留下，明显不相干的仍会被滤掉（避免刷屏）。
+    """
     if not hits:
         return []
     top = max(h["score"] for h in hits[:1]) or 0.0
     kept = [h for h in hits[:max_keep] if h["score"] >= floor_ratio * top]
+    page_floor = top * 0.5
+    pages = [h for h in hits
+             if h.get("kind") == "page" and h not in kept
+             and h["score"] >= page_floor]
+    for p in pages:
+        if len(kept) >= max_keep:
+            break
+        kept.append(p)
+    kept.sort(key=lambda h: -h["score"])
     return kept or [hits[0]]
 
 
@@ -214,17 +230,28 @@ def search(agent: str, query: str, *, k: int = SEARCH_MAX_HITS,
     dto_hits = []
     for h in hits:
         m = refmap.get(h.unit_id) or {}
+        # 页面层（L2 知识页）：snippet 用摘要（聚合答案的要点，比截断正文更
+        # 可读）；正文按 wikiPath 按需读（两阶段召回）。其余层保持原样。
+        if h.kind == "page":
+            snippet = h.summary or h.text[:200]
+        else:
+            snippet = (h.title + " | " if h.title else "") + h.text[:200]
         dto_hits.append({
             "tier": 2, "refKind": "trace",
             "refId": m.get("refId", f"unit:{h.unit_id}"),
             "score": round(h.score, 4),
-            "snippet": (h.title + " | " if h.title else "") + h.text[:200],
+            "snippet": snippet,
             # 会话定位（面板点击跳转用）；原子记忆（source='memory'）无会话
             "source": m.get("source", ""),
             "conversationId": m.get("conversationId", ""),
             "turnKey": m.get("turnKey", ""),
             "title": m.get("title", ""),
             "atomic": m.get("source") == "memory",
+            # 知识层级（page/memory/message）：页面是聚合答案、记忆是具体
+            # 结论、消息是原始细节——调用方据此决定呈现与是否下钻
+            "kind": h.kind,
+            "wikiPath": h.wiki_path or "",
+            "summary": h.summary or "",
         })
     if curate:
         # 相关度截断（≥0.7×top）但不再硬砍到 5 条，上限放宽到 SEARCH_MAX_HITS

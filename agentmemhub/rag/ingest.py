@@ -77,6 +77,11 @@ def ensure_bridge_schema(conn: sqlite3.Connection) -> None:
     # 无法回答——任何按增量消费 units 的下游（如 wiki 投影）都只能全量重扫。
     if "updated_at" not in cols:
         conn.execute("ALTER TABLE units ADD COLUMN updated_at INTEGER")
+    # wiki_path：页面层投影（source='wiki'）专用——L2 页面在知识库目录里的
+    # 相对路径，供召回命中后"按需读全文"（两阶段召回的第二阶段）。
+    # 页面是聚合产物、篇幅长（中位 1639 字符），不该一股脑塞进召回上下文。
+    if "wiki_path" not in cols:
+        conn.execute("ALTER TABLE units ADD COLUMN wiki_path TEXT")
     # 自愈式回填（幂等，每次调用都兜一次）：覆盖两类 NULL —— 补列时的存量行，
     # 以及任何绕过写入路径产生的行（例如仍在跑**旧代码的常驻 MCP 进程**写入
     # 的记忆——实测真实发生过）。用发现时刻填充，不用 units.time（那是事件

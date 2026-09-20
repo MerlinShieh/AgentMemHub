@@ -62,6 +62,33 @@ class Hit:
     ident_rank: int | None = None
     bypassed: bool = False
     turn_context: list[tuple[str, str]] = field(default_factory=list)
+    #: 命中的知识层级：page（L2 知识页，聚合答案）/ memory（蒸馏或直写记忆，
+    #: 具体结论）/ message（原始对话细节）。调用方据此决定如何呈现——
+    #: 页面给"标题+摘要+路径"（两阶段：需要时按 wiki_path 读全文），
+    #: 记忆与消息本身就是短文本。
+    kind: str = "message"
+    #: 页面层专用：知识库目录里的相对路径（两阶段召回的第二阶段入口）
+    wiki_path: str | None = None
+    #: 页面层的摘要（从正文解析），比整页短、适合直接进上下文
+    summary: str | None = None
+
+
+#: 页面层召回时返回的正文上限（字符）——整页中位 1639、最长 7221，
+#: 全塞进上下文会挤占空间；需要细节时按 wiki_path 读全文。
+PAGE_TEXT_CAP = 600
+
+#: 页面独立通道取前 N（213 页的池子里取 8，够用且不喧宾夺主）
+PAGE_CHANNEL_K = 8
+
+
+def kind_of(src_id: str | None) -> str:
+    """按投影锚判定知识层级（锚前缀是唯一可靠的判据）。"""
+    s = src_id or ""
+    if s.startswith("wiki_"):
+        return "page"
+    if s.startswith(("dst_", "mcp_")):
+        return "memory"
+    return "message"
 
 
 # ── 候选级融合与闸门（纯函数，直接断言） ─────────────────────────────────
@@ -229,6 +256,35 @@ def vector_search(conn: sqlite3.Connection, vec_table: str, qvec: np.ndarray,
     return out
 
 
+def subset_vector_search(conn: sqlite3.Connection, vec_table: str,
+                         qvec: np.ndarray, k: int,
+                         allow_ids: set[int]) -> ChannelHits:
+    """**子集内的**向量检索：只在 allow_ids（如页面层 213 条）里取 top-k。
+
+    为什么需要独立通道：页面是整页长文本，单一向量对长文本的相似度天然低于
+    短条目——混在 2.3 万条的大池子里做 top-30，页面几乎排不进去（实测：
+    200 名内只有 2 个页面）。给异质候选源各自一个通道，是本引擎既有的设计
+    （向量/全文/标识符三路本就是异质信号），页面层同理。
+
+    vec0 的 KNN 查询不支持业务过滤 → 超采样后在 Python 侧按 allow_ids 筛。
+    页面量级小（数百），超采样成本可接受。
+    """
+    if not allow_ids:
+        return []
+    fetch = min(len(allow_ids) * 3, 2000)
+    rows = conn.execute(
+        f"SELECT rowid, distance FROM {vec_table}"
+        " WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+        (qvec.astype(np.float32).tobytes(), fetch)).fetchall()
+    out: ChannelHits = []
+    for rid, dist in rows:
+        if rid in allow_ids:
+            out.append((rid, max(1.0 - float(dist), 0.0)))
+            if len(out) >= k:
+                break
+    return out
+
+
 def fts_search(conn: sqlite3.Connection, query: str, k: int,
                *, exclude_ids: set[int] | None = None) -> ChannelHits:
     q = query.strip()
@@ -324,9 +380,16 @@ def _fetch_units(conn: sqlite3.Connection, ids: list[int]) -> dict[int, sqlite3.
     if not ids:
         return {}
     marks = ",".join("?" * len(ids))
-    rows = conn.execute(
-        f"SELECT id, source, conversation_id, seq, role, turn_key, time, title, text"
-        f" FROM units WHERE id IN ({marks})", ids)
+    base = ("id, source, conversation_id, seq, role, turn_key, time, title, text")
+    # src_id / wiki_path 由 ensure_bridge_schema 幂等补列（页面层召回需要）；
+    # 老库或极简测试库可能缺列 → 降级为不含它们的查询（kind 退化为 message）
+    try:
+        rows = conn.execute(
+            f"SELECT {base}, src_id, wiki_path FROM units WHERE id IN ({marks})",
+            ids)
+    except sqlite3.OperationalError:
+        rows = conn.execute(
+            f"SELECT {base} FROM units WHERE id IN ({marks})", ids)
     return {r["id"]: r for r in rows}
 
 
@@ -391,6 +454,20 @@ def hybrid_search(
             channels["ident"] = identifier_search(conn, idents, candidate_k,
                                                   exclude_ids=excl)
 
+        # 页面层独立通道（L2 知识页）：异质候选源各自成路——页面是长文本
+        # 聚合产物，混在大池子里几乎排不进 top-k（实测 200 名内仅 2 页）。
+        # 页面命中后与向量/全文/标识符一起参与 RRF 融合。
+        if mode in ("hybrid", "vector"):
+            page_ids = {r[0] for r in conn.execute(
+                "SELECT id FROM units WHERE source='wiki'")}
+            if page_ids:
+                try:
+                    qv_page = embedder.encode_query(query)
+                    channels["page"] = subset_vector_search(
+                        conn, spec.vec_table, qv_page, PAGE_CHANNEL_K, page_ids)
+                except Exception:           # 页面通道失败不影响主召回
+                    pass
+
         cand = fuse_channels(channels)
         rel = {uid: relevance_of(e) for uid, e in cand.items()}
 
@@ -414,10 +491,10 @@ def hybrid_search(
         if diversity:
             pool = ranked[: max(k * 4, k)]
             metas = _fetch_units(conn, [i for i, _ in pool])
-            # 会话限席只约束会话轨迹；原子记忆（source='memory'）同属伪会话
-            # (memory/mcp)，每条独立成席，否则一批记忆互相挤占 top-k
+            # 会话限席只约束会话轨迹；原子记忆（source='memory'）与知识页
+            # （source='wiki'）各自独立成席——否则同域的多张页面会互相挤占
             conv_of = {i: (m["source"],
-                           f"u{i}" if m["source"] == "memory"
+                           f"u{i}" if m["source"] in ("memory", "wiki")
                            else m["conversation_id"])
                        for i, m in metas.items()}
             emb_of: dict[int, np.ndarray] = {}
@@ -446,17 +523,33 @@ def hybrid_search(
             if r is None:
                 continue
             entry = cand.get(unit_id, {})
+            src_id = r["src_id"] if "src_id" in r.keys() else None
+            kind = kind_of(src_id)      # 注意：不要用 k（那是 top-k 参数）
+            text = r["text"]
+            summary = None
+            wiki_path = None
+            if kind == "page":
+                # 两阶段：正文截断（整页中位 1639 / 最长 7221 字符），
+                # 摘要单独给出，需要细节时按路径读全文
+                m = re.search(r"摘要：(.+)", text)
+                summary = m.group(1).strip() if m else None
+                if "wiki_path" in r.keys():
+                    wiki_path = r["wiki_path"]
+                if len(text) > PAGE_TEXT_CAP:
+                    text = text[:PAGE_TEXT_CAP].rstrip() + "…"
             hit = Hit(
                 unit_id=unit_id, source=r["source"],
                 conversation_id=r["conversation_id"], seq=r["seq"],
                 role=r["role"], turn_key=r["turn_key"], time=r["time"],
-                title=r["title"], text=r["text"], score=score,
+                title=r["title"], text=text, score=score,
                 vec_rank=entry.get("vec", (None,))[0],
                 fts_rank=entry.get("fts", (None,))[0],
                 ident_rank=entry.get("ident", (None,))[0],
                 bypassed=unit_id in bypassed,
+                kind=kind, wiki_path=wiki_path, summary=summary,
             )
-            if expand_turns:
+            if expand_turns and kind != "page":
+                # 页面层没有"轮次上下文"可展开（它是聚合产物）
                 hit.turn_context = expand_turn(
                     conn, hit.source, hit.conversation_id, hit.turn_key)
             hits.append(hit)

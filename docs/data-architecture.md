@@ -23,10 +23,11 @@
 ┌───────────────────────────────────────────────────────────────────────────┐
 │ ③ 索引库 database/session_rag.db（检索层 + 记忆实体层，自持）               │
 │                                                                           │
-│  units（召回投影面，~2.3 万行）——三路召回只查它                             │
+│  units（召回投影面，~2.3 万行）——三路召回 + 页面通道只查它                 │
 │    ├ 消息层  msg:/line:/p:* 投影          ←─ ② ingest                     │
 │    ├ 记忆层  dst_<content_hash> 投影      ←─ ③ 蒸馏 S4                    │
-│    └ 手写层  mcp_<content_anchor> 投影    ←─ ④ memory_save（引擎写入）      │
+│    ├ 手写层  mcp_<content_anchor> 投影    ←─ ④ memory_save（引擎写入）      │
+│    └ 页面层  wiki_<内容指纹> 投影          ←─ ⑥ 页面投影（整页，不切片）      │
 │  vec_* / FTS 影子表（向量 + 全文索引）   unit_values（⭐/👍👎）              │
 │                                                                           │
 │  distilled_memories（蒸馏表，记忆实体账本）                                 │
@@ -127,13 +128,15 @@ MCP memory_save(content="…", importance="high", type="lesson")
 
 ---
 
-## 4. 召回链路（三路融合，实测 recall 0.930）
+## 4. 召回链路（三路融合 + 页面独立通道，实测 recall 0.930）
 
 ```
 查询 → ┌ 向量路   vec_bge_*  kNN（语义相似、同义改写）
        ├ 全文路   FTS5 trigram（精确术语、专有名词）
-       └ 标识符路 高熵串 LIKE 精确匹配（代码符号、id）
-       → 候选级 RRF 融合 → units 行 → 按 src_id 锚反查内容与元数据
+       ├ 标识符路 高熵串 LIKE 精确匹配（代码符号、id）
+       └ 页面路   在 source='wiki' 子集内的向量 KNN（L2 知识页专用）
+       → 候选级 RRF 融合 → value 加权 → 阈值截断 → 多样性限席
+       → units 行 → 按 src_id 锚反查内容与元数据
 ```
 
 - 检索动作只发生在 **units 投影面**；源库、蒸馏表都不直接参与检索
@@ -143,6 +146,52 @@ MCP memory_save(content="…", importance="high", type="lesson")
 - MCP `memory_search` 与面板召回**同源**（rag_bridge 进程内直调同一索引库）
 - 向量表注意：存在 bge_small / bge_base 两套（多模型写入架构），**active_spec
   决定现用表**——诊断/脚本别拿错表
+
+### 4.1 页面层（L2 知识页）召回
+
+wiki 页面此前是**只读产物**（Agent 搜不到）。现在 L2 页面**整页投影**成 units
+的一层，参与召回：
+
+| 项 | 取值 |
+|---|---|
+| 锚 | `src_id='wiki_<md 内容指纹>'`、`source='wiki'`、`role='wiki'` |
+| conversation_id | 主题域（可按域筛选） |
+| text | 标题 + 摘要 + 正文（全文进向量与 FTS） |
+| `wiki_path` | 页面相对路径——**两阶段召回的第二阶段入口** |
+| 来源分 | 0.6（与 Agent 主动写入同档，参与价值加权） |
+| 投影 | **全量对齐**（扫目录 → upsert → 删已不存在的页面），幂等收敛 |
+
+召回形态（`kind` 字段区分三层）：
+
+| kind | 是什么 | 返回 | 下钻 |
+|---|---|---|---|
+| `page` | L2 知识页（聚合答案） | 标题 + **摘要** + 路径；正文截断到 600 字符 | 按 `wiki_path` 读整页 |
+| `memory` | 蒸馏/直写记忆（具体结论） | 内容本身（短文） | `[m<id>]` → 记忆 → 对话轮次 |
+| `message` | 原始对话细节 | 原文片段 + 轮次上下文 | — |
+
+三个关键设计：
+
+1. **页面走独立通道**（`subset_vector_search`）：页面是长文本，混在 2.3 万条
+   大池子里做 top-30 几乎排不进去（实测：200 名内仅 2 个页面）。给异质候选源
+   各自成路是本引擎既有设计（向量/全文/标识符本就是这个思路）。
+2. **页面不受"同质阈值"约束**：终审的相对阈值（≥0.7×top）对页面放宽到
+   0.5×top——长文本相似度天然低于短条目（0.64 vs 1.04），用统一阈值会被
+   系统性误杀，而页面正是信息量最大的聚合答案。
+3. **向量用整页正文而非摘要**：实测摘要向量更差（查询"容错语义"时核心页从
+   0.826 掉出榜单）——摘要虽聚焦却丢了正文关键词。
+
+### 4.2 页面层的已知局限（待调优）
+
+页面长文本 + 单一向量 → **相关性区分度弱**：实测相关页 0.826 与明显不相干页
+0.686~0.785 分数重叠，导致结果里伴随噪声页面。可行的改进方向（按性价比）：
+
+1. **页面也开 FTS 通道**：精确术语能锁定含该词的页面，比向量区分度高
+2. **页面内分块向量**（检索粒度细、返回仍是整页）——注意这与"把页面切片
+   成独立条目"不同，不破坏"整页作为知识单元"
+3. **LLM rerank**（引擎已有 `judge` 参数）——成本换质量
+
+L1 页面**不进召回面**（只作下钻）：实测 L2 覆盖了 98.7% 的 L1 内容（221/224），
+且"按会话找内容"的需求由消息层投影覆盖——L1 进召回面只会与 L2 竞争排序。
 
 ---
 
@@ -319,6 +368,8 @@ uv run python -m agentmemhub wiki --action update   # 增量更新
 uv run python -m agentmemhub wiki --action triggers # 触发器配置与状态
 uv run python -m agentmemhub wiki --action trigger [--force]
 uv run python -m agentmemhub wiki --action backfill-manual   # 直写记忆补账（幂等）
+uv run python -m agentmemhub wiki --action index-pages --out <L2 目录>
+                                                 # L2 知识页投影进召回面（页面级召回）
 uv run python -m agentmemhub wiki --action failures [--stage l1|l2]
 uv run python -m agentmemhub wiki --action retry [--stage l1|l2] --src <第一级目录>
 
