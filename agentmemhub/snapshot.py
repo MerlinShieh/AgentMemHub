@@ -16,6 +16,9 @@ wiki 产物与蒸馏表都是 **LLM 产物**：重编要花钱花时间，且 LL
 存放：`<data_dir>/backups/<时间戳id>/`——data_dir 被测试沙箱覆盖
 （AGENTMEM_HUB_DATA_DIR），备份随测试自动隔离，绝不污染真实数据。
 
+保留策略：默认最多 5 份（超出删最旧），由配置 `snapshot.keep` 调整——见
+`keep_count()`。一份约 190 MB（索引库 + 两级 wiki 产物），磁盘紧就调小。
+
 回滚语义：restore 前会**先把当前状态做成快照**（防误恢复不可逆），
 再整体覆盖。任何时刻都有一级后悔药。
 """
@@ -30,9 +33,25 @@ from pathlib import Path
 from typing import Any
 
 from agentmemhub import config as hub_config
+from agentmemhub.config import DEFAULT_SNAPSHOT
 
-#: 快照保留份数（超出自动删最旧）
-KEEP = 5
+#: 快照保留份数内置默认（配置 `snapshot.keep` 覆盖；见 keep_count）。
+#: 单一来源：直接取 config 层的默认值，避免同一默认值在两处各写一遍。
+KEEP = DEFAULT_SNAPSHOT["keep"]
+
+
+def keep_count() -> int:
+    """生效的保留份数：配置 `snapshot.keep` > 内置默认 KEEP。
+
+    非法值（非整数 / 小于 1）一律回退默认——本函数的产物是**删目录**的依据，
+    配置里一个笔误不该把历史快照清空；宁可多留几份。
+    """
+    raw = hub_config.config().snapshot.get("keep", KEEP)
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return KEEP
+    return v if v >= 1 else KEEP
 
 
 def backups_dir() -> Path:
@@ -93,18 +112,18 @@ def create(reason: str = "手动") -> dict[str, Any]:
     (root / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1),
                                     encoding="utf-8")
     _prune()
-    return {**meta, "path": str(root),
+    return {**meta, "path": str(root), "keep": keep_count(),
             "size_mb": round(sum(f.stat().st_size for f in root.rglob("*")
                                  if f.is_file()) / 1e6, 1)}
 
 
 def _prune() -> list[str]:
-    """保留最近 KEEP 份，删最旧。返回被删的 id。"""
+    """保留最近 keep_count() 份，删最旧。返回被删的 id。"""
     root = backups_dir()
     snaps = sorted([d for d in root.iterdir() if d.is_dir()],
                    key=lambda d: d.name)
     removed = []
-    for d in snaps[:-KEEP]:
+    for d in snaps[:-keep_count()]:
         shutil.rmtree(d, ignore_errors=True)
         removed.append(d.name)
     return removed

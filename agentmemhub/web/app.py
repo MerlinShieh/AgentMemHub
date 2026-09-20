@@ -1348,9 +1348,12 @@ def create_app(db_path: Path | None = None):
         一份快照 = 索引库整库（蒸馏表/units/评分/向量）+ wiki 产物全目录，
         回滚时作为整体恢复——所有跨库引用关系（dst_ 锚、[m<id>] 溯源、
         manifest 指纹）随之回到同一时点。
+
+        `keep` = 生效的保留上限（配置 snapshot.keep，默认 5），超出自动删最旧。
         """
         from agentmemhub import snapshot
-        return JSONResponse({"snapshots": snapshot.list_snapshots()})
+        return JSONResponse({"snapshots": snapshot.list_snapshots(),
+                             "keep": snapshot.keep_count()})
 
     @app.post("/api/snapshots/create", summary="创建快照（同步，秒级）")
     def api_snapshots_create(reason: str = Query(default="", description="快照原因（记录在 meta）")):

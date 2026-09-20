@@ -40,6 +40,8 @@ def test_接口_列表为空时明确标记(snap_env):
     r = client.get("/api/snapshots")
     assert r.status_code == 200
     assert r.json()["snapshots"] == []
+    # 保留上限一并下发，面板/调用方可据此提示"还能留几份"
+    assert r.json()["keep"] >= 1
 
 
 def test_接口_创建与列表(snap_env):

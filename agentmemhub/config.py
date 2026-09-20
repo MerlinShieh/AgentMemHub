@@ -93,6 +93,17 @@ DEFAULT_WIKI = {
 }
 
 
+#: 快照保留策略（`snapshot` 段）。
+#:
+#: 为什么值得单独配：快照是**不可重建产物**的最后一道后悔药——wiki 页面重编要
+#: 花钱花时间且结果会漂移，unit_values 里的反馈演化值更是完全无法重建。保留份数
+#: 是"磁盘 vs 安全感"的权衡：一份约 190 MB（索引库 + 两级 wiki 产物），默认 5 份
+#: 约 1 GB。磁盘紧就调小，或反过来调大——不必改代码。
+DEFAULT_SNAPSHOT = {
+    "keep": 5,   # 最多保留几份（超出自动删最旧）
+}
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     """深合并（嵌套 dict 递归合并，其余类型直接覆盖）。"""
     out = dict(base)
@@ -352,6 +363,17 @@ class Config:
         l2 = dict(merged.get("l2") or {})
         l2["llm"] = self._merge_llm(self.llm, l2.get("llm") or {})
         return l2
+
+    # -- 快照 -------------------------------------------------------------
+
+    @property
+    def snapshot(self) -> dict[str, Any]:
+        """快照配置（已合并默认值，调用方无需处理缺键）。
+
+        `keep` = 最多保留几份，超出自动删最旧。非法值由 snapshot.keep_count()
+        统一兜底（回退内置默认），此处只负责把 yaml 值原样递过去。
+        """
+        return _deep_merge(DEFAULT_SNAPSHOT, self._get("snapshot", {}) or {})
 
     # -- 内部 -------------------------------------------------------------
 

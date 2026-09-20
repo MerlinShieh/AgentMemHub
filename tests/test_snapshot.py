@@ -39,12 +39,23 @@ def env(tmp_path, monkeypatch):
     return tmp_path, idx, l1, l2
 
 
+def _pin_keep(monkeypatch, n):
+    """把生效的保留份数钉死为 n —— 配置层 `snapshot.keep` 的替身。
+
+    保留份数现在来自配置（config().snapshot.keep），不再是模块常量，
+    所以测试要替换配置视图而不是 monkeypatch KEEP。
+    """
+    class _Cfg:
+        snapshot = {"keep": n}
+    monkeypatch.setattr(snapshot.hub_config, "config", lambda: _Cfg())
+
+
 def test_create_备份索引库与wiki目录(env, monkeypatch):
     _, idx, l1, l2 = env
     (l1 / "a__s1.md").write_text("页面内容", encoding="utf-8")
-    monkeypatch.setattr(snapshot, "KEEP", 5)
     r = snapshot.create(reason="测试")
     assert r["parts"] == ["session_rag.db", "wiki_l1", "wiki_l2"]
+    assert r["keep"] == snapshot.keep_count()      # 返回值带上生效的保留上限
     conn = sqlite3.connect(r["path"] + "/session_rag.db")
     assert conn.execute("SELECT content FROM distilled_memories").fetchone()[0] == "原始内容"
     conn.close()
@@ -73,13 +84,38 @@ def test_restore_把改坏的数据恢复为快照状态(env):
     assert snapshot.list_snapshots()[0]["reason"].startswith("restore")
 
 
-def test_保留策略_超出上限删最旧(env, monkeypatch):
-    monkeypatch.setattr(snapshot, "KEEP", 2)
+def test_保留策略_由配置决定保留份数(env, monkeypatch):
+    _pin_keep(monkeypatch, 2)
+    assert snapshot.keep_count() == 2
     for i in range(3):
         snapshot.create(reason=f"第{i}份")
     ids = [s["id"] for s in snapshot.list_snapshots()]
     assert len(ids) == 2                      # 只剩最近 2 份
     assert snapshot.list_snapshots()[0]["reason"] == "第2份"
+
+
+def test_保留策略_调大时全部留存(env, monkeypatch):
+    _pin_keep(monkeypatch, 9)
+    for i in range(3):
+        snapshot.create(reason=f"第{i}份")
+    assert len(snapshot.list_snapshots()) == 3
+    assert snapshot.keep_count() == 9
+
+
+@pytest.mark.parametrize("bad", [0, -1, "abc", None, "  "])
+def test_保留策略_非法配置回退内置默认(env, monkeypatch, bad):
+    """配置写错不能让历史快照被清空——非法值一律回退默认。"""
+    _pin_keep(monkeypatch, bad)
+    assert snapshot.keep_count() == snapshot.KEEP
+    for i in range(snapshot.KEEP + 2):
+        snapshot.create(reason=f"第{i}份")
+    assert len(snapshot.list_snapshots()) == snapshot.KEEP
+
+
+def test_保留策略_默认配置为5份(env):
+    """内置默认值（用户可见的契约）；本地 yaml 若另配则按配置走。"""
+    assert snapshot.KEEP == 5
+    assert snapshot.keep_count() >= 1
 
 
 def test_restore_不存在的快照明确报错(env):

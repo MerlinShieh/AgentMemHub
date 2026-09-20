@@ -998,16 +998,18 @@ def cmd_snapshot(args) -> int:
     if args.snapshot_action == "list":
         snaps = snapshot.list_snapshots()
         if not snaps:
-            print("暂无快照")
+            print("暂无快照（保留上限 %d 份）" % snapshot.keep_count())
             return 0
         for s in snaps:
             print("%s  %s  %6.1f MB  %s" % (
                 s["id"], (s["reason"] or "")[:24], s["size_mb"],
                 "、".join(s["parts"])))
+        print("共 %d 份；保留上限 %d 份（超出自动删最旧，改配置 snapshot.keep 调整）"
+              % (len(snaps), snapshot.keep_count()))
         return 0
     if args.snapshot_action == "restore":
         if not args.snapshot_id:
-            print("restore 需要 --snapshot-id（用 snapshot --action list 查看可用快照）")
+            print("restore 需要 --snapshot-id（用 snapshot --snapshot-action list 查看可用快照）")
             return 2
         r = snapshot.restore(args.snapshot_id, wiki_only=args.wiki_only,
                              db_only=args.db_only)
