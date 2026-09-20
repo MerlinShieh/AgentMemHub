@@ -429,12 +429,27 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
 
     # ---- 4. 只重编脏域（partial 模式）----
     from types import SimpleNamespace
+    # 域目录名：优先沿用 manifest 记录的现有目录；manifest 缺失时**回退到按
+    # slug 在磁盘上找同名域目录**（早期实现直接兜底 "99-"+slug，导致 manifest
+    # 信息一丢就新建 99-* 目录、与既有域目录并存——实测踩坑，L2 目录里一度
+    # 躺着 9 个 99-* 残留目录）。真的找不到才新建（此时用 99- 前缀标记待整理）。
+    existing_dirs = {d.name: d.name for d in l2.iterdir() if d.is_dir()}
+
+    def _dir_for(name: str) -> str:
+        rec = (dom_meta.get(name) or {}).get("dir")
+        if rec:
+            return rec
+        slug = wiki_aggregate._slug(name)
+        for dn in existing_dirs:
+            if dn.split("-", 1)[-1] == slug:
+                return dn
+        return "99-" + slug
+
     preset = []
     for n in dirty_domains:
         fs = set(domain_map[n])
         members = [p for p in pages if p["file"] in fs]
-        dn = (dom_meta.get(n) or {}).get("dir") or ("99-" + wiki_aggregate._slug(n))
-        preset.append((n, dn, members))
+        preset.append((n, _dir_for(n), members))
     args = SimpleNamespace(
         src=str(l1), out=str(l2), db=db, stage="all", workers=workers or 0,
         limit=0, domain="", dmin=20, dmax=60, batch=120, min_pages=2,

@@ -1430,6 +1430,12 @@ def _project_one(idx: sqlite3.Connection, m: dict, vec: np.ndarray,
     seq 取负值（-memory_id）：既不与采集事件的正 seq 冲突，又保证同会话唯一。
     """
     src_id = DISTILLED_SRC_PREFIX + (m.get("content_hash") or fingerprint(m["content"]))
+    # 本函数要写 origin（来源维度）——列不存在时先幂等补列（极简测试库/老库）。
+    # 用 PRAGMA 判断而非无条件调用：批量投影时不希望每行都做一次全量补列。
+    _cols = {r[1] for r in idx.execute("PRAGMA table_info(units)")}
+    if "origin" not in _cols:
+        from agentmemhub.rag.ingest import ensure_bridge_schema
+        ensure_bridge_schema(idx)
     topic = m.get("topic") or ""
     text = m["content"]
     body = f"{topic}：{text}" if topic and topic not in text else text
@@ -1438,14 +1444,17 @@ def _project_one(idx: sqlite3.Connection, m: dict, vec: np.ndarray,
     # 不是蒸馏/整理时刻。用蒸馏时刻会让全部历史记忆显得"刚写入"，
     # 时间衰减与"新记忆 vs 整理记忆"的区分全部失效。
     origin_time = _origin_time(idx, m)
+    # 数据来源维度（与 role 的层级维度正交）：投喂素材的记忆标 external，
+    # 其余（会话蒸馏、Agent 直写）是自有沉淀 native
+    origin = "external" if m["source"] == "feed" else "native"
     existing = idx.execute("SELECT id FROM units WHERE src_id=?", (src_id,)).fetchone()
     if existing:
         uid = int(existing[0])
         idx.execute(
             "UPDATE units SET text=?, chars=?, title=?, turn_key=?, time=?,"
-            " updated_at=? WHERE id=?",
+            " origin=?, updated_at=? WHERE id=?",
             (body, len(body), title, m.get("turn_key"), origin_time,
-             int(time.time()), uid))
+             origin, int(time.time()), uid))
         # 自愈：旧版本投影的记忆可能缺来源初始分（列后加/逻辑后补），幂等补上
         ensure_base_value(idx, uid, BASE_VALUE_DISTILLED)
         # vec0 是虚拟表，**不支持 INSERT OR REPLACE 的主键替换语义**（同一
@@ -1455,11 +1464,11 @@ def _project_one(idx: sqlite3.Connection, m: dict, vec: np.ndarray,
     else:
         uid = int(idx.execute(
             "INSERT INTO units(source, conversation_id, seq, role, turn_key,"
-            " src_id, time, title, text, chars, updated_at)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            " src_id, time, title, text, chars, origin, updated_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (m["source"], m["conversation_id"], -abs(int(m["id"])),
              DISTILLED_ROLE, m.get("turn_key"), src_id, origin_time, title,
-             body, len(body), int(time.time()))).lastrowid)
+             body, len(body), origin, int(time.time()))).lastrowid)
     # 来源初始分：按来源语义区分 —— Agent 主动写入（0.6，有明确人工意图）
     # 高于离线蒸馏（0.3，默认中等靠使用升降）。直写记忆被错当蒸馏产物压到
     # 0.3 会系统性低估用户亲自保存的内容（实测反馈）。
@@ -1514,7 +1523,7 @@ def project_memories(idx: sqlite3.Connection, settings, memories: list[dict], *,
     memories：来自 distilled_memories 的条目（需含 id/source/conversation_id/
     content/type 等字段；可选 topic/turn_key/title/created_at）。
     """
-    from agentmemhub.rag.ingest import ensure_vec_table
+    from agentmemhub.rag.ingest import ensure_bridge_schema, ensure_vec_table
     from agentmemhub.rag.runtime import get_active_embedder
     from agentmemhub.rag.search import ensure_search_schema, vector_search
 
@@ -1522,6 +1531,8 @@ def project_memories(idx: sqlite3.Connection, settings, memories: list[dict], *,
     stats = {"projected": 0, "similar": 0, "duplicate": 0}
     if not memories:
         return stats
+    # 投影要写 origin（来源维度）等桥接列——保证列在（幂等补列，测试库同样受益）
+    ensure_bridge_schema(idx)
     spec = settings.active_spec
     ensure_vec_table(idx, spec)
     ensure_search_schema(idx)          # FTS 触发器随投影自动同步

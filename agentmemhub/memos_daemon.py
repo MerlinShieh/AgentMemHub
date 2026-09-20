@@ -208,7 +208,9 @@ def _rag_dispatch(method: str, path: str, body: Optional[dict]) -> dict:
     route, qs = p[0], (p[1] if len(p) > 1 else "")
     body = body or {}
     if route == "/api/v1/memory/search" and method == "POST":
-        return rag_bridge.search(str(body.get("agent", "")), str(body.get("query", "")))
+        return rag_bridge.search(str(body.get("agent", "")),
+                                 str(body.get("query", "")),
+                                 origin=str(body.get("origin", "")))
     if route == "/api/v1/overview" and method == "GET":
         return rag_bridge.overview()
     if route == "/api/v1/traces" and method == "GET":

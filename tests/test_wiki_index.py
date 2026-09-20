@@ -171,6 +171,77 @@ def test_召回层级判定():
     assert kind_of(None) == "message"
 
 
+# ---------------------------------------------------------------------------
+# 来源维度：自有记忆沉淀 vs 外部投喂
+# ---------------------------------------------------------------------------
+
+def test_来源_页面默认自有_声明external则为投喂(env):
+    conn, tmp_path = env
+    d = tmp_path / "l2"
+    _page(d, "01-域A", "001-自有.md", "自有页", "摘要", "正文")
+    # 投喂编译的页面：frontmatter 标 origin: external（可带 doc id）
+    ext = d / "01-域A" / "002-投喂.md"
+    ext.write_text(
+        "---\ntitle: 投喂页\ndomain: 01-域A\norigin: external\n"
+        "doc: web_abc123\n---\n\n# 投喂页\n\n**摘要**：外部素材\n\n正文\n",
+        encoding="utf-8")
+    p1 = wiki_index.parse_page(d / "01-域A" / "001-自有.md")
+    p2 = wiki_index.parse_page(ext)
+    assert p1["origin"] == "native"
+    assert p2["origin"] == "external"
+
+
+def test_来源_投影写入units且召回可依据它区分(env, monkeypatch):
+    conn, tmp_path = env
+    d = tmp_path / "l2"
+    _page(d, "01-域A", "001-自有.md", "自有页", "摘要", "正文")
+    ext = d / "01-域A" / "002-投喂.md"
+    ext.write_text(
+        "---\ntitle: 投喂页\ndomain: 01-域A\norigin: external\n---\n\n"
+        "# 投喂页\n\n**摘要**：外部素材\n\n正文\n", encoding="utf-8")
+    _patch_vectors(monkeypatch)
+    _project(conn, d)
+    origins = dict(conn.execute(
+        "SELECT title, origin FROM units WHERE source='wiki'").fetchall())
+    assert origins == {"自有页": "native", "投喂页": "external"}
+
+
+def test_来源_字段与层级正交(env):
+    """origin（来源维度）与 kind（层级维度）互不干扰：页面可以是自有的，
+    记忆也可以是投喂来的（source='feed' 的切片投影时标 external）。"""
+    from agentmemhub.rag.search import Hit, kind_of
+    h = Hit(unit_id=1, source="wiki", conversation_id="01-域A", seq=-1,
+            role="wiki", turn_key=None, time=1, title="外部资料页",
+            text="x", score=1.0, origin="external")
+    assert kind_of("wiki_abc") == "page" and h.origin == "external"
+    assert Hit(unit_id=2, source="zcode", conversation_id="c1", seq=1,
+               role="user", turn_key="t", time=1, title=None, text="y",
+               score=1.0).origin == "native"        # 默认自有沉淀
+
+
+# ---------------------------------------------------------------------------
+# 页面 FTS 回路（多回路召回）
+# ---------------------------------------------------------------------------
+
+def test_页面子集全文通道_只返回页面且在子集内():
+    from agentmemhub.rag.search import subset_fts_search
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE VIRTUAL TABLE units_fts USING fts5("
+                 "text, title, tokenize='trigram')")
+    conn.execute("INSERT INTO units_fts(rowid, text, title)"
+                 " VALUES (1, 'ADBController 容错语义设计', '')")
+    conn.execute("INSERT INTO units_fts(rowid, text, title)"
+                 " VALUES (2, '无关内容', '')")
+    # 子集只含 2：1 虽匹配但不在子集 → 不返回（子集隔离生效）
+    assert subset_fts_search(conn, "ADBController 容错语义设计", 5, {2}) == []
+    # 子集含 1 → 命中
+    hits = subset_fts_search(conn, "ADBController 容错语义设计", 5, {1, 2})
+    assert hits and hits[0][0] == 1
+    # 空子集直接短路
+    assert subset_fts_search(conn, "ADBController", 5, set()) == []
+    conn.close()
+
+
 def test_召回_页面层返回摘要与路径且正文截断():
     """页面 Hit 的形态：kind=page、给摘要与路径、正文截断（两阶段）。"""
     from agentmemhub.rag.search import PAGE_TEXT_CAP, Hit, kind_of

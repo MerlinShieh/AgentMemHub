@@ -193,12 +193,14 @@ SEARCH_MAX_HITS = 20
 
 
 def search(agent: str, query: str, *, k: int = SEARCH_MAX_HITS,
-           curate: bool = True,
+           curate: bool = True, origin: str = "",
            exclude_session: tuple[str, str] | None = None) -> dict:
     """POST /api/v1/memory/search 的 rag 实现（hits 形状对齐 RetrievalResultDTO）。
 
     额外带回会话定位信息（source/conversationId/turnKey/title），
-    让面板能把命中项点开跳回对应会话的对应轮次。
+    让面板能把命中项点开跳回对应会话的对应轮次；并带回**层级**（kind：
+    page/memory/message）与**来源**（origin：native 自有沉淀 / external 外投）。
+    origin 可用于只召回某一来源（空=全部）。
     """
     t0 = time.perf_counter()
     st = settings()
@@ -208,6 +210,7 @@ def search(agent: str, query: str, *, k: int = SEARCH_MAX_HITS,
         exclude_session=exclude_session,
         value_provider=vstore,
         no_decay_ids=vstore.no_decay_ids,
+        origin=origin,
         log=_log())
     refmap: dict = {}
     if hits:
@@ -252,6 +255,8 @@ def search(agent: str, query: str, *, k: int = SEARCH_MAX_HITS,
             "kind": h.kind,
             "wikiPath": h.wiki_path or "",
             "summary": h.summary or "",
+            # 数据来源：native=自有记忆沉淀 / external=外部投喂
+            "origin": h.origin,
         })
     if curate:
         # 相关度截断（≥0.7×top）但不再硬砍到 5 条，上限放宽到 SEARCH_MAX_HITS

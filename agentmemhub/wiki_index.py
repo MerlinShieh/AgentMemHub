@@ -30,6 +30,7 @@ import json
 import re
 import sqlite3
 import time
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,10 @@ _REF_RE = re.compile(r"\[m(\d+)\]")
 _SUM_RE = re.compile(r"^\*\*摘要\*\*：(.+)$", re.M)
 _TITLE_RE = re.compile(r"^title:\s*(.+)$", re.M)
 _DOMAIN_RE = re.compile(r"^domain:\s*(.+)$", re.M)
+#: 来源维度：投喂编译的页面在 frontmatter 标 `origin: external`（可带 doc id）。
+#: 缺省 = native（自有记忆沉淀长出来的页面）。
+_ORIGIN_RE = re.compile(r"^origin:\s*(\S+)$", re.M)
+_DOC_RE = re.compile(r"^doc:\s*(\S+)$", re.M)
 
 WIKI_SRC_PREFIX = "wiki_"
 
@@ -69,16 +74,29 @@ def parse_page(path: Path) -> dict[str, Any] | None:
     clean = re.sub(r"^#\s+.*$", "", clean, count=1, flags=re.M).strip()
     refs = sorted({int(x) for x in _REF_RE.findall(body)})
     h = hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
+    rel = path.name if path.parent.name == "" else f"{path.parent.name}/{path.name}"
+    # **锚与 seq 都必须由路径派生，不能由内容/位置派生**：
+    #  · 内容变 → 页面更新（同一行 UPDATE），不该变成新行 —— 实测踩坑：
+    #    src_id 用内容指纹时，页面重编后 hash 变 → 走 INSERT → seq 撞
+    #    UNIQUE(source, conversation_id, seq)
+    #  · 位置序号（第 i 页）在页面增删后会漂移，同样会撞
+    crc = zlib.crc32(rel.encode("utf-8"))
+    o = _ORIGIN_RE.search(front)
+    doc_m = _DOC_RE.search(front)
+    is_external = bool(o and o.group(1).strip().lower() in ("external", "feed")) \
+        or bool(doc_m)
     return {
-        "src_id": f"{WIKI_SRC_PREFIX}{h}",
+        "src_id": f"{WIKI_SRC_PREFIX}{crc:08x}",
         "hash": h,
+        "seq": -(1_000_000 + (crc % 900_000_000)),
         "title": title,
         "domain": (d.group(1).strip() if d else path.parent.name),
         "summary": summary,
         "body": clean,
         "refs": refs,
-        "path": path.name if path.parent.name == "" else
-                f"{path.parent.name}/{path.name}",
+        "path": rel,
+        # 数据来源维度：native=自有记忆沉淀 / external=外部投喂
+        "origin": "external" if is_external else "native",
     }
 
 
@@ -150,19 +168,21 @@ def project_pages(idx: sqlite3.Connection, l2_dir: Path | str,
             if row:
                 uid = int(row[0])
                 idx.execute(
-                    "UPDATE units SET source='wiki', conversation_id=?, seq=?,"
+                    "UPDATE units SET source='wiki', conversation_id=?,"
                     " role='wiki', title=?, text=?, chars=?, wiki_path=?,"
-                    " updated_at=? WHERE id=?",
-                    (p["domain"], -1000000 - i, p["title"], body_text,
-                     len(body_text), p["path"], t_now, uid))
+                    " origin=?, updated_at=? WHERE id=?",
+                    (p["domain"], p["title"], body_text,
+                     len(body_text), p["path"], p["origin"], t_now, uid))
                 updated += 1
             else:
                 uid = int(idx.execute(
                     "INSERT INTO units(source, conversation_id, seq, role,"
                     " turn_key, src_id, time, title, text, chars, wiki_path,"
-                    " updated_at) VALUES('wiki',?,?,'wiki',NULL,?,?,?,?,?,?,?)",
-                    (p["domain"], -1000000 - i, p["src_id"], t_now, p["title"],
-                     body_text, len(body_text), p["path"], t_now)).lastrowid)
+                    " origin, updated_at)"
+                    " VALUES('wiki',?,?,'wiki',NULL,?,?,?,?,?,?,?,?)",
+                    (p["domain"], p["seq"], p["src_id"], t_now, p["title"],
+                     body_text, len(body_text), p["path"], p["origin"],
+                     t_now)).lastrowid)
                 inserted += 1
             for s, vecs in multi:
                 # vec0 虚拟表**不支持 INSERT OR REPLACE 的主键替换语义**

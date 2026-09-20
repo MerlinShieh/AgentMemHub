@@ -82,6 +82,12 @@ def ensure_bridge_schema(conn: sqlite3.Connection) -> None:
     # 页面是聚合产物、篇幅长（中位 1639 字符），不该一股脑塞进召回上下文。
     if "wiki_path" not in cols:
         conn.execute("ALTER TABLE units ADD COLUMN wiki_path TEXT")
+    # origin：**数据来源维度**（native=自有记忆沉淀 / external=外部投喂）。
+    # 与 role 的"层级"维度正交：role 回答"这是页面/记忆/消息"，origin 回答
+    # "这是自己长出来的还是从外面喂进来的"。NULL 视为 native（历史数据默认）。
+    # 召回时带上它，Agent 与用户都能分辨知识出处。
+    if "origin" not in cols:
+        conn.execute("ALTER TABLE units ADD COLUMN origin TEXT")
     # 自愈式回填（幂等，每次调用都兜一次）：覆盖两类 NULL —— 补列时的存量行，
     # 以及任何绕过写入路径产生的行（例如仍在跑**旧代码的常驻 MCP 进程**写入
     # 的记忆——实测真实发生过）。用发现时刻填充，不用 units.time（那是事件

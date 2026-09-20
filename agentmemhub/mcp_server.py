@@ -96,10 +96,15 @@ def _search(args: dict) -> str:
     if not q:
         raise _ToolError("memory_search 需要 query 参数")
     top = _clamp(args.get("topK"), 1, 30, 8)
+    org = str(args.get("origin") or "").strip().lower()
+    if org not in ("", "native", "external"):
+        raise _ToolError("origin 必须是 native | external（留空=全部）")
     try:
+        body = {"agent": _AGENT, "query": q}
+        if org:
+            body["origin"] = org
         res = memos_daemon.engine_request("POST", "/api/v1/memory/search",
-                                          body={"agent": _AGENT, "query": q},
-                                          timeout=30)
+                                          body=body, timeout=30)
         ov: dict = {}
         try:
             ov = memos_daemon.engine_request("GET", "/api/v1/overview", timeout=8)
@@ -111,11 +116,17 @@ def _search(args: dict) -> str:
         raise _ToolError(f"引擎检索失败：{e}")
 
     hits = res.get("hits") or []
-    lines = [f"记忆检索「{q}」：{len(hits)} 条命中"
+    scope = {"native": "（仅自有记忆沉淀）", "external": "（仅外部投喂）"}.get(org, "")
+    lines = [f"记忆检索「{q}」{scope}：{len(hits)} 条命中"
              f"（引擎在线，episodes={ov.get('episodes')}, traces={ov.get('traces')}）", ""]
+    tier_label = {"page": "知识页", "memory": "记忆", "message": "对话"}
     for h in hits[:top]:
-        lines.append(f"- score={h.get('score')} tier={h.get('tier')} "
-                     f"ref={h.get('refKind')}/{h.get('refId')}")
+        kind = h.get("kind") or "message"
+        origin = h.get("origin") or "native"
+        src_tag = "自有" if origin == "native" else "投喂"
+        path = f" → {h.get('wikiPath')}" if h.get("wikiPath") else ""
+        lines.append(f"- [{tier_label.get(kind, kind)}·{src_tag}] "
+                     f"score={h.get('score')} {h.get('title') or ''}{path}")
         lines.append(f"  {h.get('snippet') or ''}")
     ctx = (res.get("injectedContext") or "").strip()
     if ctx:
@@ -369,6 +380,15 @@ _TOOLS: list[dict] = [
             "properties": {
                 "query": {"type": "string", "description": "检索查询，自然语言描述想找的记忆主题"},
                 "topK": {"type": "integer", "description": "返回条数（默认 8，最大 30）"},
+                "origin": {
+                    "type": "string",
+                    "enum": ["native", "external"],
+                    "description": (
+                        "（可选）按数据来源筛选：native=自有记忆沉淀（会话蒸馏/Agent 直写/"
+                        "自生成知识页），external=外部投喂（PDF/网页等素材）。"
+                        "不传=两者都返回。返回结果每条的 origin 字段即其来源。"
+                    ),
+                },
                 "note": {"type": "string", "description": _NOTE_DESC},
             },
             "required": ["query"],

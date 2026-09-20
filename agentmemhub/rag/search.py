@@ -71,6 +71,9 @@ class Hit:
     wiki_path: str | None = None
     #: 页面层的摘要（从正文解析），比整页短、适合直接进上下文
     summary: str | None = None
+    #: **数据来源维度**（与 kind 的层级维度正交）：native=自有记忆沉淀，
+    #: external=外部投喂。Agent 与用户据此分辨知识出处（谁说的、可信度语境）。
+    origin: str = "native"
 
 
 #: 页面层召回时返回的正文上限（字符）——整页中位 1639、最长 7221，
@@ -285,6 +288,40 @@ def subset_vector_search(conn: sqlite3.Connection, vec_table: str,
     return out
 
 
+def subset_fts_search(conn: sqlite3.Connection, query: str, k: int,
+                      allow_ids: set[int]) -> ChannelHits:
+    """**子集内的**全文检索（页面层第二回路）。
+
+    向量对长页面区分度弱（相关 0.826 与不相干 0.686~0.785 分数重叠，实测），
+    而全文对**精确术语**很敏感——"容错语义""traceId"这类词命中就是命中。
+    两条回路一起投票（RRF），比单靠向量更可靠。
+    """
+    if not allow_ids or not query.strip():
+        return []
+    q = query.strip()
+    rows = []
+    if len(q) >= TRIGRAM_MIN_LEN:
+        chunks = _query_chunks(q)
+        if chunks:
+            match = " OR ".join(f'"{_fts_escape(c)}"' for c in chunks)
+            rows = conn.execute(
+                "SELECT rowid FROM units_fts WHERE units_fts MATCH ?"
+                " ORDER BY bm25(units_fts, 1.0, 2.0) LIMIT ?",
+                (match, max(k * 20, 200))).fetchall()
+    if not rows:
+        like = f"%{_like_esc(q)}%"
+        rows = conn.execute(
+            "SELECT id FROM units u WHERE u.text LIKE ? ESCAPE '\\' LIMIT ?",
+            (like, max(k * 20, 200))).fetchall()
+    out: ChannelHits = []
+    for i, (rid,) in enumerate(rows):
+        if rid in allow_ids:
+            out.append((rid, 1.0 / (i + 1)))
+            if len(out) >= k:
+                break
+    return out
+
+
 def fts_search(conn: sqlite3.Connection, query: str, k: int,
                *, exclude_ids: set[int] | None = None) -> ChannelHits:
     q = query.strip()
@@ -385,11 +422,16 @@ def _fetch_units(conn: sqlite3.Connection, ids: list[int]) -> dict[int, sqlite3.
     # 老库或极简测试库可能缺列 → 降级为不含它们的查询（kind 退化为 message）
     try:
         rows = conn.execute(
-            f"SELECT {base}, src_id, wiki_path FROM units WHERE id IN ({marks})",
-            ids)
+            f"SELECT {base}, src_id, wiki_path, origin FROM units"
+            f" WHERE id IN ({marks})", ids)
     except sqlite3.OperationalError:
-        rows = conn.execute(
-            f"SELECT {base} FROM units WHERE id IN ({marks})", ids)
+        try:
+            rows = conn.execute(
+                f"SELECT {base}, src_id, wiki_path FROM units"
+                f" WHERE id IN ({marks})", ids)
+        except sqlite3.OperationalError:
+            rows = conn.execute(
+                f"SELECT {base} FROM units WHERE id IN ({marks})", ids)
     return {r["id"]: r for r in rows}
 
 
@@ -422,6 +464,7 @@ def hybrid_search(
     include_low_value: bool = False,                  # 复盘模式放开 value<=0
     judge: "Judge | None" = None,                     # P2-1 终审
     threshold_floor: float = THRESHOLD_FLOOR,
+    origin: str = "",          # ""=全部 | "native"=自有沉淀 | "external"=外部投喂
     log: logging.Logger | None = None,
 ) -> list[Hit]:
     log = log or logging.getLogger("asrag.search")
@@ -456,7 +499,9 @@ def hybrid_search(
 
         # 页面层独立通道（L2 知识页）：异质候选源各自成路——页面是长文本
         # 聚合产物，混在大池子里几乎排不进 top-k（实测 200 名内仅 2 页）。
-        # 页面命中后与向量/全文/标识符一起参与 RRF 融合。
+        # **两个回路**：向量（语义）+ 全文（精确术语）——向量对长页面区分度弱
+        # （相关 0.826 与不相干 0.686~0.785 重叠），全文能精确锁定含词页面，
+        # 两路一起投票更可靠。页面命中后与向量/全文/标识符一起参与 RRF 融合。
         if mode in ("hybrid", "vector"):
             page_ids = {r[0] for r in conn.execute(
                 "SELECT id FROM units WHERE source='wiki'")}
@@ -467,9 +512,24 @@ def hybrid_search(
                         conn, spec.vec_table, qv_page, PAGE_CHANNEL_K, page_ids)
                 except Exception:           # 页面通道失败不影响主召回
                     pass
+                try:
+                    pf = subset_fts_search(conn, query, PAGE_CHANNEL_K, page_ids)
+                    if pf:
+                        channels["page_fts"] = pf
+                except Exception:
+                    pass
 
         cand = fuse_channels(channels)
         rel = {uid: relevance_of(e) for uid, e in cand.items()}
+
+        # 来源过滤（可选）：只保留指定来源的候选——自有记忆沉淀 vs 外部投喂
+        # 是两类可信度语境不同的数据，调用方可按需只看一类。
+        if origin and rel:
+            ometa = _fetch_units(conn, list(rel))
+            for uid, m in ometa.items():
+                o = (m["origin"] if "origin" in m.keys() else None) or "native"
+                if o != origin:
+                    rel.pop(uid, None)
 
         dropped_low: list[int] = []
         if value_provider is not None and rel:
@@ -525,6 +585,8 @@ def hybrid_search(
             entry = cand.get(unit_id, {})
             src_id = r["src_id"] if "src_id" in r.keys() else None
             kind = kind_of(src_id)      # 注意：不要用 k（那是 top-k 参数）
+            origin = ((r["origin"] if "origin" in r.keys() else None)
+                      or "native")
             text = r["text"]
             summary = None
             wiki_path = None
@@ -547,6 +609,7 @@ def hybrid_search(
                 ident_rank=entry.get("ident", (None,))[0],
                 bypassed=unit_id in bypassed,
                 kind=kind, wiki_path=wiki_path, summary=summary,
+                origin=origin,
             )
             if expand_turns and kind != "page":
                 # 页面层没有"轮次上下文"可展开（它是聚合产物）
