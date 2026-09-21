@@ -197,3 +197,40 @@ def test_手动force_绕过规则直接更新(_tmp_state, tmp_path, monkeypatch)
     r = wiki_triggers.run_manual(force=True)
     assert r["should_run"] is True and len(calls) == 1
     assert r["reasons"] == ["手动强制"]
+
+
+# ---------------------------------------------------------------------------
+# 判定留痕（logs/wiki.log 的 trigger_check 事件）
+# ---------------------------------------------------------------------------
+
+def _capture_wiki_audit(monkeypatch) -> list[dict]:
+    entries: list[dict] = []
+    monkeypatch.setattr("agentmemhub.logs.audit_wiki", lambda e: entries.append(e))
+    return entries
+
+
+def test_判定结果落wiki日志_触发时(_tmp_state, tmp_path, monkeypatch):
+    """触发器此前**没有**这条日志，"某次为什么触发"只能靠 fired 记录 + 代码
+    反推（实测踩过，回查历史触发原因时无从下手）。判定信息比执行记录更该留痕。
+    """
+    _mk_trigger_env(tmp_path, monkeypatch)
+    entries = _capture_wiki_audit(monkeypatch)
+    wiki_triggers.on_memories_written()
+    checks = [e for e in entries if e.get("event") == "trigger_check"]
+    assert len(checks) == 1
+    e = checks[0]
+    assert e["hook"] == "write" and e["should_run"] is True
+    assert e["reasons"], "必须记下**为什么**触发"
+    assert e["dirty"] >= 1
+
+
+def test_判定结果落wiki日志_未触发时也记(_tmp_state, tmp_path, monkeypatch):
+    """没触发也要留痕 —— 否则无法区分"根本没检测"和"检测了但规则不满足"。"""
+    _mk_trigger_env(tmp_path, monkeypatch)
+    entries = _capture_wiki_audit(monkeypatch)
+    wiki_triggers.on_memories_written()          # 第一次：每日首写 → 触发
+    wiki_triggers.on_memories_written()          # 第二次：规则不再满足
+    checks = [e for e in entries if e.get("event") == "trigger_check"]
+    assert len(checks) == 2
+    assert checks[0]["should_run"] is True
+    assert checks[1]["should_run"] is False

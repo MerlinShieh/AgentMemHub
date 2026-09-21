@@ -228,6 +228,18 @@ def _check_and_run(*, hook: str, force: bool = False) -> dict[str, Any]:
             "reasons": verdict["reasons"], "dirty": dirty,
             "last_update_at": state.get("last_update_at"),
         }
+        # 判定结果落 wiki.log —— 触发器此前**没有**这条日志，导致回查"某次为什么
+        # 触发"只能靠 fired 记录 + 代码反推（实测踩过）；长任务必须能从日志回答
+        # "为什么跑"，判定信息比执行记录更该留痕。
+        try:
+            from agentmemhub.logs import audit_wiki
+            audit_wiki({"event": "trigger_check", "hook": hook,
+                        "should_run": verdict["should_run"],
+                        "reasons": verdict["reasons"],
+                        "due_slots": verdict["due_slots"], "dirty": dirty,
+                        "last_update_at": state.get("last_update_at")})
+        except Exception:                       # noqa: BLE001 —— 审计旁路
+            pass
         if not verdict["should_run"]:
             return out
         try:

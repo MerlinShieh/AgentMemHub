@@ -986,6 +986,55 @@ def cmd_wiki(args) -> int:
     return 0
 
 
+def cmd_memory_log(args) -> int:
+    """记忆操作事实流查询：什么时候写了/读了什么记忆（`logs/memory.log`）。
+
+    与 `logs/mcp.log` 的分工：那份记**协议层**（谁调了什么工具、耗时、成败），
+    这份记**数据层**（哪条记忆被写/读，内容是什么、从哪条路径来）。查"某条记忆
+    的来龙去脉"用这份；查"Agent 调了什么、失败没有"用 `scripts/mcp_log.py`。
+    """
+    import json as _json
+    import time as _time
+    from agentmemhub import logs as _logs
+
+    rows = _logs.read_memory_audit()
+    if args.event:
+        rows = [r for r in rows if r.get("event") == args.event]
+    if args.path:
+        rows = [r for r in rows if (r.get("path") or "") == args.path]
+    if args.grep:
+        kw = args.grep.lower()
+        rows = [r for r in rows
+                if kw in _json.dumps(r, ensure_ascii=False).lower()]
+    if args.limit:
+        rows = rows[-args.limit:]
+    if args.json:
+        print(_json.dumps(rows, ensure_ascii=False, indent=2, default=str))
+        return 0
+    if not rows:
+        print("无匹配的记忆操作记录（%s）" % _logs.memory_audit_file())
+        return 0
+    for r in rows:
+        ts = _time.strftime("%m-%d %H:%M:%S",
+                            _time.localtime(float(r.get("ts") or 0)))
+        ev = r.get("event")
+        if ev == "write":
+            print("%s [写·%s] id=%s %s/%s %s ← %s  (%d 字)" % (
+                ts, r.get("path") or "?", r.get("memory_id"),
+                r.get("source") or "?", r.get("type") or "?",
+                (r.get("content") or "").replace("\n", " ")[:64],
+                r.get("result") or "", r.get("chars") or 0))
+        elif ev == "read":
+            print("%s [读·%s] q=%r 命中 %s 条 %s" % (
+                ts, r.get("path") or "?", (r.get("query") or "")[:36],
+                r.get("hits"), r.get("kinds") or ""))
+        else:
+            print("%s [%s] %s" % (ts, ev,
+                                  _json.dumps(r, ensure_ascii=False)[:160]))
+    print("\n共 %d 条（%s）" % (len(rows), _logs.memory_audit_file()))
+    return 0
+
+
 def cmd_snapshot(args) -> int:
     """快照与回滚：索引库整库（含蒸馏表/units/评分）+ wiki 产物目录。"""
     import json as _json
@@ -1127,6 +1176,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="只蒸馏不落库（预览产物与成本，可反复执行）")
 
     _register_snapshot_parser(sub)
+    _register_memory_log_parser(sub)
 
     pwk = sub.add_parser("wiki", help="LLM Wiki 运维：对齐审计 / 增量更新 / 查看失败清单 / 定向补跑")
     pwk.add_argument("--action", default="failures",
@@ -1169,12 +1219,27 @@ def main() -> None:
         "distill": cmd_distill, "weight": cmd_weight,
         "wiki": cmd_wiki,
         "snapshot": cmd_snapshot,
+        "memory-log": cmd_memory_log,
     }
     fn = handlers.get(args.command)
     if fn is None:
         build_parser().print_help()
         return
     fn(args)
+
+
+def _register_memory_log_parser(sub) -> None:
+    pm = sub.add_parser(
+        "memory-log", help="记忆操作事实流：查什么时候写了/读了什么记忆")
+    pm.add_argument("--limit", type=int, default=50,
+                    help="最多显示多少条（默认 50；0=全部）")
+    pm.add_argument("--event", default="", choices=["", "write", "read"],
+                    help="只看写入 / 只看读取")
+    pm.add_argument("--path", default="",
+                    choices=["", "mcp", "http", "distill", "cli", "unknown"],
+                    help="只看某个来源路径")
+    pm.add_argument("--grep", default="", help="关键词过滤（匹配整条记录）")
+    pm.add_argument("--json", action="store_true", help="输出原始 JSON")
 
 
 def _register_snapshot_parser(sub) -> None:

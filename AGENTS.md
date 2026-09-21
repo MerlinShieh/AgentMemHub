@@ -42,12 +42,21 @@
   （记忆排除 UI 已下线，后端能力保留）；记忆页承载筛选/溯源/⭐加权/👍👎/蒸馏入口。
   会话与记忆通过 `session_uid`（全局递增）双向绑定跳转。
 - **测试纪律**：每次改动带测试；bug 修复先写复现测试（红→绿）；
-  `uv run pytest` 全绿是提交门槛（数量以实测为准，当前 664 passed / 1 skipped）。
+  `uv run pytest` 全绿是提交门槛（数量以实测为准，当前 689 passed / 1 skipped）。
 - **日志纪律**：统一 `logs/` 按程序分文件；测试必须隔离日志与数据目录
   （`conftest` 的 autouse 夹具已强制把 `logs.log_dir` 指向临时目录）。
-  **MCP 调用审计由服务端在唯一分发点自动写 `logs/mcp.log`，不依赖 Agent 手动记**
-  （漏一条就无法区分"没做"与"没记"，审计即失去意义）；Agent 的意图用可选参数
-  `note` 补充。**长任务同样要落 `logs/wiki.log`**（wiki 编译的每次 LLM 调用、
+  **三个事实流分工**：`logs/mcp.log` 记**协议层**（谁调了什么工具、耗时、成败，
+  由服务端在唯一分发点自动写，不依赖 Agent 手动记）、`logs/memory.log` 记
+  **数据层**（哪条记忆被写/读、**内容全文**、来自 `mcp`/`http`/`distill`/`cli`
+  哪条路径；写入点埋在 `distill` 的落表处，一处覆盖所有路径，查询用
+  `agentmemhub memory-log`）、`logs/wiki.log` 记**流水线层**（编译跑到哪、花了
+  多少、断在哪，含触发器判定 `trigger_check`）。
+  **滚动/归档**由 `logs` 配置段统一控制：全局 `logs.rotate` 对**所有**日志生效、
+  `logs.files.<日志名>` 覆盖（空则回落全局）；滚动规则**二选一**——`max_mb > 0`
+  按大小（**最高优先级**），否则 `daily` 按**自然日首次写入**；归档进
+  `logs/archive/<日志名>/`（`compress: false` 时保留原始文件），`keep_days` 默认
+  30 清理超期归档；`logs/tasks/*.log` 按天直接清理。
+  Agent 的意图用可选参数 `note` 补充。**长任务同样要落 `logs/wiki.log`**（wiki 编译的每次 LLM 调用、
   每个会话/页面的成败、运行汇总）—— 跑几十分钟的批量任务必须能从日志回答
   "跑到哪了、哪些失败了、花了多少、上次断在哪"，控制台输出关掉就没了。
 - `.bat` 脚本：纯 ASCII + CRLF + `if (...)` 块内不得含 `)`。
@@ -59,7 +68,7 @@
 
 - **`docs/data-architecture.md` — 架构全景（权威）**：三层数据模型、表矩阵、ID 锚体系、
   六路召回与准入、价值体系、快照回滚、运维速查、演进时间线（**改动架构先读它**）
-- `docs/branch-milestones.md` — 分支里程碑时间线（三个大里程碑 + 即将做的事）
+- `docs/branch-milestones.md` — 分支里程碑时间线（四个大里程碑 + 即将做的事）
 - `README.md` — 使用说明与快速开始（含「记忆蒸馏」「Agent 协作配置」章节）
 - `ARCHITECTURE.md` — 架构说明
 - `docs/memory-distillation.md` — 记忆蒸馏的设计与实施记录

@@ -92,6 +92,7 @@ def _trace_id(content: str, ts: int) -> str:
 # ---------------------------------------------------------------------------
 
 def _search(args: dict) -> str:
+    _t0 = time.time()               # 记忆操作审计用：本次检索耗时
     q = str(args.get("query", "")).strip()
     if not q:
         raise _ToolError("memory_search 需要 query 参数")
@@ -116,6 +117,20 @@ def _search(args: dict) -> str:
         raise _ToolError(f"引擎检索失败：{e}")
 
     hits = res.get("hits") or []
+    # 记忆操作事实流：**读也要留痕**（"什么时候读了什么"与写入同样重要——
+    # 排查"某条记忆为什么没被想起"时，要能区分"没写过"和"写了但没召回"）
+    try:
+        from collections import Counter
+        from agentmemhub import logs as _logs
+        _logs.audit_memory({
+            "event": "read", "ts": round(time.time(), 3), "path": "mcp",
+            "actor": _AGENT, "query": q,
+            "top": top, "hits": len(hits), "origin_filter": org or "all",
+            "kinds": dict(Counter((h.get("kind") or "message") for h in hits)),
+            "elapsed_ms": int((time.time() - _t0) * 1000),
+        })
+    except Exception:                       # noqa: BLE001 —— 审计旁路
+        pass
     scope = {"native": "（仅自有记忆沉淀）", "external": "（仅外部投喂）"}.get(org, "")
     shown = hits[:top]
     head = (f"记忆检索「{q}」{scope}：{len(shown)} 条命中"
@@ -278,7 +293,13 @@ def _save(args: dict) -> str:
                 #（substr 去掉 units.src_id 的 'mcp_' 前缀），这里必须对齐，
                 # 否则 slice_key 变 'mcp:mcp_<hash>'，去重匹配不上 → 面板重复
                 slice_key=f"mcp:{tid.removeprefix('mcp_')}",
-                model="memory_save(mcp)")
+                model="memory_save(mcp)",
+                # 记忆操作事实流（logs/memory.log）的**协议层补充**：这些字段
+                # 只有 Agent 侧拿得到（importance/tags/trace_id 都是入参），
+                # 数据层记的是"落了哪条、内容是什么"。
+                audit_extra={"path": "mcp", "trace_id": tid,
+                             "importance": importance, "value": value,
+                             "tags": tags, "actor": _AGENT})
             # 落表即补齐检索面：来源初始分 + 增量投影（含跨会话去重判定），
             # 评分/加权/召回立即可用，不等下次蒸馏（阈值与蒸馏配置同源）。
             # Agent 直写的初始分再按 importance 档位精调（0.8/0.6/0.4）——

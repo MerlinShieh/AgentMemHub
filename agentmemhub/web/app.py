@@ -825,6 +825,18 @@ def create_app(db_path: Path | None = None):
              "atomic": bool(h.get("atomic"))}
             for h in (res.get("hits") or [])[:top]
         ]
+        # 记忆操作事实流：面板检索同样留痕（与 MCP 检索同一条事实流，用 path 区分）
+        try:
+            from collections import Counter
+            from agentmemhub import logs as _logs
+            _logs.audit_memory({
+                "event": "read", "path": "http", "actor": "panel", "query": q,
+                "top": top, "hits": len(hits),
+                "kinds": dict(Counter((h.get("kind") or "message")
+                                      for h in (res.get("hits") or [])[:top])),
+            })
+        except Exception:                   # noqa: BLE001 —— 审计旁路
+            pass
         return JSONResponse({"query": q, "hits": hits,
                              "injectedContext": res.get("injectedContext") or "",
                              "episodes": ov.get("episodes"),

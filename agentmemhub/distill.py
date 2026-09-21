@@ -630,6 +630,37 @@ def mark_slice_done(idx: sqlite3.Connection, sl: Slice, *, prompt_ver: int,
                sl.content_hash, prompt_ver, model, created_at)
 
 
+def _audit_memory_write(*, memory_id: int | None, content: str, content_hash: str,
+                        source: str, conversation_id: str, type_: str,
+                        confidence: str, result: str, slice_key: str = "",
+                        topic: str | None = None, path: str = "",
+                        extra: dict | None = None) -> None:
+    """把一次记忆**落表**记进 `logs/memory.log`（审计旁路，失败绝不影响落库）。
+
+    为什么记在数据层（而不是各个端各自记）：落表是所有写入路径的**唯一汇合点**
+    —— Agent 直写（MCP）、面板推送、蒸馏批量、CLI 导入都会经过这里，记一处即可
+    全覆盖；"这次从哪条路径来"由协议层用 `logs.memory_path()` 标记。
+    """
+    try:
+        from agentmemhub import logs
+        entry = {
+            "event": "write", "ts": round(time.time(), 3),
+            "memory_id": memory_id, "content_hash": content_hash,
+            "source": source, "conversation_id": conversation_id,
+            "type": type_, "confidence": confidence, "topic": topic,
+            "result": result,               # inserted | revived | duplicate
+            "slice_key": slice_key,
+            "content": content, "chars": len(content or ""),
+        }
+        if path:
+            entry["path"] = path
+        if extra:
+            entry.update(extra)
+        logs.audit_memory(entry)
+    except Exception:                       # noqa: BLE001
+        pass
+
+
 def save_memories(idx: sqlite3.Connection, sl: Slice, result: DistillResult,
                   *, prompt_ver: int = PROMPT_VER, model: str = "",
                   sanitize_enabled: bool = True,
@@ -677,8 +708,25 @@ def save_memories(idx: sqlite3.Connection, sl: Slice, result: DistillResult,
                          m.get("topic") or None, m["confidence"], prompt_ver,
                          model, ts, exist[0]))
                     inserted += 1
+                    _audit_memory_write(
+                        memory_id=exist[0], content=content, content_hash=h,
+                        source=sl.source, conversation_id=sl.conversation_id,
+                        type_=m["type"], confidence=m["confidence"],
+                        result="revived", slice_key=sl.slice_key,
+                        path="distill",
+                        topic=m.get("topic") or None)
+                else:
+                    # 同内容已有效存在：也记一次（"什么时候写过什么"要完整，
+                    # 重复写入尝试同样是事实）
+                    _audit_memory_write(
+                        memory_id=exist[0], content=content, content_hash=h,
+                        source=sl.source, conversation_id=sl.conversation_id,
+                        type_=m["type"], confidence=m["confidence"],
+                        result="duplicate", slice_key=sl.slice_key,
+                        path="distill",
+                        topic=m.get("topic") or None)
                 continue
-            idx.execute(
+            cur = idx.execute(
                 "INSERT INTO distilled_memories"
                 "(source, conversation_id, slice_key, turn_key, type, topic,"
                 " content, confidence, status, content_hash, prompt_ver, model,"
@@ -687,6 +735,13 @@ def save_memories(idx: sqlite3.Connection, sl: Slice, result: DistillResult,
                  m["type"], m.get("topic") or None, content, m["confidence"],
                  "new", h, prompt_ver, model, ts))
             inserted += 1
+            _audit_memory_write(
+                memory_id=cur.lastrowid, content=content, content_hash=h,
+                source=sl.source, conversation_id=sl.conversation_id,
+                type_=m["type"], confidence=m["confidence"],
+                result="inserted", slice_key=sl.slice_key,
+                path="distill",
+                topic=m.get("topic") or None)
         idx.execute(
             "INSERT OR IGNORE INTO distill_hashes"
             "(source, conversation_id, slice_key, content_hash, prompt_ver,"
@@ -700,7 +755,8 @@ def save_direct_memory(idx: sqlite3.Connection, *, content: str,
                        type_: str = "fact", confidence: str = "medium",
                        topic: str | None = None, model: str = "",
                        source: str = "mcp", conversation_id: str = "direct",
-                       slice_key: str = "", created_at: int | None = None) -> str:
+                       slice_key: str = "", created_at: int | None = None,
+                       audit_extra: dict | None = None) -> str:
     """Agent 直写记忆落蒸馏表（`memory_save` 的 wiki/报表可见性缺口修复）。
 
     背景：MCP `memory_save` 此前只写引擎与消息层投影（units 有 `mcp_` 前缀
@@ -740,15 +796,30 @@ def save_direct_memory(idx: sqlite3.Connection, *, content: str,
                     "UPDATE distilled_memories SET status='new', type=?,"
                     " confidence=?, created_at=? WHERE id=?",
                     (type_, confidence, ts, exist[0]))
+                _audit_memory_write(
+                    memory_id=exist[0], content=content, content_hash=h,
+                    source=source, conversation_id=conversation_id,
+                    type_=type_, confidence=confidence, result="revived",
+                    slice_key=slice_key, topic=topic, extra=audit_extra)
                 return "revived"
+            _audit_memory_write(
+                memory_id=exist[0], content=content, content_hash=h,
+                source=source, conversation_id=conversation_id,
+                type_=type_, confidence=confidence, result="duplicate",
+                slice_key=slice_key, topic=topic, extra=audit_extra)
             return "duplicate"
-        idx.execute(
+        cur = idx.execute(
             "INSERT INTO distilled_memories"
             "(source, conversation_id, slice_key, turn_key, type, topic,"
             " content, confidence, status, content_hash, prompt_ver, model,"
             " created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (source, conversation_id, slice_key, None, type_, topic, content,
              confidence, "new", h, PROMPT_VER, model, ts))
+        _audit_memory_write(
+            memory_id=cur.lastrowid, content=content, content_hash=h,
+            source=source, conversation_id=conversation_id, type_=type_,
+            confidence=confidence, result="inserted", slice_key=slice_key,
+            topic=topic, extra=audit_extra)
         return "inserted"
 
 

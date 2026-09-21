@@ -581,11 +581,41 @@ uv run python -m agentmemhub wiki --action index-pages --out <L2 目录>
 uv run python -m agentmemhub wiki --action failures [--stage l1|l2]
 uv run python -m agentmemhub wiki --action retry [--stage l1|l2] --src <第一级目录>
 
+uv run python -m agentmemhub memory-log              # 记忆操作事实流（写了/读了什么）
+  [--event write|read] [--path mcp|http|distill] [--grep 关键词] [--limit N] [--json]
+uv run python -m agentmemhub snapshot                # 快照与回滚（见 §10）
+
 # HTTP（面板）
 GET  /api/wiki/align?out=       POST /api/wiki/update?l1=&l2=
 GET  /api/wiki/triggers         PUT  /api/wiki/triggers
 POST /api/wiki/trigger/run      GET/POST /api/wiki/failures|retry
 ```
+
+### 日志体系：三个事实流（视角不同，不要混用）
+
+| 文件 | 视角 | 回答什么 | 写入点 |
+|---|---|---|---|
+| `logs/mcp.log` | **协议层** | 谁调了什么工具、参数、耗时、成败 | MCP 服务端唯一分发点（自动，不依赖 Agent 记） |
+| **`logs/memory.log`** | **数据层** | **哪条记忆被写/读、内容全文、来自哪条路径** | `distill` 的落表处（一处覆盖 MCP/面板/蒸馏/CLI 全部路径） |
+| `logs/wiki.log` | **流水线层** | 编译跑到哪、花了多少、断在哪；**触发器为什么触发** | wiki 编译与 `wiki_triggers._check_and_run` |
+
+- `memory.log` 记**内容全文**（回答"当时到底写进去了什么"）：蒸馏记忆受
+  `CONTENT_MAX=120` 硬截断，**直写记忆（`memory_save`）没有这层限制**（实测一条
+  698 字），所以膨胀靠**单文件 5 MB 上限触发滚动归档**兜底，不靠"记忆一定很短"
+  的假设
+- **抗误删**：全部日志写入点都是 `mkdir(parents=True, exist_ok=True)` + 追加打开
+  ——手工删掉日志文件（甚至整个 `logs/` 目录）后，下一次写入**自动重建并续记**
+  （已实测 + 回归测试覆盖 `mcp.log`/`memory.log`/`wiki.log`/`web.log`/`tasks/`）
+- **滚动与归档**（`logs` 配置段）：**全局 `logs.rotate` 对所有日志生效**，
+  `logs.files.<日志名>` 覆盖它（单文件段为空则回落全局）。滚动规则**二选一**：
+  `max_mb > 0` → 按**大小**滚动（**最高优先级**）；否则 `daily` 为真 → 按**自然日
+  首次写入**（靠文件 mtime 判定，无需状态文件）。归档到
+  `logs/archive/<日志名>/<日志名>.<毫秒时间戳>`（先按日志名分文件夹），
+  默认 `keep_days: 30` 清理超期归档；`compress: false` 时保留**原始文件**。
+  `logs/tasks/*.log` 是"一次性任务输出"，按 `keep_days` **直接清理**（不归档）。
+- 来源路径由协议层用 `logs.memory_path("mcp")` 标记（contextvar），数据层自动读取
+  —— 写入点在数据层、而"从哪来"只有协议层知道，这样无需改一长串函数签名
+- 查询：`agentmemhub memory-log`（CLI）或 `logs.read_memory_audit()`（Python）
 
 ---
 
