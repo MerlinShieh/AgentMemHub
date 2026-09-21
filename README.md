@@ -792,6 +792,7 @@ distillation:                         # 记忆蒸馏全部可调（不硬编码�
 |---|---|
 | **[docs/data-architecture.md](docs/data-architecture.md)** | **架构全景（权威）**：三层数据模型、表矩阵、ID 锚体系、六路召回与准入、价值体系、快照回滚、运维速查、演进时间线 |
 | [docs/branch-milestones.md](docs/branch-milestones.md) | **分支里程碑时间线**：四个大里程碑做了什么 + 即将做的事（Roadmap） |
+| [docs/memory-deletion.md](docs/memory-deletion.md) | **记忆软删除与 wiki 引用状态（设计基准）**：数据模型、接口、召回行为、环境安全（**待实施**） |
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | 代码结构与模块职责（速览） |
 | [docs/recall-fusion.md](docs/recall-fusion.md) | 多路召回融合的机制、算法与评测数据 |
 | [docs/memory-distillation.md](docs/memory-distillation.md) | 记忆蒸馏：切片 / 合并 / 去重 / 投影全流程 |

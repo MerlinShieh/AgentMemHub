@@ -69,6 +69,7 @@
 - **`docs/data-architecture.md` — 架构全景（权威）**：三层数据模型、表矩阵、ID 锚体系、
   六路召回与准入、价值体系、快照回滚、运维速查、演进时间线（**改动架构先读它**）
 - `docs/branch-milestones.md` — 分支里程碑时间线（四个大里程碑 + 即将做的事）
+- `docs/memory-deletion.md` — 记忆软删除与 wiki 引用状态（**设计基准，待实施**）
 - `README.md` — 使用说明与快速开始（含「记忆蒸馏」「Agent 协作配置」章节）
 - `ARCHITECTURE.md` — 架构说明
 - `docs/memory-distillation.md` — 记忆蒸馏的设计与实施记录
