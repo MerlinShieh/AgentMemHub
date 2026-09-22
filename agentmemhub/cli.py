@@ -1242,6 +1242,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     _register_snapshot_parser(sub)
     _register_memory_log_parser(sub)
+    _register_llm_config_parser(sub)
 
     pwk = sub.add_parser("wiki", help="LLM Wiki 运维：对齐审计 / 增量更新 / 查看失败清单 / 定向补跑")
     pwk.add_argument("--action", default="failures",
@@ -1300,12 +1301,57 @@ def main() -> None:
         "wiki": cmd_wiki,
         "snapshot": cmd_snapshot,
         "memory-log": cmd_memory_log,
+        "llm-config": cmd_llm_config,
     }
     fn = handlers.get(args.command)
     if fn is None:
         build_parser().print_help()
         return
     fn(args)
+
+
+def cmd_llm_config(args) -> int:
+    """打印各 LLM 使用点**最终生效**的配置，并标出每项是继承还是覆盖。
+
+    为什么需要（2026-09-22）：LLM 的覆盖项是**就地**的（`wiki.llm` /
+    `distillation.llm` / `wiki.l2.llm`），与 `logs.files.<name>`、召回档位的
+    `retrieval.callers.<name>` 那种集中式覆盖不同 —— 想知道"某个调用方到底用
+    哪个模型、哪些参数是继承来的"要翻好几处配置。本命令把结果拼好。
+    """
+    import json as _json
+
+    from agentmemhub import config as hub_config
+
+    data = hub_config.llm_effective()
+    if getattr(args, "json", False):
+        print(_json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+
+    print("LLM 生效配置（%d 个使用点）" % len(data["users"]))
+    print("=" * 76)
+    print("\n【顶层 llm】%s —— 所有调用方的共用默认" % data["top"]["path"])
+    for k, v in data["top"]["values"].items():
+        print("   %-18s %s" % (k, v))
+
+    for u in data["users"]:
+        print("\n【%s】%s" % (u["name"], u["path"]))
+        if not u["overrides"]:
+            print("   （完全继承顶层，无覆盖）")
+        for k, v in u["values"].items():
+            tag = "覆盖" if k in u["overrides"] else "继承"
+            print("   [%s] %-18s %s" % (tag, k, v))
+
+    print("\n注：Wiki 第二级的继承链是「顶层 llm → wiki.l2.llm」，**刻意跳过 "
+          "wiki.llm** ——\n    级联继承会让第一级换 provider 牵连第二级（实测踩过："
+          "第一级切到\n    DeepSeek 官方关推理，第二级因此丢掉了 Command Code 的凭据）。")
+    return 0
+
+
+def _register_llm_config_parser(sub) -> None:
+    pl = sub.add_parser(
+        "llm-config",
+        help="查看各 LLM 使用点最终生效的配置（哪项继承、哪项覆盖）")
+    pl.add_argument("--json", action="store_true", help="输出原始 JSON")
 
 
 def _register_memory_log_parser(sub) -> None:

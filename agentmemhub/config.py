@@ -465,3 +465,69 @@ def reset() -> None:
     """重置单例（测试用）。"""
     global _instance
     _instance = None
+
+
+# ---------------------------------------------------------------------------
+# LLM 生效配置视图（只读）
+# ---------------------------------------------------------------------------
+
+#: 四个 LLM 使用点：显示名 → 取值函数（返回该调用方**合并后**的 llm 段）。
+#:
+#: 为什么要这个视图（2026-09-22）：LLM 的覆盖项是**就地**的（`wiki.llm` /
+#: `distillation.llm` / `wiki.l2.llm`）—— 这与日志的 `logs.files.<name>`、
+#: 召回档位的 `retrieval.callers.<name>` 那种**集中式覆盖**不同。于是"某个
+#: 调用方到底用哪个模型、哪些参数是继承的"要翻好几处配置才能拼出来。
+#: 本函数把结果拼好，并标注每一项的来源。
+_LLM_USERS: tuple[tuple[str, str, str], ...] = (
+    ("记忆蒸馏", "distillation.llm", "distill"),
+    ("批量评分", "llm（顶层，无覆盖）", "score"),
+    ("Wiki 第一级", "wiki.llm", "wiki_l1"),
+    ("Wiki 第二级", "wiki.l2.llm", "wiki_l2"),
+)
+
+
+def _llm_fields(cfg: dict) -> dict[str, Any]:
+    """从一份 llm 配置里取"看得见的字段"（api_key 只报存在性，绝不回显）。"""
+    out: dict[str, Any] = {}
+    for k in ("endpoint", "model", "headers", "timeout", "max_tokens",
+              "temperature", "thinking", "reasoning_effort", "repair_model"):
+        v = (cfg or {}).get(k)
+        if v is None or v == "" or v == {}:
+            continue
+        out[k] = v
+    key = str((cfg or {}).get("api_key") or "")
+    out["api_key"] = "（已设置）" if key else "（未设置）"
+    return out
+
+
+def llm_effective(conf: "Config | None" = None) -> dict[str, Any]:
+    """各 LLM 使用点**最终生效**的配置 + 每项的来源（继承 / 覆盖）。
+
+    返回 `{"top": {...}, "users": [{"name", "path", "values", "overrides",
+    "inherits"}, ...]}`。`overrides` 是与顶层**取值不同**的字段（即该调用方
+    真正覆盖了什么），`inherits` 是沿用顶层的字段。
+    """
+    c = conf or config()
+    top = c.llm
+    top_fields = _llm_fields(top)
+    # 四个调用方各自的合并结果（与生产链路读的是同一份属性，不会各说各话）
+    raw: dict[str, dict] = {
+        "distill": (c.distillation or {}).get("llm") or {},
+        "score": top,
+        "wiki_l1": (c.wiki or {}).get("llm") or {},
+        "wiki_l2": (c.wiki_l2 or {}).get("llm") or {},
+    }
+    users = []
+    for name, path, key in _LLM_USERS:
+        vals = _llm_fields(raw[key])
+        overrides, inherits = [], []
+        for k, v in vals.items():
+            if k == "api_key":
+                continue
+            if top_fields.get(k) == v:
+                inherits.append(k)
+            else:
+                overrides.append(k)
+        users.append({"name": name, "path": path, "values": vals,
+                      "overrides": overrides, "inherits": inherits})
+    return {"top": {"path": "llm（顶层）", "values": top_fields}, "users": users}

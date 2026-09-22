@@ -8,6 +8,61 @@ def _cfg(env=None, path=None):
     return C.Config(env=env or {}, path=path)
 
 
+def test_llm_effective_标出继承与覆盖(tmp_path):
+    """`llm-config` 视图：把四个使用点的生效配置拼好，并标出每项来源。
+
+    动机：LLM 的覆盖项是**就地**的（`wiki.llm` / `distillation.llm`），
+    与 `logs.files.<name>`、`retrieval.callers.<name>` 的集中式覆盖不同 ——
+    不拼一下根本看不出来"谁在用什么、哪些是继承的"。
+    """
+    f = tmp_path / "agentmemhub.yaml"
+    f.write_text(
+        "llm:\n  endpoint: https://top/v1\n  api_key: sk-secret\n  model: m\n"
+        "distillation:\n  enabled: true\n"
+        "wiki:\n  llm:\n    timeout: 900\n"
+        "  l2:\n    llm:\n      reasoning_effort: low\n", encoding="utf-8")
+    data = C.llm_effective(_cfg(path=f))
+
+    assert data["top"]["values"]["model"] == "m"
+    by_name = {u["name"]: u for u in data["users"]}
+
+    # 蒸馏：完全继承顶层
+    d = by_name["记忆蒸馏"]
+    assert d["overrides"] == []
+    assert "model" in d["inherits"]
+
+    # Wiki 第一级：只覆盖 timeout
+    w1 = by_name["Wiki 第一级"]
+    assert w1["overrides"] == ["timeout"]
+    assert w1["values"]["timeout"] == 900
+    assert "model" in w1["inherits"], "未覆盖的字段应标记为继承"
+
+    # Wiki 第二级：**只**覆盖 reasoning_effort —— 它刻意跳过 wiki.llm
+    # （继承链是「顶层 llm → wiki.l2.llm」），所以**不会**继承 DEFAULT_WIKI 里
+    # 给第一级的 timeout=900。级联继承会让第一级换 provider 牵连第二级（实测踩过）。
+    w2 = by_name["Wiki 第二级"]
+    assert w2["overrides"] == ["reasoning_effort"]
+    assert "timeout" not in w2["values"], "不应从 wiki.llm 继承 timeout"
+
+
+def test_llm_effective_绝不回显密钥(tmp_path):
+    """视图是给人看配置的，api_key 只报存在性。"""
+    f = tmp_path / "agentmemhub.yaml"
+    f.write_text("llm:\n  endpoint: https://top/v1\n  api_key: sk-secret\n",
+                 encoding="utf-8")
+    data = C.llm_effective(_cfg(path=f))
+    assert data["top"]["values"]["api_key"] == "（已设置）"
+    assert "sk-secret" not in str(data)
+
+
+def test_llm_effective_未配置时也不炸(tmp_path):
+    f = tmp_path / "agentmemhub.yaml"
+    f.write_text("llm: {}\n", encoding="utf-8")
+    data = C.llm_effective(_cfg(path=f))
+    assert len(data["users"]) == 4
+    assert data["top"]["values"]["api_key"] == "（未设置）"
+
+
 def test_defaults():
     c = _cfg()
     # 默认数据目录在项目内（database/，随项目走便于备份迁移）
