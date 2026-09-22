@@ -977,6 +977,46 @@ RAG 优化「能不能捞到」，wiki 优化「有没有结构」；**wiki 不�
 - [x] 文档：新增 **`docs/data-architecture.md`（架构全景·权威）**、
       `docs/model-selection.md`（模型选型与定价）；六路通道表述同步进 README / ARCHITECTURE / API
 
+### v2.3（2026-09-21）可观测性：三个事实流
+
+**按视角拆日志**——"这条记忆到底写进去没有""这次 wiki 为什么跑 / 为什么没跑"
+此前只能靠翻库和反推代码：
+
+- [x] `logs/mcp.log` **协议层**：谁调了什么工具、参数、耗时、成败（服务端唯一分发点自动写）
+- [x] `logs/memory.log` **数据层**：哪条记忆被写/读、**内容全文**、来自 `mcp`/`http`/`distill`/`cli` 哪条路径
+- [x] `logs/wiki.log` **流水线层**：编译跑到哪、花了多少、断在哪；新增**触发判定留痕**
+      （`trigger_check` 记下 `should_run` / `reasons` / `dirty`）
+- [x] **日志滚动与归档**由 `logs` 配置段统一控制：全局默认 + 单文件覆盖（空则回落）；
+      滚动规则**二选一**（`max_mb > 0` 按大小**优先**，否则按**自然日**首次写入）；
+      归档进 `logs/archive/<日志名>/`，`keep_days` 默认 30
+- [x] 写入点一律"建目录 + 追加打开"：**手工删掉日志文件甚至整个 `logs/` 也能自动重建续记**
+- [x] 同日暴露并修复 wiki **静默落后于记忆却一直显示健康**（三处叠加缺陷 + 一个观测盲区 +
+      一个配置漏配，详见 v2.4 与 `docs/llm-wiki.md`）
+
+### v2.4（2026-09-22）编译可靠性 + 待更新记忆可运维
+
+**把"能跑"钉死成"跑得住、失败也不骗人"**：
+
+- [x] **组级并发**（`wiki.page_workers`，默认 3）+ **结果按组序重排**（完成顺序不确定，
+      直接 append 会让页序漂移、产物不可复现）；实测 **32 组约 48 分钟 → 约 12 分钟**
+- [x] **分组分批**（`wiki.plan_batch_max`，默认 40）：分组是"输出规模随输入线性增长"的调用
+- [x] **429 进程级共享闸门**：撞限就推后"下次允许发请求的时间"，**所有线程一起等**
+      （避免多 worker 各自退避造成的"退避共振"）+ 尊重 `Retry-After`（上限 300s）
+- [x] **`HTTPException` 纳入瞬态重试**：`IncompleteRead`/`RemoteDisconnected` 继承自它
+      而非 `OSError`，旧捕获会漏掉 → "切网丢一组、一次都不重试"
+- [x] **组级失败剔除新基线**：单组失败不影响整会话（对），但会话仍算成功 →
+      那几组记忆照样进新基线、被永久掩盖（实测 23 组失败 3 组、**20 条记忆**差点静默丢弃）
+- [x] **跨进程单飞行锁**（`O_CREAT|O_EXCL` 原子创建 + PID/时间戳 + 陈旧抢占）：
+      `threading.Lock` 只管进程内、`msvcrt.locking` 跨进程无效、不依赖 `psutil`
+- [x] **计时双口径**：墙钟 `seconds` + 累计调用耗时 `call_seconds`
+      （机器休眠会把墙钟撑大，实测一次 L2 显示 9.2 小时而实际约 1 小时）
+- [x] **待更新记忆的查看与删除**：`wiki --action pending|ignored|drop|restore`
+      （HTTP 同步四路由）。**软删除** = 打 `wiki_ignore_at`，记忆仍可召回、只是不进 wiki、
+      可恢复、**不触发重编**；**硬删除** = 真删（蒸馏行 + 投影 + 向量）需 `confirm`，
+      删完**重建 manifest**。**边界**：只处理**尚未进 wiki** 的记忆（删除不产生死链），
+      已进 wiki 的删除属 `docs/memory-deletion.md` 范畴，`drop()` 会拒绝
+- [x] 主模型切换 `xiaomi/mimo-v2.6-flash`（同价优先新模型，V2.5 留作回退位）
+
 - [ ] 更多 Agent（Claude Code / Cursor / Gemini CLI / CodeBuddy）
 - [ ] 记忆折叠压缩（超长会话压缩、相邻轮折叠）
 - [ ] 存储扩展（单库增长的按 source 分片/归档；data_root 已参数化，见 watermarks 扩展点设计）
