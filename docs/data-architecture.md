@@ -93,11 +93,12 @@ MCP memory_save(content="…", importance="high", type="lesson")
   │    ├─ 返回给调用方（trace_id）           ← memory_score 靠它定位
   │    ├─ bundle.traces[0].id = tid ──→ 引擎 import_bundle：
   │    │     units.legacy_id = tid        ★ 引擎存储的 trace id（去重/feedback 锚）
-  │    │     units.src_id = content_anchor(text)   ← 内容锚 'mcp_<内容hash>'
-  │    │       （与 tid 是两套 hash！src_id 用于引擎幂等，不用作跨表关联）
+  │    │     units.src_id = content_anchor(text)   ← 内容锚 'mcp_<sha256(原始内容)[:16]>'
+  │    │       （与 tid 是两套 hash！src_id 用于引擎幂等，不用作跨表关联；
+  │    │         也**不等于** content_hash —— 后者用规范化后的内容算）
   │    └─ 蒸馏表 distilled_memories（save_direct_memory）：
   │          slice_key = 'mcp:<tid 去 mcp_ 前缀>'   ← wiki/面板关联锚
-  │          content_hash = fingerprint(content)    ← 内容指纹 md5
+  │          content_hash = fingerprint(content)    ← 内容指纹 sha256[:16]（规范化后）
   │          status = 'new'，type/importance 随参数
   │
   └─ 投影（S4/直写补投影）：
@@ -112,10 +113,10 @@ MCP memory_save(content="…", importance="high", type="lesson")
 | `session_uid` | 源库 ingest | conversations.session_uid | 全局会话唯一 id，面板双向跳转 | 与 (source, conversation_id) 1:1 |
 | `conversation_id` | 各 harness | 源库 + 蒸馏表 + units | 会话标识 | 直写记忆固定为 `'direct'`（source='mcp'） |
 | `tid`（trace id） | `_trace_id(content, ts)` | 返回值；引擎 **legacy_id**；蒸馏表 slice_key 前缀 | memory_score 定位；面板去重关联 | **引擎的 units.src_id 不是 tid**，是内容锚 |
-| `units.src_id`（手写层） | `content_anchor(text)` | units.src_id（'mcp_\<内容hash\>'） | 引擎幂等（同内容不重投影） | **不能用它与蒸馏表关联**——两套 hash |
+| `units.src_id`（手写层） | `content_anchor(text)` | units.src_id（`'mcp_<sha256(原始内容)[:16]>'`） | 引擎幂等（同内容不重投影）；**召回侧的双投影去重也用它** | **不能假定它与 `content_hash` 相同**——它用**原始**内容算哈希，而 `content_hash`（`fingerprint`）用**规范化后**内容（去空行 + 每行 strip）。两者只在"入库未改动内容"时一致（实测 114 条直写单元里 **11 条因 `sanitize.redact` 改动内容而分叉**）|
 | `units.legacy_id` | import_bundle（存传入 tid） | units.legacy_id | trace id 的引擎侧真身 | **面板去重 / 直写关联的唯一正确锚** |
 | `dst_<content_hash>` | 蒸馏表 content_hash | units.src_id（记忆层投影） | 记忆的检索分身；面板 unit_id/value | 锚不含会话——同 hash 跨会话共享一个投影行 |
-| `content_hash` | `fingerprint(content)`（md5） | distilled_memories.content_hash | 内容指纹；幂等；dst_ 锚；manifest 指纹 | 直写经 sanitize 后的文本才计入——与原始 trace 文本可能不一致 |
+| `content_hash` | `fingerprint(content)`（**sha256[:16]**，规范化后） | distilled_memories.content_hash | 内容指纹；幂等；dst_ 锚；manifest 指纹 | 直写经 sanitize 后的文本才计入——与原始 trace 文本可能不一致（**这正是 `mcp_` 与 `dst_` 锚偶尔分叉的原因**）|
 | `slice_key` | 蒸馏：切片键；直写：`mcp:<tid>` | distilled_memories.slice_key | 溯源；面板去重键 | **必须与去重 SQL 的口径逐字一致**（见 §7.4） |
 | `dedup_of` | S3 / 直写投影 | distilled_memories.dedup_of | similar/merged 指向池中目标 | similar 行与目标行在面板可能"语义相似" |
 | 会话内序号 `[n]` | wiki_compile 的 source_map | L1 页正文 | 会话内溯源 | 提升为全局 `[m<id>]` 后才跨会话有效 |
@@ -177,7 +178,7 @@ MCP memory_save(content="…", importance="high", type="lesson")
 | ⑤ 页面准入 | `apply_page_policy`：高分优先 + 低分字面兜底 + 席位 | 分数与证据都只在各自区间有效（§4.2/§4.4） |
 | ⑥ 多样性限席 | 会话轨迹限席；页面/记忆各自独立成席 | 防同一会话刷屏 |
 | ⑦ 页面保位 | `reserve_pages`：**替换**末尾非页面（不追加） | 相关页 rel 低会被挤出 k；追加又会被下游截断切掉 |
-| ⑧ 终审截断 | `safe_cutoff_hits`（桥接层，`floor_ratio` 来自档位） | 页面占名额、不参与窗口截断 |
+| ⑧ 终审截断 | `safe_cutoff_hits`（桥接层，`floor_ratio` 与两个兜底席来自档位） | 页面占名额、不参与窗口截断；**非页面也有字面兜底席**（§4.2 末） |
 
 ⚠️ **下游有两处"取前 N 条"**（`safe_cutoff_hits` 的 `hits[:max_keep]`、面板
 `/api/memos/search` 的 `top`），所以第 ⑦ 步必须保持"总数不变"——实测踩过：
@@ -291,15 +292,77 @@ wiki 页面此前是**只读产物**（Agent 搜不到）。现在 L2 页面**�
 
 **残余局限**：噪声仍会出现，且**排序不完美**——拼错查询 `windowsctrol` 下
 噪声「Clink」(0.805) 仍排在真相关页「WindowsControl 图标检测」(0.204) 前面，
-因为它的向量分确实高。**分数与证据都无法可靠区分"高分噪声"与"低分相关"**，
-这只能靠 rerank 解决。进一步方向（按性价比）：
+因为它的向量分确实高。**分数与证据都无法可靠区分"高分噪声"与"低分相关"**。
 
-1. **本地 cross-encoder rerank**（如 bge-reranker ONNX）：双塔余弦分重叠的
-   标准解法，无 API 费用、延迟 ~100-300ms、确定性好；需新增第三个模型
-2. **LLM 条件精判**（引擎已有 `judge` 参数与 `LLMFinalJudge`，fail-closed）：
-   判别力强，代价是每次召回 +1~3s 与 token 费
-3. **页面内分块向量**：实测收益中等且有反例（块级 max 会让噪声页上位、分数
-   整体上移 0.03~0.10 需重标阈值），且**不解决准入问题**，优先级最低
+### 4.2.1 非页面层的字面兜底席（2026-09-22 补）
+
+页面层早在 §4.2 里就有了"低分字面兜底席"，**非页面层（记忆/消息）却一直没有** ——
+于是同一次召回里出现荒谬的不对称：
+
+| 层级 | 条目 | 分数 | 结果 |
+|---|---|---|---|
+| 页面 | 真相关页 | **0.195** | ✅ 进了（字面兜底席救回） |
+| 记忆 | 「WindowsControl 项目架构与技术栈」 | **0.701** | ❌ 被切掉 |
+
+**根因**：非页面只套一条**乘性相对门限** `score ≥ curate_floor × top`，而 **top
+本身可能是噪声**。拼错查询 `windowsctrol` 的 top1 是完全无关的字面命中(1.237)，
+门限因此被抬到 0.990，24 条候选只剩 4 条 —— 而真相关那条 0.701 白白被切。
+
+**修法（与页面层同构）**：`rag_bridge.safe_cutoff_hits` 改为
+① 高分（≥ 门限）优先，但为字面兜底**留出席位**；② 低分但命中**字面通道**
+（`fts`/`ident`/`phrase`，与页面用同一套 `_PAGE_LITERAL_SIGNALS`）的用兜底席救回；
+③ **只救有字面证据的** —— 低分且只有向量分的仍然切掉，否则等于取消门限。
+档位表新增 `nonpage_literal_seats`（1/2/**2**/3/4，默认档 3 = 2 席）。
+
+**实测效果**（干净数据、6 个真实查询，`curate=False/True` 对比）：
+
+| 查询 | 改前保留 | 改后 | 效果 |
+|---|---|---|---|
+| `记忆怎么软删除` | 7 | **12** | **救回了答案本身**（0.947） |
+| `windowsctrol` | 4 | **6** | **救回了被误杀的「WindowsControl 项目架构与技术栈」** |
+| `rerank 精排方案` | 4 | **11** | 多条相关记忆回来 |
+| `command code` | 11 | **13** | — |
+| `面板端口是多少` | 4 | **6** | — |
+
+**仍然救不回的那一类**：查询「Windows 下怎么设置 git 代理」时，答案本身
+「Git 代理与 SSL 配置处理」(0.789) **只命中 `vec`、没有任何字面证据** ——
+兜底席给不了它，门限又够不着。**这一类只能靠 cross-encoder**（它直接比较
+query 与候选的语义，不依赖通道命中）。
+
+**所以两条腿不是替代关系**：规则兜底席解决"**有字面证据**的低分真相关"（拼错、
+近义）；cross-encoder 解决"**只有语义证据**的低分真相关"（换词、纯语义）。
+
+### 4.2.2 召回精排（rerank）的三条路线
+
+| 路线 | 延迟 | 成本 | 确定性 | 决策 |
+|---|---|---|---|---|
+| **规则兜底席** | **0** | 0 | 确定 | ✅ **已实施**（§4.2.1） |
+| **本地 cross-encoder** | 约 100~300ms | **0** | 确定（可复现、可缓存） | 可行，待排期 |
+| **LLM 精判** | **+1~3s** | 每次召回一次 LLM 调用 | **不确定** | ❌ **否决** |
+
+**否决 LLM 精判的理由**（两条，第二条是结构性的）：
+
+1. 成本不可控 + 延迟明显：Agent 侧或许无感（它本来就在等 LLM），但**接口与面板
+   查询能明确感知**。
+2. **更硬的一条：缓存救不了它**。rerank 结果缓存的收益取决于**查询重复率**，而
+   面板/接口的查询是**人输入的**、重复率天然很低 → 缓存几乎不命中，"每次都发一次
+   LLM 请求"无从缓解。**这是结构性缺陷，不是调优能解决的。** 外加 LLM 输出
+   **不确定**，会让"召回结果可复现"这条原则失效。
+
+**本地 cross-encoder 的实测延迟**（本机纯 CPU，onnxruntime + `CPUExecutionProvider`）：
+
+```
+单条 query 编码     1.6 ms
+单条 passage 编码   70 字 2.1ms / 150 字 4.9ms / 300 字 6.9ms / 600 字 13.1ms
+```
+
+cross-encoder 对**每个 (query, doc) 对**都要独立前向（不像 bi-encoder 能复用 doc
+编码），成本 ≈ 逐条编码 × 参数量倍数：**30 候选 × 同规模 ≈ 106ms、× base 级
+（约 3.3× 参数）≈ 282ms**。真实候选更长、再加首次加载，实际落在 **200~500ms**，
+且可用"**只精排 top-N**"进一步压缩。
+
+**第 3 条路（页面内分块向量）**：实测收益中等且有反例（块级 max 会让噪声页上位、
+分数整体上移 0.03~0.10 需重标阈值），且**不解决准入问题**，优先级最低。
 
 ### 4.3 召回严格度档位（统一配置）
 
@@ -308,13 +371,16 @@ wiki 页面此前是**只读产物**（Agent 搜不到）。现在 L2 页面**�
 终审阈值、页面席位/字面兜底席/证据门槛线，避免散着配出互相矛盾的组合。
 调用方只需回答一个问题：要少而准，还是全而杂？
 
-| 档 | 名称 | 候选池 | 非页面阈值 | 终审阈值 | 页面席位 | 字面兜底席 | 证据门槛线 | 实测（四组查询条数 · 12查询基线） |
-|---|---|---|---|---|---|---|---|---|
-| 1 | 最严格 | 20 | 0.35 | 0.90 | 1 | 1 | 0.95 | 2/1/1/1 · 18 条 / 页面 7 |
-| 2 | 严格 | 25 | 0.30 | 0.85 | 2 | 1 | 0.85 | 2/1/1/1 · 27 条 / 页面 13 |
-| **3** | **均衡（默认）** | 30 | 0.20 | 0.80 | 3 | 1 | 0.70 | **4/4/4/4 · 55 条 / 页面 35** |
-| 4 | 宽松 | 40 | 0.15 | 0.75 | 4 | 2 | 0.50 | 5/5/5/5 · 76 条 / 页面 46 |
-| 5 | 最宽松 | 60 | 0.10 | 0.70 | 5 | 3 | 0.30 | 6/7/8/8 · 88 条 / 页面 57 |
+| 档 | 名称 | 候选池 | 非页面阈值 | 终审阈值 | 页面席位 | 页面兜底席 | **非页面兜底席** | 证据门槛线 | 实测（四组查询条数 · 12查询基线） |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 最严格 | 20 | 0.35 | 0.90 | 1 | 1 | **1** | 0.95 | 2/1/1/1 · 18 条 / 页面 7 |
+| 2 | 严格 | 25 | 0.30 | 0.85 | 2 | 1 | **2** | 0.85 | 2/1/1/1 · 27 条 / 页面 13 |
+| **3** | **均衡（默认）** | 30 | 0.20 | 0.80 | 3 | 1 | **2** | 0.70 | **4/4/4/4 · 55 条 / 页面 35** |
+| 4 | 宽松 | 40 | 0.15 | 0.75 | 4 | 2 | **3** | 0.50 | 5/5/5/5 · 76 条 / 页面 46 |
+| 5 | 最宽松 | 60 | 0.10 | 0.70 | 5 | 3 | **4** | 0.30 | 6/7/8/8 · 88 条 / 页面 57 |
+
+「页面兜底席」= `page.literal_seats`、「非页面兜底席」= `nonpage_literal_seats`
+（2026-09-22 新增，见 §4.2.1）；两者同方向：档位越宽松给得越多。
 
 「证据门槛线」= `literal_required_below`：**这条线以上的页面只看分数**（高分语义
 优先），线以下必须有字面证据（低分模糊匹配兜底）；「字面兜底席」= `literal_seats`，
@@ -592,7 +658,7 @@ api_memories = 蒸馏路（distilled_memories JOIN dst_ units）
 | **长 update 会拖长蒸馏收尾** | 两条写入钩子的行为**不同**，别混：**MCP `_save` 是 daemon 线程**（`_wiki_trigger_probe`，立即返回）—— 实测 update 跑 30~60 分钟期间 MCP 工具**仍即时响应**；**蒸馏收尾是同步**调用（`distill.py` 直接等返回值再 `emit`）。所以"长 update 会阻塞 MCP"是**误判**，真实代价是批量蒸馏会多等很久。根因见下一条 |
 | ~~逐组编译是串行的~~ | **已修（2026-09-21）**：`compile_session` 原本对分组结果**串行**逐组调 LLM（32 组 × 30~150 秒 ≈ 48 分钟）。各组之间**无依赖**，串行纯属浪费 —— 改为 `wiki.page_workers`（默认 3）并发，**结果按组序重排**（完成顺序不确定，直接 append 会让页序随机漂移、产物不可复现）。实测降到约 12 分钟 |
 | **429 限流：全局限流闸门** | 并发之后多个 worker 会几乎同时撞上同一个 RPM/TPM 窗口。若各自独立退避，它们会在同一时刻一起恢复、一起重试，再次撞限（**退避共振**）→ `agentmemhub/llm.py` 用**进程级共享**的闸门统一推后，所有线程一起等。另：解析 `Retry-After`（秒数或 HTTP-date，上限 300s 防服务端给离谱值卡死）、限流把总尝试次数放宽到 `max_retries+1+2`（RPM 窗口是分钟级，默认 3 次常常不够） |
-| **待更新记忆的删除** | 2026-09-22 新增（`agentmemhub/wiki_pending.py`）：`wiki --action pending\|drop\|ignored\|restore` 与 `/api/wiki/pending*`。**软删除** = 写 `distilled_memories.wiki_ignore_at`（记忆**仍存在、仍可召回**，只是不再参与 wiki 编译，可 `restore` 取消）；**硬删除** = 真删蒸馏表行 + `units` 投影 + 向量（不可恢复，需 `confirm`）。**只允许删尚未进 wiki 的记忆** —— 已进 wiki 的会被拒绝（那类删除会让页面里的 `[m<id>]` 变死引用，属于 [`memory-deletion.md`](memory-deletion.md) 的范畴）。两个要点：软删待更新的记忆**不触发任何重编**（它本就不在基线里）；硬删后**自动重建 manifest**，否则 align 会报"失去输入"而触发无意义重编 |
+| **待更新记忆的删除** | 2026-09-22 新增（`agentmemhub/wiki_pending.py`）：`wiki --action pending\|drop\|ignored\|restore` 与 `/api/wiki/pending*`。**软删除** = 写 `distilled_memories.wiki_ignore_at`（记忆**仍存在、仍可召回**，只是不再参与 wiki 编译，可 `restore` 取消）；**硬删除** = 真删蒸馏表行 + **两份召回投影**（`dst_<hash>` 与 `mcp_<hash>`）+ 向量（不可恢复，需 `confirm`）。**只允许删尚未进 wiki 的记忆** —— 已进 wiki 的会被拒绝（那类删除会让页面里的 `[m<id>]` 变死引用，属于 [`memory-deletion.md`](memory-deletion.md) 的范畴）。三个要点：软删待更新的记忆**不触发任何重编**（它本就不在基线里）；硬删后**自动重建 manifest**，否则 align 会报"失去输入"而触发无意义重编；**两份投影都要清** —— 只清 `dst_` 会让那条记忆**仍能被检索命中**（2026-09-22 实测踩到"删了还能搜到"） |
 
 ---
 
@@ -799,3 +865,17 @@ GET  /api/wiki/pending/ignored  POST /api/wiki/pending/restore
    同日补齐运维缺口：**待更新记忆的查看与删除**（§7.5，软删 = 不进 wiki 且不触发
    重编 / 硬删 = 真删并重建 manifest，**边界限定"尚未进 wiki"**）。主模型切
    `xiaomi/mimo-v2.6-flash`（同价优先新模型，V2.5 留回退位；**质量指标待收尾重测**）
+17. **召回终审的对称化 + 两个既有缺口的修复**（2026-09-22）：页面层早有"低分字面
+   兜底席"，非页面层却只套一条乘性相对门限 `score ≥ 0.8×top` —— 而 **top 本身可能
+   是噪声**（拼错查询 `windowsctrol` 的 top1 是完全无关的字面命中 1.237，门限被抬到
+   0.990，24 条候选只剩 4 条，真相关的「WindowsControl 项目架构与技术栈」0.701 被
+   白白切掉），而同一次结果里页面 **0.195** 反而进了 —— 这个不对称本身就是缺陷。
+   现与页面层**同构**（§4.2.1，新增档位键 `nonpage_literal_seats`）。**实测 6 个
+   查询里 5 个改善**，两处救回了被误杀的答案（`记忆怎么软删除` 7→12 条、
+   `windowsctrol` 4→6 条）。同日顺带修掉两个既有缺口：
+   ① **直写记忆双投影** —— `mcp_<hash>`（引擎落账）与 `dst_<hash>`（蒸馏投影）内容
+   相同，导致结果里重复出现且**各占一个席位**（实测吃掉兜底席）→ 召回侧按
+   hash + 正文双重去重；② **硬删除漏清直写落账单元** —— `drop_projection` 只清
+   `dst_`，删完 `mcp_` 仍在 units 里，表现为"**删了还能搜到**"→ 两份都清。
+   仍未解决的一类：「只有向量证据、没有字面命中」的低分真相关（如 git 代理查询的
+   答案 0.789），规则兜底席给不了它 —— **那类只能靠 cross-encoder**（§4.2.2）。

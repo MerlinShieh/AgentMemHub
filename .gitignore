@@ -1,4 +1,4 @@
-﻿# ==== 不纳入版本库的内容 ====
+# ==== 不纳入版本库的内容 ====
 # 用户数据库（笔记/收藏/项目归类/摘要，体积大且持续变化）
 hub_notes.sqlite
 hub_notes.sqlite-wal
@@ -44,6 +44,10 @@ agentmemhub.yaml
 # 本地环境文件与测试缓存（防误加）
 .env
 .pytest_cache/
+# pytest 的 --basetemp（Windows 上必须自建，因为系统 temp 可能不可写）。
+# **必须忽略**：一次全量跑的残留含多份 session_rag.db 等二进制，误提交会把
+# 仓库撑大且无法清除历史（2026-09-22 实测踩到一次）。
+.pytest_tmp/
 
 # 交接文档（仅供二次检查，不入库）
 HANDOFF.md
