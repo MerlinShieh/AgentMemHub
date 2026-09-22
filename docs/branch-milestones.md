@@ -197,14 +197,46 @@ ID 经项目客户端实测探测确认（`mimo-v2.6` / `mimo-v2.5-flash` 均不
 "乘性相对门限"这个工具本身就选错了：它假设"分数与相关度同尺度"，而这个假设已被
 反复证伪（页面层甚至**反相关**：相关页 0.21×top、噪声页 0.63×top）。
 
-**两条路的现状**：
+**三条路线的实测与决策（2026-09-22）**：
 
-- **`LLMFinalJudge` 实现完整却从未接线**：`agentmemhub/rag/ext.py:52` 有完整的
-  精筛+重排（temperature 0、刻意剔除分数防锚定、fail-closed 退 `safe_cutoff`），
-  `tests/rag/test_rag_ext.py` 测试也齐 —— 但**生产链路零调用**
-  （`rag_bridge.search()` 里没有任何 `judge=`，只有引擎自带的调试 CLI 用）。
-  **精排的"高级档"早就写好了，只是没接上。**
-- **本地 cross-encoder**（如 bge-reranker ONNX）：完全未实现，需引入第三个模型。
+| 路线 | 延迟 | 成本 | 确定性 | 决策 |
+|---|---|---|---|---|
+| **LLM 精判**（`LLMFinalJudge`） | **+1~3s** | 每次召回一次 LLM 调用（token 费） | **不确定**（同候选可能给不同结果） | **否决** |
+| **本地 cross-encoder** | **约 100~300ms** | **0** | **确定**（可复现、可缓存） | 可行，待排期 |
+| **规则改进**（对称化 + 门限策略） | **0** | 0 | 确定 | **优先** |
+
+**为什么否决 LLM 精判**（两条，第二条是结构性的）：
+
+1. 用户判断：**成本不可控 + 延迟明显**。Agent 侧或许无感（它本来就在等 LLM），
+   但**接口与面板查询能明确感知**。
+2. **更硬的一条：缓存救不了它**。rerank 结果缓存的收益取决于**查询重复率**，而
+   面板/接口的查询是**人输入的**，重复率天然很低 → 缓存几乎不命中，"每次都发一次
+   LLM 请求"无从缓解。**这是结构性缺陷，不是调优能解决的。** 外加 LLM 输出
+   **不确定**，会让"召回结果可复现"这条既有原则失效。
+
+**本地 cross-encoder 的实测延迟**（本机纯 CPU，onnxruntime + CPUExecutionProvider；
+脚本 `exports/wiki_work/diag_rerank_latency.py`）：
+
+```
+单条 query 编码     1.6 ms
+单条 passage 编码   70 字 2.1ms / 150 字 4.9ms / 300 字 6.9ms / 600 字 13.1ms
+```
+
+cross-encoder 对**每个 (query, doc) 对**都要独立前向（不像 bi-encoder 能复用 doc
+编码），所以成本 ≈ 逐条编码 × 参数量倍数：
+
+- **30 候选 × 同规模 reranker ≈ 106 ms**
+- **30 候选 × base 级（约 3.3× 参数）≈ 282 ms**
+
+真实候选更长、再加首次模型加载，实际落在 **200~500ms** 量级 —— 且可用"**只精排
+top-N**"进一步压缩（候选池 30 条，只精排前 10~15）。**零 API 成本、零 token 费、
+结果确定**，与 LLM 的 1~3s + 每次花钱不是一个量级。
+
+**顺带纠正一个直觉**：`LLMFinalJudge`（`agentmemhub/rag/ext.py:52`）**实现是完整的**
+（temperature 0、刻意剔除分数防锚定、fail-closed 退 `safe_cutoff`），测试也齐
+（`tests/rag/test_rag_ext.py`）—— 但**生产链路零调用**（`rag_bridge.search()` 里没有
+任何 `judge=`，只有引擎自带的调试 CLI 用）。**既然 LLM 路线被否，它只能作为
+"cross-encoder 之外的另一条腿"留档，不再优先。**
 
 **增量诊断脚本**：`exports/wiki_work/diag_rerank_gap.py`（对比 `curate=False/True`
 的差异，列出被门限切掉的条目）。
