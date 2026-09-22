@@ -262,7 +262,7 @@ GET  /api/admin/job  →  轮询进度
 
 ## 五、CLI
 
-见 README「命令行」章节的完整表格。与接口相关的四条运维入口：
+见 README「命令行」章节的完整表格。与接口相关的几条运维入口：
 
 ```bash
 python -m agentmemhub wiki --action failures --out DIR          # 查 wiki 失败清单
@@ -270,6 +270,8 @@ python -m agentmemhub wiki --action retry --out DIR --stage l2   # 定向补跑
 python -m agentmemhub health_check                              # 记忆库一致性巡检
 python -m agentmemhub memory-log                                # 记忆操作事实流（写了/读了什么）
   [--event write|read] [--path mcp|http|distill|cli] [--grep 关键词] [--limit N] [--json]
+python -m agentmemhub llm-config [--json]                       # 各 LLM 使用点**最终生效**的配置
+                                                                # （标出每项是继承还是覆盖）
 ```
 
 ---

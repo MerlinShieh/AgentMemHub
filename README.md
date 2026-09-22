@@ -333,6 +333,11 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 | `score [--pending] [--limit N] [--dry-run] [--workers N] [--ids id1,id2] [--unscored-count] [--sync-episodes]` | ⚠️ **当前不生效**（入口已从控制台/面板隐藏；实测评为 neutral 居多且跑批全跳过，质量把关由蒸馏置信度 + 面板 👍/👎 承担）——命令保留备查。原功能：LLM 批量自动评分历史记忆（**增量优先**：pending_score 队列非空只评队列·定点读零全量枚举，队列空则先筛未评 id 再读正文；`--pending` 仅评队列，`--ids` 只评指定条（写后即评），`--unscored-count` 统计未评条数（只读 id），`--sync-episodes` 回填 episode.r_task；**三档 verdict 均记入跳过清单**——positive/negative 写 value、neutral 不写值但仍标记「已评」避免下次重评（dry-run 一律不记录）；网关**内容审核拒评（如智谱 1301）自动归 neutral 并记账**，不再每次卡该条报错；LLM 调用**强制直连**、不受系统代理影响，确需代理设 `AGENTMEMHUB_LLM_PROXY`）|
 | `rebuild [--mode repair\|rebuild]` | 补向量：触发引擎 embedding rebuild（导入记忆后修复语义检索）|
 | `wiki --action failures\|retry --out DIR [--stage l1\|l2] [--src DIR_L1] [--workers N]` | **LLM Wiki 运维**：查看失败清单（按原因分类）/ 定向补跑失败项（只跑失败的，不全量重来）|
+| `wiki --action pending\|ignored\|drop\|restore` | **待更新记忆的查看与删除**：`pending` 列明细；`drop --ids a,b --mode soft`（不进 wiki、仍可召回）/ `--mode hard --confirm`（真删）；`ignored` 列已忽略；`restore` 取消 |
+| `wiki --action triggers\|trigger\|align\|update` | 触发器状态 / 手动触发 / 对齐审计（只读）/ 增量更新 |
+| `memory-log [--event write\|read] [--path mcp\|http\|distill\|cli] [--grep 词] [--json]` | **记忆操作事实流**：什么时候写了/读了什么记忆（含内容全文与来源路径）|
+| `snapshot [--snapshot-action create\|list\|restore]` | 快照与回滚（索引库整库 + wiki 产物目录）|
+| `llm-config [--json]` | **配置自检**：列出各 LLM 使用点（蒸馏/评分/Wiki 一级/二级）**最终生效**的配置，并标出每项是**继承**还是**覆盖** |
 | `stats` / `adapters` | 统计 / adapter 状态 |
 
 > 更完整的代码与 SQL 示例（按 Agent 查询、按文件夹跨 Agent 统计、会话角色分布、直连数据库等）见 **[docs/EXAMPLES.md](./docs/EXAMPLES.md)**。
@@ -744,10 +749,17 @@ rag:
     # 多模型召回融合（真正生效，2026-09-11 起）：逐模型向量路 + RRF；
     # 同门模型重叠度高，扩展前先评测
     models: [bge-small-zh-v1.5]
-    candidate_k: 30                   # 每路候选数
-    threshold_floor: 0.2              # 相对阈值（×top）
-    max_per_conversation: 2           # 同会话限席（原子记忆不受限）
-    search_max_hits: 20               # 面板检索返回上限
+    # 召回严格度档位 1~5（1 最严格 … 5 最宽松，默认 3「均衡」）。
+    # **一条刻度统一给出**：候选宽度 / 相对阈值 / 终审阈值 / 页面席位 /
+    # 字面兜底席 / 证据门槛线 —— 不要再分别去配 candidate_k / threshold_floor
+    # 那些单项（它们已由档位决定，见 docs/data-architecture.md §4.3/§13）。
+    recall_level: 3
+    # 按调用方细分档位（与 logs.files 同一模式：不配则回落上面的全局值）：
+    #   mcp=Agent 自动召回（求"少而准"）/ panel=面板查询（求"不遗漏"）
+    #   cli=命令行 / eval=召回评测
+    # callers:
+    #   mcp: 3
+    #   panel: 4
   models:                             # 模型注册表（新增模型在此登记）
     bge-small-zh-v1.5:
       path: models/bge-small-zh-v1.5
@@ -784,6 +796,36 @@ distillation:                         # 记忆蒸馏全部可调（不硬编码�
 ```
 
 相对路径相对项目根解析，`~` 展开为用户目录。
+
+### 配置的「继承」有四种形态（改配置前必读）
+
+同一个键可能**被上层决定**，也可能**覆盖**上层 —— 机制不止一种，不弄清容易写出
+"配了不生效"或"覆盖范围超出预期"的配置。完整说明（含检查清单）见
+[docs/data-architecture.md §13](docs/data-architecture.md)。
+
+| 机制 | 例子 | 覆盖项写在哪 |
+|---|---|---|
+| **内置默认 < 配置文件** | `DEFAULT_WIKI` → `wiki` 段 | —（不配即用默认） |
+| **集中式细分覆盖** | `logs.rotate` < `logs.files.<日志名>` | 集中在同名键下 |
+| | `rag.retrieval.recall_level` < `rag.retrieval.callers.<调用方>` | 同上 |
+| **就地覆盖** | `llm` < `wiki.llm` / `distillation.llm` / `wiki.l2.llm` | 分散在各使用段 |
+| **三层**（仅页面策略） | 内置默认 < **档位** < `rag.retrieval.page.*` | — |
+
+**"某个调用方到底在用哪份 LLM 配置"看不出来时**：
+
+```bash
+uv run python -m agentmemhub llm-config          # 生效配置 + 继承/覆盖标注
+uv run python -m agentmemhub llm-config --json   # 机器读
+```
+
+**加/改配置键之后**跑一次 `uv run python scripts/check_config_keys.py` —— 查"定义了
+却没有任何读取点"的**僵尸键**（本项目踩过三次：`wiki.single_shot_max`、
+`wiki.workers`、`wiki.l2.*`，共同特征是**配置值恰好等于代码里硬编码的默认值**，
+所以既不报错、也不让测试变红）。
+
+> ⚠️ 该脚本是**启发式**：按"键名在代码里出现过"判定，**不保证真的从 yaml 读**。
+> 例：`rag.retrieval.candidate_k` 在代码里出现过（档位展开的 profile 有同名字段），
+> 但 yaml 里配它**不生效** —— 那类要人工复核（见 §13 检查清单）。
 
 ## 技术文档
 

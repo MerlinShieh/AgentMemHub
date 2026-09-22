@@ -766,6 +766,7 @@ uv run python -m agentmemhub wiki --action retry [--stage l1|l2] --src <第一�
 uv run python -m agentmemhub memory-log              # 记忆操作事实流（写了/读了什么）
   [--event write|read] [--path mcp|http|distill] [--grep 关键词] [--limit N] [--json]
 uv run python -m agentmemhub snapshot                # 快照与回滚（见 §10）
+uv run python -m agentmemhub llm-config [--json]     # 各 LLM 使用点最终生效的配置（见 §13）
 
 # 待更新记忆的查看与删除（见 §7.4 末尾与 §9）
 uv run python -m agentmemhub wiki --action pending            # 列出待 wiki 更新的记忆明细
