@@ -426,6 +426,14 @@ def status() -> dict[str, Any]:
 
 
 def _configured() -> bool:
+    """wiki 是否可用：**总开关打开** + 两级产出目录都配了。
+
+    `wiki.enabled` 此前**没有任何消费点** —— 关掉它照样触发（2026-09-22 配置
+    审计发现的假开关）。现在它是真正的总开关：置 false 后触发器不再跑，
+    `status()` 也会如实报告目标未就绪。
+    """
     from agentmemhub import config as hub_config
     w = hub_config.config().wiki
+    if not w.get("enabled", True):
+        return False
     return bool((w.get("out_l1") or "").strip() and (w.get("out_l2") or "").strip())

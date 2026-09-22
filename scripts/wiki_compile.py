@@ -64,15 +64,25 @@ PLAN_BATCH_MAX = 40
 #: 但等待本身就是浪费。默认 3 是"单会话显著提速、多会话不至于打爆上游"的折中。
 PAGE_WORKERS = 3
 
+#: 会话级并发（`compile_all` 同时编译多少个会话）。
+#:
+#: 与 `PAGE_WORKERS` **相乘**才是真实并发 —— 前者是"同时编几个会话"，后者是
+#: "每个会话内同时编几组"。上游有 RPM/TPM 限制，撞 429 会走
+#: `agentmemhub/llm.py` 的**全局限流闸门**统一退避。
+WORKERS = 4
+
 #: 失败清单类型（仅用于标注，避免顶层重复 import 拖慢启动）
 from agentmemhub.failures import FailureLog  # noqa: E402
 
 
-def _limits() -> tuple[int, int, int]:
-    """(single_shot_max, plan_batch_max, page_workers)：优先取配置，非法回落常量。
+def _limits() -> tuple[int, int, int, int]:
+    """(single_shot_max, plan_batch_max, page_workers, workers)：优先取配置，非法回落常量。
 
-    这几个值此前是**硬编码常量**，而 `wiki.single_shot_max` 虽在 DEFAULT_WIKI 与
-    example 里存在却**从未被读取**（默认值恰好一致，所以一直没暴露）。
+    这几个值此前**全部是硬编码常量**，而 `wiki.*` 的同名键虽在 DEFAULT_WIKI 与
+    example 里存在却**从未被读取** —— 默认值恰好一致，所以一直没暴露。
+    `single_shot_max` / `plan_batch_max` / `page_workers` 于 2026-09-21 收口，
+    `workers` 是 2026-09-22 配置审计补上的最后一个（它另有两处硬编码：
+    `compile_all` 的 `workers=4` 默认值与 `wiki.py` 的 `workers or 4`）。
     """
     def _pick(w, key: str, default: int) -> int:
         try:
@@ -84,10 +94,11 @@ def _limits() -> tuple[int, int, int]:
         from agentmemhub import config as hub_config
         w = hub_config.config().wiki or {}
     except Exception:                       # noqa: BLE001 —— 脚本要能独立运行
-        return SINGLE_SHOT_MAX, PLAN_BATCH_MAX, PAGE_WORKERS
+        return SINGLE_SHOT_MAX, PLAN_BATCH_MAX, PAGE_WORKERS, WORKERS
     return (_pick(w, "single_shot_max", SINGLE_SHOT_MAX),
             _pick(w, "plan_batch_max", PLAN_BATCH_MAX),
-            _pick(w, "page_workers", PAGE_WORKERS))
+            _pick(w, "page_workers", PAGE_WORKERS),
+            _pick(w, "workers", WORKERS))
 
 # ---------------------------------------------------------------------------
 # 提示词 —— 整个方案成败在这里
@@ -323,7 +334,7 @@ def compile_page(client, memories: list[dict], group: dict) -> dict:
 
 def compile_session(client, memories: list[dict], log=print) -> dict:
     """短会话单次编译；长会话走「分组 → 逐组编译（可并发）」。"""
-    single_max, plan_max, page_max = _limits()
+    single_max, plan_max, page_max, _workers = _limits()
     if len(memories) <= single_max:
         log("  单次编译（%d 条 ≤ 阈值 %d）" % (len(memories), single_max))
         r = client.complete_json(
@@ -565,7 +576,7 @@ def compile_one(db: Path, source: str, cid: str, out_dir: Path,
             "seconds": round(time.time() - t0, 1)}
 
 
-def compile_all(db: Path, out_dir: Path, *, workers: int = 4, limit: int = 0,
+def compile_all(db: Path, out_dir: Path, *, workers: int = 0, limit: int = 0,
                 resume: bool = True, min_n: int = 1,
                 thinking: str = "", only: set | None = None,
                 failures: "FailureLog | None" = None) -> list[dict]:
@@ -574,9 +585,11 @@ def compile_all(db: Path, out_dir: Path, *, workers: int = 4, limit: int = 0,
     resume=True 时跳过已有产出的会话 —— 200+ 个会话跑一小时，中途失败必须能续。
     only：只跑这些 (source, conversation_id)（用于 --retry-failed 定向补跑）。
     failures：失败清单；单会话失败记一条，成功则把历史失败标记为已解决。
+    workers：0 = 用配置 `wiki.workers`（默认 4）；显式传值则覆盖。
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    workers = workers or _limits()[3]
     conn = open_ro(db)
     sessions = list_sessions(conn, min_n=min_n, limit=limit or 10 ** 9)
     conn.close()
@@ -682,7 +695,8 @@ def main() -> int:
     ap.add_argument("--index-db", default="",
                     help="索引库路径（默认读配置；验证时建议显式指向副本）")
     ap.add_argument("--all", action="store_true", help="全量编译所有会话")
-    ap.add_argument("--workers", type=int, default=4, help="并发数（默认 4）")
+    ap.add_argument("--workers", type=int, default=0,
+                    help="并发数（0=用配置 wiki.workers，默认 4）")
     ap.add_argument("--limit", type=int, default=0, help="最多编译多少个会话")
     ap.add_argument("--no-resume", action="store_true",
                     help="不跳过已有产出（默认跳过，便于断点续跑）")

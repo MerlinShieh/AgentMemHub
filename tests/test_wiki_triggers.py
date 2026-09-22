@@ -330,3 +330,27 @@ def test_单飞行_其它进程持锁时取不到(_tmp_state, tmp_path, monkeypa
     # 子进程退出后锁由内核释放
     with wiki_triggers._file_lock() as got:
         assert got is True
+
+
+def test_configured_总开关关闭则视为未配置(monkeypatch):
+    """`wiki.enabled` 此前是**假开关** —— 它没有任何消费点，关掉照样触发
+    （2026-09-22 配置审计发现）。现在它是真正的总开关。"""
+    from agentmemhub import config as _cfg
+
+    class _C:
+        wiki = {"enabled": True, "out_l1": "a", "out_l2": "b"}
+
+    monkeypatch.setattr(_cfg, "config", lambda: _C())
+    assert wiki_triggers._configured() is True
+
+    # 总开关关闭 → 即便目录配齐也视为未就绪
+    _C.wiki = {"enabled": False, "out_l1": "a", "out_l2": "b"}
+    assert wiki_triggers._configured() is False
+
+    # 目录没配齐同样未就绪（原有语义不变）
+    _C.wiki = {"enabled": True, "out_l1": "a", "out_l2": ""}
+    assert wiki_triggers._configured() is False
+
+    # 键缺失时按"开"处理（与 DEFAULT_WIKI 的 true 一致）
+    _C.wiki = {"out_l1": "a", "out_l2": "b"}
+    assert wiki_triggers._configured() is True

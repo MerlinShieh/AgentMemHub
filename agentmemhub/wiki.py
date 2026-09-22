@@ -130,7 +130,7 @@ def retry_failed(*, stage: str, out_dir: Path | str, src: str = "",
             from agentmemhub.rag.config import load_settings
             db = str(load_settings().index_db)
         results = wiki_compile.compile_all(
-            Path(db), out, workers=workers or 4, resume=False,
+            Path(db), out, workers=workers, resume=False,
             only=only, failures=log)
         ok = [r for r in results if not r.get("error") and not r.get("skipped")]
         bad = [r for r in results if r.get("error")]
@@ -398,7 +398,7 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
     # ---- 2. 重编脏会话的 L1 ----
     fl1 = FailureLog(l1 / "failures.jsonl")
     l1_results = wiki_compile.compile_all(
-        Path(db), l1, workers=workers or 4, resume=False,
+        Path(db), l1, workers=workers, resume=False,
         only=dirty_sessions, failures=fl1)
     l1_ok = [r for r in l1_results if not r.get("error") and not r.get("skipped")]
     l1_bad = [r for r in l1_results if r.get("error")]

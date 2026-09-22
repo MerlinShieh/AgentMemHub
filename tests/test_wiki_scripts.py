@@ -324,25 +324,67 @@ def test_分组分批_batch为零时用模块默认上限():
 
 
 def test_分组上限_优先取配置且非法值回落(monkeypatch):
-    """这几个阈值此前是**硬编码常量**：`wiki.single_shot_max` 虽在 DEFAULT_WIKI
-    与 example 里存在，却从未被读取（默认值恰好一致才一直没暴露）。"""
+    """这几个阈值此前是**硬编码常量**：`wiki.*` 同名键虽在 DEFAULT_WIKI
+    与 example 里存在，却从未被读取（默认值恰好一致才一直没暴露）。
+    2026-09-22 配置审计补上最后一个漏网的 `workers`。"""
     from agentmemhub import config as _cfg
     import wiki_compile as _wc
 
     class _C:
-        wiki = {"single_shot_max": 3, "plan_batch_max": 7, "page_workers": 5}
+        wiki = {"single_shot_max": 3, "plan_batch_max": 7, "page_workers": 5,
+                "workers": 9}
 
     monkeypatch.setattr(_cfg, "config", lambda: _C())
-    assert _wc._limits() == (3, 7, 5)
+    assert _wc._limits() == (3, 7, 5, 9)
 
-    # 非法值（非整数 / 0 / 负数）一律回落默认
-    _C.wiki = {"single_shot_max": "abc", "plan_batch_max": 0, "page_workers": -1}
+    # 非法值（非整数 / 0 / 负数 / 空）一律回落默认
+    _C.wiki = {"single_shot_max": "abc", "plan_batch_max": 0, "page_workers": -1,
+               "workers": None}
     assert _wc._limits() == (_wc.SINGLE_SHOT_MAX, _wc.PLAN_BATCH_MAX,
-                             _wc.PAGE_WORKERS)
+                             _wc.PAGE_WORKERS, _wc.WORKERS)
 
     _C.wiki = {}
     assert _wc._limits() == (_wc.SINGLE_SHOT_MAX, _wc.PLAN_BATCH_MAX,
-                             _wc.PAGE_WORKERS)
+                             _wc.PAGE_WORKERS, _wc.WORKERS)
+
+
+def test_compile_all的workers取配置(monkeypatch):
+    """`wiki.workers` 此前有两处硬编码绕过配置：`compile_all` 的 `workers=4`
+    默认值，与 `wiki.py` 里的 `workers or 4`。现在 0 表示"用配置"。"""
+    from agentmemhub import config as _cfg
+    import wiki_compile as _wc
+
+    class _C:
+        wiki = {"workers": 11}
+
+    monkeypatch.setattr(_cfg, "config", lambda: _C())
+    assert _wc._limits()[3] == 11
+    # 显式传值优先于配置（参数 > 配置 > 常量）
+    assert (7 or _wc._limits()[3]) == 7
+
+
+def test_l2参数_优先取配置且非法值回落(monkeypatch):
+    """`wiki.l2.workers` / `min_pages` / `domain_max` 此前**从未被读取** ——
+    脚本只认 argparse 参数，而默认值恰好等于配置里的值，所以永远不报错。"""
+    from agentmemhub import config as _cfg
+    from wiki_aggregate import _l2_cfg, L2_WORKERS, L2_MIN_PAGES, L2_DOMAIN_MAX
+
+    class _C:
+        wiki_l2 = {"workers": 8, "min_pages": 5, "domain_max": 33}
+
+    monkeypatch.setattr(_cfg, "config", lambda: _C())
+    assert _l2_cfg("workers", L2_WORKERS) == 8
+    assert _l2_cfg("min_pages", L2_MIN_PAGES) == 5
+    assert _l2_cfg("domain_max", L2_DOMAIN_MAX) == 33
+
+    # 非法 / 缺失一律回落常量
+    _C.wiki_l2 = {"workers": 0, "min_pages": "x", "domain_max": None}
+    assert _l2_cfg("workers", L2_WORKERS) == L2_WORKERS
+    assert _l2_cfg("min_pages", L2_MIN_PAGES) == L2_MIN_PAGES
+    assert _l2_cfg("domain_max", L2_DOMAIN_MAX) == L2_DOMAIN_MAX
+
+    _C.wiki_l2 = None
+    assert _l2_cfg("workers", L2_WORKERS) == L2_WORKERS
 
 
 def test_组级并发_确实并发且结果按组序重排():

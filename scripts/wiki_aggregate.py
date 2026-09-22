@@ -54,6 +54,27 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+#: 第二级参数的兜底默认值（配置读不到时用，如脚本独立运行）。
+L2_WORKERS = 6
+L2_MIN_PAGES = 2
+L2_DOMAIN_MAX = 60
+
+
+def _l2_cfg(key: str, default: int) -> int:
+    """读 `wiki.l2.<key>`；读不到（脚本独立运行 / 键缺失 / 非法）回落常量。
+
+    这几个键此前**从未被读取** —— 脚本只认命令行参数，而 argparse 的默认值又
+    恰好等于配置里的值，所以"配了不生效"永远不报错（2026-09-22 配置审计发现）。
+    优先级：命令行显式传值 > `wiki.l2.<key>` > 本模块常量。
+    """
+    try:
+        from agentmemhub import config as hub_config
+        v = int((hub_config.config().wiki_l2 or {}).get(key))
+    except Exception:                       # noqa: BLE001 —— 脚本要能独立运行
+        return default
+    return v if v > 0 else default
+
+
 # ---------------------------------------------------------------------------
 # 解析第一级产出
 # ---------------------------------------------------------------------------
@@ -763,7 +784,8 @@ def run(args) -> None:
         if args.stage in ("domains", "all") and not (args.resume and dom_file.exists()):
             print("\n① 归域…")
             t0 = time.time()
-            domains = stage_domains(client, pages, args.dmin, args.dmax,
+            domains = stage_domains(client, pages, args.dmin,
+                                    args.dmax or _l2_cfg("domain_max", L2_DOMAIN_MAX),
                                     batch=args.batch,
                                     cache_file=out / "_assign_cache.json")
             dom_file.write_text(json.dumps(domains, ensure_ascii=False, indent=2),
@@ -803,8 +825,8 @@ def run(args) -> None:
               % (len(dom_list), [n[:18] for n, _ in dom_list][:5]))
 
     all_titles = [p["title"] for p in pages]
-    min_pages = int(args.min_pages)
-    cfg_workers = args.workers or 6
+    min_pages = int(args.min_pages) or _l2_cfg("min_pages", L2_MIN_PAGES)
+    cfg_workers = args.workers or _l2_cfg("workers", L2_WORKERS)
     t0 = time.time()
 
     def plan_domain(item):
@@ -1014,17 +1036,19 @@ def main() -> None:
                     help="索引库路径（只读）——用于把正文 [n] 补全为全局 m-id，强烈建议提供")
     ap.add_argument("--stage", default="all",
                     choices=["domains", "all"], help="domains=只归域（便宜，先看质量）")
-    ap.add_argument("--workers", type=int, default=0, help="并发数（0=用配置）")
+    ap.add_argument("--workers", type=int, default=0,
+                    help="并发数（0=用配置 wiki.l2.workers，默认 6）")
     ap.add_argument("--limit", type=int, default=0, help="只处理前 N 页（试跑）")
     ap.add_argument("--domain", default="", help="只跑名称匹配该串的域（试跑）")
     ap.add_argument("--retry-failed", action="store_true", dest="retry_failed",
                     help="只重跑失败清单里未解决的域（读 --out 下的 failures.jsonl）")
     ap.add_argument("--dmin", type=int, default=20, help="主题域数量下限")
-    ap.add_argument("--dmax", type=int, default=60, help="主题域数量上限")
+    ap.add_argument("--dmax", type=int, default=0,
+                    help="主题域数量上限（0=用配置 wiki.l2.domain_max，默认 60）")
     ap.add_argument("--batch", type=int, default=120,
                     help="归类时每批的页面数（越小越不容易被思维链吃满 max_tokens）")
-    ap.add_argument("--min-pages", type=int, default=2,
-                    help="域内页数 ≤ 此值时不再细分（直接合成一页）")
+    ap.add_argument("--min-pages", type=int, default=0,
+                    help="域内页数 ≤ 此值时不再细分（0=用配置 wiki.l2.min_pages，默认 2）")
     ap.add_argument("--recompile-single", action="store_true",
                     help="单页组成的最终页也走 LLM 重编译（默认沿用原文，省调用）")
     ap.add_argument("--thinking", default="", help="覆盖思考开关（enabled/disabled）")
