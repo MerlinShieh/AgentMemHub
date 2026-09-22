@@ -233,7 +233,8 @@ def test_召回档位_逐档放宽是单调的():
     档位的唯一价值就是"一个方向上的刻度"，非单调就失去意义。
     """
     from agentmemhub.rag.config import RECALL_LEVELS
-    ks, floors, curates, seats, literals, weaken = [], [], [], [], [], []
+    ks, floors, curates, seats, literals, weaken, np_literals = \
+        [], [], [], [], [], [], []
     for lv in range(1, 6):
         p = RECALL_LEVELS[lv]
         ks.append(p["candidate_k"])
@@ -242,6 +243,7 @@ def test_召回档位_逐档放宽是单调的():
         seats.append(p["page"]["max_in_results"])
         literals.append(p["page"]["literal_seats"])
         weaken.append(p["page"]["literal_required_below"])
+        np_literals.append(p["nonpage_literal_seats"])
         assert "min_evidence" not in p["page"], \
             "档位不得设证据硬门槛——它会连高分页面一起挡掉"
     assert ks == sorted(ks), "候选宽度应逐档变大"
@@ -249,6 +251,7 @@ def test_召回档位_逐档放宽是单调的():
     assert curates == sorted(curates, reverse=True), "终审阈值应逐档变松"
     assert seats == sorted(seats), "页面席位应逐档变多"
     assert literals == sorted(literals), "字面兜底席位应逐档变多"
+    assert np_literals == sorted(np_literals), "非页面字面兜底席应逐档变多"
     assert weaken == sorted(weaken, reverse=True), "字面证据门槛线应逐档降低"
     assert RECALL_LEVELS[1]["page"]["max_in_results"] == 1
     assert RECALL_LEVELS[5]["page"]["max_in_results"] == 5

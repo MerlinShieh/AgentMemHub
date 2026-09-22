@@ -371,3 +371,114 @@ def test_import_bundle_writes_all_write_order_models(rag_env, tmp_path):
             assert row, f"{spec.id} 的向量表应有该单元"
     finally:
         conn.close()
+
+
+# ── 终审（safe_cutoff_hits）：高分优先 + 低分字面兜底 ──────────────────
+#
+# 2026-09-22 实测发现：**页面层早已有"低分字面兜底席"，非页面层没有** ——
+# 于是同一次召回里出现荒谬的不对称：
+#     页面 0.195（有字面证据）→ 进了结果
+#     记忆 0.701（有字面证据）→ 被切掉
+# 根因是本函数只用一条**乘性相对门限**（`score ≥ floor_ratio × top`），而 top
+# 本身可能是噪声：拼错查询 `windowsctrol` 的 top1 是完全无关的字面命中(1.238)，
+# 门限因此被抬到 0.990，24 条候选只剩 4 条，真相关的
+# 「WindowsControl 项目架构与技术栈」(0.701，命中 fts+vec) 白白被切。
+#
+# 规则与页面层**同构**（用户验收标准同样是"不遗漏 > 排序靠前 > 噪声可容忍"）：
+#   ① 高分（≥ 门限）优先，但给字面兜底**留出席位**；
+#   ② 低分但**命中字面通道**（fts / ident / phrase）的，用兜底席救回；
+#   ③ 只救有字面证据的 —— 低分且只有向量分的仍然切掉（否则等于取消门限）。
+
+def _h(score, *, kind="memory", ref="x", signals=(), snippet=""):
+    return {"score": score, "kind": kind, "refId": ref,
+            "signals": list(signals), "snippet": snippet}
+
+
+def test_终审_低分真相关不被分数门限误杀():
+    """回归：有字面证据的低分条目必须被兜底席救回。"""
+    hits = [
+        _h(1.238, ref="noise", signals=["fts"]),         # 噪声当锚 → 门限 0.990
+        _h(0.701, ref="truth", signals=["fts", "vec"]),  # 真相关，有字面证据
+        _h(0.400, ref="lowvec", signals=["vec"]),        # 低分且无字面证据
+    ]
+    refs = [h["refId"] for h in rag_bridge.safe_cutoff_hits(
+        hits, max_keep=20, floor_ratio=0.8, page_max_keep=3)]
+    assert "truth" in refs, "低分但有字面证据的真相关不应被切掉"
+    assert "lowvec" not in refs, \
+        "低分且无字面证据的仍应被切（否则等于取消门限）"
+
+
+def test_终审_兜底席不挤掉高分条目():
+    """兜底席是"留出席位"，不是"插队" —— 高分条目必须还在。"""
+    hits = [
+        _h(1.000, ref="high1", signals=["vec"]),
+        _h(0.950, ref="high2", signals=["vec"]),
+        _h(0.300, ref="lit", signals=["ident"]),
+    ]
+    refs = [h["refId"] for h in rag_bridge.safe_cutoff_hits(
+        hits, max_keep=20, floor_ratio=0.8, page_max_keep=3)]
+    assert refs == ["high1", "high2", "lit"]
+
+
+def test_终审_全部高分时行为不变():
+    """纯回归保护：没有低分条目时，新逻辑不该改变结果。"""
+    hits = [_h(1.0, ref="a", signals=["vec"]), _h(0.9, ref="b", signals=["vec"])]
+    refs = [h["refId"] for h in rag_bridge.safe_cutoff_hits(
+        hits, max_keep=20, floor_ratio=0.8, page_max_keep=3)]
+    assert refs == ["a", "b"]
+
+
+def test_终审_页面只受配额不受分数门限():
+    """页面走自己的准入策略（apply_page_policy 已判定过），这里只执行配额。"""
+    hits = [
+        _h(1.000, ref="m1", signals=["vec"]),
+        _h(0.500, ref="p1", kind="page", signals=["page_fts"]),
+        _h(0.300, ref="m2", signals=["fts"]),
+    ]
+    refs = [h["refId"] for h in rag_bridge.safe_cutoff_hits(
+        hits, max_keep=20, floor_ratio=0.8, page_max_keep=3)]
+    assert "p1" in refs, "页面不套分数门限"
+
+
+# ── 同内容双投影去重（_dedupe_projections）─────────────────────────────
+#
+# 2026-09-22 实测：Agent 直写记忆在召回面有**两份内容相同**的单元 ——
+# `mcp_<hash>`（memory_save 写引擎时产生）与 `dst_<hash>`（蒸馏 S4 投影），
+# 两者用同一个内容 hash。后果：结果里同一条重复出现，而且**各占一个席位**
+# （实测把"低分字面兜底席"都吃掉了，挤掉别的条目）。
+
+class _Proj:
+    """最小 Hit 替身（去重只看 unit_id 与 kind）。"""
+
+    def __init__(self, uid, kind="memory"):
+        self.unit_id = uid
+        self.kind = kind
+
+
+def test_去重_同内容双投影只保留一条():
+    hits = [_Proj(1), _Proj(2)]              # 按分数降序，1 分更高
+    refmap = {1: {"srcId": "mcp_abc123"}, 2: {"srcId": "dst_abc123"}}
+    out = rag_bridge._dedupe_projections(hits, refmap)
+    assert [h.unit_id for h in out] == [1], "应保留分数高的那份"
+
+
+def test_去重_不同内容不合并():
+    hits = [_Proj(1), _Proj(2)]
+    refmap = {1: {"srcId": "mcp_aaa"}, 2: {"srcId": "dst_bbb"}}
+    assert len(rag_bridge._dedupe_projections(hits, refmap)) == 2
+
+
+def test_去重_消息层与页面层不受影响():
+    """它们没有 mcp_/dst_ 配对；同文重复若出现，成因不同，不在此处合并。"""
+    hits = [_Proj(1, "message"), _Proj(2, "message"),
+            _Proj(3, "page"), _Proj(4, "page")]
+    refmap = {1: {"srcId": "mcp_aaa"}, 2: {"srcId": "dst_aaa"},
+              3: {"srcId": "wiki_x"}, 4: {"srcId": "wiki_x"}}
+    assert len(rag_bridge._dedupe_projections(hits, refmap)) == 4
+
+
+def test_去重_没有srcId时不误删():
+    """老库/异常数据缺 src_id 时不能把条目误判成重复删掉。"""
+    hits = [_Proj(1), _Proj(2)]
+    refmap = {1: {}, 2: {"srcId": ""}}
+    assert len(rag_bridge._dedupe_projections(hits, refmap)) == 2

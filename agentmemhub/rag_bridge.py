@@ -159,10 +159,21 @@ _SELECT_TRACE = (
     " FROM units u LEFT JOIN unit_values v ON v.unit_id = u.id")
 
 
+#: 非页面层的**字面证据**信号集合 —— 与页面层同源（`search._PAGE_LITERAL_SIGNALS`）。
+#: 命中这些通道说明"查询词真的出现在文本里"，是拼错/近义查询下真相关的关键线索。
+_LITERAL_SIGNALS = frozenset({"phrase", "ident", "fts"})
+
+
+def _has_literal(h: dict) -> bool:
+    """该条目是否命中字面通道（查询词真的出现在文本里）。"""
+    return bool(set(h.get("signals") or ()) & _LITERAL_SIGNALS)
+
+
 def safe_cutoff_hits(hits: list[dict], *, max_keep: int = 5,
                      floor_ratio: float = 0.7,
-                     page_max_keep: int = 3) -> list[dict]:
-    """机械终审（dict 版 ext.safe_cutoff 同规则）：≥floor_ratio×top 且 ≤max_keep。
+                     page_max_keep: int = 3,
+                     literal_seats: int = 1) -> list[dict]:
+    """终审：**高分优先 + 低分字面兜底**（与页面层同构）。
 
     **页面层准入**（kind='page'）：这里曾是页面刷屏的直接推手——给页面
     0.5×top 的宽松门限，并且**从 max_keep 之外把页面捞回结果**，等于"页面
@@ -174,17 +185,56 @@ def safe_cutoff_hits(hits: list[dict], *, max_keep: int = 5,
     噪声页 0.63×top）。所以这里对页面**不再套分数门限**，只执行配额，并且
     **不参与 `max_keep` 窗口截断**——页面分数天然低、排在末尾，按窗口切会
     正好把它切掉（实测：k=20 时页面掉出 `hits[:20]` 窗口而消失，k=8 时正常）。
+
+    **非页面层的字面兜底席**（2026-09-22 补）：本函数此前对非页面只套一条
+    乘性相对门限 `score ≥ floor_ratio × top`，而 **top 本身可能是噪声**——
+    拼错查询 `windowsctrol` 的 top1 是完全无关的字面命中（1.238），门限因此
+    被抬到 0.990，24 条候选只剩 4 条，真相关的「WindowsControl 项目架构与
+    技术栈」(0.701，命中 fts+vec) 被白白切掉。而**同一批结果里页面**因为有
+    字面兜底席，连 0.195 的真相关页都进了结果——**这个不对称本身就是缺陷**。
+
+    所以规则与页面层对齐（用户验收标准同样是"不遗漏 > 排序靠前 > 噪声可容忍"）：
+      ① 高分（≥ 门限）优先，但为字面兜底**留出席位**；
+      ② 低分但命中字面通道的，用兜底席救回；
+      ③ **只救有字面证据的**——低分且只有向量分的仍然切掉，否则等于取消门限。
     """
     if not hits:
         return []
     top = hits[0]["score"] or 0.0
+    thr = floor_ratio * top
     pages = [h for h in hits if h.get("kind") == "page"][:page_max_keep]
     others = [h for h in hits if h.get("kind") != "page"]
     # 页面占名额（不是额外叠加），总数守恒 ≤ max_keep——否则调用方按 max_keep
     # 再截一次就会把末尾的页面切掉（面板 top 截断实测踩过）
     room = max(max_keep - len(pages), 0)
-    kept = [h for h in others[:room] if h["score"] >= floor_ratio * top]
-    out = sorted(kept + pages, key=lambda h: -h["score"])   # 页面按分数落位
+
+    high = [h for h in others if (h["score"] or 0.0) >= thr]
+    low_lit = [h for h in others
+               if (h["score"] or 0.0) < thr and _has_literal(h)]
+
+    picked: list[dict] = []
+    seen: set[tuple] = set()
+
+    def take(lst: list[dict], cap: int) -> None:
+        for h in lst:
+            if len(picked) >= cap:
+                return
+            # 去重键：优先 refId（同一 unit 不重复入选）；**缺失时退回对象身份**。
+            # 不能写成 `(h.get("refId"), h.get("kind"))` —— 那样所有没有 refId 的
+            # 条目都成了同一个键 (None, None)，会被误判成重复而**静默只剩第一条**
+            # （既有测试 test_safe_cutoff_hits_rules 当场抓到）。
+            key = h.get("refId") or id(h)
+            if key in seen:
+                continue
+            picked.append(h)
+            seen.add(key)
+
+    seats = min(max(literal_seats, 0), room)
+    take(high, room - seats)      # ① 高分优先，给字面兜底留出席位
+    take(low_lit, room)           # ② 低分但有字面证据的模糊匹配
+    take(high, room)              # ③ 某一类不足时另一类补齐
+
+    out = sorted(picked + pages, key=lambda h: -(h["score"] or 0.0))
     if out:
         return out
     # 兜底：非页面条目即使低于门限也保 1 条（"至少给一条"的既有语义）；
@@ -197,6 +247,45 @@ def safe_cutoff_hits(hits: list[dict], *, max_keep: int = 5,
 #: 面板语义检索的默认返回上限。curate 只做「相关度截断」不做「硬砍到 5 条」——
 #: 用户搜东西期望看到"有哪些相关"，5 条过少（R6 体验反馈）。
 SEARCH_MAX_HITS = 20
+
+#: 召回面上"同内容双投影"的两种前缀：Agent 直写落账（`mcp_`）与蒸馏投影（`dst_`）。
+_PROJECTION_PREFIXES = ("mcp_", "dst_")
+
+
+def _dedupe_projections(hits: list, refmap: dict) -> list:
+    """把"同一条内容的双投影"合并成一条（保留分数最高的那份）。
+
+    背景（2026-09-22 实测）：Agent 直写记忆在召回面有**两份内容相同**的单元 ——
+    `mcp_<hash>`（`memory_save` 写引擎时产生）与 `dst_<hash>`（蒸馏 S4 投影），
+    两者用**同一个内容 hash**。后果有两个：
+
+      · 结果里同一条**重复出现**（用户可见）；
+      · 更麻烦的是它们**各占一个席位** —— 实测会把"低分字面兜底席"也吃掉，
+        把别的条目挤出去。
+
+    去重键用 **src_id 里的内容 hash**，而不是比对正文：`dst_` 侧的正文可能带
+    `topic：` 前缀而有细微差异，hash 才是精确判据。只对 `kind == "memory"`
+    生效 —— 消息层/页面层的同文重复另有成因，不在本函数范围。
+
+    `hits` 已按分数降序，所以保留的自然是分数高的那份（实测 `mcp_` 侧因
+    Agent 写入基础分更高而胜出，符合预期）。
+    """
+    seen: set[str] = set()
+    out: list = []
+    for h in hits:
+        if h.kind == "memory":
+            src = (refmap.get(h.unit_id) or {}).get("srcId", "")
+            key = ""
+            for p in _PROJECTION_PREFIXES:
+                if src.startswith(p):
+                    key = src[len(p):]
+                    break
+            if key:
+                if key in seen:
+                    continue
+                seen.add(key)
+        out.append(h)
+    return out
 
 
 def search(agent: str, query: str, *, k: int = SEARCH_MAX_HITS,
@@ -232,6 +321,8 @@ def search(agent: str, query: str, *, k: int = SEARCH_MAX_HITS,
                 [h.unit_id for h in hits]):
                 refmap[r["id"]] = {
                     "refId": r["legacy_id"] or r["src_id"] or f"unit:{r['id']}",
+                    # src_id 用于"同内容双投影"去重（见 _dedupe_projections）
+                    "srcId": r["src_id"] or "",
                     "source": r["source"],
                     "conversationId": r["conversation_id"],
                     "turnKey": r["turn_key"] or "",
@@ -239,6 +330,8 @@ def search(agent: str, query: str, *, k: int = SEARCH_MAX_HITS,
                 }
         finally:
             conn.close()
+    # 同一条直写记忆在召回面有两份投影 → 先合并再成型（否则结果里重复、且各占席位）
+    hits = _dedupe_projections(hits, refmap)
     dto_hits = []
     for h in hits:
         m = refmap.get(h.unit_id) or {}
@@ -266,16 +359,20 @@ def search(agent: str, query: str, *, k: int = SEARCH_MAX_HITS,
             "summary": h.summary or "",
             # 数据来源：native=自有记忆沉淀 / external=外部投喂
             "origin": h.origin,
+            # 命中的通道集合。字面通道（fts/ident/phrase）说明**查询词真的出现
+            # 在文本里** —— 终审的"低分字面兜底席"靠它判定（见 safe_cutoff_hits）
+            "signals": sorted(h.signals),
         })
     if curate:
-        # 相关度截断：阈值与页面席位都来自**召回档位**（rag.retrieval.recall_level）
+        # 相关度截断：阈值与席位都来自**召回档位**（rag.retrieval.recall_level）
         # ——档位越高越宽松（详见 rag/config.py 的 RECALL_LEVELS）
         policy = st.page_policy
         profile = st.recall_profile
         dto_hits = safe_cutoff_hits(
             dto_hits, max_keep=SEARCH_MAX_HITS,
             floor_ratio=float(profile.get("curate_floor", 0.7)),
-            page_max_keep=int(policy.get("max_in_results", 5)))
+            page_max_keep=int(policy.get("max_in_results", 5)),
+            literal_seats=int(profile.get("nonpage_literal_seats", 1)))
     ctx = "\n".join(f"- {d['snippet'][:160]}" for d in dto_hits[:3])
     return {"hits": dto_hits, "injectedContext": ctx,
             "tierLatencyMs": {"rag": round((time.perf_counter() - t0) * 1000)}}

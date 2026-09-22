@@ -61,26 +61,39 @@ DEFAULT_RECALL_LEVEL = 3
 
 RECALL_LEVELS = {
     1: {"name": "最严格", "candidate_k": 20, "threshold_floor": 0.35,
-        "curate_floor": 0.90,
+        "curate_floor": 0.90, "nonpage_literal_seats": 1,
         "page": {"max_in_results": 1, "literal_seats": 1,
                  "literal_required_below": 0.95, "floor_ratio": 0.5}},
     2: {"name": "严格", "candidate_k": 25, "threshold_floor": 0.30,
-        "curate_floor": 0.85,
+        "curate_floor": 0.85, "nonpage_literal_seats": 2,
         "page": {"max_in_results": 2, "literal_seats": 1,
                  "literal_required_below": 0.85, "floor_ratio": 0.3}},
     3: {"name": "均衡", "candidate_k": 30, "threshold_floor": 0.20,
-        "curate_floor": 0.80,
+        "curate_floor": 0.80, "nonpage_literal_seats": 2,
         "page": {"max_in_results": 3, "literal_seats": 1,
                  "literal_required_below": 0.70, "floor_ratio": 0.1}},
     4: {"name": "宽松", "candidate_k": 40, "threshold_floor": 0.15,
-        "curate_floor": 0.75,
+        "curate_floor": 0.75, "nonpage_literal_seats": 3,
         "page": {"max_in_results": 4, "literal_seats": 2,
                  "literal_required_below": 0.50, "floor_ratio": 0.0}},
     5: {"name": "最宽松", "candidate_k": 60, "threshold_floor": 0.10,
-        "curate_floor": 0.70,
+        "curate_floor": 0.70, "nonpage_literal_seats": 4,
         "page": {"max_in_results": 5, "literal_seats": 3,
                  "literal_required_below": 0.30, "floor_ratio": 0.0}},
 }
+
+#: `nonpage_literal_seats`：**非页面层的字面兜底席位**（记忆/消息）。
+#:
+#: 为什么需要（2026-09-22 实测）：终审原先对非页面只套一条乘性相对门限
+#: （`score ≥ curate_floor × top`），而 **top 本身可能是噪声** —— 拼错查询
+#: `windowsctrol` 的 top1 是完全无关的字面命中(1.238)，门限被抬到 0.990，
+#: 24 条候选只剩 4 条，真相关的「WindowsControl 项目架构与技术栈」(0.701，
+#: 命中 fts+vec) 被白白切掉；而**同一批结果里的页面**因为有字面兜底席，
+#: 连 0.195 的真相关页都进了结果 —— **这个不对称本身就是缺陷**。
+#:
+#: 与页面的 `literal_seats` 同构：席位只留给"**低分但命中字面通道**
+#: （fts/ident/phrase）"的条目 —— 低分且只有向量分的仍然切掉，否则等于取消门限。
+#: 档位越高（越宽松）给得越多，与 `page.literal_seats` 同方向。
 
 #: 页面层（L2 知识页）准入策略——见 search.apply_page_policy 的实测依据。
 #:
