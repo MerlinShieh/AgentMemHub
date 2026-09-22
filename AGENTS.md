@@ -38,11 +38,17 @@
 - **配置单点**：模型/分桶/召回/写入策略/蒸馏/LLM 一律经 `agentmemhub.yaml`，
   **禁止硬编码模型 id/维度/路径/密钥**。LLM 接入可用
   `scripts/sync_llm_from_zcode.py` 从 ZCode 配置同步（密钥只写本地 yaml，不入库）。
+  **加/改配置键后必跑** `uv run python scripts/check_config_keys.py` —— 它查
+  "定义了却没有任何读取点"的**僵尸键**。本项目踩过三次同一个坑
+  （`wiki.single_shot_max`、`wiki.workers`、`wiki.l2.*`，以及没有任何消费点的
+  假开关 `wiki.enabled`），**共同特征是配置里的值恰好等于代码里硬编码的默认值**
+  —— 所以既不报错、也不让测试变红，能潜伏数月。`tests/test_config_audit.py`
+  里有一条守护测试会在提交前拦住它。
 - **面板结构**：双标签页「统一会话 / 记忆报表」；会话页只做查看/删除/改标题
   （记忆排除 UI 已下线，后端能力保留）；记忆页承载筛选/溯源/⭐加权/👍👎/蒸馏入口。
   会话与记忆通过 `session_uid`（全局递增）双向绑定跳转。
 - **测试纪律**：每次改动带测试；bug 修复先写复现测试（红→绿）；
-  `uv run pytest` 全绿是提交门槛（数量以实测为准，当前 723 passed / 1 skipped）。
+  `uv run pytest` 全绿是提交门槛（数量以实测为准，当前 735 passed / 1 skipped）。
 - **日志纪律**：统一 `logs/` 按程序分文件；测试必须隔离日志与数据目录
   （`conftest` 的 autouse 夹具已强制把 `logs.log_dir` 指向临时目录）。
   **三个事实流分工**：`logs/mcp.log` 记**协议层**（谁调了什么工具、耗时、成败，

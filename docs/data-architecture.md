@@ -656,6 +656,18 @@ POST /api/snapshots/restore?snapshot_id=<id>[&wiki_only=|&db_only=]
 详见 §4.3。改完**需重启 MCP server 与面板 `agentmemhub serve`** 才生效
 （两者都是常驻进程，配置在启动时读取）。
 
+**配置自检**：加/改配置键之后跑
+
+```bash
+uv run python scripts/check_config_keys.py            # 列出每个键的读取点
+uv run python scripts/check_config_keys.py --strict   # 有僵尸键则退出码 1（接 CI）
+```
+
+它找的是"**定义了却没有任何读取点**"的僵尸键。本项目踩过三次同一个坑
+（`wiki.single_shot_max`、`wiki.workers`、`wiki.l2.*`，以及没有任何消费点的假开关
+`wiki.enabled`），**共同特征是配置里的值恰好等于代码里硬编码的默认值** —— 所以既
+不报错、也不让测试变红，能潜伏数月。`tests/test_config_audit.py` 里有守护测试。
+
 ```bash
 uv run python -m agentmemhub ingest                 # 采集（会话级增量）
 uv run python -m agentmemhub distill                # 记忆蒸馏
