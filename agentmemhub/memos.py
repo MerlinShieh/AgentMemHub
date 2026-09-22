@@ -1,4 +1,4 @@
-﻿"""AgentMemHub → MemOS 桥接器。
+"""AgentMemHub → MemOS 桥接器。
 
 把统一事件流（store 中的会话）转换为 MemOS Local Plugin 的导入 bundle
 （TraceDTO 格式），可直接 POST 到 MemOS 的 /api/v1/import 生成历史记忆。

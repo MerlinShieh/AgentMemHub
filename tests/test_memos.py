@@ -1,4 +1,4 @@
-﻿"""memos 桥接器单元测试：幂等 id / turn 分组 / value 启发式 / 系统注入跳过。
+"""memos 桥接器单元测试：幂等 id / turn 分组 / value 启发式 / 系统注入跳过。
 
 直接测纯函数 _session_events_to_traces（不需要 SQLite store）。
 """

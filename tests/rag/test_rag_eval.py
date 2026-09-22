@@ -1,4 +1,4 @@
-﻿"""eval 模块测试：yaml 解析、命中判定纯函数、小库端到端报表结构。"""
+"""eval 模块测试：yaml 解析、命中判定纯函数、小库端到端报表结构。"""
 from __future__ import annotations
 
 import dataclasses

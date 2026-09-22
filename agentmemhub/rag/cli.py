@@ -1,4 +1,4 @@
-﻿"""asrag 命令行入口：ingest / stats / reembed / search / eval。"""
+"""asrag 命令行入口：ingest / stats / reembed / search / eval。"""
 from __future__ import annotations
 
 import argparse
