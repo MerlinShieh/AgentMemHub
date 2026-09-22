@@ -112,10 +112,12 @@ def main(argv: list[str] | None = None) -> int:
         cases = load_cases(path)
         emb = get_embedder(settings.active_spec, settings=settings)
         lat = []
+        from .config import retrieval_caller
         for c in cases:
             t0 = _t.perf_counter()
-            hybrid_search(settings, c.query, embedder=emb, k=args.k,
-                          expand_turns=False, log=log)
+            with retrieval_caller("eval"):
+                hybrid_search(settings, c.query, embedder=emb, k=args.k,
+                              expand_turns=False, log=log)
             lat.append((_t.perf_counter() - t0) * 1000)
         s = sorted(lat)
         print(json.dumps({
@@ -143,9 +145,11 @@ def main(argv: list[str] | None = None) -> int:
                     return safe_cutoff(hs)
 
             judge = _SafeJudge()
-        hits = hybrid_search(settings, args.query, k=args.k, mode=args.mode,
-                             expand_turns=not args.no_expand,
-                             exclude_session=exclude, judge=judge, log=log)
+        from .config import retrieval_caller
+        with retrieval_caller("cli"):
+            hits = hybrid_search(settings, args.query, k=args.k, mode=args.mode,
+                                 expand_turns=not args.no_expand,
+                                 exclude_session=exclude, judge=judge, log=log)
         if args.json:
             print(json.dumps([{
                 "unit_id": h.unit_id, "source": h.source,

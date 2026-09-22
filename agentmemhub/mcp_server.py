@@ -104,13 +104,18 @@ def _search(args: dict) -> str:
         body = {"agent": _AGENT, "query": q}
         if org:
             body["origin"] = org
-        res = memos_daemon.engine_request("POST", "/api/v1/memory/search",
-                                          body=body, timeout=30)
-        ov: dict = {}
-        try:
-            ov = memos_daemon.engine_request("GET", "/api/v1/overview", timeout=8)
-        except Exception:
-            pass
+        # 标注调用方 → 决定用哪一档召回严格度（对应 `rag.retrieval.callers.mcp`）。
+        # Agent 的自动召回通常希望"少而准"，可以比面板查询配得更严。
+        from agentmemhub.rag.config import retrieval_caller
+        with retrieval_caller("mcp"):
+            res = memos_daemon.engine_request("POST", "/api/v1/memory/search",
+                                              body=body, timeout=30)
+            ov: dict = {}
+            try:
+                ov = memos_daemon.engine_request("GET", "/api/v1/overview",
+                                                 timeout=8)
+            except Exception:
+                pass
     except memos_daemon.EngineAuthError:
         raise _ToolError(_auth_hint())
     except Exception as e:

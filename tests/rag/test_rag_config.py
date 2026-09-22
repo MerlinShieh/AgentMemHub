@@ -208,6 +208,49 @@ def test_召回档位_非法值回退默认(tmp_path, bad):
     assert s.recall_level == DEFAULT_RECALL_LEVEL
 
 
+def test_召回档位_按调用方细分_缺省回落全局(tmp_path):
+    """与日志的滚动策略**同一模式**：全局 `recall_level` < `callers.<name>`。
+
+    动机（2026-09-22）：**用户主动检索**希望"尽量不遗漏"（档位高），而
+    **Agent 的自动召回**希望"少而准"（档位低）—— 两者不该共用一条刻度。
+    """
+    from agentmemhub.rag.config import (current_retrieval_caller,
+                                        retrieval_caller)
+    s = _settings_at(tmp_path, "  retrieval:\n    recall_level: 4\n"
+                               "    callers:\n      mcp: 2\n")
+    assert s.global_recall_level == 4
+    assert s.recall_level_for("mcp") == 2
+    assert s.recall_level_for("panel") == 4         # 未配 → 回落全局
+    assert s.recall_level_for("") == 4              # 未标记 → 全局
+
+    assert current_retrieval_caller() == ""
+    with retrieval_caller("mcp"):
+        assert s.recall_level == 2                  # 属性自动跟随 contextvar
+        assert s.recall_profile["level"] == 2
+        assert s.recall_profile["name"] == "严格"
+    assert s.recall_level == 4, "退出上下文后必须恢复"
+
+
+def test_召回档位_细分非法值回落到全局而非默认档(tmp_path):
+    """写错的覆盖项不该比全局更严 —— 否则"想调松"的意图会反向生效。"""
+    s = _settings_at(tmp_path, "  retrieval:\n    recall_level: 5\n"
+                               "    callers:\n      mcp: abc\n      cli: '9'\n")
+    assert s.recall_level_for("mcp") == 5
+    assert s.recall_level_for("cli") == 5
+
+
+def test_页面策略跟随调用方档位(tmp_path):
+    """页面席位/兜底席都来自档位 —— 按调用方分档时它必须一起变。"""
+    from agentmemhub.rag.config import retrieval_caller
+    s = _settings_at(tmp_path, "  retrieval:\n    recall_level: 1\n"
+                               "    callers:\n      panel: 5\n")
+    assert s.page_policy["max_in_results"] == 1      # 档 1
+    assert s.recall_profile["nonpage_literal_seats"] == 1
+    with retrieval_caller("panel"):
+        assert s.page_policy["max_in_results"] == 5  # 档 5
+        assert s.recall_profile["nonpage_literal_seats"] == 4
+
+
 def test_召回档位_展开参数并驱动页面策略(tmp_path):
     s = _settings_at(tmp_path, "  retrieval:\n    recall_level: 5\n")
     prof = s.recall_profile

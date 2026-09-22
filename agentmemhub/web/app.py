@@ -806,9 +806,13 @@ def create_app(db_path: Path | None = None):
         from agentmemhub import memos_daemon
         ov = _require_engine()
         try:
-            res = memos_daemon.engine_request(
-                "POST", "/api/v1/memory/search",
-                body={"agent": "hermes", "query": q}, timeout=30)
+            # 标注调用方：**用户主动查询**希望"尽量不遗漏"，可以比 Agent 自动
+            # 召回配得更宽松（对应 `rag.retrieval.callers.panel`）
+            from agentmemhub.rag.config import retrieval_caller
+            with retrieval_caller("panel"):
+                res = memos_daemon.engine_request(
+                    "POST", "/api/v1/memory/search",
+                    body={"agent": "hermes", "query": q}, timeout=30)
         except memos_daemon.EngineAuthError as e:
             raise HTTPException(status_code=503, detail=str(e))
         except Exception as e:

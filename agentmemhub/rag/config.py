@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import os
 import re
@@ -12,6 +14,36 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+# ---------------------------------------------------------------------------
+# 检索调用方（决定用哪一档召回严格度）
+# ---------------------------------------------------------------------------
+
+#: 当前检索的**调用方**（`mcp` / `panel` / `cli` / `agent` …；空 = 未标记）。
+#:
+#: **为什么用 contextvar 而不是层层传参**：档位在 `Settings` 里被多处读取
+#: （`recall_level` → `recall_profile` → `page_policy`，而 `page_policy` 又被
+#: `hybrid_search` 内部使用）—— 传参要改一整条链路的签名。contextvar 让配置层
+#: 直接读到当前调用方，`hybrid_search` 一行都不用动。
+#: 与 `logs._MEMORY_PATH`（记忆操作来源）是**同一模式**。
+_RETRIEVAL_CALLER: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "agentmemhub_retrieval_caller", default="")
+
+
+@contextlib.contextmanager
+def retrieval_caller(name: str):
+    """标记其内检索的调用方：`with retrieval_caller("mcp"): ...`。"""
+    token = _RETRIEVAL_CALLER.set(name)
+    try:
+        yield
+    finally:
+        _RETRIEVAL_CALLER.reset(token)
+
+
+def current_retrieval_caller() -> str:
+    """当前上下文里的检索调用方（未标记时为空串）。"""
+    return _RETRIEVAL_CALLER.get()
+
 
 #: 内置默认（yaml 缺失项时使用）
 DEFAULT_EMBED = {
@@ -235,8 +267,8 @@ class Settings:
         return ms or [self.active_model]
 
     @property
-    def recall_level(self) -> int:
-        """生效的召回严格度档位（1 最严格 … 5 最宽松）。
+    def global_recall_level(self) -> int:
+        """**全局**召回严格度档位（`retrieval.recall_level`，不按调用方）。
 
         非法值（非整数 / 越界）一律回退默认档——它决定的是"给不给结果"，
         配置写错时宁可回到最保守的一档，也不要静默放宽。
@@ -248,9 +280,34 @@ class Settings:
             return DEFAULT_RECALL_LEVEL
         return lv if lv in RECALL_LEVELS else DEFAULT_RECALL_LEVEL
 
+    def recall_level_for(self, caller: str = "") -> int:
+        """某调用方的**生效**档位：全局 `recall_level` < `retrieval.callers.<caller>`。
+
+        与日志的滚动策略**同一模式**（全局 `logs.rotate` < `logs.files.<name>`）：
+        默认走全局，配了细分就用细分的。
+
+        细分配错时的回落目标是**全局档位**而不是默认档 —— 一个写错的覆盖项
+        不该比全局更严（那会让"想调松"的意图反向生效）。
+        """
+        if not caller:
+            return self.global_recall_level
+        raw = (self.retrieval.get("callers") or {}).get(caller)
+        if raw is None:
+            return self.global_recall_level
+        try:
+            lv = int(raw)
+        except (TypeError, ValueError):
+            return self.global_recall_level
+        return lv if lv in RECALL_LEVELS else self.global_recall_level
+
+    @property
+    def recall_level(self) -> int:
+        """**当前调用方**的生效档位（读 contextvar；未标记时 = 全局档位）。"""
+        return self.recall_level_for(current_retrieval_caller())
+
     @property
     def recall_profile(self) -> dict:
-        """当前档位展开后的召回参数（带 level / name，便于日志与界面展示）。"""
+        """当前调用方档位展开后的召回参数（带 level / name，便于日志与界面）。"""
         lv = self.recall_level
         return {"level": lv, **RECALL_LEVELS[lv]}
 
