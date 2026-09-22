@@ -96,8 +96,16 @@
 `docs/API.md`、`agentmemhub/web/app.py`、`AGENTS.md`、`README.md`
 上冲突——**内容已一致，只是 SHA 不同**，解决时以任一侧为准即可。
 
-**另注**：`feat/llm-robustness` 从 `main` 分出后只含 2.A 的改动，
-与 `feat/llm-wiki` 在这些文件上**会冲突**（两边都改了 `llm.py` / `config.py` /
-`distill.py` / `logs.py`）。因为 `feat/llm-wiki` 上已有这些修复，
-**合并顺序建议：`feat/llm-robustness` → `main` 先合**，之后 `feat/llm-wiki` 侧的冲突
-以特性分支为准（它是超集）。
+**另注（2026-09-22 决策）**：`feat/llm-robustness` 只含 2.A 的改动，
+曾以 fast-forward 试合入 `main`（`2fd1802..d992efd`），**随后按用户决策退回** ——
+`main` 仍在 `2fd1802`。
+
+**为什么不单独合并 main**：`main` 当前处于**冻结**状态 —— 开发一律从 `feat/llm-wiki`
+进行，将来整体合并进 `main` 作为一个大版本。而 `feat/llm-wiki` **本身就是这些通用
+修复的超集**（它们本来就长在它上面），大版本合并时**自然一并带过去**。
+单独回移是**冗余动作**，只会徒增两边未来的合并冲突面。
+
+**保留该分支的意义**：改动已提取、已验证（503 passed）、随时可用 ——
+若将来出现"需要从 `main` 拉分支修紧急问题"的场景，直接
+`git merge feat/llm-robustness` 即可。**若确认永远用不到，删掉它不影响任何东西**
+（`feat/llm-wiki` 侧一个字节都不会少）。
