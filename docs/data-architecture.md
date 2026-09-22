@@ -337,8 +337,22 @@ query 与候选的语义，不依赖通道命中）。
 | 路线 | 延迟 | 成本 | 确定性 | 决策 |
 |---|---|---|---|---|
 | **规则兜底席** | **0** | 0 | 确定 | ✅ **已实施**（§4.2.1） |
-| **本地 cross-encoder** | 约 100~300ms | **0** | 确定（可复现、可缓存） | 可行，待排期 |
+| **本地 cross-encoder** | **实测 12~18s/查询**（纯 CPU）× | 0 | 确定 | ⏸️ **暂缓** |
 | **LLM 精判** | **+1~3s** | 每次召回一次 LLM 调用 | **不确定** | ❌ **否决** |
+
+**本地 cross-encoder 的实测结论（2026-09-22，`gte-multilingual-reranker-base`）**：
+模型 0.3B / 12 层 / hidden=768，FP32 ONNX 1.2GB。**纯 CPU 下单对 265ms、
+30 候选 5.8s，真实查询（20~27 候选、候选文本 1200 字）12~18 秒** —— 比被否决的
+LLM 方案还差一个量级。效果上 6 个查询里 3 个有改善（`windowsctrol` 的 top1 从
+无关条目修正为「WindowsControl 项目架构与技术栈」，证明 cross-encoder 对
+拼错/纯语义场景确实有效），但**恰恰没解决我们最想要的案例**（`git 代理` 的答案
+仍没进 top5）。
+
+**所以暂缓**：在纯 CPU 下性价比不成立。两次估算都偏乐观（先是按参数量线性外推
+× 短文本样本，实际架构差异 + 长候选使延迟高出 4~6 倍）。**若将来上 GPU，值得
+重测**（本机有 RTX 4060，但缺 CUDA Toolkit，需装 `onnxruntime-gpu` 或 DirectML；
+模型与验证脚本已留在 `models/gte-multilingual-reranker-base/` 与
+`exports/wiki_work/verify_reranker.py`）。
 
 **否决 LLM 精判的理由**（两条，第二条是结构性的）：
 
