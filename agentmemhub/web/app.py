@@ -1299,6 +1299,54 @@ def create_app(db_path: Path | None = None):
         from agentmemhub import wiki
         return JSONResponse(wiki.align(out, stage, db))
 
+    # ---- 待更新记忆的查看与删除（软删除=不进 wiki；硬删除=真删）----------
+    # 与 align 的分工：align 回答"差多少"（只有 id 列表、且会截断），
+    # 这一组回答"具体是哪几条、内容是什么" —— 让人能判断该不该删。
+    # **边界**：只处理**尚未进 wiki** 的记忆。已进 wiki 的硬删会产生死引用，
+    # 那属于 docs/memory-deletion.md 的范畴（墓碑 + 引用重映射），此处直接拒绝。
+
+    @app.get("/api/wiki/pending", summary="待 wiki 更新的记忆明细（只读）")
+    def api_wiki_pending(out: str = Query(default="", description="L1 产出目录；留空=用配置 wiki.out_l1"),
+                         limit: int = Query(default=0, ge=0, description="最多返回几条（0=全部）")):
+        from agentmemhub import wiki_pending
+        return JSONResponse(wiki_pending.pending(l1_dir=out, limit=limit))
+
+    @app.post("/api/wiki/pending/drop", summary="删除待更新的记忆（soft=不进 wiki / hard=真删）")
+    def api_wiki_pending_drop(payload: dict = Body(...)):
+        """body：`{"ids": [...], "mode": "soft"|"hard", "confirm": bool, "out": "..."}`
+
+        · `soft`：写 `wiki_ignore_at` 标记 —— 记忆**仍然存在、仍然能被召回**，
+          只是不再参与 wiki 编译；可 `restore` 取消。
+        · `hard`：真删（蒸馏表 + units 投影 + 向量），**不可恢复**，必须
+          `confirm: true`。
+        """
+        from agentmemhub import wiki_pending
+        try:
+            ids = [int(x) for x in (payload.get("ids") or [])]
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="ids 必须是整数数组")
+        return JSONResponse(wiki_pending.drop(
+            ids=ids, mode=str(payload.get("mode") or "soft"),
+            confirm=bool(payload.get("confirm")),
+            l1_dir=str(payload.get("out") or "")))
+
+    @app.get("/api/wiki/pending/ignored", summary="已软删除（不进 wiki）的记忆")
+    def api_wiki_pending_ignored(out: str = Query(default=""),
+                                 limit: int = Query(default=0, ge=0)):
+        from agentmemhub import wiki_pending
+        return JSONResponse(wiki_pending.ignored(l1_dir=out, limit=limit))
+
+    @app.post("/api/wiki/pending/restore", summary="取消软删除（重新变回待更新）")
+    def api_wiki_pending_restore(payload: dict = Body(...)):
+        """body：`{"ids": [...], "out": "..."}`"""
+        from agentmemhub import wiki_pending
+        try:
+            ids = [int(x) for x in (payload.get("ids") or [])]
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="ids 必须是整数数组")
+        return JSONResponse(wiki_pending.restore(ids=ids,
+                                                 l1_dir=str(payload.get("out") or "")))
+
     @app.post("/api/wiki/update", summary="增量更新 wiki（长任务：只重编脏会话与受影响域）")
     def api_wiki_update(l1: str = Query(..., description="第一级产出目录"),
                         l2: str = Query(..., description="第二级产出目录"),

@@ -9,6 +9,27 @@
 > 关联文档：[`data-architecture.md`](data-architecture.md)（§2 表矩阵 / §4 召回 / §10 快照）、
 > [`API.md`](API.md)（对外契约）、[`branch-milestones.md`](branch-milestones.md)（Roadmap）
 
+## 0. ⚠️ 先分清:两套"删除"，对象不同、复杂度差一个量级
+
+2026-09-22 先落地了**另一套更简单的删除** —— 针对**尚未进 wiki** 的记忆
+（`align` 报出来的"待更新"）：
+
+| | **待更新记忆的删除**(已实现) | **本文(记忆软删除，待实施)** |
+|---|---|---|
+| 对象 | **尚未进 wiki** 的记忆（dirty / 待编译） | **已经进 wiki** 的记忆（页面里已有 `[m<id>]`） |
+| 入口 | `GET/POST /api/wiki/pending*`、`wiki --action pending\|drop\|ignored\|restore` | 见本文第 4 节 |
+| 实现 | `agentmemhub/wiki_pending.py` | 本文第 3 节的数据模型 |
+| 软删除语义 | 写 `distilled_memories.wiki_ignore_at` = **"不进 wiki"**（记忆仍存在、**仍可召回**） | `deleted_at` = **"这条被删了"**（召回要过滤、wiki 页保留并标注） |
+| 硬删除 | ✅ 有（真删蒸馏表 + 投影 + 向量） | ❌ 不在本文范围（本文只做软删除） |
+| 为什么简单 | 没被任何页面引用 → **删除不产生死链** | 引用会变死链 → 需要墓碑 + 引用重映射/占位 |
+
+**一句话**：**进 wiki 之前**删除是最简单的（`wiki_pending` 已覆盖）；
+**进 wiki 之后**删除才会牵扯引用，那才是本文要解决的问题。两套并存、互不替代 ——
+`wiki_pending.drop()` 会**主动拒绝**任何"已进 wiki"的 id，就是为了不在缺少本文
+那套机制时把引用打断。
+
+---
+
 ## 1. 要解决的问题
 
 | # | 问题 | 现状 |

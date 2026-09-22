@@ -271,19 +271,6 @@ def cmd_adapters(args) -> None:
         _stdout(f"[{d['source']}] {d['label']}: {'✓ ' + (d['path'] or '') if d['located'] else '✗ 未找到'}")
 
 
-def cmd_serve(args) -> None:
-    """启动本地 Web 页面加载统一会话库。"""
-    from agentmemhub.web import run_server
-    run_server(port=args.port, open_browser=args.open,
-               db=args.db or None)
-
-
-def cmd_adapters(args) -> None:
-    for a in adapters.all_adapters():
-        d = a.describe()
-        _stdout(f"[{d['source']}] {d['label']}: {'✓ ' + (d['path'] or '') if d['located'] else '✗ 未找到'}")
-
-
 def cmd_memos_daemon(args) -> None:
     """MemOS 记忆引擎 daemon 管理（启动/停止/巡检/日志/配置）。"""
     import json as _json
@@ -856,6 +843,14 @@ def cmd_wiki(args) -> int:
 
     from agentmemhub import wiki
 
+    # `--out` 不是所有动作都需要：triggers/trigger/backfill-manual 完全不用目录，
+    # update 用 --l1/--l2，index-pages 可回落配置。此前 argparse 把它声明成
+    # `required=True`，导致 `wiki --action trigger` 直接报"缺少 --out"而走不通
+    # （实测踩到）。改为按动作校验。
+    if args.action in ("failures", "align", "retry") and not args.out:
+        print("需要 --out 指定 wiki 产出目录（动作：%s）" % args.action)
+        return 2
+
     if args.action == "failures":
         s = wiki.failures_summary(args.out, args.stage)
         if not s["exists"]:
@@ -911,6 +906,76 @@ def cmd_wiki(args) -> int:
                     print("     … 其余 %d 个见 JSON 输出" % (s["dirty_session_total"] - 10))
         print()
         print(r["message"])
+        return 0
+
+    # ---- pending / ignored / drop / restore（待更新记忆的查看与删除）----
+    # **只处理尚未进 wiki 的记忆**：已进 wiki 的硬删会让页面里的 [m<id>] 变成
+    # 死引用，那属于 docs/memory-deletion.md 的范畴，wiki_pending.drop 会拒绝。
+    if args.action in ("pending", "ignored"):
+        from agentmemhub import wiki_pending
+        fn = (wiki_pending.pending if args.action == "pending"
+              else wiki_pending.ignored)
+        r = fn(l1_dir=args.out, limit=args.limit)
+        if r.get("error"):
+            print("错误：%s" % r["error"])
+            return 2
+        if args.action == "pending":
+            print("待 wiki 更新：%d 条（新增 %d / 变更 %d）"
+                  % (r["count"], r["added_total"], r["changed_total"]))
+            if r.get("dirty_sessions"):
+                print("脏会话：%s" % "、".join(r["dirty_sessions"]))
+        else:
+            print("已软删除（不进 wiki）：%d 条" % r["count"])
+            if r.get("note"):
+                print("（%s）" % r["note"])
+        for it in r["items"]:
+            print()
+            print("  id=%s  %s/%s  type=%s  %d 字  %s"
+                  % (it["id"], it["source"], it["conversation_id"],
+                     it["type"], it["chars"],
+                     time.strftime("%Y-%m-%d %H:%M",
+                                   time.localtime(it["created_at"] or 0))))
+            print("     %s" % it["summary"][:100])
+        if not r["items"]:
+            print("（无）")
+        elif args.action == "pending":
+            print()
+            print("软删除示例：wiki --action drop --ids %s --mode soft"
+                  % ",".join(str(x["id"]) for x in r["items"][:3]))
+        return 0
+
+    if args.action in ("drop", "restore"):
+        from agentmemhub import wiki_pending
+        try:
+            ids = [int(x) for x in (args.ids or "").replace(" ", "").split(",") if x]
+        except ValueError:
+            print("--ids 必须是逗号分隔的整数，例：--ids 4388,4392")
+            return 2
+        if not ids:
+            print("需要 --ids 指定记忆 id（逗号分隔），例：--ids 4388,4392")
+            return 2
+        if args.action == "restore":
+            r = wiki_pending.restore(ids=ids, l1_dir=args.out)
+        else:
+            r = wiki_pending.drop(ids=ids, mode=args.mode,
+                                  confirm=args.confirm, l1_dir=args.out)
+        if r.get("error"):
+            print("错误：%s" % r["error"])
+            if r.get("hint"):
+                print("提示：%s" % r["hint"])
+            for x in (r.get("rejected") or []):
+                print("  拒绝 id=%s：%s" % (x.get("id"), x.get("reason")))
+            return 2
+        if args.action == "restore":
+            print("已取消忽略：%d 条" % r["restored"])
+        else:
+            print("已删除：%d 条（mode=%s）" % (r["dropped"], r["mode"]))
+            if r.get("projections_removed"):
+                print("  同时清理召回投影：%d 条" % r["projections_removed"])
+        if r.get("note"):
+            print("  %s" % r["note"])
+        for x in (r.get("rejected") or []):
+            print("  拒绝 id=%s：%s" % (x.get("id"), x.get("reason")))
         return 0
 
     # ---- triggers（触发器查看/手动触发）----
@@ -1182,14 +1247,20 @@ def build_parser() -> argparse.ArgumentParser:
     pwk.add_argument("--action", default="failures",
                      choices=["failures", "retry", "align", "update",
                               "triggers", "trigger", "backfill-manual",
-                              "index-pages"],
+                              "index-pages", "pending", "drop", "ignored",
+                              "restore"],
                      help="failures=查看失败清单（默认）；retry=只重跑失败项；"
                           "align=审计 wiki 产物与索引库的差距（只读）；"
                           "update=增量更新（只重编脏会话 L1 与受影响 L2 域）；"
                           "triggers=查看触发器配置与状态；trigger=手动执行一次触发检测；"
                           "backfill-manual=历史 Agent 直写记忆回填蒸馏表（幂等）；"
-                          "index-pages=L2 知识页投影进召回面（页级召回）")
-    pwk.add_argument("--out", required=True, help="wiki 产出目录（失败清单在其下）")
+                          "index-pages=L2 知识页投影进召回面（页级召回）；"
+                          "pending=待更新记忆明细；drop=删除待更新记忆"
+                          "（--mode soft=不进 wiki / hard=真删）；"
+                          "ignored=已软删除的记忆；restore=取消软删除")
+    pwk.add_argument("--out", default="",
+                     help="wiki 产出目录（failures/align/retry 必需；"
+                          "其余从配置或 --l1/--l2 读）")
     pwk.add_argument("--stage", default="", choices=["", "l1", "l2"],
                      help="限定阶段：l1=第一级；l2=第二级；留空=全部")
     pwk.add_argument("--src", default="", help="第二级补跑必需：第一级产出目录")
@@ -1199,6 +1270,15 @@ def build_parser() -> argparse.ArgumentParser:
     pwk.add_argument("--db", default="", help="索引库路径（align/update 用；默认读配置）")
     pwk.add_argument("--force", action="store_true",
                      help="trigger 用：绕过规则强制执行一次增量更新")
+    pwk.add_argument("--ids", default="",
+                     help="drop/restore 用：记忆 id 列表，逗号分隔（如 4388,4392）")
+    pwk.add_argument("--mode", default="soft", choices=["soft", "hard"],
+                     help="drop 用：soft=只标记不进 wiki（可恢复，默认）；"
+                          "hard=真删（蒸馏表+投影+向量，不可恢复）")
+    pwk.add_argument("--confirm", action="store_true",
+                     help="drop --mode hard 必须显式加上（二次确认）")
+    pwk.add_argument("--limit", type=int, default=0,
+                     help="pending/ignored 用：最多显示几条（0=全部）")
     return p
 
 

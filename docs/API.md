@@ -144,6 +144,49 @@ GET  /api/admin/job  →  轮询进度
 |---|---|---|
 | `GET` | `/api/wiki/failures` | 失败清单摘要（`out` 必填；`stage` 可选 `l1`/`l2`）|
 | `POST` | `/api/wiki/retry` | **定向补跑**失败项（`out`、`stage`、`src`、`workers`）|
+| `GET` | `/api/wiki/align` | 对齐审计（只读）：**脏多少 + 覆盖缺口**（`out` 必填，`stage`/`db` 可省）|
+| `POST` | `/api/wiki/update` | **增量更新**（长任务）：脏会话重编 L1 + 受影响域重编 L2 |
+| `GET` | `/api/wiki/triggers` | 触发器配置与状态（规则、今日已触发档位、上次更新时间、产出目录）|
+| `PUT` | `/api/wiki/triggers` | 编辑触发规则（运行时 overrides，**不改 yaml**）|
+| `POST` | `/api/wiki/trigger/run` | 手动执行一次检测（`force=` 绕过规则强制更新）|
+| `GET` | `/api/wiki/pending` | **待更新记忆明细**（`out` 可省=用配置；`limit` 0=全部）—— 带来源/类型/时间/正文摘要 |
+| `POST` | `/api/wiki/pending/drop` | **删除待更新记忆**：body `{ids, mode, confirm, out}`；`soft`=不进 wiki，`hard`=真删（需 `confirm`）|
+| `GET` | `/api/wiki/pending/ignored` | 已软删除（不进 wiki）的记忆 —— 供取消忽略 |
+| `POST` | `/api/wiki/pending/restore` | **取消软删除**：body `{ids, out}` |
+
+**待更新记忆的查看与删除（`/api/wiki/pending*`）**
+
+与 `align` 的分工：`align` 回答"**差多少**"（只有 id 列表、且会截断），这一组回答
+"**具体是哪几条、内容是什么**"，让人能判断该不该删。
+
+```jsonc
+// GET /api/wiki/pending
+{
+  "count": 3, "added_total": 3, "changed_total": 0,
+  "dirty_sessions": {"mcp/direct": {"added": 3, "changed": 0, "removed": 0}},
+  "items": [{"id": 4388, "source": "mcp", "conversation_id": "direct",
+             "type": "fact", "status": "new", "confidence": "medium",
+             "chars": 492, "created_at": 1758000421, "summary": "…"}]
+}
+```
+
+**两种删除语义**（这是核心区别，别混）：
+
+| 模式 | 效果 | 可恢复 |
+|---|---|---|
+| **`soft`** | 写 `wiki_ignore_at` 标记：记忆**仍然存在、仍然能被召回**，只是**不再参与 wiki 编译** | ✅ `restore` 可取消 |
+| **`hard`** | 真删：蒸馏表行 + `units` 投影 + 向量（FTS 由触发器同步） | ❌ 不可恢复，需 `confirm: true` |
+
+**⚠️ 只允许删"待更新"的记忆**（尚未进 wiki 的那些）：
+
+- 它们**没有被任何页面引用**，所以删除**不产生死链** —— 这是最简单的场景
+- **已进 wiki** 的记忆会被直接**拒绝**（返回 `rejected`）：硬删会让页面正文里的
+  `[m<id>]` 变成死引用，那属于 [`memory-deletion.md`](memory-deletion.md) 的范畴
+  （需要墓碑表 + 引用重映射/占位），本接口刻意不承担
+- **软删除一条待更新的记忆不触发任何重编**：它本来就不在 manifest 基线里，
+  编译输入去掉它，diff 依然是零
+- **硬删除后会自动重建 manifest**：否则 `align` 会把这批 id 报成"失去输入"，
+  明明页面里引用不到，却触发一次毫无意义的重编
 
 **`GET /api/wiki/failures` 响应要点**
 
@@ -159,6 +202,26 @@ GET  /api/admin/job  →  轮询进度
              "attempts": 1, "error": "...", "ts": 1789000000}]
 }
 ```
+
+**`GET /api/wiki/align` 响应要点**
+
+```json
+{
+  "needs_recompile": true,        // 只看 manifest diff（"wiki 是不是脏的"）
+  "stages": {"l1": {"added_total": 101, "changed_total": 0, "removed_total": 0,
+                    "dirty_sessions": {"mcp/direct": {"added": 101, ...}},
+                    "dirty_session_total": 1}},
+  "invalid_refs": {"missing_total": 0, "not_input_total": 0},   // 死链
+  "coverage": {"current_inputs": 1781, "covered": 1720,
+               "uncovered": 61,   // ← 没被**任何**页面引用（diff 视角看不见）
+               "uncovered_ids": [428, 527, ...], "ratio": 0.9657},
+  "message": "l1: 新增 101 / 变更 0 / 失去输入 0（脏会话 1 个）；失效引用 0 个；⚠️ 未覆盖 61 条输入"
+}
+```
+
+`needs_recompile` 与 `coverage.uncovered` 是**两个视角**：前者回答"要不要重编"，
+后者暴露"页面里根本没有的输入"。`uncovered` **只告警、不触发重编** —— 否则会陷入
+"每次都触发、却因脏会话为空而什么都不做"（详见 `data-architecture.md` §7.4）。
 
 ---
 

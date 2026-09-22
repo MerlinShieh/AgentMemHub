@@ -95,8 +95,20 @@ CREATE INDEX IF NOT EXISTS idx_dm_hash   ON distilled_memories(content_hash);
 
 
 def ensure_distill_schema(conn: sqlite3.Connection) -> None:
-    """幂等建表（重复调用安全；与 open_index 的 schema 并行不冲突）。"""
+    """幂等建表 + 幂等补列（重复调用安全；与 open_index 的 schema 并行不冲突）。"""
     conn.executescript(_SCHEMA_DISTILL)
+    # 补列：`CREATE TABLE IF NOT EXISTS` **不会**给已存在的表加新列，所以新列
+    # 必须单独 ALTER（照 rag/ingest.ensure_bridge_schema 的做法）。
+    #
+    # wiki_ignore_at：**"不进 wiki"标记**（软删除）。
+    # 语义与"删记忆"（deleted_at）不同 —— 那条记忆仍然存在、**仍然能被召回**，
+    # 只是不参与 wiki 编译（用户看了待更新列表后判定"这条不该进知识库"）。
+    # 用独立列而不是复用 status，是为了**保留原状态**（new/similar 的区别），
+    # 取消忽略时能精确还原。
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(distilled_memories)")}
+    if "wiki_ignore_at" not in cols:
+        conn.execute(
+            "ALTER TABLE distilled_memories ADD COLUMN wiki_ignore_at INTEGER")
     conn.commit()
 
 
