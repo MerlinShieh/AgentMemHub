@@ -256,21 +256,31 @@ def _dedupe_projections(hits: list, refmap: dict) -> list:
     """把"同一条内容的双投影"合并成一条（保留分数最高的那份）。
 
     背景（2026-09-22 实测）：Agent 直写记忆在召回面有**两份内容相同**的单元 ——
-    `mcp_<hash>`（`memory_save` 写引擎时产生）与 `dst_<hash>`（蒸馏 S4 投影），
-    两者用**同一个内容 hash**。后果有两个：
+    `mcp_<hash>`（`memory_save` 写引擎时产生）与 `dst_<hash>`（蒸馏 S4 投影）。
+    后果有两个：
 
       · 结果里同一条**重复出现**（用户可见）；
       · 更麻烦的是它们**各占一个席位** —— 实测会把"低分字面兜底席"也吃掉，
         把别的条目挤出去。
 
-    去重键用 **src_id 里的内容 hash**，而不是比对正文：`dst_` 侧的正文可能带
-    `topic：` 前缀而有细微差异，hash 才是精确判据。只对 `kind == "memory"`
-    生效 —— 消息层/页面层的同文重复另有成因，不在本函数范围。
+    **两个判据都用**（任一命中即视为同一条）：
 
-    `hits` 已按分数降序，所以保留的自然是分数高的那份（实测 `mcp_` 侧因
+    ① **src_id 里的内容 hash 配对**。注意这依赖一个**未写在文档里的巧合**：
+       `content_anchor()` 用**原始**内容算 `sha256[:16]`，而
+       `distilled_memories.content_hash`（`fingerprint()`）用**规范化后**的内容 ——
+       两者只在"入库时内容没被改动"时才相同。实测 114 条 `mcp_` 单元里
+       **11 条 hash 分叉**（入库时 `sanitize.redact` 改动了内容），所以光靠 hash
+       会漏。
+    ② **正文归一化后比对**兜底 —— 实测配对成功的那些**正文 100% 相同**，
+       正好补上 ① 漏掉的 11 条。跨会话同内容不会误伤：`dst_` 锚不含会话，
+       同 hash 本来就只有一个投影行。
+
+    只对 `kind == "memory"` 生效 —— 消息层/页面层的同文重复另有成因，不在本函数
+    范围。`hits` 已按分数降序，所以保留的自然是分数高的那份（实测 `mcp_` 侧因
     Agent 写入基础分更高而胜出，符合预期）。
     """
-    seen: set[str] = set()
+    seen_key: set[str] = set()
+    seen_text: set[str] = set()
     out: list = []
     for h in hits:
         if h.kind == "memory":
@@ -280,10 +290,13 @@ def _dedupe_projections(hits: list, refmap: dict) -> list:
                 if src.startswith(p):
                     key = src[len(p):]
                     break
+            txt = " ".join((h.text or "").split())
+            if (key and key in seen_key) or (txt and txt in seen_text):
+                continue
             if key:
-                if key in seen:
-                    continue
-                seen.add(key)
+                seen_key.add(key)
+            if txt:
+                seen_text.add(txt)
         out.append(h)
     return out
 

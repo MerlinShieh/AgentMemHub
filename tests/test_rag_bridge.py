@@ -448,11 +448,12 @@ def test_终审_页面只受配额不受分数门限():
 # （实测把"低分字面兜底席"都吃掉了，挤掉别的条目）。
 
 class _Proj:
-    """最小 Hit 替身（去重只看 unit_id 与 kind）。"""
+    """最小 Hit 替身（去重只看 unit_id / kind / text）。"""
 
-    def __init__(self, uid, kind="memory"):
+    def __init__(self, uid, kind="memory", text=""):
         self.unit_id = uid
         self.kind = kind
+        self.text = text
 
 
 def test_去重_同内容双投影只保留一条():
@@ -462,23 +463,32 @@ def test_去重_同内容双投影只保留一条():
     assert [h.unit_id for h in out] == [1], "应保留分数高的那份"
 
 
+def test_去重_hash分叉时用正文兜底():
+    """hash 会因入库脱敏而分叉 —— 实测 114 条 mcp_ 单元里有 11 条如此
+    （`content_anchor` 用原始内容、`fingerprint` 用规范化后内容）。
+    这类只能靠正文比对合并。"""
+    hits = [_Proj(1, text="同一段内容"), _Proj(2, text="同一段内容")]
+    refmap = {1: {"srcId": "mcp_aaa"}, 2: {"srcId": "dst_bbb"}}   # hash 不同
+    assert len(rag_bridge._dedupe_projections(hits, refmap)) == 1
+
+
 def test_去重_不同内容不合并():
-    hits = [_Proj(1), _Proj(2)]
+    hits = [_Proj(1, text="甲"), _Proj(2, text="乙")]
     refmap = {1: {"srcId": "mcp_aaa"}, 2: {"srcId": "dst_bbb"}}
     assert len(rag_bridge._dedupe_projections(hits, refmap)) == 2
 
 
 def test_去重_消息层与页面层不受影响():
     """它们没有 mcp_/dst_ 配对；同文重复若出现，成因不同，不在此处合并。"""
-    hits = [_Proj(1, "message"), _Proj(2, "message"),
-            _Proj(3, "page"), _Proj(4, "page")]
+    hits = [_Proj(1, "message", "同样的话"), _Proj(2, "message", "同样的话"),
+            _Proj(3, "page", "同样的话"), _Proj(4, "page", "同样的话")]
     refmap = {1: {"srcId": "mcp_aaa"}, 2: {"srcId": "dst_aaa"},
               3: {"srcId": "wiki_x"}, 4: {"srcId": "wiki_x"}}
     assert len(rag_bridge._dedupe_projections(hits, refmap)) == 4
 
 
-def test_去重_没有srcId时不误删():
-    """老库/异常数据缺 src_id 时不能把条目误判成重复删掉。"""
+def test_去重_没有srcId且正文为空时不误删():
+    """老库/异常数据既缺 src_id 又没有正文时不能把条目误判成重复删掉。"""
     hits = [_Proj(1), _Proj(2)]
     refmap = {1: {}, 2: {"srcId": ""}}
     assert len(rag_bridge._dedupe_projections(hits, refmap)) == 2
