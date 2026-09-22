@@ -113,6 +113,44 @@ def test_硬删除_删行并重建manifest_不报失去输入(tmp_path):
     assert a["needs_recompile"] is False
 
 
+def test_硬删除_同时清掉直写落账单元(tmp_path):
+    """回归（2026-09-22 实测）：直写记忆在召回面有**两份**投影 ——
+    `dst_<hash>`（蒸馏投影）与 `mcp_<hash>`（`memory_save` 写引擎时的落账单元），
+    两者用**同一个内容 hash**。
+
+    此前硬删除只清 `dst_`，于是那条记忆**仍能被检索命中** —— 表现为"删了还能
+    搜到"（实测：删掉 id=4459 后 `mcp_21966322e734b36c` 还在 units 里）。
+    """
+    from agentmemhub.rag.ingest import open_index
+
+    db, l1 = _mk(tmp_path, 3)
+    idx = open_index(db)
+    try:
+        # units 有 (source, conversation_id, seq) 唯一约束 → 两条给不同 seq
+        for i, src in enumerate(("dst_h3", "mcp_h3")):
+            idx.execute(
+                "INSERT INTO units (source, conversation_id, seq, role, text,"
+                " chars, src_id) VALUES (?,?,?,?,?,?,?)",
+                ("a", "s1", -3 - i, "distilled", "内容3 这一条用来测试删除",
+                 len("内容3 这一条用来测试删除"), src))
+        idx.commit()
+        n = idx.execute("SELECT COUNT(*) FROM units WHERE src_id IN"
+                        " ('dst_h3','mcp_h3')").fetchone()[0]
+        assert n == 2, "夹具应造出两份投影"
+    finally:
+        idx.close()
+
+    wiki_pending.drop(ids=[3], mode="hard", confirm=True, l1_dir=l1, db=str(db))
+
+    idx = open_index(db)
+    try:
+        left = [r[0] for r in idx.execute(
+            "SELECT src_id FROM units WHERE src_id IN ('dst_h3','mcp_h3')")]
+    finally:
+        idx.close()
+    assert left == [], "两份投影都必须清掉，否则「删了还能搜到」：%s" % left
+
+
 def test_硬删除_缺confirm被拒且不删(tmp_path):
     db, l1 = _mk(tmp_path, 3)
     r = wiki_pending.drop(ids=[3], mode="hard", confirm=False,

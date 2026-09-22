@@ -217,23 +217,30 @@ def _soft_drop(ids: list[int], db: str) -> dict[str, Any]:
 
 
 def _hard_drop(ids: list[int], db: str, l1: str) -> dict[str, Any]:
-    """真删：蒸馏表行 + units 投影 + 向量；然后**重建 manifest**。
+    """真删：蒸馏表行 + **两份召回投影** + 向量；然后**重建 manifest**。
 
-    重建是关键一步：库里行没了而 manifest 还留着 → align 会报"失去输入"→
+    投影有两份，只清一份等于"删了还能搜到"：
+      · `dst_<hash>` —— 蒸馏投影（`drop_projection`）
+      · `mcp_<hash>` —— **Agent 直写落账单元**（`drop_agent_write_unit`），
+        由 `memory_save` 写引擎时产生。两者用**同一个内容 hash**。
+        2026-09-22 实测踩到：只清 `dst_` 时，被删记忆仍能被检索命中。
+
+    重建 manifest 是关键一步：库里行没了而 manifest 还留着 → align 会报"失去输入"→
     明明页面里引用不到它们，却触发一次无意义的重编。
     """
-    from agentmemhub.distill import drop_projection
+    from agentmemhub.distill import drop_agent_write_unit, drop_projection
     from agentmemhub.rag.ingest import open_index
     idx = open_index(db)
     hashes: list[str] = []
+    proj = 0
     try:
         q = ",".join("?" * len(ids))
         hashes = [h for (h,) in idx.execute(
             "SELECT content_hash FROM distilled_memories WHERE id IN (%s)" % q,
             ids) if h]
-        proj = 0
         for h in hashes:
-            proj += drop_projection(idx, h)
+            proj += drop_projection(idx, h)          # dst_（蒸馏投影）
+            proj += drop_agent_write_unit(idx, h)    # mcp_（直写落账）
         cur = idx.execute(
             "DELETE FROM distilled_memories WHERE id IN (%s)" % q, ids)
         idx.commit()

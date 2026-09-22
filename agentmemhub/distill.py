@@ -1416,15 +1416,20 @@ def _has_units(idx: sqlite3.Connection) -> bool:
     ).fetchone() is not None
 
 
-def drop_projection(idx: sqlite3.Connection, content_hash: str) -> int:
-    """回收某个内容 hash 在 units 里的蒸馏投影（含向量）。返回删除条数。
+#: Agent 直写记忆在引擎侧的单元前缀（`memory_save` 的幂等锚：`mcp_<内容hash>`）。
+#: **与 `dst_<内容hash>` 用同一个 hash** —— 所以同一条直写记忆在召回面会有两份
+#: 内容相同的单元（见 `drop_agent_write_unit` 与 `rag_bridge.search` 的去重）。
+AGENT_WRITE_SRC_PREFIX = "mcp_"
+
+
+def drop_unit_by_src_id(idx: sqlite3.Connection, src_id: str) -> int:
+    """按 src_id 删除一个召回单元（含向量）。返回删除条数。
 
     FTS 由 units 上的触发器随 DELETE 同步；vec0 无触发器，必须显式删。
     """
     if not _has_units(idx):
         return 0
-    row = idx.execute("SELECT id FROM units WHERE src_id=?",
-                      (DISTILLED_SRC_PREFIX + content_hash,)).fetchone()
+    row = idx.execute("SELECT id FROM units WHERE src_id=?", (src_id,)).fetchone()
     if not row:
         return 0
     uid = int(row[0])
@@ -1432,6 +1437,26 @@ def drop_projection(idx: sqlite3.Connection, content_hash: str) -> int:
     for vt in _vec_tables(idx):
         idx.execute(f"DELETE FROM {vt} WHERE rowid=?", (uid,))
     return 1
+
+
+def drop_projection(idx: sqlite3.Connection, content_hash: str) -> int:
+    """回收某个内容 hash 在 units 里的**蒸馏投影**（`dst_`，含向量）。
+
+    FTS 由 units 上的触发器随 DELETE 同步；vec0 无触发器，必须显式删。
+    """
+    return drop_unit_by_src_id(idx, DISTILLED_SRC_PREFIX + content_hash)
+
+
+def drop_agent_write_unit(idx: sqlite3.Connection, content_hash: str) -> int:
+    """回收某个内容 hash 的 **Agent 直写落账单元**（`mcp_`，含向量）。
+
+    为什么硬删除必须带上它：直写记忆在召回面有**两份**投影 —— `mcp_`（memory_save
+    写引擎时产生，价值分 0.6 起）与 `dst_`（蒸馏 S4 投影，0.3）。此前
+    `drop_projection` 只清后者，于是"硬删除"之后那条记忆**仍然能被召回** ——
+    表现为"删了还能搜到"（2026-09-22 实测：删掉 id=4459 后，`mcp_21966322e734b36c`
+    仍在 units 里，依旧命中查询）。
+    """
+    return drop_unit_by_src_id(idx, AGENT_WRITE_SRC_PREFIX + content_hash)
 
 
 def _hash_still_needed(idx: sqlite3.Connection, content_hash: str) -> bool:
