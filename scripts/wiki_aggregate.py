@@ -963,9 +963,13 @@ def run(args) -> None:
     print()
     print(fl.summary())
     from agentmemhub.llm import usage_snapshot
+    _u = usage_snapshot()
     _wlog(event="run_end", script="wiki_aggregate", domains=len(results),
-          pages=n_pages, seconds=round(time.time() - t_all, 1),
-          usage=usage_snapshot())
+          pages=n_pages,
+          # seconds = 墙钟（机器休眠会把它撑大，实测一次显示 9.2 小时而实际
+          # 约 1 小时）；call_seconds = 累计调用耗时，反映真实工作量
+          seconds=round(time.time() - t_all, 1),
+          call_seconds=round(_u.get("seconds", 0.0), 1), usage=_u)
 
     # 编译清单：与第一级同口径（全库输入快照），另附 域 → L1源文件/记忆 的映射，
     # 供对齐审计把"哪些记忆变了"映射成"哪些主题域需要重编"。

@@ -24,18 +24,144 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from agentmemhub import wiki_manifest as wm
 
-#: 单飞行锁：update 是长任务，两个触发点撞上时后到者直接放弃
+#: 进程内单飞行锁：update 是长任务，两个触发点撞上时后到者直接放弃
 _RUN_LOCK = threading.Lock()
+
+#: **跨进程**单飞行锁的文件（update 可能从 MCP 进程、CLI、面板、脚本被同时触发）。
+#:
+#: 为什么必须是跨进程的：`threading.Lock` 只在单进程内有效。2026-09-21 实测
+#: MCP 的写入钩子（daemon 线程）与人工恢复脚本**并发**跑同一批产物 —— 日志里
+#: 出现两份"两段式：先分组"（条数还是 101 / 102 两个版本），两者同时写
+#: `out_l1_mimo` 与 manifest。
+#:
+#: 用**原子创建锁文件**（`O_CREAT|O_EXCL`）+ 内容写 PID/时间戳做跨进程互斥。
+#:
+#: 为什么不用 `msvcrt.locking` / `fcntl.flock`：实测在"追加模式打开 + 空文件先
+#: 写一字节再锁"这个用法下，**子进程持锁时父进程仍能拿到锁**（跨进程互斥没生效，
+#: 测试直接抓到了）。原子创建 + stale 判定语义明确、跨平台一致，代价是要自己
+#: 处理"进程崩溃留下锁文件"，所以写 PID/时间戳并在失效时抢占。
+_LOCK_FILE = Path("logs") / "wiki_update.lock"
+
+#: 锁的最大持有时长（秒）：update 跑大会话可能近一小时，给足 3 小时。
+#: 超过即视为失效锁 —— 崩溃残留不能永久挡住 wiki 更新。
+_LOCK_MAX_AGE = 3 * 3600
 
 #: 状态文件默认位置（logs/ 已忽略，状态不必入库）
 STATE_FILE = Path("logs") / "wiki_trigger_state.json"
+
+
+def _pid_alive(pid: int) -> bool:
+    """判断进程是否存活。
+
+    **刻意不依赖 psutil**：它不在依赖里（实测未安装），而"判断存活"一旦失败就
+    会退化成"锁永久有效" —— 崩溃残留的锁会把 wiki 更新彻底挡住。
+    """
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            # PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            h = k32.OpenProcess(0x1000, False, pid)
+            if not h:
+                return False
+            try:
+                code = ctypes.c_ulong()
+                if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+                    return False
+                return code.value == 259            # STILL_ACTIVE
+            finally:
+                k32.CloseHandle(h)
+        except Exception:                           # noqa: BLE001
+            return True                             # 判断不了 → 保守认为存活
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except Exception:                               # noqa: BLE001
+        return True
+
+
+def _lock_is_stale() -> bool:
+    """锁文件是否已失效：持锁进程不在了，或超过最大持有时长。"""
+    try:
+        parts = _LOCK_FILE.read_text(encoding="utf-8").split()
+        pid, ts = int(parts[0]), float(parts[1])
+    except Exception:                       # noqa: BLE001 —— 读不出来当失效
+        return True
+    if time.time() - ts > _LOCK_MAX_AGE:
+        return True
+    return not _pid_alive(pid)
+
+
+def _take_lock() -> bool:
+    """尝试原子创建锁文件；成功返回 True。"""
+    try:
+        fd = os.open(_LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    except OSError:
+        return True                         # 打不开（磁盘/权限）→ 退化为不锁
+    try:
+        os.write(fd, ("%d %.3f" % (os.getpid(), time.time())).encode("utf-8"))
+    finally:
+        os.close(fd)
+    return True
+
+
+@contextmanager
+def _file_lock():
+    """取得跨进程锁；拿不到时 yield False。
+
+    锁文件异常（磁盘只读、目录不可建）时**退化为不锁** —— 宁可承担并发风险，
+    也不能让 wiki 更新整体失效，更不能让异常炸掉调用方的写入流程。
+    """
+    try:
+        _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:                       # noqa: BLE001
+        yield True
+        return
+    got = _take_lock()
+    if not got and _lock_is_stale():
+        # 抢占失效锁：清掉后重试一次
+        try:
+            _LOCK_FILE.unlink()
+        except OSError:
+            pass
+        got = _take_lock()
+    try:
+        yield got
+    finally:
+        if got:
+            try:
+                _LOCK_FILE.unlink()
+            except OSError:
+                pass
+
+
+@contextmanager
+def _single_flight():
+    """单飞行：先取进程内锁，再取跨进程文件锁。yield False = 已有更新在跑。"""
+    if not _RUN_LOCK.acquire(blocking=False):
+        yield False
+        return
+    try:
+        with _file_lock() as got:
+            yield got
+    finally:
+        _RUN_LOCK.release()
 
 
 # ---------------------------------------------------------------------------
@@ -205,52 +331,77 @@ def run_manual(*, force: bool = False) -> dict[str, Any]:
 
 
 def _check_and_run(*, hook: str, force: bool = False) -> dict[str, Any]:
+    # 单飞行（进程内锁 + 跨进程文件锁）：已有更新在跑就不重复触发。
+    # update 自己会把 manifest 刷新成新基线，天然防重复编译。
+    with _single_flight() as got:
+        if not got:
+            return {"checked": True, "should_run": False,
+                    "message": "已有一次增量更新在执行中（可能来自其它进程），本次跳过"}
+        return _run_locked(hook=hook, force=force)
+
+
+def _run_locked(*, hook: str, force: bool = False) -> dict[str, Any]:
+    """持锁后的判定与执行（主体）。"""
     from agentmemhub import wiki
     l1, l2, db = _targets()
     cfg = get_effective_config()
 
-    # 单飞行：已有更新在跑就不重复触发（update 自己也会刷新 manifest）
-    if not _RUN_LOCK.acquire(blocking=False):
-        return {"checked": True, "should_run": False,
-                "message": "已有一次增量更新在执行中，本次跳过"}
+    a = wiki.align(l1, "l1", db)
+    s = a.get("stages", {}).get("l1", {})
+    dirty = (s.get("added_total") or 0) + (s.get("changed_total") or 0)
+    state = _load_state()
+    now = datetime.now()
+    verdict = ({"should_run": True, "reasons": ["手动强制"],
+                "due_slots": []} if force else
+               evaluate(now=now, dirty=dirty, has_dirty=a["needs_recompile"],
+                        hook=hook, cfg=cfg, state=state))
+    out: dict[str, Any] = {
+        "checked": True, "hook": hook, "should_run": verdict["should_run"],
+        "reasons": verdict["reasons"], "dirty": dirty,
+        "last_update_at": state.get("last_update_at"),
+    }
+    # 判定结果落 wiki.log —— 触发器此前**没有**这条日志，导致回查"某次为什么
+    # 触发"只能靠 fired 记录 + 代码反推（实测踩过）；长任务必须能从日志回答
+    # "为什么跑"，判定信息比执行记录更该留痕。
     try:
-        a = wiki.align(l1, "l1", db)
-        s = a.get("stages", {}).get("l1", {})
-        dirty = (s.get("added_total") or 0) + (s.get("changed_total") or 0)
-        state = _load_state()
-        now = datetime.now()
-        verdict = ({"should_run": True, "reasons": ["手动强制"],
-                    "due_slots": []} if force else
-                   evaluate(now=now, dirty=dirty, has_dirty=a["needs_recompile"],
-                            hook=hook, cfg=cfg, state=state))
-        out: dict[str, Any] = {
-            "checked": True, "hook": hook, "should_run": verdict["should_run"],
-            "reasons": verdict["reasons"], "dirty": dirty,
-            "last_update_at": state.get("last_update_at"),
-        }
-        # 判定结果落 wiki.log —— 触发器此前**没有**这条日志，导致回查"某次为什么
-        # 触发"只能靠 fired 记录 + 代码反推（实测踩过）；长任务必须能从日志回答
-        # "为什么跑"，判定信息比执行记录更该留痕。
+        from agentmemhub.logs import audit_wiki
+        audit_wiki({"event": "trigger_check", "hook": hook,
+                    "should_run": verdict["should_run"],
+                    "reasons": verdict["reasons"],
+                    "due_slots": verdict["due_slots"], "dirty": dirty,
+                    "last_update_at": state.get("last_update_at")})
+    except Exception:                       # noqa: BLE001 —— 审计旁路
+        pass
+    if not verdict["should_run"]:
+        return out
+    try:
+        upd = wiki.update(l1_dir=l1, l2_dir=l2, db=db)
+    except Exception as e:                  # noqa: BLE001 —— 失败如实返回，不打标记
+        out["update"] = {"error": "%s: %s" % (type(e).__name__, str(e)[:300])}
+        out["fired"] = False
+        return out
+    out["update"] = upd
+
+    # **部分失败不算成功**：L1 有会话没编出来时不能打标记 —— 否则当日档位与
+    # last_update_at 一起被消耗，而失败会话（已被剔除出新基线）要等到明天首次
+    # 写入才有机会重试。实测 2026-09-21 就是这么把一次超时拖成静默丢失的：
+    # update 只 catch 异常、不看返回值，failed=1 照样被当成成功。
+    n_bad = (upd.get("l1") or {}).get("failed") or 0 if isinstance(upd, dict) else 0
+    if n_bad:
+        out["fired"] = False
+        out["fired_note"] = ("L1 有 %d 个会话编译失败，不消耗触发额度"
+                             "（下次写入自然重试）" % n_bad)
         try:
             from agentmemhub.logs import audit_wiki
-            audit_wiki({"event": "trigger_check", "hook": hook,
-                        "should_run": verdict["should_run"],
-                        "reasons": verdict["reasons"],
-                        "due_slots": verdict["due_slots"], "dirty": dirty,
-                        "last_update_at": state.get("last_update_at")})
-        except Exception:                       # noqa: BLE001 —— 审计旁路
+            audit_wiki({"event": "trigger_fired_skipped", "hook": hook,
+                        "l1_failed": n_bad, "reasons": verdict["reasons"]})
+        except Exception:                   # noqa: BLE001 —— 审计旁路
             pass
-        if not verdict["should_run"]:
-            return out
-        try:
-            out["update"] = wiki.update(l1_dir=l1, l2_dir=l2, db=db)
-        except Exception as e:                  # noqa: BLE001 —— 失败如实返回，不打标记
-            out["update"] = {"error": "%s: %s" % (type(e).__name__, str(e)[:300])}
-            return out
-        _mark_fired(_load_state(), now, verdict["due_slots"], hook)
         return out
-    finally:
-        _RUN_LOCK.release()
+
+    _mark_fired(_load_state(), now, verdict["due_slots"], hook)
+    out["fired"] = True
+    return out
 
 
 def status() -> dict[str, Any]:

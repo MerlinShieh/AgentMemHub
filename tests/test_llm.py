@@ -56,15 +56,40 @@ def _ok(content: str = '{"memories": []}') -> dict:
     return {"choices": [{"message": {"content": content}}]}
 
 
-def _http_error(code: int, body: str = "") -> urllib.error.HTTPError:
+def _http_error(code: int, body: str = "",
+                headers: dict | None = None) -> urllib.error.HTTPError:
     return urllib.error.HTTPError(
-        "http://x", code, "err", {}, io.BytesIO(body.encode("utf-8")))
+        "http://x", code, "err", headers or {},
+        io.BytesIO(body.encode("utf-8")))
 
 
 def _client(results, **cfg_kw) -> LLMClient:
     cfg = LLMConfig(endpoint="http://x/v1/chat/completions", api_key="k",
                     model="m", backoff_base=0.0, **cfg_kw)
     return LLMClient(cfg, _opener=_FakeOpener(results))
+
+
+@pytest.fixture(autouse=True)
+def _no_rate_wait(monkeypatch):
+    """限流闸门在测试里不产生**真实等待**。
+
+    429 未给 `Retry-After` 时会把全局闸门推后 `_RATE_DEFAULT_WAIT`（默认 20 秒），
+    后续每个请求都要等在闸门前 —— 测试里必须置 0，否则一个 429 用例就白等 20 秒。
+    """
+    from agentmemhub import llm as _llm
+    monkeypatch.setattr(_llm, "_RATE_DEFAULT_WAIT", 0.0, raising=False)
+    monkeypatch.setattr(_llm, "_RATE_UNTIL", 0.0, raising=False)
+    yield
+    _llm._RATE_UNTIL = 0.0
+
+
+@pytest.fixture(autouse=True)
+def _reset_usage():
+    """累计用量是**模块级全局**，测试之间必须隔离（否则互相污染）。"""
+    from agentmemhub import llm as _llm
+    _llm.usage_reset()
+    yield
+    _llm.usage_reset()
 
 
 # ── extract_json：模型输出容错 ─────────────────────────────────────────
@@ -237,3 +262,167 @@ def test_extract_json_salvage_does_not_mask_other_shapes():
     """非 memories 结构且不可解析 → 仍报错（抢救逻辑不误伤）。"""
     with pytest.raises(ValueError):
         extract_json("完全是自然语言，没有 JSON")
+
+
+# ── 429 限流：全局闸门 + Retry-After ───────────────────────────────────
+#
+# 组级/会话级并发之后，多个 worker 会几乎同时撞上同一个 RPM/TPM 窗口。若各自
+# 独立退避，它们会在同一时刻一起恢复、一起重试，再次撞限（"退避共振"）——
+# 所以退避必须是**进程级共享**的。
+
+def test_retry_after_解析秒数日期与非法值():
+    import email.utils
+    import time as _t
+
+    from agentmemhub.llm import _parse_retry_after
+
+    assert _parse_retry_after({"Retry-After": "12"}) == 12.0
+    assert _parse_retry_after({"Retry-After": " 3.5 "}) == 3.5
+    assert _parse_retry_after({}) is None
+    assert _parse_retry_after(None) is None
+    assert _parse_retry_after({"Retry-After": "不是数字也不是日期"}) is None
+    # HTTP-date 形式（RFC 允许两种写法）
+    future = email.utils.formatdate(_t.time() + 30, usegmt=True)
+    v = _parse_retry_after({"Retry-After": future})
+    assert v is not None and 20 < v <= 31
+
+
+def test_限流_异常带上标记与retry_after():
+    # 注意：429 会把总尝试次数放宽到 max_retries+3，所以即使 max_retries=0
+    # 也会重试到 3 次 —— 必须给足预设响应，否则是测试自己的假 opener 抛错
+    opener = _FakeOpener([_http_error(429, "slow down", {"Retry-After": "1"})] * 3)
+    c = LLMClient(LLMConfig(endpoint="http://x/v1/chat/completions",
+                            api_key="k", model="m", backoff_base=0.0,
+                            max_retries=0), _opener=opener)
+    with pytest.raises(LLMTransientError) as ei:
+        c.complete_json("s", "u")
+    assert ei.value.is_rate_limit is True
+    assert ei.value.retry_after == 1.0
+    assert opener.calls == 3
+    # 非限流的瞬态不应被标成 rate limit
+    opener2 = _FakeOpener([_http_error(503, "down")])
+    c2 = LLMClient(LLMConfig(endpoint="http://x/v1/chat/completions",
+                             api_key="k", model="m", backoff_base=0.0,
+                             max_retries=0), _opener=opener2)
+    with pytest.raises(LLMTransientError) as ei2:
+        c2.complete_json("s", "u")
+    assert ei2.value.is_rate_limit is False
+
+
+def test_限流_闸门被推后且过期后不阻塞(monkeypatch):
+    import time as _t
+
+    from agentmemhub import llm as _llm
+
+    monkeypatch.setattr(_llm, "_RATE_UNTIL", 0.0)
+    _llm._rate_backoff(30.0)
+    assert _llm._RATE_UNTIL > _t.time() + 25
+
+    # 只延长不退让：较小的值不能把闸门提前
+    _llm._rate_backoff(1.0)
+    assert _llm._RATE_UNTIL > _t.time() + 25
+
+    # 闸门过期后不阻塞
+    _llm._RATE_UNTIL = 0.0
+    t0 = _t.time()
+    _llm._rate_wait()
+    assert _t.time() - t0 < 0.5
+
+
+def test_限流_闸门有上限防卡死(monkeypatch):
+    """服务端给个离谱的 Retry-After（比如一天）不能把任务卡死。"""
+    import time as _t
+
+    from agentmemhub import llm as _llm
+
+    monkeypatch.setattr(_llm, "_RATE_UNTIL", 0.0)
+    _llm._rate_backoff(86400)
+    assert _llm._RATE_UNTIL <= _t.time() + _llm._RATE_MAX_WAIT + 1
+
+
+def test_限流_比普通瞬态多给重试轮次():
+    """RPM 窗口是分钟级，默认 3 次尝试常常不够 —— 限流放宽到 max_retries+3 次尝试。"""
+    n = 4                    # 普通瞬态上限 3 次尝试，这里要 5 次才成功
+    opener = _FakeOpener(
+        [_http_error(429, "rate limited", {"Retry-After": "0"})] * n + [_ok()])
+    c = LLMClient(LLMConfig(endpoint="http://x/v1/chat/completions",
+                            api_key="k", model="m", backoff_base=0.0,
+                            max_retries=2), _opener=opener)
+    assert c.complete_json("s", "u") == {"memories": []}
+    assert opener.calls == n + 1        # 5 次尝试 > 普通瞬态的 3 次上限
+
+    # 对照：普通瞬态（503）在同样 max_retries 下只会尝试 3 次
+    o2 = _FakeOpener([_http_error(503, "down")] * 5)
+    c2 = LLMClient(LLMConfig(endpoint="http://x/v1/chat/completions",
+                             api_key="k", model="m", backoff_base=0.0,
+                             max_retries=2), _opener=o2)
+    with pytest.raises(LLMTransientError):
+        c2.complete_json("s", "u")
+    assert o2.calls == 3
+
+
+# ── 累计调用耗时：与墙钟分开的"真实工作量"口径 ────────────────────────
+#
+# 任务汇总里的时长是**墙钟**，机器一休眠就被撑大：实测一次 L2 汇总显示
+# 33052 秒（9.2 小时），据此误判成"上游重试了 9 小时"，实际约 1 小时。
+# 累计调用耗时只算真正在等 LLM 的时间（休眠时不会有请求在跑），不会失真。
+
+def test_累计耗时_成功请求会累加():
+    from agentmemhub import llm as _llm
+
+    r = _ok('{"memories": []}')
+    r["usage"] = {"prompt_tokens": 10, "completion_tokens": 5}
+    c = _client([r])
+    c.complete_json("s", "u")
+    u = _llm.usage_snapshot()
+    assert u["calls"] == 1
+    assert u["prompt"] == 10 and u["completion"] == 5
+    assert u["seconds"] > 0.0, "成功请求必须计入调用耗时"
+
+
+def test_累计耗时_响应无usage也记耗时():
+    """响应不带 usage 时 `calls` 不计（成本口径），但时间是实打实花掉的。"""
+    from agentmemhub import llm as _llm
+
+    c = _client([{"choices": [{"message": {"content": '{"a": 1}'}}]}])
+    c.complete_json("s", "u")
+    u = _llm.usage_snapshot()
+    assert u["calls"] == 0
+    assert u["seconds"] > 0.0
+
+
+def test_累计耗时_多次请求累加且可重置():
+    from agentmemhub import llm as _llm
+
+    rs = []
+    for _ in range(3):
+        r = _ok()
+        r["usage"] = {"prompt_tokens": 1, "completion_tokens": 1}
+        rs.append(r)
+    c = _client(rs)
+    for _ in range(3):
+        c.complete_json("s", "u")
+    u = _llm.usage_snapshot()
+    assert u["calls"] == 3 and u["seconds"] > 0.0
+
+    _llm.usage_reset()
+    u2 = _llm.usage_snapshot()
+    assert u2["calls"] == 0 and u2["seconds"] == 0.0
+
+
+def test_累计耗时_不计退避等待(monkeypatch):
+    """退避等待不算"在等 LLM" —— 否则限流时又会把口径搞脏。"""
+    import time as _t
+
+    from agentmemhub import llm as _llm
+
+    opener = _FakeOpener([_http_error(503, "down"), _ok()])
+    c = LLMClient(LLMConfig(endpoint="http://x/v1/chat/completions",
+                            api_key="k", model="m", backoff_base=1.0,
+                            max_retries=1), _opener=opener)
+    t0 = _t.time()
+    c.complete_json("s", "u")
+    wall = _t.time() - t0
+    secs = _llm.usage_snapshot()["seconds"]
+    assert wall >= 1.0            # 确实退避等待过
+    assert secs < wall            # 但等待的那 1 秒没被算进调用耗时

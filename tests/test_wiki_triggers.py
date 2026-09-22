@@ -21,9 +21,16 @@ from agentmemhub import wiki, wiki_triggers
 
 @pytest.fixture(autouse=True)
 def _tmp_state(tmp_path, monkeypatch):
-    """状态文件指向临时目录（默认 logs/ 下，测试绝不碰真实状态）。"""
+    """状态文件与**锁文件**都指向临时目录（测试绝不碰真实状态）。
+
+    锁文件必须一起隔离：`_single_flight()` 用跨进程锁，若用默认的
+    `logs/wiki_update.lock`，测试就会与**真实正在跑的 update** 抢锁 ——
+    实测真实 update 运行时本文件 7 个钩子测试全挂（拿不到锁 → 判定为
+    "已有更新在执行"）。这与之前的 `log_dir` / `_targets` 是同一类隔离缺陷。
+    """
     f = tmp_path / "trigger_state.json"
     monkeypatch.setattr(wiki_triggers, "STATE_FILE", f)
+    monkeypatch.setattr(wiki_triggers, "_LOCK_FILE", tmp_path / "update.lock")
     yield f
 
 
@@ -234,3 +241,92 @@ def test_判定结果落wiki日志_未触发时也记(_tmp_state, tmp_path, monk
     assert len(checks) == 2
     assert checks[0]["should_run"] is True
     assert checks[1]["should_run"] is False
+
+
+def test_钩子_L1部分失败不打标记(_tmp_state, tmp_path, monkeypatch):
+    """update **正常返回**但 L1 有会话失败（`failed > 0`）—— 此前被当成成功：
+    当日档位与 last_update_at 一起被消耗，失败会话（已剔除出新基线）要等到
+    **明天**首次写入才有机会重试。实测 2026-09-21 的一次分组超时正是这么从
+    "可重试的失败"变成"静默丢失"的：update 只 catch 异常、不看返回值。
+    """
+    db, l1, l2, calls = _mk_trigger_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(wiki, "update", lambda **kw: {
+        "updated": True,
+        "l1": {"recompiled": 0, "failed": 1, "removed_files": []}})
+    entries = _capture_wiki_audit(monkeypatch)
+
+    r = wiki_triggers.on_memories_written()
+    assert r["should_run"] is True and r["fired"] is False
+    assert "1 个会话编译失败" in r["fired_note"]
+    st = json.loads(_tmp_state.read_text(encoding="utf-8"))
+    assert "first_write_date" not in st and "last_update_at" not in st
+    # 留痕，便于回查"为什么没打标记"
+    assert any(e.get("event") == "trigger_fired_skipped" for e in entries)
+
+    # 修好之后（failed=0）下一次写入即可正常打标记
+    monkeypatch.setattr(wiki, "update", lambda **kw: {
+        "updated": True, "l1": {"recompiled": 1, "failed": 0}})
+    r2 = wiki_triggers.on_memories_written()
+    assert r2["fired"] is True
+    assert json.loads(_tmp_state.read_text(encoding="utf-8"))["first_write_date"]
+
+
+# ---------------------------------------------------------------------------
+# 单飞行锁必须**跨进程**
+#   2026-09-21 实测：MCP 的写入钩子（daemon 线程）与人工恢复脚本并发跑同一批
+#   产物与 manifest，日志里出现两份"两段式：先分组"（101 / 102 两个版本）。
+#   `threading.Lock` 只在单进程内有效，挡不住这种并发。
+# ---------------------------------------------------------------------------
+
+def test_单飞行_同进程内不重复取得(_tmp_state, tmp_path, monkeypatch):
+    monkeypatch.setattr(wiki_triggers, "_LOCK_FILE", tmp_path / "u.lock")
+    with wiki_triggers._single_flight() as a:
+        assert a is True
+        with wiki_triggers._single_flight() as b:
+            assert b is False                 # 同进程第二次拿不到
+    with wiki_triggers._single_flight() as c:
+        assert c is True                      # 释放后可再取
+
+
+def test_单飞行_锁文件打不开时退化为不锁(_tmp_state, tmp_path, monkeypatch):
+    """锁文件异常不能炸掉调用方的写入流程，也不能让 wiki 更新整体失效。"""
+    monkeypatch.setattr(wiki_triggers, "_LOCK_FILE",
+                        tmp_path / "不存在的目录" / "x" / "u.lock")
+    monkeypatch.setattr(wiki_triggers.Path, "mkdir",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("磁盘只读")))
+    with wiki_triggers._file_lock() as got:
+        assert got is True
+
+
+def test_单飞行_其它进程持锁时取不到(_tmp_state, tmp_path, monkeypatch):
+    """真·跨进程验证：子进程持锁期间，本进程必须拿不到。"""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    lock = tmp_path / "u.lock"
+    monkeypatch.setattr(wiki_triggers, "_LOCK_FILE", lock)   # 两边必须同一个锁文件
+    code = (
+        "import sys, time\n"
+        "sys.path.insert(0, r'%s')\n"
+        "from pathlib import Path\n"
+        "from agentmemhub import wiki_triggers as t\n"
+        "t._LOCK_FILE = Path(r'%s')\n"
+        "ctx = t._file_lock()\n"
+        "assert ctx.__enter__() is True, 'child failed to lock'\n"
+        "print('LOCKED', flush=True)\n"
+        "time.sleep(20)\n" % (root, lock)
+    )
+    proc = subprocess.Popen([sys.executable, "-c", code], cwd=str(root),
+                            stdout=subprocess.PIPE, text=True)
+    try:
+        assert "LOCKED" in (proc.stdout.readline() or ""), "子进程未取得锁"
+        with wiki_triggers._file_lock() as got:
+            assert got is False, "另一个进程持锁，本进程却拿到了 —— 不是跨进程锁"
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+    # 子进程退出后锁由内核释放
+    with wiki_triggers._file_lock() as got:
+        assert got is True

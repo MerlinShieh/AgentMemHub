@@ -247,6 +247,10 @@ def align(out_dir: Path | str, stage: str = "", db: str = "") -> dict[str, Any]:
     not_input = sorted(i for i in all_refs
                        if i in exist and exist[i] not in ("new", "similar"))
     covered = all_refs & cur_inputs
+    # **变更检测看不见的那一半**：manifest 说"已编译"、页面里却没有引用的输入。
+    # 实测库里 1781 条输入有 61 条无任何页面引用（最早追到 09-10），而 align 只
+    # 比 manifest diff，一律报"✓ 库未变化" —— 静默缺口必须有出口。
+    uncovered = sorted(cur_inputs - covered)
 
     stages: dict[str, Any] = {}
     check = ["l1", "l2"] if not stage else [stage]
@@ -278,6 +282,9 @@ def align(out_dir: Path | str, stage: str = "", db: str = "") -> dict[str, Any]:
             parts.append("%s: 无编译清单（只能做引用反推）" % st)
     message = ("；".join(parts)
                + "；失效引用 %d 个" % (len(missing) + len(not_input))
+               + ("；⚠️ 未覆盖 %d 条输入（页面里没有任何引用）" % len(uncovered)
+                  if uncovered and any(s.get("manifest") for s in stages.values())
+                  else "")
                + ("；⚠️ 需要重编译" if needs else "；✓ 库未变化"))
 
     return {
@@ -294,6 +301,9 @@ def align(out_dir: Path | str, stage: str = "", db: str = "") -> dict[str, Any]:
         "coverage": {
             "current_inputs": len(cur_inputs),
             "covered": len(covered),
+            # 未被任何页面引用的输入数（变更检测的口径看不见它们）
+            "uncovered": len(uncovered),
+            "uncovered_ids": uncovered[:wm._LIST_CAP],
             "ratio": round(len(covered) / len(cur_inputs), 4) if cur_inputs else None,
         },
         "stages": stages,
@@ -456,14 +466,35 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
         recompile_single=False, thinking="", no_resume=False, resume=True,
         retry_failed=False, partial=True, preset_domains=preset,
         domain_map=domain_map)
-    wiki_aggregate.run(args)
-
-    # ---- 5. linkfix（L2 标题可能变）----
-    import wiki_linkfix
-    fix = wiki_linkfix.run_fix(l2, dry_run=False)
+    # L1 一条都没编出来时，L2 只会拿**磁盘上的旧 L1** 重跑一遍同样的域：
+    # 实测白烧 1290 秒 / 42 万 prompt token，产出还只是"同义不同措辞"。
+    # 全失败就跳过 —— 时间留给真正的重试（失败会话没进新基线，下次写入会重试）。
+    l1_all_failed = bool(dirty_sessions) and not l1_ok and not removed_files
+    fix: dict[str, Any] = {}
+    if l1_all_failed:
+        l2_stats: dict[str, Any] = {
+            "domains_recompiled": 0, "pages": 0,
+            "skipped": "L1 全部失败（%d 个会话），不基于旧 L1 重跑 L2" % len(l1_bad)}
+    else:
+        wiki_aggregate.run(args)
+        # ---- 5. linkfix（L2 标题可能变）----
+        import wiki_linkfix
+        fix = wiki_linkfix.run_fix(l2, dry_run=False)
+        l2_stats = {"domains_recompiled": len(preset),
+                    "pages": sum(len(m) for _, _, m in preset)}
 
     # ---- 6. 刷新两级 manifest（新基线）----
-    mf1 = wm.build_manifest("l1", db)
+    # **只写实际编译成功的输入**，两类失败都要剔除，否则 align 会认为它们已经
+    # 编译过、这批脏数据被永久掩盖（2026-09-21 实测的静默丢失）：
+    #   · 会话级失败（整会话没编出来）
+    #   · **组级失败** —— 逐组编译是 fail-open 的，会话整体算成功，但失败那几组
+    #     的记忆其实没进任何页面（切网时实测丢了几组）
+    bad_sessions = {(r.get("source"), r.get("cid")) for r in l1_bad}
+    failed_ids: set[int] = set()
+    for r in l1_results:
+        failed_ids.update(r.get("failed_ids") or [])
+    mf1 = wm.build_manifest("l1", db, drop_sessions=bad_sessions,
+                            drop_ids=failed_ids)
     wm.write_manifest(wm.manifest_path(l1, "l1"), mf1)
     dirs = {n: (m.get("dir") or "") for n, m in dom_meta.items()}
     for n, dn, _ in preset:
@@ -508,17 +539,22 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
     if l1_bad:
         hints.append("L1 有 %d 个会话重编失败，已记入失败清单，可用 --action retry 补跑"
                      % len(l1_bad))
+    if failed_ids:
+        hints.append("L1 有 %d 条记忆所在的**分组**编译失败（会话整体成功，但这几组"
+                     "没产出页面）—— 已剔除出新基线，下次增量更新会重试"
+                     % len(failed_ids))
 
     return {
         "updated": True,
         "db": db,
         "dirty_sessions": ["%s/%s" % (s, c) for s, c in sorted(dirty_sessions)],
         "l1": {"recompiled": len(l1_ok), "failed": len(l1_bad),
+               "failed_ids": len(failed_ids),
                "removed_files": removed_files},
         "dirty_domains": dirty_domains,
-        "l2": {"domains_recompiled": len(preset),
-               "pages": sum(len(m) for _, _, m in preset)},
-        "linkfix": {k: fix[k] for k in ("total", "ok", "fixed", "dropped")},
+        "l2": l2_stats,
+        "linkfix": ({k: fix.get(k, 0) for k in ("total", "ok", "fixed", "dropped")}
+                    if fix else {"skipped": True}),
         "manifest": {"l1_inputs": mf1["n_inputs"], "l2_inputs": mf2["n_inputs"]},
         "page_index": page_index,
         "snapshot": {"id": snap.get("id"),

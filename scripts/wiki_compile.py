@@ -48,8 +48,46 @@ for _s in (sys.stdout, sys.stderr):
 #: 记忆条数不超过此值就单次编译（省一次分组调用）
 SINGLE_SHOT_MAX = 12
 
+#: 分组调用的**单批记忆数上限**（≤0 = 不分批）。
+#:
+#: 2026-09-21 实测：101 条一次性分组（摘要约 2 万字，**输出规模随输入线性增长**）
+#: 会让调用卡住 —— 客户端 60s 超时连续 3 次失败（≈187 秒）；即便把 timeout 放宽到
+#: 900s，22 分钟内也**没有任何响应**（进程 CPU 仅 1.4，纯等网络）。结论：分组必须
+#: 限制单批输入，批内编号再映射回全局编号（见 `plan_groups_batched`）。
+PLAN_BATCH_MAX = 40
+
+#: 组级（页级）并发编译的默认并发度。**各组之间无依赖**，串行纯属浪费 ——
+#: 实测 32 组串行约 48 分钟，并发 3 后约 12 分钟。
+#:
+#: 为什么不更高：真实并发 = 会话级 `workers` × 组级 `page_workers`，两者相乘；
+#: 上游有 RPM/TPM 限制，撞 429 后靠 `agentmemhub/llm.py` 的**全局限流闸门**退避，
+#: 但等待本身就是浪费。默认 3 是"单会话显著提速、多会话不至于打爆上游"的折中。
+PAGE_WORKERS = 3
+
 #: 失败清单类型（仅用于标注，避免顶层重复 import 拖慢启动）
 from agentmemhub.failures import FailureLog  # noqa: E402
+
+
+def _limits() -> tuple[int, int, int]:
+    """(single_shot_max, plan_batch_max, page_workers)：优先取配置，非法回落常量。
+
+    这几个值此前是**硬编码常量**，而 `wiki.single_shot_max` 虽在 DEFAULT_WIKI 与
+    example 里存在却**从未被读取**（默认值恰好一致，所以一直没暴露）。
+    """
+    def _pick(w, key: str, default: int) -> int:
+        try:
+            v = int(w.get(key))
+        except (TypeError, ValueError, AttributeError):
+            return default
+        return v if v > 0 else default
+    try:
+        from agentmemhub import config as hub_config
+        w = hub_config.config().wiki or {}
+    except Exception:                       # noqa: BLE001 —— 脚本要能独立运行
+        return SINGLE_SHOT_MAX, PLAN_BATCH_MAX, PAGE_WORKERS
+    return (_pick(w, "single_shot_max", SINGLE_SHOT_MAX),
+            _pick(w, "plan_batch_max", PLAN_BATCH_MAX),
+            _pick(w, "page_workers", PAGE_WORKERS))
 
 # ---------------------------------------------------------------------------
 # 提示词 —— 整个方案成败在这里
@@ -217,6 +255,43 @@ def plan_groups(client, memories: list[dict]) -> dict:
                                 temperature=0.2)
 
 
+def plan_groups_batched(client, memories: list[dict], log=print,
+                        batch: int = 0) -> dict:
+    """分批分组 —— 单批记忆数受限（理由见 `PLAN_BATCH_MAX`）。
+
+    **批内编号是「批内 1 起」，必须映射回全局编号**：`compile_page` 的 members
+    是按全局清单取记忆的，不映射会取错，且越靠后的批次错得越离谱。
+    session_summary 取首批的（它描述整个会话，首批已看过开头）。
+    """
+    size = batch or PLAN_BATCH_MAX
+    if size <= 0 or len(memories) <= size:
+        return plan_groups(client, memories)
+
+    n_batch = (len(memories) + size - 1) // size
+    groups: list[dict] = []
+    unclassified: list[dict] = []
+    summary = ""
+    for i in range(0, len(memories), size):
+        chunk = memories[i:i + size]
+        log("   [分批 %d/%d] %d 条…" % (i // size + 1, n_batch, len(chunk)))
+        plan = plan_groups(client, chunk)
+        if not summary:
+            summary = plan.get("session_summary") or ""
+        for g in (plan.get("groups") or []):
+            g = dict(g)
+            g["members"] = [n + i for n in _norm_nums(g.get("members"))]
+            if g["members"]:
+                groups.append(g)
+        for u in (plan.get("unclassified") or []):
+            u = dict(u)
+            ns = _norm_nums([u.get("n")])
+            if ns:
+                u["n"] = ns[0] + i
+            unclassified.append(u)
+    return {"session_summary": summary, "groups": groups,
+            "unclassified": unclassified}
+
+
 def compile_page(client, memories: list[dict], group: dict) -> dict:
     """② 逐组编译：只喂该组成员的全文。"""
     idx = [n for n in (group.get("members") or []) if 1 <= n <= len(memories)]
@@ -247,9 +322,10 @@ def compile_page(client, memories: list[dict], group: dict) -> dict:
 
 
 def compile_session(client, memories: list[dict], log=print) -> dict:
-    """短会话单次编译；长会话走「分组 → 逐组编译」。"""
-    if len(memories) <= SINGLE_SHOT_MAX:
-        log("  单次编译（%d 条 ≤ 阈值 %d）" % (len(memories), SINGLE_SHOT_MAX))
+    """短会话单次编译；长会话走「分组 → 逐组编译（可并发）」。"""
+    single_max, plan_max, page_max = _limits()
+    if len(memories) <= single_max:
+        log("  单次编译（%d 条 ≤ 阈值 %d）" % (len(memories), single_max))
         r = client.complete_json(
             SYSTEM_SINGLE,
             USER_SINGLE.format(n=len(memories), listing=build_listing(memories),
@@ -259,21 +335,68 @@ def compile_session(client, memories: list[dict], log=print) -> dict:
                 "pages": r.get("pages") or [],
                 "unclassified": r.get("unclassified") or []}
 
-    log("  两段式：先分组（%d 条）…" % len(memories))
-    plan = plan_groups(client, memories)
+    log("  两段式：先分组（%d 条，单批上限 %d）…" % (len(memories), plan_max))
+    plan = plan_groups_batched(client, memories, log=log, batch=plan_max)
     groups = plan.get("groups") or []
     log("  分组结果：%d 组" % len(groups))
-    pages = []
-    for i, g in enumerate(groups, 1):
-        log("   [%d/%d] %s（成员 %s）" % (i, len(groups), g.get("title"),
-                                          g.get("members")))
-        try:
-            pages.append(compile_page(client, memories, g))
-        except Exception as e:      # fail-open：单组失败不影响其它组
-            log("       失败：%s: %s" % (type(e).__name__, str(e)[:120]))
+    pages, failed = _compile_groups(client, memories, groups, page_max, log)
+    if failed:
+        log("   ⚠️ %d 条记忆所在的分组编译失败（不写进新基线，下次会重试）"
+            % len(failed))
     return {"session_summary": plan.get("session_summary", ""),
             "pages": [p for p in pages if p],
-            "unclassified": plan.get("unclassified") or []}
+            "unclassified": plan.get("unclassified") or [],
+            "failed_members": failed}
+
+
+def _compile_groups(client, memories: list[dict], groups: list[dict],
+                    page_max: int, log=print) -> list[dict]:
+    """逐组编译（**并发**，各组之间无依赖）。
+
+    串行是纯浪费：实测 32 组 × 30~150 秒 ≈ 48 分钟，而每组之间的输入输出互不
+    相干。并发后按 `page_workers` 收敛到约 12 分钟。
+
+    并发下必须守住两件事：
+      · **结果按组序重排** —— 完成顺序不确定，直接 append 会让页序随机漂移
+        （同一份记忆两次编译产出不同页序，产物不可复现）
+      · **单组失败仍然 fail-open** —— 与串行版一致，不让一组拖垮整会话
+    """
+    n = len(groups)
+    workers = max(1, min(int(page_max or 1), n))
+    failed: list[int] = []
+    if workers <= 1 or n <= 1:
+        pages: list[dict] = []
+        for i, g in enumerate(groups, 1):
+            log("   [%d/%d] %s（成员 %s）" % (i, n, g.get("title"),
+                                              g.get("members")))
+            try:
+                pages.append(compile_page(client, memories, g))
+            except Exception as e:      # fail-open：单组失败不影响其它组
+                log("       失败：%s: %s" % (type(e).__name__, str(e)[:120]))
+                failed.extend(int(m) for m in (g.get("members") or []))
+        return pages, failed
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    log("   并发编译 %d 组（%d 路）…" % (n, workers))
+    results: dict[int, dict] = {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(compile_page, client, memories, g): i
+                for i, g in enumerate(groups)}
+        done = 0
+        for fut in as_completed(futs):
+            i = futs[fut]
+            g = groups[i]
+            done += 1
+            try:
+                r = fut.result()
+            except Exception as e:      # fail-open：单组失败不影响其它组
+                log("       失败：%s: %s" % (type(e).__name__, str(e)[:120]))
+                failed.extend(int(m) for m in (g.get("members") or []))
+                continue
+            if r:
+                results[i] = r
+            log("   [%d/%d] 完成：%s" % (done, n, g.get("title")))
+    return [results[i] for i in sorted(results)], failed
 
 
 def _norm_nums(v) -> list[int]:
@@ -365,11 +488,14 @@ def _usage_report(tag: str = "") -> str:
     cost = estimate_cost(u)
     return ("--- 用量统计%s ---\n"
             "调用次数   : %d\n"
+            "调用耗时   : %.1f 秒（真实在等 LLM 的时间，不含退避等待；\n"
+            "             与上方'用时'的区别：那个是墙钟，机器休眠会把它撑大）\n"
             "输入 tokens: %s（缓存命中 %s / 未命中 %s）\n"
             "输出 tokens: %s（其中思维链 %s，占输出 %.0f%%）\n"
             "估算花费   : ¥%.2f（DeepSeek 高峰价：输入未命中 ¥2/M、命中 ¥0.04/M、输出 ¥8/M；\n"
             "             空闲时段为半价）"
-            % (" " + tag if tag else "", u["calls"], f"{u['prompt']:,}",
+            % (" " + tag if tag else "", u["calls"], u.get("seconds", 0.0),
+               f"{u['prompt']:,}",
                f"{u['cached_hit']:,}", f"{u['cached_miss']:,}",
                f"{u['completion']:,}", f"{u['reasoning']:,}",
                (100.0 * u["reasoning"] / u["completion"]) if u["completion"] else 0.0,
@@ -399,23 +525,43 @@ def compile_one(db: Path, source: str, cid: str, out_dir: Path,
     client = _make_client(thinking)
 
     t0 = time.time()
+    # 编译进度落 wiki.log：一个 101 条的会话要分 3 批分组 + 逐组编译 30+ 次 LLM
+    # 调用，全程可能几十分钟。此前这里把 log 整个吞掉，长任务在日志里**完全
+    # 静默** —— 实测回查时无法区分"在正常推进"和"卡死了"（2026-09-21 因此
+    # 误判并杀掉了两次正在正常工作的编译）。长任务必须能从日志回答"跑到哪了"。
     try:
-        result = compile_session(client, mems, log=lambda *a, **k: None)
+        result = compile_session(
+            client, mems,
+            log=lambda msg: _wlog(event="progress", script="wiki_compile",
+                                  target="%s/%s" % (source, cid),
+                                  message=str(msg)[:200]))
     except Exception as e:
         return {"source": source, "cid": cid, "n_in": len(mems), "pages": 0,
                 "error": "%s: %s" % (type(e).__name__, str(e)[:180]),
                 "seconds": round(time.time() - t0, 1)}
 
+    src_map = {i: ("m%d" % m["id"]) for i, m in enumerate(mems, 1)}
     if write:
         meta = {"title": "%s / %s" % (source, cid), "source": source,
                 "conversation_id": cid, "n_in": len(mems),
-                "source_map": {i: ("m%d" % m["id"]) for i, m in enumerate(mems, 1)}}
+                "source_map": src_map}
         stem = _out_stem(source, cid)
         (out_dir / (stem + ".md")).write_text(render(result, meta), encoding="utf-8")
         (out_dir / (stem + ".json")).write_text(
             json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 组级失败的成员 → 记忆 id：逐组编译是 fail-open 的（单组失败不影响其它组），
+    # 所以会话整体算"成功"，但失败那几组的记忆**其实没进任何页面**。必须报给
+    # 调用方让它们不写进新基线，否则下次 align 会以为已编译而永久掩盖
+    # —— 与"会话级失败"是同一个坑，只是粒度更细（2026-09-21 切网时实测）。
+    failed_ids: list[int] = []
+    for n in (result.get("failed_members") or []):
+        tag = src_map.get(n)
+        if tag:
+            failed_ids.append(int(tag[1:]))
     return {"source": source, "cid": cid, "n_in": len(mems),
             "pages": len(result.get("pages") or []),
+            "failed_ids": failed_ids,
+            "failed_groups": len(result.get("failed_members") or []),
             "seconds": round(time.time() - t0, 1)}
 
 
@@ -501,9 +647,13 @@ def compile_all(db: Path, out_dir: Path, *, workers: int = 4, limit: int = 0,
         print()
         print(failures.summary("l1"))
     from agentmemhub.llm import usage_snapshot
+    _u = usage_snapshot()
     _wlog(event="run_end", script="wiki_compile", ok=len(ok), failed=len(bad),
           pages=sum(r.get("pages", 0) for r in ok), skipped=skipped,
-          seconds=round(time.time() - t0, 1), usage=usage_snapshot())
+          # seconds = 墙钟（机器休眠会把它撑大）；call_seconds = **累计调用耗时**
+          # （真实在等 LLM 的时间）—— 两者并列，回查时不会被墙钟误导
+          seconds=round(time.time() - t0, 1),
+          call_seconds=round(_u.get("seconds", 0.0), 1), usage=_u)
 
     # 编译清单：记录本次输入快照（id → content_hash + 会话归属）。
     # 这是 wiki 与 RAG 库对齐的锚 —— 没有它，库后来发生了什么变更 wiki 无从得知

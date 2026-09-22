@@ -70,27 +70,65 @@ def snapshot_inputs(conn: sqlite3.Connection) -> tuple[dict[int, str], dict[str,
     返回：
       inputs   : {mid: 内容指纹}       —— 全库 new/similar 的内容指纹
       sessions : {"source/cid": [mid, ...]}  —— 按会话分组（与 LLM 看到的顺序一致）
+
+    **已标记 `wiki_ignore_at` 的记忆被排除**（软删除 = "不进 wiki"）：它们仍然
+    存在、仍然可召回，只是不参与编译，所以也不会出现在 align 的待更新列表里。
+
+    列的存在性**每次现查**（一次 PRAGMA，毫秒级）：迁移在写入侧
+    （`distill.ensure_distill_schema`）保证，而本函数只读、可能先于迁移运行 ——
+    列不存在说明从没人标记过，此时不过滤即为正确语义。刻意不缓存，避免
+    "迁移已跑但缓存还记着没有该列"。
     """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(distilled_memories)")}
+    ignore = " AND wiki_ignore_at IS NULL" if "wiki_ignore_at" in cols else ""
     inputs: dict[int, str] = {}
     sessions: dict[str, list[int]] = {}
     for mid, content, src, cid in conn.execute(
             "SELECT id, content, source, conversation_id"
-            " FROM distilled_memories WHERE status IN ('new','similar')"
-            " ORDER BY source, conversation_id, created_at, id"):
+            " FROM distilled_memories WHERE status IN ('new','similar')" + ignore
+            + " ORDER BY source, conversation_id, created_at, id"):
         inputs[mid] = _fingerprint(content)
         sessions.setdefault("%s/%s" % (src, cid), []).append(mid)
     return inputs, sessions
 
 
 def build_manifest(stage: str, db_path: Path | str,
-                   extra: dict[str, Any] | None = None) -> dict[str, Any]:
-    """对某索引库做输入快照，生成 manifest 结构（不落盘）。"""
+                   extra: dict[str, Any] | None = None,
+                   *, drop_sessions: set[tuple[str, str]] | None = None,
+                   drop_ids: set[int] | None = None) -> dict[str, Any]:
+    """对某索引库做输入快照，生成 manifest 结构（不落盘）。
+
+    剔除参数都是同一个原则：manifest 的语义是「**实际编译成了什么**」，而不是
+    「库里现在有什么」。若把没编成的也写进去，下一次 align 会认为它已经编译过，
+    这批脏数据就被**永久掩盖**（2026-09-21 线上实测：一次分组调用超时导致该会话
+    此后再也不重编，而 align 一直报"库未变化"）。剔除后它下次仍显示为 added ——
+    这是重试的唯一线索。
+
+      · `drop_sessions`：**会话级**失败（`(source, conversation_id)`）的输入
+      · `drop_ids`：**组级**失败 —— L1 是"会话 → 多个组 → 多个页"，逐组编译是
+        fail-open 的（单组失败不影响其它组），所以会话整体算"成功"，但失败那几组
+        的记忆其实没进任何页面。它们必须照样剔除，否则同样是静默丢失。
+    """
     p = Path(db_path)
     conn = sqlite3.connect("file:%s?mode=ro" % p.as_posix(), uri=True)
     try:
         inputs, sessions = snapshot_inputs(conn)
     finally:
         conn.close()
+    if drop_sessions:
+        for s, c in drop_sessions:
+            for mid in sessions.pop("%s/%s" % (s, c), None) or []:
+                inputs.pop(mid, None)
+    if drop_ids:
+        for mid in drop_ids:
+            inputs.pop(mid, None)
+        drop = set(drop_ids)
+        for key, mids in list(sessions.items()):
+            kept = [m for m in mids if m not in drop]
+            if kept:
+                sessions[key] = kept
+            else:
+                sessions.pop(key, None)
     m: dict[str, Any] = {
         "version": VERSION,
         "stage": stage,

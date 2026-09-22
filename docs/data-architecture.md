@@ -471,7 +471,85 @@ align 定位脏会话 → L1 整页重编（会话隔离，无副作用）
 实测（首次实战，80 条直写记忆触发）：L1 重编 1 会话（12 页）→ 归域 →
 L2 重编 1 个域 → 全程 12 分钟。
 
-### 7.4 面板记忆报表的双路 UNION 与去重
+### 7.4 静默失败：manifest 必须只记「实际编译成了什么」
+
+2026-09-21 实测（一次 L1 分组调用超时）暴露**三个叠加缺陷**，合起来的效果是
+**wiki 静默落后于记忆，而系统一直显示健康**：
+
+| # | 缺陷 | 后果 | 修复 |
+|---|---|---|---|
+| ① | `update()` 正常返回但 `l1.failed > 0`，而触发器**只 catch 异常、不看返回值** | 当日档位与 `last_update_at` 被一起消耗，失败会话要等**明天**首次写入才有机会重试 | `failed > 0` 即不打标记，落 `trigger_fired_skipped` 审计 |
+| ② | `update()` 失败后仍用「库当前状态」重建 manifest | 失败会话被**谎报为已编译** → 此后 align 一律报"库未变化"，脏数据**永久掩盖** | `build_manifest(drop_sessions=…)`：失败会话剔除出新基线，保留重试线索 |
+| ③ | L1 全失败仍跑 L2 | L2 拿磁盘上的**旧 L1** 重跑同样的域，实测白烧 1290 秒 / 42 万 prompt token | 全失败直接跳过 L2 |
+| ④ | **组级失败被 fail-open 吞掉**：逐组编译单组失败不影响整会话，会话整体算"成功"，但失败那几组的记忆**没进任何页面** —— 却照样被写进新基线 | 与 ② **同源、粒度更细**（会话 → 组）。2026-09-21 切网实测：23 组里 3 组因 `IncompleteRead` 失败，**20 条记忆被静默丢弃** | `compile_session` 报出失败组的成员 → `compile_one` 按 `source_map` 转成记忆 id → `build_manifest(drop_ids=…)` 一并剔除；`hints` 明示 |
+
+**同时修掉一个网络层的漏网**：`IncompleteRead`（响应读了一半连接就断）继承自
+`http.client.HTTPException`，而 `_post` 只把 `(URLError, TimeoutError, OSError)`
+当瞬态 —— **它一次都不重试**，网络抖一下直接丢一组。现已把 `HTTPException` 一并
+纳入瞬态重试。
+
+**另一个盲区**：`align` 只比 manifest diff，**从不看"页面实际覆盖了多少输入"**。
+实测库里 1781 条输入有 **61 条无任何页面引用**（最早可追到 09-10），而它一直报
+"✓ 库未变化"。现在 `coverage.uncovered` 与 message 都会显式提示 —— 但**只告警、
+不触发重编**（否则会陷入"每次都触发、却因脏会话为空而什么都不做"）。
+
+**根因是配置漏配**：`wiki.llm` 此前没有 timeout 覆盖 → 继承默认 **60s**，而 L1 是
+长调用（一个会话几十条记忆，分组与逐组编译的输入可达几万字符）。101 条记忆的
+会话在**分组调用**上连续 3 次读超时（60s × 3 + 退避 ≈ 187 秒），整会话编译失败。
+第二级早已把 timeout 放宽到 900s（yaml 注释写着"默认 60s 对输入几万字符的归域
+调用必然读超时"），**第一级漏配** —— 现在**默认值本身**就是 900s，不再依赖使用者
+先知道这个内部坑。
+
+**遗留**：`compile_session` 里 `compile_page` 有 fail-open（单组失败不影响其它组），
+但 `plan_groups` **没有** —— 分组一失败整会话就废。暂不加"兜底分组"降级：那样的
+产出质量不可控，宁可如实失败并重试（① ② 已保证它能被重试且可见）。
+
+### 7.5 长任务必须能从日志回答"跑到哪了"（同日第二次定位）
+
+修好 timeout 后重跑，**40 多分钟仍无任何输出** —— 起初误判成"又卡住了"（并因此
+两次杀掉了**正在正常工作**的编译）。用短超时（90s、不重试）做规模探测才看清：
+
+```
+前  3 条（  826 字）：✅ 60.3s
+前 10 条（ 6792 字）：✅ 75.9s
+前 40 条（27900 字）：✅ 68.2s，分 14 组      ← 分组根本没卡
+```
+
+真正的耗时在**逐组编译**：101 条 → 30+ 组，每组一次 LLM 调用（30~90 秒），
+合计 **30~60 分钟**；而 `page_done` / `call` 事件**只在整会话完成后才写**，
+全程在日志里静默 —— 于是"正常推进"与"卡死"无法区分。
+
+两处修正：
+
+- **分组分批**（`wiki.plan_batch_max`，默认 40）：分组是"**输出规模随输入线性
+  增长**"的调用，101 条一次性分组会真的卡到超时；分批后每批约 1 分钟。批内编号
+  必须映射回全局编号（`compile_page` 按全局清单取记忆，不映射会越靠后错得越离谱）
+- **进度落盘**：`compile_one` 此前把 `log` 整个吞掉；现在每步写 `wiki.log` 的
+  `progress` 事件（"两段式：先分组（101 条，单批上限 40）"→"[分批 1/3] 40 条"→
+  逐组编译…）
+
+顺带修掉一处"配置形同虚设"：`wiki.single_shot_max` 虽在 `DEFAULT_WIKI` 与 example
+里存在，**却从未被读取**（脚本用硬编码常量，默认值恰好一致才一直没暴露）——
+现在由 `wiki_compile._limits()` 统一取值，非法值回落常量。
+
+**墙钟 ≠ 真实工作量**。`run_end` 的 `seconds` 是**墙钟**，机器一休眠就被撑大：
+实测一次 L2 汇总显示 **33052 秒（9.2 小时）**，据此误判成"上游重试了 9 小时"，
+实际约 1 小时（71 次调用 / 45 万 token）。现在汇总与 `run_end` **并列两个口径**：
+
+| 字段 | 含义 |
+|---|---|
+| `seconds` | 墙钟时长（含休眠、含退避等待） |
+| `call_seconds` | **累计调用耗时** —— 只算真正在等 LLM 的时间，不含退避等待；休眠时没有请求在跑，所以不受影响 |
+
+计时细节：用 `time.perf_counter()` 而**不是** `monotonic()` —— 后者在 Windows 上
+基于 `GetTickCount64`，精度只有约 **15.6ms**，短请求会测出 0（实测踩到，单元测试
+直接暴露）。
+
+**教训**：可观测性的缺口会**反过来制造错误判断**。日志静默时，"慢"看起来和
+"死"一模一样，排查者（包括 Agent）会做出破坏性动作（杀掉正常任务）；而一个
+**失真的时间数字**同样会误导 —— 它会让人去治根本不存在的病。
+
+### 7.6 面板记忆报表的双路 UNION 与去重
 
 ```
 api_memories = 蒸馏路（distilled_memories JOIN dst_ units）
@@ -510,6 +588,11 @@ api_memories = 蒸馏路（distilled_memories JOIN dst_ units）
 | 测试隔离 | conftest 已钉 `wiki_triggers._targets`（测试禁止解析真实 wiki 目录）——蒸馏收尾钩子在测试里必然早退；蒸馏/触发器测试自行 mock 目标 |
 | wiki 进召回 | **已做**（§4.1）：L2 页面整页投影为 `wiki_<crc32>` 单元，走独立的页面向量路 + 页面全文路，参与六路融合；准入另有策略（§4.2） |
 | 外部投喂 | 未做。架构已定：文档 = 会话（source=pdf/web，原始层 + 记忆层两层存储） |
+| ~~update 缺跨进程锁~~ | **已修（2026-09-21）**。`_RUN_LOCK` 原本是 `threading.Lock`，**只在单进程内有效** —— 实测 MCP 的写入钩子与人工恢复脚本并发跑，日志里出现两份"两段式：先分组"（101 / 102 两个版本），两者写同一批产物与 manifest。现改为 `_single_flight()` = 进程内锁 + **跨进程锁文件**（`O_CREAT\|O_EXCL` 原子创建，内容写 PID/时间戳，3 小时或持锁进程已死即抢占）。**两个坑都踩过**：① 先试 `msvcrt.locking`（追加模式打开 + 先写一字节再锁），实测**跨进程不互斥** —— 测试直接抓到子进程持锁时父进程仍拿到；② `psutil` **不在依赖里**，用它判进程存活会退化成"锁永久有效"，改为 `OpenProcess`/`os.kill(pid,0)` |
+| **长 update 会拖长蒸馏收尾** | 两条写入钩子的行为**不同**，别混：**MCP `_save` 是 daemon 线程**（`_wiki_trigger_probe`，立即返回）—— 实测 update 跑 30~60 分钟期间 MCP 工具**仍即时响应**；**蒸馏收尾是同步**调用（`distill.py` 直接等返回值再 `emit`）。所以"长 update 会阻塞 MCP"是**误判**，真实代价是批量蒸馏会多等很久。根因见下一条 |
+| ~~逐组编译是串行的~~ | **已修（2026-09-21）**：`compile_session` 原本对分组结果**串行**逐组调 LLM（32 组 × 30~150 秒 ≈ 48 分钟）。各组之间**无依赖**，串行纯属浪费 —— 改为 `wiki.page_workers`（默认 3）并发，**结果按组序重排**（完成顺序不确定，直接 append 会让页序随机漂移、产物不可复现）。实测降到约 12 分钟 |
+| **429 限流：全局限流闸门** | 并发之后多个 worker 会几乎同时撞上同一个 RPM/TPM 窗口。若各自独立退避，它们会在同一时刻一起恢复、一起重试，再次撞限（**退避共振**）→ `agentmemhub/llm.py` 用**进程级共享**的闸门统一推后，所有线程一起等。另：解析 `Retry-After`（秒数或 HTTP-date，上限 300s 防服务端给离谱值卡死）、限流把总尝试次数放宽到 `max_retries+1+2`（RPM 窗口是分钟级，默认 3 次常常不够） |
+| **待更新记忆的删除** | 2026-09-22 新增（`agentmemhub/wiki_pending.py`）：`wiki --action pending\|drop\|ignored\|restore` 与 `/api/wiki/pending*`。**软删除** = 写 `distilled_memories.wiki_ignore_at`（记忆**仍存在、仍可召回**，只是不再参与 wiki 编译，可 `restore` 取消）；**硬删除** = 真删蒸馏表行 + `units` 投影 + 向量（不可恢复，需 `confirm`）。**只允许删尚未进 wiki 的记忆** —— 已进 wiki 的会被拒绝（那类删除会让页面里的 `[m<id>]` 变死引用，属于 [`memory-deletion.md`](memory-deletion.md) 的范畴）。两个要点：软删待更新的记忆**不触发任何重编**（它本就不在基线里）；硬删后**自动重建 manifest**，否则 align 会报"失去输入"而触发无意义重编 |
 
 ---
 
@@ -521,10 +604,17 @@ api_memories = 蒸馏路（distilled_memories JOIN dst_ units）
 - 存放：`database/backups/<时间戳id>/`（data_dir 沙箱覆盖，测试自动隔离）
 - **增量更新前自动快照**（`wiki.update` 开头，对齐判定通过后才做；失败旁路
   不阻塞更新），手动随时可做
-- **保留份数可配**：`snapshot.keep`，默认 **5** 份，超出自动删最旧。一份约
-  190 MB（索引库 + 两级 wiki 产物），默认总占用约 1 GB——磁盘紧就调小，
-  想留更长历史就调大。**非法值（非整数 / <1）回退默认 5**：该值的唯一用途是
+- **保留份数可配**：`snapshot.keep`，默认 **10** 份，超出自动删最旧。一份约
+  190 MB（索引库 176 MB + 两级 wiki 产物 5 MB），默认总占用约 **1.8 GB**——磁盘紧
+  就调小，想留更长历史就调大。**非法值（非整数 / <1）回退默认**：该值的唯一用途是
   决定删哪些目录，配置写错时宁可多留，不能因一个笔误清空历史快照
+- **默认不压缩**（实测数据）：整份 gzip 可压到 **67%**（176 MB → 119 MB，6.5 秒），
+  10 份省约 0.5 GB。但快照的价值在"出事时能立刻恢复"，**可读、可直接打开**比省这点
+  空间更重要；且库里 93% 是含向量 blob 的索引库，本来也压不动多少。真要压缩，
+  加 `compress` 开关即可（尚未实现）
+- ⚠️ **频繁调试会加速淘汰历史快照**：keep 是"最近 N 份"而非"关键节点永久保留"。
+  2026-09-21 一晚触发 5 次 update，就把更早的基线（含软删除基线）挤出了队列。
+  **重要节点应手工打一份带 `--reason` 的快照**并单独留存
 - **restore 前自动把当前状态存为保护快照**——任何误恢复都可再回滚
 
 ```bash
@@ -585,11 +675,26 @@ uv run python -m agentmemhub memory-log              # 记忆操作事实流（�
   [--event write|read] [--path mcp|http|distill] [--grep 关键词] [--limit N] [--json]
 uv run python -m agentmemhub snapshot                # 快照与回滚（见 §10）
 
+# 待更新记忆的查看与删除（见 §7.4 末尾与 §9）
+uv run python -m agentmemhub wiki --action pending            # 列出待 wiki 更新的记忆明细
+uv run python -m agentmemhub wiki --action drop --ids 4388,4392 --mode soft
+uv run python -m agentmemhub wiki --action drop --ids 4388 --mode hard --confirm
+uv run python -m agentmemhub wiki --action ignored            # 已软删除（不进 wiki）的
+uv run python -m agentmemhub wiki --action restore --ids 4388
+
 # HTTP（面板）
 GET  /api/wiki/align?out=       POST /api/wiki/update?l1=&l2=
 GET  /api/wiki/triggers         PUT  /api/wiki/triggers
 POST /api/wiki/trigger/run      GET/POST /api/wiki/failures|retry
+GET  /api/wiki/pending          POST /api/wiki/pending/drop
+GET  /api/wiki/pending/ignored  POST /api/wiki/pending/restore
 ```
+
+**两种删除的区别（务必分清）**：`--mode soft` 只是**不打进 wiki**（记忆仍在、
+**仍可召回**，可 `restore`）；`--mode hard` 是**真删**（蒸馏表 + 召回投影 + 向量，
+不可恢复，必须 `--confirm`）。两者**都只允许作用于"尚未进 wiki"的记忆** ——
+已进 wiki 的删除会让页面里的 `[m<id>]` 变成死引用，属于
+[`memory-deletion.md`](memory-deletion.md) 的范畴。
 
 ### 日志体系：三个事实流（视角不同，不要混用）
 
@@ -662,3 +767,12 @@ POST /api/wiki/trigger/run      GET/POST /api/wiki/failures|retry
    `ident` 通道"多词短语"的盲区。实测 `command code`：修复前 12 个含
    "Command Code" 的单元有 **11 个连候选池都没进**（页面排 63/63），修复后
    档 1 即返回 7 条全相关、页面 1.191 进前排
+15. **静默失败治理**（§7.4）：新加的 `trigger_check` 日志让"某次为什么跑"第一次
+   可查，顺藤查出 wiki 会**静默落后于记忆、而系统一直显示健康** —— 三个叠加缺陷
+   （`l1.failed>0` 仍打触发标记 / **manifest 谎报基线**：失败会话被写进新基线，
+   致 `align` 此后永久报"库未变化" / L1 全失败仍跑 L2 白烧 1290 秒）+ 一个观测
+   盲区（`align` 只看 manifest diff，**61 条输入无任何页面引用却报"健康"**）+
+   一个配置漏配（`wiki.llm` 继承默认 timeout 60s，而 L1 是长调用：101 条记忆的
+   分组调用连续 3 次读超时 ≈ 187 秒后整会话失败）。**教训：不抛异常、不使测试
+   变红的缺陷才最危险** —— 它们能否被发现，取决于"日志能不能回答当时发生了
+   什么"

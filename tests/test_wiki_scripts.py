@@ -269,3 +269,160 @@ def test_日志写入失败不影响主流程(monkeypatch):
     monkeypatch.setattr(logs, "log_dir", boom)
     _wlog(event="x")          # 不应抛出
 
+
+# ---------------------------------------------------------------------------
+# 分组分批：101 条一次性分组会卡死（2026-09-21 实测）
+# ---------------------------------------------------------------------------
+
+class _RecordingPlanner:
+    """记录每次分组调用看到的条数，并为本批全部成员返回一个组。"""
+
+    def __init__(self):
+        self.seen: list[int] = []
+
+    def complete_json(self, system, user, max_tokens=0, temperature=0.0):
+        n = len([ln for ln in user.splitlines() if ln.startswith("[")])
+        self.seen.append(n)
+        return {"session_summary": "概要",
+                "groups": [{"title": "组", "type": "concept",
+                            "members": list(range(1, n + 1)), "why": "w"}],
+                "unclassified": [{"n": n, "why": "不值得"}]}
+
+
+def _mems(n):
+    return [{"id": i, "type": "fact", "confidence": "high",
+             "content": "内容 %d" % i} for i in range(1, n + 1)]
+
+
+def test_分组分批_超限时切批且映射回全局编号():
+    """批内编号是「批内 1 起」，必须映射回全局编号 —— 否则 compile_page 会按
+    全局清单取错记忆，且越靠后的批次错得越离谱。"""
+    from wiki_compile import plan_groups_batched
+    c = _RecordingPlanner()
+    plan = plan_groups_batched(c, _mems(5), log=lambda *a: None, batch=2)
+    assert c.seen == [2, 2, 1]                      # 切成 3 批
+    assert plan["groups"][0]["members"] == [1, 2]
+    assert plan["groups"][1]["members"] == [3, 4]
+    assert plan["groups"][2]["members"] == [5]
+    assert [u["n"] for u in plan["unclassified"]] == [2, 4, 5]
+
+
+def test_分组分批_未超限时保持单次调用():
+    from wiki_compile import plan_groups_batched
+    c = _RecordingPlanner()
+    plan = plan_groups_batched(c, _mems(3), log=lambda *a: None, batch=10)
+    assert c.seen == [3]
+    assert plan["groups"][0]["members"] == [1, 2, 3]
+
+
+def test_分组分批_batch为零时用模块默认上限():
+    from wiki_compile import PLAN_BATCH_MAX, plan_groups_batched
+    c = _RecordingPlanner()
+    assert PLAN_BATCH_MAX >= 5
+    plan_groups_batched(c, _mems(5), log=lambda *a: None, batch=0)
+    assert c.seen == [5]                            # 5 条远小于默认上限 → 不分批
+
+
+def test_分组上限_优先取配置且非法值回落(monkeypatch):
+    """这几个阈值此前是**硬编码常量**：`wiki.single_shot_max` 虽在 DEFAULT_WIKI
+    与 example 里存在，却从未被读取（默认值恰好一致才一直没暴露）。"""
+    from agentmemhub import config as _cfg
+    import wiki_compile as _wc
+
+    class _C:
+        wiki = {"single_shot_max": 3, "plan_batch_max": 7, "page_workers": 5}
+
+    monkeypatch.setattr(_cfg, "config", lambda: _C())
+    assert _wc._limits() == (3, 7, 5)
+
+    # 非法值（非整数 / 0 / 负数）一律回落默认
+    _C.wiki = {"single_shot_max": "abc", "plan_batch_max": 0, "page_workers": -1}
+    assert _wc._limits() == (_wc.SINGLE_SHOT_MAX, _wc.PLAN_BATCH_MAX,
+                             _wc.PAGE_WORKERS)
+
+    _C.wiki = {}
+    assert _wc._limits() == (_wc.SINGLE_SHOT_MAX, _wc.PLAN_BATCH_MAX,
+                             _wc.PAGE_WORKERS)
+
+
+def test_组级并发_确实并发且结果按组序重排():
+    """各组之间无依赖 → 并发编译；但**结果必须按组序重排**，否则页序会随完成
+    顺序随机漂移，同一份记忆两次编译产出不同产物（不可复现）。"""
+    import threading
+    import time
+
+    from wiki_compile import _compile_groups
+
+    groups = [{"title": "G%d" % i, "members": [i + 1]} for i in range(6)]
+    peak = {"cur": 0, "max": 0}
+    lock = threading.Lock()
+
+    class _C:
+        def complete_json(self, system, user, max_tokens=0, temperature=0.0):
+            with lock:
+                peak["cur"] += 1
+                peak["max"] = max(peak["max"], peak["cur"])
+            time.sleep(0.05)                    # 模拟网络等待
+            with lock:
+                peak["cur"] -= 1
+            return {"title": "T", "type": "concept", "summary": "s",
+                    "body": "b", "related": []}
+
+    out, failed = _compile_groups(_C(), _mems(6), groups, 4, log=lambda *a: None)
+    assert peak["max"] > 1, "没有真正并发"
+    assert [p["_members"][0] for p in out] == [1, 2, 3, 4, 5, 6], "页序漂移了"
+    assert failed == []
+
+
+def test_组级并发_单组失败不影响其它组并把失败成员报出来():
+    """fail-open 语义在并发版必须保持（串行版本来就有）。
+
+    同时**失败组的成员必须被报出来** —— 它们没进任何页面，调用方要据此把它们
+    剔除出新基线；只 fail-open 不汇报，就等于静默丢弃（2026-09-21 切网实测）。
+    """
+    from wiki_compile import _compile_groups
+
+    groups = [{"title": "G%d" % i, "members": [i + 1]} for i in range(4)]
+
+    class _C:
+        def complete_json(self, system, user, max_tokens=0, temperature=0.0):
+            if "内容 2" in user:
+                raise RuntimeError("这一组炸了")
+            return {"title": "T", "type": "concept", "summary": "s",
+                    "body": "b", "related": []}
+
+    out, failed = _compile_groups(_C(), _mems(4), groups, 3, log=lambda *a: None)
+    assert [p["_members"][0] for p in out] == [1, 3, 4]      # 只有第 2 组缺失
+    assert failed == [2]                                     # 失败成员被报出
+
+
+def test_组级并发_串行路径同样报出失败成员():
+    from wiki_compile import _compile_groups
+
+    groups = [{"title": "G%d" % i, "members": [i + 1]} for i in range(3)]
+
+    class _C:
+        def complete_json(self, system, user, max_tokens=0, temperature=0.0):
+            if "内容 3" in user:
+                raise RuntimeError("炸")
+            return {"title": "T", "type": "concept", "summary": "s",
+                    "body": "b", "related": []}
+
+    out, failed = _compile_groups(_C(), _mems(3), groups, 1, log=lambda *a: None)
+    assert [p["_members"][0] for p in out] == [1, 2]
+    assert failed == [3]
+
+
+def test_组级并发_并发度1时走串行结果一致():
+    from wiki_compile import _compile_groups
+
+    groups = [{"title": "G%d" % i, "members": [i + 1]} for i in range(3)]
+
+    class _C:
+        def complete_json(self, system, user, max_tokens=0, temperature=0.0):
+            return {"title": "T", "type": "concept", "summary": "s",
+                    "body": "b", "related": []}
+
+    out, _failed = _compile_groups(_C(), _mems(3), groups, 1, log=lambda *a: None)
+    assert [p["_members"][0] for p in out] == [1, 2, 3]
+

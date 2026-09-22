@@ -16,6 +16,7 @@ JSON 输出容错：模型常把 JSON 包在 ``` 围栏里或前后加解释文�
 from __future__ import annotations
 
 import json
+import http.client
 import logging
 import re
 import threading
@@ -35,13 +36,19 @@ from typing import Any, Optional
 # 否则并发跑完各算各的、无法回答"这批花了多少钱"。用锁保护，开销可忽略。
 # ---------------------------------------------------------------------------
 _USAGE_LOCK = threading.Lock()
-_USAGE: dict[str, int] = {
+_USAGE: dict[str, float] = {
     "calls": 0, "prompt": 0, "completion": 0, "reasoning": 0,
     "cached_hit": 0, "cached_miss": 0,
+    # **累计调用耗时**（秒）：只算真正在等 LLM 的时间，不含退避等待。
+    # 为什么必须单独统计：任务汇总里的时长是**墙钟**，机器一休眠就严重失真
+    # —— 实测一次 L2 汇总显示 33052 秒（9.2 小时），其中绝大部分是睡眠时间，
+    # 据此误判成"上游重试了 9 小时"。这个口径反映真实工作量，休眠不干扰
+    # （休眠时不会有请求在跑）。
+    "seconds": 0.0,
 }
 
 
-def usage_snapshot() -> dict[str, int]:
+def usage_snapshot() -> dict[str, float]:
     """当前累计用量（线程安全）。"""
     with _USAGE_LOCK:
         return dict(_USAGE)
@@ -54,12 +61,77 @@ def usage_reset() -> None:
             _USAGE[k] = 0
 
 
-def _record_usage(usage: dict | None) -> None:
-    """把一次响应的 usage 计入累计（字段缺失按 0）。"""
-    if not isinstance(usage, dict):
-        return
-    det = usage.get("completion_tokens_details") or {}
+# ---------------------------------------------------------------------------
+# 全局限流闸门（429）
+#
+# 为什么必须**跨线程共享**：并发（会话级 workers × 组级 workers）之后，多个
+# worker 会几乎同时撞上同一个 RPM/TPM 窗口。若各自独立退避，它们会在同一时刻
+# 一起恢复、一起重试，再次撞上限流 —— 即"退避共振"。用一个进程级时间闸门统一
+# 推后，恢复时刻自然错开。
+# ---------------------------------------------------------------------------
+_RATE_GATE = threading.Lock()
+_RATE_UNTIL: float = 0.0
+
+#: 429 未给 `Retry-After` 时的默认推后秒数（RPM 窗口是分钟级，等几秒没意义）
+_RATE_DEFAULT_WAIT = 20.0
+
+#: `Retry-After` 的可接受上限（防服务端给出离谱值把任务卡死）
+_RATE_MAX_WAIT = 300.0
+
+
+def _rate_wait() -> None:
+    """在全局闸门前等待（同进程所有线程共用）。"""
+    while True:
+        with _RATE_GATE:
+            remain = _RATE_UNTIL - time.time()
+        if remain <= 0:
+            return
+        time.sleep(min(remain, 2.0))
+
+
+def _rate_backoff(seconds: float) -> None:
+    """把全局闸门推后（取最大值：只延长、不退让）。"""
+    global _RATE_UNTIL
+    sec = max(0.0, min(float(seconds), _RATE_MAX_WAIT))
+    with _RATE_GATE:
+        _RATE_UNTIL = max(_RATE_UNTIL, time.time() + sec)
+
+
+def _parse_retry_after(headers) -> float | None:
+    """解析 `Retry-After`（秒数或 HTTP-date）；缺失/非法返回 None。"""
+    if headers is None:
+        return None
+    try:
+        raw = headers.get("Retry-After")
+    except Exception:                       # noqa: BLE001
+        return None
+    if not raw:
+        return None
+    raw = str(raw).strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(raw)
+        return None if dt is None else max(0.0, dt.timestamp() - time.time())
+    except Exception:                       # noqa: BLE001
+        return None
+
+
+def _record_usage(usage: dict | None, elapsed: float = 0.0) -> None:
+    """把一次响应的 usage 与耗时计入累计（字段缺失按 0）。
+
+    `elapsed` 与 usage **分开**累计：响应不一定带 usage 字段，但时间是实打实
+    花掉的。所以耗时先记，再按 usage 是否存在决定是否计 `calls`/token。
+    """
+    det = (usage.get("completion_tokens_details") or {}
+           if isinstance(usage, dict) else {})
     with _USAGE_LOCK:
+        _USAGE["seconds"] += float(elapsed or 0.0)
+        if not isinstance(usage, dict):
+            return
         _USAGE["calls"] += 1
         _USAGE["prompt"] += int(usage.get("prompt_tokens") or 0)
         _USAGE["completion"] += int(usage.get("completion_tokens") or 0)
@@ -91,7 +163,18 @@ class ContentFilterRejected(LLMError):
 
 
 class LLMTransientError(LLMError):
-    """瞬态错误（429/5xx/网络/超时）——可退避重试。"""
+    """瞬态错误（429/5xx/网络/超时）——可退避重试。
+
+    限流（429）额外携带两个信息，供**全局闸门**与重试策略使用：
+      · `is_rate_limit`：是否限流 —— 限流按"窗口"计，值得比普通瞬态多等几轮
+      · `retry_after`：服务端 `Retry-After` 指定的秒数（None = 服务端没给）
+    """
+
+    def __init__(self, message: str = "", *, is_rate_limit: bool = False,
+                 retry_after: float | None = None):
+        super().__init__(message)
+        self.is_rate_limit = is_rate_limit
+        self.retry_after = retry_after
 
 
 #: 内容审核类响应特征（与 scoring.py 同源判定）
@@ -295,6 +378,7 @@ class LLMClient:
     # -- 单次请求 --------------------------------------------------------
 
     def _post(self, body: dict, timeout: float) -> dict:
+        _rate_wait()                      # 全局限流闸门（429 后所有线程一起等）
         headers = {"Content-Type": "application/json",
                    "Authorization": f"Bearer {self.cfg.api_key}"}
         if self.cfg.headers:
@@ -308,10 +392,17 @@ class LLMClient:
         except ValueError as e:
             # endpoint 非法（缺协议头等）——配置错误，不重试
             raise LLMError(f"LLM endpoint 非法（检查配置）：{e}") from None
+        # 计时用 perf_counter（高精度）：Windows 上 monotonic() 基于
+        # GetTickCount64，精度只有约 15.6ms —— 短请求会测出 0.0（实测踩到）
+        t0 = time.perf_counter()
         try:
             with self._opener.open(req, timeout=timeout) as r:
                 data = json.loads(r.read().decode("utf-8"))
-                _record_usage(data.get("usage"))      # 成本可见性：累计用量
+                # 成本可见性：累计用量 + **累计调用耗时**
+                # （任务汇总里的时长是墙钟，机器休眠会严重失真；这个口径才是
+                #   真实工作量）
+                _record_usage(data.get("usage"),
+                              elapsed=time.perf_counter() - t0)
                 return data
         except urllib.error.HTTPError as e:
             detail = ""
@@ -323,9 +414,22 @@ class LLMClient:
                 raise ContentFilterRejected(
                     f"内容审核拒评（HTTP {e.code}）：{detail[:160]}") from None
             if e.code in (408, 409, 425, 429, 500, 502, 503, 504):
-                raise LLMTransientError(f"HTTP {e.code}：{detail[:200]}") from None
+                rate = (e.code == 429)
+                retry_after = _parse_retry_after(getattr(e, "headers", None))
+                if rate:
+                    # 推后全局闸门 —— 并发的其它 worker 也会因此一起等待，
+                    # 避免"各自退避、同时恢复、再次撞限"的退避共振
+                    _rate_backoff(retry_after if retry_after is not None
+                                  else _RATE_DEFAULT_WAIT)
+                raise LLMTransientError(
+                    f"HTTP {e.code}：{detail[:200]}",
+                    is_rate_limit=rate, retry_after=retry_after) from None
             raise LLMError(f"HTTP {e.code}：{detail[:200]}") from None
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
+        except (urllib.error.URLError, TimeoutError, OSError,
+                http.client.HTTPException) as e:
+            # HTTPException 必须一并算瞬态：`IncompleteRead`（响应读了一半连接就断）
+            # 继承自它而**不是** OSError —— 漏掉的话网络抖一下就直接判失败、
+            # 一次都不重试（实测切网时因此丢了好几组）。
             raise LLMTransientError(f"{type(e).__name__}: {e}") from None
 
     # -- 对外：取结构化 JSON ---------------------------------------------
@@ -411,7 +515,9 @@ class LLMClient:
         if self.cfg.reasoning_effort:
             body["reasoning_effort"] = self.cfg.reasoning_effort
         last: Optional[Exception] = None
-        for attempt in range(self.cfg.max_retries + 1):
+        attempt = 0
+        max_attempts = self.cfg.max_retries + 1
+        while attempt < max_attempts:
             try:
                 data = self._post(body, self.cfg.timeout)
                 choices = data.get("choices") or []
@@ -430,10 +536,18 @@ class LLMClient:
                 raise
             except LLMTransientError as e:
                 last = e
-                if attempt < self.cfg.max_retries:
-                    delay = self.cfg.backoff_base * (2 ** attempt)
+                attempt += 1
+                if getattr(e, "is_rate_limit", False):
+                    # 限流按"窗口"计（RPM/TPM 通常分钟级），默认 3 次尝试常常不够；
+                    # 全局闸门已把等待拉长，这里再多给 2 轮**重试**
+                    # （总尝试次数 = max_retries + 1 + 2）
+                    max_attempts = max(max_attempts, self.cfg.max_retries + 1 + 2)
+                if attempt < max_attempts:
+                    delay = getattr(e, "retry_after", None)
+                    if not delay:
+                        delay = self.cfg.backoff_base * (2 ** (attempt - 1))
                     self.log.warning("LLM 瞬态错误（第 %d 次），%.1fs 后重试：%s",
-                                     attempt + 1, delay, e)
+                                     attempt, delay, e)
                     time.sleep(delay)
         raise last or LLMError("LLM 调用失败")
 

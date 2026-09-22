@@ -477,3 +477,122 @@ def test_update_会话输入清空时删除其L1产物(tmp_path, monkeypatch):
     assert r["updated"] is True
     assert not (l1 / "a__s1.md").exists()
     assert not (l1 / "a__s1.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# L1 失败的静默丢失（2026-09-21 线上实测复现）
+# ---------------------------------------------------------------------------
+
+def _fail_session(monkeypatch, msg="LLMTransientError: TimeoutError: read timed out"):
+    """让 L1 编译整体失败（模拟分组调用连续读超时）。"""
+    wiki._ensure_scripts_on_path()
+    import wiki_aggregate as _wa
+    import wiki_compile as _wc
+    monkeypatch.setattr(_wc, "_make_client", lambda thinking="": None)
+
+    def _boom(client, memories, log=print):
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(_wc, "compile_session", _boom)
+    monkeypatch.setattr(_wa, "make_client", lambda thinking="": _FakeClient())
+
+
+def _add_memory(db, mid, src, cid, content):
+    conn = _sqlite3.connect(db)
+    conn.execute("INSERT INTO distilled_memories VALUES "
+                 "(%d,'%s','%s','concept','high','t','new','%s','h%d',2000)"
+                 % (mid, src, cid, content, mid))
+    conn.commit(); conn.close()
+
+
+def test_update_L1失败时不把失败会话写进新基线(tmp_path, monkeypatch):
+    """复现当天真实的静默丢失。
+
+    L1 编译失败后，update 仍用「库当前状态」重建 manifest 并落盘，于是失败
+    会话被**谎报为已编译** —— 此后 align 一律报"库未变化"，这批记忆再也
+    不会重编。manifest 必须只记**实际编译成功**的输入（它是重试的唯一线索）。
+    """
+    db, l1, l2 = _mk_wiki(tmp_path)
+    _add_memory(db, 4, "a", "s1", "新增内容")
+    _fail_session(monkeypatch)
+
+    r = wiki.update(l1_dir=l1, l2_dir=l2, db=str(db))
+    assert r["l1"]["failed"] == 1
+
+    a = wiki.align(l1, "l1", db=str(db))
+    assert a["needs_recompile"] is True, "失败会话被写进新基线了 —— 脏数据被永久掩盖"
+    assert a["stages"]["l1"]["added_total"] >= 1
+    assert "a/s1" in (a["stages"]["l1"]["dirty_sessions"] or {})
+    # 失败不该破坏已有产出
+    assert (l1 / "a__s1.md").exists()
+
+
+def test_update_L1全失败时跳过L2避免无效重写(tmp_path, monkeypatch):
+    """L1 一条都没编出来时，L2 只会拿**磁盘上的旧 L1** 重跑一遍同样的域 ——
+    实测白烧 1290 秒 / 42 万 prompt token。全失败就跳过，等重试。"""
+    db, l1, l2 = _mk_wiki(tmp_path)
+    _add_memory(db, 4, "a", "s1", "新增内容")
+    _fail_session(monkeypatch)
+
+    before = (l2 / "01-域A" / "001-页A.md").read_text(encoding="utf-8")
+    r = wiki.update(l1_dir=l1, l2_dir=l2, db=str(db))
+
+    assert r["l2"]["domains_recompiled"] == 0
+    assert r["l2"].get("skipped")
+    after = (l2 / "01-域A" / "001-页A.md").read_text(encoding="utf-8")
+    assert after == before, "L2 不该基于未更新的 L1 重写"
+
+
+def test_对齐_未被页面覆盖的输入要浮出来(tmp_path):
+    """align 只比 manifest diff，从不看"页面实际覆盖了多少输入"。
+
+    实测库里 1781 条输入有 **61 条无任何页面引用**（最早可追到 09-10），
+    而 align 一直报"✓ 库未变化" —— 静默缺口必须有出口，否则没人会发现。
+    """
+    db, l1, l2 = _mk_wiki(tmp_path)
+    _add_memory(db, 4, "a", "s1", "从未被任何页面引用")
+
+    # manifest 里"已编译"（含 m4），但页面确实没引用它 —— 制造静默缺口
+    from agentmemhub import wiki_manifest as _w
+    _w.write_manifest(_w.manifest_path(l1, "l1"), _w.build_manifest("l1", db))
+
+    a = wiki.align(l1, "l1", db=str(db))
+    assert a["needs_recompile"] is False          # diff 视角：确实没变化
+    assert a["coverage"]["uncovered"] == 1        # 但覆盖视角：有缺口
+    assert "未覆盖" in a["message"]
+
+
+def test_update_组级失败的记忆不写进新基线(tmp_path, monkeypatch):
+    """逐组编译是 fail-open 的：单组失败不影响整会话，所以会话整体算"成功"。
+
+    但失败那组的记忆**没进任何页面** —— 必须照样剔除出新基线，否则下次 align
+    会以为已编译，它们就被静默丢弃了（与"会话级失败"同一个坑，粒度更细；
+    2026-09-21 切网时实测丢了几组）。
+    """
+    db, l1, l2 = _mk_wiki(tmp_path)
+    _add_memory(db, 4, "a", "s1", "新增内容")
+
+    wiki._ensure_scripts_on_path()
+    import wiki_aggregate as _wa
+    import wiki_compile as _wc
+    monkeypatch.setattr(_wc, "_make_client", lambda thinking="": None)
+    # 会话整体成功（没抛异常），但第 2 条记忆所在的分组编译失败了
+    monkeypatch.setattr(_wc, "compile_session",
+                        lambda client, memories, log=print: {
+                            "session_summary": "概要",
+                            "pages": [{"title": "页A", "type": "concept",
+                                       "summary": "s", "sources": [1, 3],
+                                       "body": "正文 [m1][m3]", "related": []}],
+                            "failed_members": [2]})
+    monkeypatch.setattr(_wa, "make_client", lambda thinking="": _FakeClient())
+
+    r = wiki.update(l1_dir=l1, l2_dir=l2, db=str(db))
+    assert r["l1"]["failed"] == 0             # 会话级没失败
+    assert r["l1"]["failed_ids"] == 1         # 但组级失败了 1 条
+
+    # 失败那条不进新基线 → 下次 align 仍报脏、会重试
+    a = wiki.align(l1, "l1", db=str(db))
+    assert a["needs_recompile"] is True
+    assert a["stages"]["l1"]["added_total"] == 1
+    assert any("分组" in h for h in r["hints"])
+
