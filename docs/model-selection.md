@@ -10,11 +10,15 @@
 
 ## 一、结论：当前推荐
 
-1. **主力：`xiaomi/mimo-v2.5`** ⭐ —— 实测**质量与成本综合最优**：12/12 稳定、
-   思维链仅占输出 **24~37%**（推理 token 计入输出计费，这是省钱的关键），
-   算上推理的**真实成本约为 deepseek 的一半**。价格也是付费档里最低的
-   （$0.14/$0.28）。**弱点**：JSON 遵从性弱于 deepseek（二级编译 233 页里有 3 页
-   重试 3 次后退化为直接拼接）→ 配 `llm.repair_model` 兜底即可。
+1. **主力：`xiaomi/mimo-v2.6-flash`** ⭐ —— 2026-09-22 上游新上架，**价格与 V2.5
+   持平**（$0.14/$0.28），按"同价优先新模型"切换。ID 经**实测探测**确认：
+   `mimo-v2.6-flash` 可用，而 `mimo-v2.6`、`mimo-v2.5-flash` 都返回
+   "not supported on this endpoint"（探测时注意：必须走项目自己的 client ——
+   裸 urllib 会被 Cloudflare 拦成 403 `error code: 1010`，**连在用的旧模型也 403**，
+   容易误判成"模型不存在"）。
+   **质量指标待重测**：下面 V2.5 的实测结论（12/12 稳定、思维链 24~37%、JSON
+   遵从性弱于 deepseek）是**同族上一版**的数据，可作预期参考，但**不能当成本版
+   结论**。回退位：`llm.model` 换回 `xiaomi/mimo-v2.5`（同价，已实测）。
 2. **批量 / 质量增强：`meituan/LongCat-2.0:free`** ⭐ —— **免费**（100 请求/天/账号，
    UTC 午夜重置）。适合**放后台大批量、多次重跑**：同一批目标跑多轮取更优结果，
    是"零成本提质量"的手段（配合 `wiki --action retry` 定向补跑）。
@@ -32,7 +36,8 @@
 
 | 模型 | 输入 | 输出 | 能力要点 | 适用 |
 |---|---|---|---|---|
-| **`xiaomi/mimo-v2.5`** ⭐ | **$0.14** | **$0.28** | Intelligence 22.3；思维链占比低（24~37%）；128K 上下文 | **主力：蒸馏 + wiki 两级编译** |
+| **`xiaomi/mimo-v2.6-flash`** ⭐ | **$0.14** | **$0.28** | 2026-09-22 新上架，**价格与 V2.5 持平**；同族上一版实测 Intelligence 22.3、思维链占比低（24~37%）；**本版质量待重测** | **主力：蒸馏 + wiki 两级编译** |
+| `xiaomi/mimo-v2.5` | $0.14 | $0.28 | 同价，**已实测**：12/12 稳定、真实成本≈deepseek 一半；JSON 遵从性略弱 → 配 `repair_model` | **回退位**（新模型出问题时换回） |
 | `xiaomi/mimo-v2.5-pro` | $0.435 | $0.87 | 同族增强版 | 质量要求更高的批次 |
 | `deepseek/deepseek-v4.1-flash` | $0.15 | $0.60（低谷） | **247 tok/s**（全表最快）；JSON 遵从性好 | 高吞吐；注意峰谷计价 |
 | `z-ai/glm-5.3-flash` | $0.15 | $0.50 | **Intelligence 41.9**（全表最高） | 付费档质量优先 |
@@ -74,7 +79,7 @@
 # agentmemhub.yaml
 llm:
   endpoint: "https://api.commandcode.ai/provider/v1"
-  model: "xiaomi/mimo-v2.5"          # 主力推荐
+  model: "xiaomi/mimo-v2.6-flash"    # 主力推荐（同价优先新模型）
   repair_model: "deepseek/deepseek-v4.1-flash"   # JSON 解析失败时的修复模型
   timeout: 900
   # thinking / reasoning_effort 视 provider 支持情况填

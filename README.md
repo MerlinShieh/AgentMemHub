@@ -55,7 +55,8 @@ uv run python scripts/fetch_model.py Xenova/bge-base-zh-v1.5
 
 | 模型 | 输入 / 输出（USD/百万 token） | 说明 |
 |---|---|---|
-| **`xiaomi/mimo-v2.5`** ⭐ **推荐** | **0.14 / 0.28** | 实测质量与成本综合最优：12/12 稳定、**思维链仅占输出 24~37%**（推理 token 计入输出计费，这是省钱关键）、算上推理的**真实成本≈deepseek 的一半**；配 `repair_model` 补 JSON 遵从性 |
+| **`xiaomi/mimo-v2.6-flash`** ⭐ **推荐** | **0.14 / 0.28** | 2026-09-22 上游新上架，**价格与 V2.5 持平**，按"同价优先新模型"切换；**质量指标待重测**（上一版 V2.5 实测 12/12 稳定、思维链仅占输出 24~37%，可作预期参考）。配 `repair_model` 补 JSON 遵从性 |
+| `xiaomi/mimo-v2.5` | 0.14 / 0.28 | 同价**回退位**（已实测：真实成本≈deepseek 的一半）；新模型出问题时换回 |
 | **`meituan/LongCat-2.0:free`** ⭐ **次选** | **免费**（100 请求/天） | 适合**放后台大批量、多次重跑**——同一批目标跑多轮取更优结果，零成本提质量 |
 | `deepseek/deepseek-v4.1-flash` | 0.15 / 0.60（低谷） | **247 tok/s**（全表最快）；注意**峰谷计价**（国内工作时段翻倍） |
 | `z-ai/glm-5.3-flash` | 0.15 / 0.50 | 官网 Intelligence **41.9**（全表最高），付费档质量优先 |
@@ -949,6 +950,8 @@ RAG 优化「能不能捞到」，wiki 优化「有没有结构」；**wiki 不�
 
 - [x] LLM 接入切换为 `xiaomi/mimo-v2.5`（实测思维链仅 24–37%，
       算上推理 token 的真实成本约为 deepseek 的一半）
+- [x] **2026-09-22 随上游上架切换到 `xiaomi/mimo-v2.6-flash`**（价格与 V2.5 持平，
+      同价优先新模型；ID 经实测探测确认，`mimo-v2.6` / `mimo-v2.5-flash` 均不支持）
 - [x] `thinking` / `reasoning_effort` 开关 + 用量与成本统计（`usage_snapshot` / `estimate_cost`）
 - [x] 两级 wiki **各自相对顶层 `llm` 覆盖**，互不牵连
       （级联会让第一级换 provider 时连带改掉第二级，已实测踩过）
