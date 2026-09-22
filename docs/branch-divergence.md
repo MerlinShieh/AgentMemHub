@@ -1,152 +1,88 @@
 # 分支差异记录：`main` ↔ `feat/llm-wiki`
 
-> 记录时间：2026-09-18　｜　分叉点：`253257f`（Merge feat/memory-distillation）
+> 记录时间：2026-09-18　｜　**2026-09-22 更新**：通用修复已回移到 `feat/llm-robustness`
+> ｜　分叉点：`253257f`（Merge feat/memory-distillation）
 >
 > **为什么记这个**：`feat/llm-wiki` 是一次**大版本升级**（在 RAG 之上增加 LLM Wiki
 > 编译链路），而 `main` 仍是上一版的 RAG 记忆引擎。两条线的定位不同，**暂不合并**。
 > 但分叉期间容易出现"**本该属于主干的通用修复被夹带在功能分支里**"——
 > 这份记录就是把这些差异挑出来，避免它们被埋没或将来冲突时才发现。
 
-## 一、差异总览
+## 一、差异总览（2026-09-22 实测）
 
 ```
-24 files changed, 4143 insertions(+), 33 deletions(-)
-├── 11 个新增文件（wiki 分支独有）
-└── 13 个修改文件（需逐个人工分类）
+57 files changed, 12927 insertions(+), 175 deletions(-)
+├── 大量新增文件（wiki 链路 / 召回 / 快照 / 测试）
+└── 十余个修改文件（需逐个人工分类）
 ```
 
-**新增文件（全部属于 wiki 功能，无争议）**
+**规模与接口对照**：
 
-| 文件 | 说明 |
-|---|---|
-| `agentmemhub/wiki.py` | Wiki 服务层（失败清单查询 + 定向补跑） |
-| `agentmemhub/failures.py` | 长任务失败清单 |
-| `scripts/wiki_compile.py` / `wiki_aggregate.py` / `wiki_linkfix.py` | 两级编译 + 链接修复 |
-| `scripts/sync_llm_from_dsh.py` | 从 DSH 配置同步 LLM 接入参数 |
-| `docs/llm-wiki.md` | Wiki 设计与实测记录 |
-| `tests/test_failures.py` / `test_llm_repair.py` / `test_wiki_scripts.py` / `test_wiki_service.py` | 共 60 项测试 |
-
-## 二、⚠️ 重点：**与 wiki 无关的通用差异**
-
-以下改动**不属于 wiki 功能**，而是通用的**修复 / 能力 / 重构**。
-它们目前只在 `feat/llm-wiki` 上，**`main` 缺失** —— 这是本次排查的主要产出。
-
-### 2.1 记忆内容硬截断（`agentmemhub/distill.py`）
-
-**性质**：通用修复　｜　**影响面**：**记忆库质量**
-
-```python
-def clamp_content(text, limit=CONTENT_MAX) -> str:
-    """超长时在句读处断开；句读太靠前则硬切加省略号。"""
-```
-
-`normalize_memories()` 里对 `content` 做代码级兜底。**原先 `CONTENT_MAX=120`
-只是提示词里的软约束，实测没有任何模型稳定遵守**（同一提示词、同一批 12 个切片：
-MiMo 24% 超标、LongCat 44%、deepseek-v4.1-flash 52%、ling 53%）。
-
-> **对 main 的意义**：RAG 记忆库里目前**存在一批超长记忆**（实测 704/1543 = 45.6%，
-> 最长 2581 字），它们"一条讲好几个结论"，直接损害自包含性与召回质量。
-> **这个修复与 wiki 毫无关系**，蒸馏链路自己也该有。
-
-### 2.2 LLM 格式修复（`agentmemhub/llm.py`）
-
-**性质**：通用能力　｜　**影响面**：所有 LLM 调用
-
-主模型**返回了内容但 JSON 解析失败**时，把原始输出交给 `repair_model`
-（JSON 遵从性更好的模型）转成规范 JSON —— 而不是丢弃或退化成拼接。
-
-> **对 main 的意义**：蒸馏/合并/评分都会遇到"有内容但格式不对"，
-> 现在只能整条丢弃（fail-open 不登记 hash，靠重跑碰运气）。
-
-### 2.3 LLM 用量与成本统计（`agentmemhub/llm.py`）
-
-**性质**：通用能力　｜　**影响面**：成本可见性
-
-`usage_snapshot()` / `usage_reset()` / `_record_usage()` / `estimate_cost()`。
-模块级累计（因为 `LLMClient` 被设计成每线程一个实例，统计必须跨实例汇总）。
-
-> **对 main 的意义**：现在跑蒸馏**看不到花了多少钱**。
-
-### 2.4 思考模式开关（`agentmemhub/llm.py` + 配置示例）
-
-**性质**：通用能力　｜　**影响面**：**成本**
-
-`thinking: enabled|disabled` 与 `reasoning_effort: low|medium|high|xhigh|max`。
-请求体顶层下发 `{"thinking": {"type": ...}}`。
-
-> **关键事实**：推理模型的思维链**计入输出计费**（实测占输出的 63–94%）。
-> `reasoning_effort: low` **挡不住**推理量；**只有 `thinking: disabled` 能真正归零**。
-> **对 main 的意义**：蒸馏成本可以显著下降。
-
-### 2.5 配置白名单导致的**静默失效**（`agentmemhub/config.py`）
-
-**性质**：**通用 bug 修复**　｜　**影响面**：排查成本
-
-```python
-_LLM_SCALAR_KEYS = ("timeout", "max_tokens", "temperature",
-                    "thinking", "reasoning_effort", "repair_model")
-```
-
-原先是硬编码的 `for k in ("timeout", "max_tokens", "temperature")` 白名单，
-**新增 provider 开关会被静默吃掉**（写进 yaml 却读不到，表现为"开关不生效"，
-实测排查成本很高）。同时 `reasoning_effort` 的校验原先只认 `low/high/max`，
-而 Command Code 实际支持**五档**。
-
-### 2.6 其他通用项
-
-| 文件 | 改动 | 性质 |
+| 层 | `main` | `feat/llm-wiki` |
 |---|---|---|
-| `agentmemhub/logs.py` | 把 `read_mcp_audit` 的行解析抽成公共 `_read_jsonl` | 通用重构（消除重复）|
-| `tests/test_config.py` | 继承断言从"整字典相等"改为逐字段 | 通用改进（否则每加一个字段就假失败）|
-| `agentmemhub.yaml.example` | 补 `thinking` / `reasoning_effort` / `repair_model` 说明 | 通用文档 |
-| `agentmemhub/config.py` | 文件开头 BOM 移除 | 清理 |
-| `scripts/sensitive_scan.py` | 打印 ✅ 时 GBK 编码崩溃 | **已同步到 main** ✅ |
+| HTTP 路由 | 28 | **42** |
+| MCP 工具 | 5 | 5（一致）|
+| CLI 子命令 | 17 | **20** |
+| 测试 | 488 passed | **723 passed / 1 skipped** |
+| 提交数 | — | 领先 **25 个** |
+
+## 二、通用差异（与 wiki 无关）
+
+### 2.A ✅ 已回移 —— 分支 `feat/llm-robustness` @ `d992efd`
+
+| # | 项 | 内容 | 为什么属于主干 |
+|---|---|---|---|
+| 1 | **记忆内容硬截断**（`distill.py`） | `clamp_content()` 在 `normalize_memories()` 里做代码级兜底：超长时断在句读处，句读太靠前则硬切加省略号 | `CONTENT_MAX=120` 原先只是**提示词软约束**，实测**没有任何模型稳定遵守**（MiMo 24% / LongCat 44% / deepseek 52% / ling 53% 超标）；`main` 的库里**存量问题已实测存在**（704/1543 = **45.6% 超标**，最长 2581 字），直接损害自包含性与召回质量 |
+| 2 | **LLM 开关白名单修复**（`config.py`） | 抽出 `_LLM_SCALAR_KEYS`，`llm` 属性与 `_merge_llm` 共用它 | 原先是硬编码三元组白名单，**新增 provider 开关会被静默吃掉**（写进 yaml 却读不到，表现为"开关不生效"）；同时 `_merge_llm` 提升为 `classmethod` 并纳入 `repair_model` |
+| 3 | **格式修复模型**（`llm.py`） | 主模型返回了内容但 JSON 解析失败时，把**原始输出**交给 `repair_model` 转规范 JSON | 蒸馏/合并/评分都会遇到"有内容但格式不对"，原先只能整条丢弃（fail-open 不登记 hash，靠重跑碰运气） |
+| 4 | **用量与成本统计**（`llm.py`） | `usage_snapshot()` / `usage_reset()` / `_record_usage()` / `estimate_cost()`，模块级累计（`LLMClient` 每线程一个实例，统计必须跨实例汇总） | `main` 上跑蒸馏**看不到花了多少钱** |
+| 5 | **思考模式开关**（`llm.py` + `config.py`） | `thinking: enabled\|disabled` 与 `reasoning_effort`，请求体顶层下发 `{"thinking": {"type": ...}}` | 思维链**计入输出计费**（实测占输出的 63–94%）；`reasoning_effort: low` **挡不住**推理量，**只有 `thinking: disabled` 能真正归零**——直接省钱 |
+| 6 | **429 进程级限流闸门 + 尊重 `Retry-After`**（`llm.py`） | 撞限就推后"下次允许发请求的时间"，所有线程一起等；`Retry-After` 上限 300s | 并发调用下各自独立退避会"共振"；属于**所有链路共用**的鲁棒性 |
+| 7 | **`HTTPException` 纳入瞬态重试**（`llm.py`） | `IncompleteRead` / `RemoteDisconnected` 继承自 `http.client.HTTPException`（**不是 `OSError`**），旧捕获会漏掉 | 表现为"网络抖一下直接丢一组、一次都不重试" |
+| 8 | **计时口径**（`llm.py`） | 计时改用 `time.perf_counter()`（Windows `monotonic()` 精度仅约 15.6ms，短请求测出 0） | 度量正确性，与 wiki 无关 |
+| 9 | **`_read_jsonl` 公共实现**（`logs.py`） | 把 `read_mcp_audit` 的行解析抽成 `_read_jsonl(path, default_name, limit)` | 通用重构（消除重复解析） |
+| 10 | **测试断言改进**（`tests/test_config.py`） | 继承断言从"整字典相等"改为逐字段 | 否则每加一个可选 `llm` 字段就假失败 |
+| 11 | **配置示例说明**（`agentmemhub.yaml.example`） | 补 `thinking` / `reasoning_effort` / `repair_model` 的完整注释 | 通用文档 |
+
+**回移方式**：**逐文件挑选**，没有直接 `cherry-pick`。原因有两个——
+① `19ce71e` 是**混合提交**（既含通用修复也含 wiki 内容）；
+② 分叉之后 `llm.py` / `config.py` / `distill.py` / `logs.py` 又各自长了新东西
+（429 闸门、软删除列、wiki 日志等），直接 cherry-pick 会把 wiki 段落一并带过来。
+实际做法：`llm.py` 与 `tests/test_llm.py` **无任何 wiki 引用**（`grep -i wiki` 零命中）→ 整取；
+`config.py` / `distill.py` / `logs.py` / `yaml.example` 手工剔除 wiki 部分。
+
+**验证**：`uv run pytest` → **503 passed / 1 skipped**（`main` 原 488，回移带入 15 项测试）。
+
+**回移时暴露的一个连带**：`clamp_content` 生效后，
+`test_merge_hierarchical_truncates_when_not_converging` 里构造的"超长 content"被截到
+`CONTENT_MAX` 以内，**每批能装的条数变了、制造不出"不收敛"** → 该测试随之调整
+（`long_text` 改小、`max_chars` 从 1000 降到 350）。**这是"兜底生效"的正常连锁，不是回归**。
+
+### 2.B ⬜ 未回移（仍留在 `feat/llm-wiki`）
+
+| 项 | 为什么暂不回移 |
+|---|---|
+| **记忆操作事实流**（`logs/memory.log`）+ **日志滚动归档** | 与 `wiki.log` 同批设计，回移需要先拆分 `DEFAULT_LOGS` 里的 wiki 部分；且滚动归档与 `logs.files` 配置段耦合，值得单独一轮 |
+| **快照与回滚** | 面向"索引库整库 + **wiki 产物目录**"，主体是 wiki 运维 |
+| **Agent 直写记忆落蒸馏表**（`save_direct_memory`）+ 历史回填 | 牵涉 MCP server 调用点与 CLI 子命令，是**独立特性**而非"夹带的修复"；但它确实是 `main` 的真缺口（直写记忆在记忆报表里看不见），**建议单独排期** |
+| 四路召回调优 / 页面准入 / 严格度档位 / 短语通道 | wiki 分支专有（依赖页面层） |
 
 ## 三、wiki 分支专有（预期内，不需处理）
 
 | 文件 | 内容 |
 |---|---|
-| `agentmemhub/web/app.py` | `/api/wiki/failures`、`/api/wiki/retry` 两个端点（main 上不存在）|
+| `agentmemhub/wiki.py` / `wiki_manifest.py` / `wiki_triggers.py` / `wiki_pending.py` / `wiki_index.py` | Wiki 服务层与运维 |
+| `agentmemhub/failures.py` | 长任务失败清单 |
+| `scripts/wiki_compile.py` / `wiki_aggregate.py` / `wiki_linkfix.py` | 两级编译 + 链接修复 |
+| `agentmemhub/web/app.py` | `/api/wiki/*` 端点（pending / drop / restore / failures / retry 等）|
 | `docs/API.md` | 「3.6 LLM Wiki」一节 + CLI wiki 子命令（main 版本已剔除）|
-| `agentmemhub/cli.py` | `wiki` 子命令（`--action failures\|retry`）|
-| `agentmemhub/config.py` | `DEFAULT_WIKI` 段、`Config.wiki` / `wiki_l2` 属性 |
-| `agentmemhub/logs.py` | `wiki_log_file` / `audit_wiki` / `read_wiki_audit` |
-| `README` / `AGENTS` / `ARCHITECTURE` | wiki 章节、目录树条目、v2.1 更新记录 |
-| 11 个新增文件 | 见第一节 |
+| `agentmemhub/cli.py` | `wiki` 子命令 |
+| `agentmemhub/config.py` | `DEFAULT_WIKI` / `DEFAULT_SNAPSHOT` / `DEFAULT_LOGS` 段，`Config.wiki` / `wiki_l2` / `snapshot` / `logs` 属性 |
+| `agentmemhub/logs.py` | `wiki_log_file` / `audit_wiki` / `read_wiki_audit` / `wiki.log` |
+| `agentmemhub/distill.py` | `wiki_ignore_at` 列迁移、`drop_projection`、`wiki_triggers` 写入钩子 |
+| `README` / `AGENTS` / `ARCHITECTURE` | wiki 章节、目录树条目、v2.1~v2.4 更新记录 |
 
-## 四、接口差异对照
-
-| 层 | `main` | `feat/llm-wiki` |
-|---|---|---|
-| HTTP 路由 | **28 个** | **30 个**（+2 wiki 端点）|
-| MCP 工具 | 5 个（`note` 已齐全）| 5 个（同）|
-| CLI 子命令 | 17 个 | 18 个（+`wiki`）|
-| 文档 | `docs/API.md`（不含 wiki 章节）| `docs/API.md`（含 wiki 章节）|
-
-> `docs/API.md` 在两边的**主体内容一致** —— 拆分时已确保 main 版本只描述
-> main 上真实存在的接口（计数同步改为 28 / 9 个面板未调用接口）。
-
-## 五、建议
-
-**第三节（wiki 专有）不动** —— 随 wiki 分支一起交付。
-
-**第二节（通用差异）建议逐个评估是否回移主干**，优先级：
-
-| 优先级 | 项 | 理由 |
-|---|---|---|
-| **高** | 2.1 记忆内容硬截断 | 直接影响记忆库质量，且 main 上存量问题已实测存在（45.6% 超标）|
-| **高** | 2.5 配置白名单修复 | 是 bug，且会拖慢后续任何 LLM 配置排查 |
-| **中** | 2.4 思考模式开关 | 直接省钱（思维链占输出 63–94%）|
-| **中** | 2.3 用量统计 | 成本可见性，蒸馏已经能跑到几元钱 |
-| **中** | 2.2 格式修复 | 提升 LLM 调用的鲁棒性 |
-| **低** | 2.6 各项 | 重构与文档，回移时顺手带上即可 |
-
-**回移方式**：从 `feat/llm-wiki` 上 `git cherry-pick` 相应提交（`19ce71e` 含 2.1/2.2/2.3/2.4/2.5），
-或在 main 上新建 `feat/llm-robustness` 分支单独做。**注意**：`19ce71e` 是混合提交
-（既含通用修复也含 wiki 内容），cherry-pick 时需要剥离 wiki 部分——与这次拆分
-`docs/API.md` 的处理方式相同。
-
-## 六、一个操作提醒
+## 四、一个操作提醒
 
 两个分支**已分叉**，且接口相关的 5 个改动**存在两份**（SHA 不同）：
 
@@ -159,3 +95,9 @@ _LLM_SCALAR_KEYS = ("timeout", "max_tokens", "temperature",
 将来合并 `feat/llm-wiki` 回 main 时会在
 `docs/API.md`、`agentmemhub/web/app.py`、`AGENTS.md`、`README.md`
 上冲突——**内容已一致，只是 SHA 不同**，解决时以任一侧为准即可。
+
+**另注**：`feat/llm-robustness` 从 `main` 分出后只含 2.A 的改动，
+与 `feat/llm-wiki` 在这些文件上**会冲突**（两边都改了 `llm.py` / `config.py` /
+`distill.py` / `logs.py`）。因为 `feat/llm-wiki` 上已有这些修复，
+**合并顺序建议：`feat/llm-robustness` → `main` 先合**，之后 `feat/llm-wiki` 侧的冲突
+以特性分支为准（它是超集）。
