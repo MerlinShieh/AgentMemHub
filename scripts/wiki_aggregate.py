@@ -46,6 +46,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from wiki_compile import _usage_report  # noqa: E402  （复用用量/成本统计）
 from agentmemhub.failures import FailureLog  # noqa: E402
+from agentmemhub.llm_batch import (  # noqa: E402
+    BatchRequest, PendingError, SyncRunner,
+)
 
 # Windows 控制台默认 GBK，用量报告里的 ¥ 会抛 UnicodeEncodeError。
 for _s in (sys.stdout, sys.stderr):
@@ -58,6 +61,14 @@ for _s in (sys.stdout, sys.stderr):
 L2_WORKERS = 6
 L2_MIN_PAGES = 2
 L2_DOMAIN_MAX = 60
+
+#: 域内细分**单批成员上限**。超过就分批调用再合并。
+#: 为什么必须分批：细分是**一次** LLM 调用，prompt 随域内页数线性增长。实测
+#: 2026-09-25，114 个成员的域必定撞上游 HTTP 524（超时），而细分失败的兜底是
+#: "退化为整域一页" —— 43 页的域因此被压成 1 页（两次事故的直接放大器）。
+#: 与第一级的 `wiki_compile.PLAN_BATCH_MAX` 同一思路：**限制单批输入，
+#: 批内编号再映射回全局编号**。
+L2_PLAN_BATCH_MAX = 40
 
 #: 写盘保护阈值（2026-09-25 丢页事故后加）。
 #: 事故：定时触发的 L2 聚合在 LLM 上游**全程 HTTP 524** 时仍照写 —— 域内细分失败
@@ -483,24 +494,74 @@ def stage_domains(client, pages: list[dict], dmin: int, dmax: int,
 # 阶段 ②：域内细分
 # ---------------------------------------------------------------------------
 
-def stage_plan(client, domain: dict, members: list[dict]) -> list[dict]:
+def plan_prompt(domain_name: str, members: list[dict]) -> str:
+    """细分的用户提示（**纯函数**，分批与离线批处理都要复用它）。"""
     listing = "\n".join("[%d] %s :: %s" % (i, p["title"], p["summary"][:120])
                         for i, p in enumerate(members, 1))
-    user = USER_PLAN.format(domain=domain.get("name", ""), n=len(members),
-                            listing=listing)
-    r = call_json(client, SYSTEM_PLAN, user, max_tokens=16000, tag="细分 ")
-    plans = r.get("pages") or []
-    seen, out = set(), []
-    for pl in plans:
-        idx = [int(x) for x in (pl.get("members") or [])
-               if str(x).isdigit() and 1 <= int(x) <= len(members) and int(x) not in seen]
-        if not idx:
-            continue
-        seen.update(idx)
-        out.append({"title": pl.get("title") or "(无标题)", "idx": idx})
-    left = [i for i in range(1, len(members) + 1) if i not in seen]
-    for i in left:                      # 细分遗漏的页面各自成页，绝不丢内容
-        out.append({"title": members[i - 1]["title"], "idx": [i]})
+    return USER_PLAN.format(domain=domain_name, n=len(members), listing=listing)
+
+
+def plan_requests(domain_key: str, domain_name: str, members: list[dict],
+                  size: int) -> list[BatchRequest]:
+    """把域内成员切成若干批，每批**一条请求**。
+
+    custom_id 自带定位信息（阶段｜域｜第几批）而不是裸序号 —— 离线批处理里
+    「上传」与「回读」可能隔几小时甚至换机器，凭据必须能独立定位。
+    """
+    n_batch = max(1, (len(members) + size - 1) // size)
+    out: list[BatchRequest] = []
+    for bi in range(n_batch):
+        chunk = members[bi * size:(bi + 1) * size]
+        out.append(BatchRequest(
+            custom_id="l2plan|%s|%d" % (domain_key, bi),
+            system=SYSTEM_PLAN, user=plan_prompt(domain_name, chunk),
+            max_tokens=16000, tag="细分[%d/%d] " % (bi + 1, n_batch)))
+    return out
+
+
+def stage_plan(client, domain: dict, members: list[dict], *,
+               batch: int = 0, runner=None, log=print) -> list[dict]:
+    """域内细分；成员多时**分批**调用再合并（理由见 `L2_PLAN_BATCH_MAX`）。
+
+    **批内编号是「批内 1 起」，必须映射回全局编号** —— 与第一级的
+    `wiki_compile.plan_groups_batched` 是同一个坑：不映射会取错成员，且越靠后的
+    批次错得越离谱。
+
+    `runner` 是**离线批处理的唯一接缝**：默认 `SyncRunner`（当场调用），
+    换成离线运行器即可走 JSONL（见 `agentmemhub/llm_batch.py`）。单条失败由
+    runner 记成空结果 → 该批成员**各自成页**，绝不丢内容、也不会塌成一页。
+    """
+    size = batch or L2_PLAN_BATCH_MAX
+    if size <= 0:
+        size = L2_PLAN_BATCH_MAX
+    reqs = plan_requests(domain.get("key") or _slug(domain.get("name", "")),
+                         domain.get("name", ""), members, size)
+    if runner is None:
+        runner = SyncRunner(
+            lambda s, u, mt, tag: call_json(client, s, u, max_tokens=mt, tag=tag),
+            on_error=lambda r, e: log("     %s失败（该批成员各自成页）：%s"
+                                      % (r.tag, str(e)[:70])))
+    results = runner.run(reqs)
+
+    seen: set[int] = set()
+    out: list[dict] = []
+    for bi, r in enumerate(results):
+        base = bi * size
+        for pl in ((r or {}).get("pages") or []):
+            idx = []
+            for x in (pl.get("members") or []):
+                if not str(x).isdigit():
+                    continue
+                g = base + int(x)          # 批内编号 → 全局编号
+                if 1 <= g <= len(members) and g not in seen:
+                    idx.append(g)
+            if not idx:
+                continue
+            seen.update(idx)
+            out.append({"title": pl.get("title") or "(无标题)", "idx": idx})
+    for i in range(1, len(members) + 1):   # 细分遗漏的页面各自成页，绝不丢内容
+        if i not in seen:
+            out.append({"title": members[i - 1]["title"], "idx": [i]})
     return out
 
 
@@ -974,20 +1035,29 @@ def run(args) -> None:
     all_titles = [p["title"] for p in pages]
     min_pages = int(args.min_pages) or _l2_cfg("min_pages", L2_MIN_PAGES)
     cfg_workers = args.workers or _l2_cfg("workers", L2_WORKERS)
+    plan_batch = _l2_cfg("plan_batch_max", L2_PLAN_BATCH_MAX)
     t0 = time.time()
 
     def plan_domain(item):
-        """把一个域细分成若干"最终页"。失败时退化为整域一页，绝不丢内容。"""
+        """把一个域细分成若干"最终页"。
+
+        **兜底从"整域一页"改成"成员各自成页"**：前者虽然不丢内容，却会把几十页
+        的域压成 1 页（2026-09-25 两次丢页事故的放大器）；后者保持粒度、同样不丢
+        内容，配合写盘侧的页数崩塌闸一起，把"降级"的破坏力限制在质量层面。
+        """
         name, members = item
         if len(members) <= min_pages:
             return name, [{"title": (members[0]["title"] if len(members) == 1 else name),
                            "group": list(members)}]
         try:
-            plans = stage_plan(client, {"name": name}, members)
+            plans = stage_plan(client, {"name": name}, members, batch=plan_batch,
+                               log=lambda m: print(m, flush=True))
+        except PendingError:
+            raise                       # 离线：结果未回来，交给上层保留现场
         except Exception as e:
-            print("     细分 %s 失败（退化为整域一页）：%s"
+            print("     细分 %s 失败（成员各自成页）：%s"
                   % (name[:24], str(e)[:70]), flush=True)
-            return name, [{"title": name, "group": list(members)}]
+            return name, [{"title": m["title"], "group": [m]} for m in members]
         return name, [{"title": pl["title"], "group": [members[i - 1] for i in pl["idx"]]}
                       for pl in plans if pl.get("idx")]
 

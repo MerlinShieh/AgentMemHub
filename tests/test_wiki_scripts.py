@@ -707,3 +707,88 @@ def test_域目录计数忽略index与json(tmp_path):
     (d / "001-页.json").write_text("{}", encoding="utf-8")
     assert _count_domain_pages(d) == 1
 
+
+# ---------------------------------------------------------------------------
+# 域内细分分批（2026-09-25：大域一次调用必撞 524 → 整域压成一页的根治）
+# ---------------------------------------------------------------------------
+
+def _members(n: int) -> list[dict]:
+    return [{"title": "P%d" % i, "summary": "摘要%d" % i} for i in range(1, n + 1)]
+
+
+def test_细分分批_批内编号映射回全局():
+    """**关键回归**：批内编号是「批内 1 起」，不映射回全局就会取错成员，
+    且越靠后的批次错得越离谱（与第一级 `plan_groups_batched` 同一个坑）。"""
+    from wiki_aggregate import stage_plan
+
+    class _C:
+        def complete_json(self, system, user, **kw):
+            n = len([ln for ln in user.splitlines() if ln.startswith("[")])
+            return {"pages": [{"title": "批%d" % n,
+                               "members": list(range(1, n + 1))}]}
+
+    plans = stage_plan(_C(), {"name": "域A"}, _members(7), batch=3,
+                       log=lambda *_: None)
+
+    assert sorted(i for pl in plans for i in pl["idx"]) == list(range(1, 8))
+    assert len(plans) == 3
+    # 第二批覆盖全局 4~6（若忘了映射就会是 1~3）
+    assert plans[1]["idx"] == [4, 5, 6]
+
+
+def test_细分分批_某批失败只让该批成员各自成页():
+    """**这正是丢掉「整域退化为一个页面」的关键**：一条失败只影响它覆盖的成员，
+    其余批次照常合并 —— 43 页的域不会再被压成 1 页。"""
+    from wiki_aggregate import stage_plan
+
+    class _C:
+        def complete_json(self, system, user, **kw):
+            if "[1] P1" in user:                 # 只让第一批失败（重试也一致）
+                raise RuntimeError("HTTP 524")
+            return {"pages": [{"title": "合并页", "members": [1, 2]}]}
+
+    plans = stage_plan(_C(), {"name": "域A"}, _members(6), batch=2,
+                       log=lambda *_: None)
+
+    assert sorted(pl["title"] for pl in plans) == ["P1", "P2", "合并页", "合并页"]
+    assert sorted(i for pl in plans for i in pl["idx"]) == list(range(1, 7)), \
+        "无论哪批失败都不能丢成员"
+
+
+def test_细分分批_成员数不超过上限时仍是单批():
+    from wiki_aggregate import plan_requests
+
+    assert len(plan_requests("域A", "域A", _members(3), 40)) == 1
+    assert len(plan_requests("域A", "域A", _members(40), 40)) == 1
+    assert len(plan_requests("域A", "域A", _members(41), 40)) == 2
+
+
+def test_细分请求的custom_id自带定位信息():
+    """离线批处理里「上传」与「回读」可能隔几小时甚至换机器，凭据必须能独立定位。"""
+    from wiki_aggregate import plan_requests
+
+    reqs = plan_requests("DSH-Hermes", "DSH/Hermes 助手架构与运行", _members(5), 2)
+
+    assert [r.custom_id for r in reqs] == [
+        "l2plan|DSH-Hermes|0", "l2plan|DSH-Hermes|1", "l2plan|DSH-Hermes|2"]
+    assert all(r.system and r.user for r in reqs)
+    assert "DSH/Hermes 助手架构与运行" in reqs[0].user
+
+
+def test_细分可换运行器_离线接缝():
+    """`runner` 是离线批处理的唯一接缝：换成会写 JSONL 的实现即可，
+    `stage_plan` 本身不必改。"""
+    from wiki_aggregate import stage_plan
+
+    seen = []
+
+    class _Deferred:
+        def run(self, requests):
+            seen.extend(r.custom_id for r in requests)
+            return [{} for _ in requests]        # 假装结果还没回来 → 成员各自成页
+
+    plans = stage_plan(None, {"name": "域A"}, _members(5), batch=2, runner=_Deferred())
+
+    assert seen == ["l2plan|域A|0", "l2plan|域A|1", "l2plan|域A|2"]
+    assert sorted(pl["title"] for pl in plans) == ["P1", "P2", "P3", "P4", "P5"]
+

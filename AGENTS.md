@@ -54,7 +54,7 @@
   （记忆排除 UI 已下线，后端能力保留）；记忆页承载筛选/溯源/⭐加权/👍👎/蒸馏入口。
   会话与记忆通过 `session_uid`（全局递增）双向绑定跳转。
 - **测试纪律**：每次改动带测试；bug 修复先写复现测试（红→绿）；
-  `uv run pytest` 全绿是提交门槛（数量以实测为准，当前 767 passed / 1 skipped）。
+  `uv run pytest` 全绿是提交门槛（数量以实测为准，当前 791 passed / 1 skipped）。
   ⚠️ **别并发跑两个 `uv run`**（例如后台跑全量测试、前台又跑脚本）—— uv 会争用环境锁，
   实测导致 10 个毫不相干的测试假失败（snapshot / wiki_triggers），干净重跑即全绿。
 - **日志纪律**：统一 `logs/` 按程序分文件；测试必须隔离日志与数据目录
@@ -88,6 +88,9 @@
 - `ARCHITECTURE.md` — 架构说明
 - `docs/memory-distillation.md` — 记忆蒸馏的设计与实施记录
 - `docs/llm-wiki.md` — LLM Wiki 两级编译、失败兜底与格式修复的实测记录
+- `docs/llm-batch-offline.md` — 离线批处理（Batch API）接入设计：**接缝已就位、
+  上传/轮询/下载未实现**；接缝是 `stage_plan(..., runner=)`，编解码在
+  `agentmemhub/llm_batch.py`。⚠️ 接通前**不要加** `plan_mode` 这类配置键（假开关）
 - `docs/model-selection.md` — LLM 模型选型与定价（推荐 MiMo / 免费 LongCat）
 - `docs/API.md` — 对外接口契约（HTTP / MCP / CLI；含长任务约定与错误语义）
 - `docs/recall-fusion.md` — 召回融合的机制与实测数据（**最新权威描述见 `docs/data-architecture.md` §4**）
