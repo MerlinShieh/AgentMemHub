@@ -557,8 +557,26 @@ def _slug(s: str, n: int = 40) -> str:
     return (s[:n] or "page").rstrip("-")
 
 
+def _yaml_flow_scalar(s: object) -> str:
+    """把任意文本安全地放进 YAML **流式序列**（`[a, b]`）里的单个标量。
+
+    title 来自 LLM，不能假设它干净：裸标量以 `[`/`{`/`,`/`#`/`&`/`*` 等开头、
+    或含 `: ` / ` #` 时在 YAML 里都有特殊含义。统一用双引号包住 + 转义 `\\` 与 `"`
+    最省心（实测当前 362 个标题都没问题，但那是运气，不是保证）。
+    """
+    return '"%s"' % str(s).replace("\\", "\\\\").replace('"', '\\"')
+
+
 def render_page(page: dict, domain: str) -> str:
     L = ["---", "title: %s" % page["title"], "domain: %s" % domain,
+         # aliases：**这一行是给 Obsidian 用的**。Obsidian 的 `[[X]]` 按
+         # **文件名或 frontmatter aliases** 解析，**不读 title**；而页面里
+         # `**相关**：[[标题]]` 全是**标题**形态 —— 缺 aliases 时这些链接会
+         # 全部悬空，点一下还会让编辑器在 vault 根**自动新建一个空文件**
+         # （实测踩过：3 个空文件差点被当成知识页投影进召回面，见
+         # `wiki_index.project_pages` 的空页面闸）。让 title 兼作 alias，
+         # 零额外成本把图谱的链接真正接上。
+         "aliases: [%s]" % _yaml_flow_scalar(page["title"]),
          "type: %s" % page["type"],
          "compiled_at: %s" % time.strftime("%Y-%m-%d %H:%M:%S"),
          "sources: %d" % len(page["sources"]),
@@ -609,13 +627,34 @@ def render_index(domains: list[tuple[str, list[dict]]]) -> str:
 # 增量模式辅助
 # ---------------------------------------------------------------------------
 
+_FM_TITLE_RE = re.compile(r"^title:\s*(.+)$", re.M)
+_MD_SUMMARY_RE = re.compile(r"^\*\*摘要\*\*：(.+)$", re.M)
+
+
+def _page_meta_from_md(path: Path) -> tuple[str, str]:
+    """从页面 md 自身取 (title, summary)，作为 json 副产物缺失时的回落。
+
+    只解析本项目自己写出去的固定格式（frontmatter 的 `title:` 行与正文的
+    `**摘要**：` 行），不引入通用 markdown/frontmatter 解析依赖。
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return path.stem, ""
+    t = _FM_TITLE_RE.search(text)
+    s = _MD_SUMMARY_RE.search(text)
+    return ((t.group(1).strip() if t else "") or path.stem,
+            s.group(1).strip() if s else "")
+
+
 def render_index_from_disk(out: Path, include: list[tuple[str, list[dict]]],
                            skip_dirs: set[str]) -> str:
     """增量模式重建顶层索引：本轮域用内存结果，其余域从磁盘读。
 
     域名读各域 index.md 的首行（render_domain_index 写成 `# 域名`）；
-    页的 title/summary 读各页 json 产物。磁盘是唯一真相 —— 不在内存里的域
-    不能靠猜。
+    页的 title/summary 优先读各页 json 产物、缺失时回落 md 自身。
+    **页面的枚举以 `.md` 为准** —— 索引里的链接必须指向知识页本身。
+    磁盘是唯一真相 —— 不在内存里的域不能靠猜。
     """
     rows: list[tuple[str, list[tuple[str, str, str, str]]]] = []
     for name, pages_out in include:
@@ -634,13 +673,29 @@ def render_index_from_disk(out: Path, include: list[tuple[str, list[dict]]],
             except Exception:
                 pass
         pages: list[tuple[str, str, str, str]] = []
-        for jf in sorted(d.glob("*.json")):
-            try:
-                j = json.loads(jf.read_text(encoding="utf-8"))
-            except Exception:
+        # 以 **.md 为准**枚举页面。曾经这里是 `glob("*.json")` 并把 **json 文件名**
+        # 拼进链接，于是增量一跑顶层 index.md 就坏掉 —— 实测 362 条链接里 286 条
+        # 指向 .json（点开是 JSON 原文）；域级 index 走 render_domain_index 另一条
+        # 路径，所以没被污染，坏链因此潜伏了很久（2026-09-22 修复）。
+        # json 仍是 title/summary 的首选来源（它是 LLM 的原始结构化产物），
+        # 缺失或损坏时回落解析 md 自身。
+        for mf in sorted(d.glob("*.md")):
+            if mf.name == "index.md":
                 continue
-            pages.append((d.name, jf.name, j.get("title") or "(无标题)",
-                          (j.get("summary") or "").strip()))
+            title = summary = ""
+            jf = mf.with_suffix(".json")
+            if jf.exists():
+                try:
+                    j = json.loads(jf.read_text(encoding="utf-8"))
+                    title = (j.get("title") or "").strip()
+                    summary = (j.get("summary") or "").strip()
+                except Exception:
+                    pass
+            if not title or not summary:
+                md_title, md_summary = _page_meta_from_md(mf)
+                title = title or md_title
+                summary = summary or md_summary
+            pages.append((d.name, mf.name, title or "(无标题)", summary))
         if pages:
             rows.append((name, pages))
     total = sum(len(p) for _, p in rows)
@@ -652,6 +707,35 @@ def render_index_from_disk(out: Path, include: list[tuple[str, list[dict]]],
             L.append("- [%s](%s/%s) — %s" % (title, dname, fname, summary))
         L.append("")
     return "\n".join(L)
+
+
+def _prune_stale_domain_dirs(out: Path, keep: set[str], *, partial: bool) -> int:
+    """全量模式清掉**不属于本轮**的旧域目录，返回清掉的个数。
+
+    为什么必须清：重跑时域划分/命名一变就生成新目录，旧目录原地不动，两轮产出
+    混在一起（实测踩过：227 页的产出目录里躺着 449 个 md，核验与 linkfix 全被
+    污染）。产物是纯派生物，清掉随时可重建。
+
+    为什么**只清域目录**：产物目录可能被用户直接当 Obsidian vault 打开，里面会有
+    `.obsidian/`（编辑器配置）这类**不是本脚本产出**的东西。原实现是"凡是不在
+    本轮 keep 里的目录一律 rmtree"，会把用户的 vault 配置一起删掉 —— 不可逆的
+    数据丢失（2026-09-22 实测发现）。现在两道闸：**跳过隐藏目录**（`.` 开头）
+    且**只清 `%02d-` 数字前缀的域目录**。
+
+    增量模式（partial）**绝不清目录**：本轮只编了少数域，其它域的产物都在磁盘上，
+    清了就是把整个知识库删掉；目录名沿用现有映射，不让域集合编号重排波及未重编的域。
+    """
+    if partial:
+        return 0
+    removed = 0
+    for d in list(out.iterdir()):
+        if not d.is_dir() or d.name.startswith(".") or d.name in keep:
+            continue
+        if not d.name[:1].isdigit():      # 只认 `%02d-域名` 形态的域目录
+            continue
+        shutil.rmtree(d, ignore_errors=True)
+        removed += 1
+    return removed
 
 
 def assign_new_pages(client, table: list[dict], new_pages: list[dict],
@@ -938,14 +1022,9 @@ def run(args) -> None:
                     else "%02d-%s" % (i, _slug(name))))
             for i, name in enumerate(sorted(by_domain_pages), 1)]
     keep = {dirname for _, dirname in plan}
-    removed = 0
-    if not partial:
-        for d in list(out.iterdir()):
-            if d.is_dir() and d.name not in keep:
-                shutil.rmtree(d, ignore_errors=True)
-                removed += 1
-        if removed:
-            print("  清理上一轮的 %d 个旧域目录（避免两轮产出混在一起）" % removed)
+    removed = _prune_stale_domain_dirs(out, keep, partial=partial)
+    if removed:
+        print("  清理上一轮的 %d 个旧域目录（避免两轮产出混在一起）" % removed)
 
     results: list[tuple[str, list[dict]]] = []
     dir_of = {name: dirname for name, dirname in plan}

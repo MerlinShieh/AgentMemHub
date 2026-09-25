@@ -137,14 +137,27 @@ def project_pages(idx: sqlite3.Connection, l2_dir: Path | str,
     st = settings or load_settings()
 
     pages: list[dict[str, Any]] = []
+    skipped_empty = 0
     for f in sorted(root.rglob("*.md")):
         if f.name == "index.md":
             continue
         p = parse_page(f)
-        if p:
-            pages.append(p)
+        if not p:
+            continue
+        # **空页面不入召回面**：把产物目录当 Obsidian vault 打开时，点击未解析的
+        # `[[链接]]` 会让编辑器在原地**自动新建 0 字节的 md**，文件名就是链接文字。
+        # 这类文件会被 parse_page 照收（title 兜底 path.stem、domain 取父目录名），
+        # 于是变成"标题看着很正当、正文却是空"的召回单元 —— **安静污染召回面**
+        # （2026-09-25 实测：vault 根下 3 个空文件待投影，domain 全是错误的
+        #  `out_l2_mimo`，且 origin 会标成 native）。判据用「正文为空」而非文件
+        # 大小：正文才是知识，frontmatter 不算。
+        if not p["body"].strip():
+            skipped_empty += 1
+            continue
+        pages.append(p)
     if not pages:
         return {"pages": 0, "inserted": 0, "updated": 0, "removed": 0,
+                "skipped_empty": skipped_empty,
                 "message": "未找到页面（检查 L2 目录）"}
 
     # 向量用**整页正文**（含标题与摘要）：实测比"仅标题+摘要"更好——摘要虽聚焦，
@@ -214,9 +227,10 @@ def project_pages(idx: sqlite3.Connection, l2_dir: Path | str,
                                 (int(row[0]),))
                 idx.execute("DELETE FROM units WHERE id=?", (int(row[0]),))
     log(f"页面层投影：{len(pages)} 页（新增 {inserted} / 更新 {updated} / "
-        f"清理 {len(gone)}）")
+        f"清理 {len(gone)}）"
+        + (f"；跳过 {skipped_empty} 个空页面" if skipped_empty else ""))
     return {"pages": len(pages), "inserted": inserted, "updated": updated,
-            "removed": len(gone)}
+            "removed": len(gone), "skipped_empty": skipped_empty}
 
 
 def stats(idx: sqlite3.Connection) -> dict[str, Any]:

@@ -468,3 +468,148 @@ def test_组级并发_并发度1时走串行结果一致():
     out, _failed = _compile_groups(_C(), _mems(3), groups, 1, log=lambda *a: None)
     assert [p["_members"][0] for p in out] == [1, 2, 3]
 
+
+# ---------------------------------------------------------------------------
+# 顶层索引：链接必须指向知识页（.md），不是 json 副产物
+# ---------------------------------------------------------------------------
+
+_PAGE_MD = "\n".join([
+    "---",
+    "title: 页面甲",
+    "domain: 域A",
+    "type: concept",
+    "compiled_at: 2026-09-22 12:00:00",
+    "sources: 3",
+    "merged_from: 2",
+    "generator: wiki_aggregate prototype",
+    "---",
+    "",
+    "# 页面甲",
+    "",
+    "**摘要**：这是页面甲的摘要。",
+    "",
+    "正文。",
+])
+
+
+def _domain(tmp_path: Path, dirname: str = "01-域A") -> Path:
+    d = tmp_path / dirname
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "index.md").write_text("# 域A\n", encoding="utf-8")
+    return d
+
+
+def test_顶层索引链接指向md而不是json(tmp_path):
+    """实测踩过（2026-09-22 修复）：增量路径曾 `glob("*.json")` 并把 **json 文件名**
+    拼进链接，导致顶层 index.md 的 362 条链接里 286 条指向 .json（点开是 JSON 原文）。
+    域级 index 走 render_domain_index 另一条路径所以没被污染，坏链因此潜伏很久。
+    """
+    from wiki_aggregate import render_index_from_disk
+
+    d = _domain(tmp_path)
+    (d / "001-页面甲.md").write_text(_PAGE_MD, encoding="utf-8")
+    (d / "001-页面甲.json").write_text(
+        json.dumps({"title": "页面甲", "summary": "这是页面甲的摘要。"},
+                   ensure_ascii=False), encoding="utf-8")
+
+    text = render_index_from_disk(tmp_path, [], set())
+
+    assert ".json" not in text, "顶层索引里不允许出现 json 链接"
+    assert "(01-域A/001-页面甲.md)" in text
+    assert "页面甲" in text and "这是页面甲的摘要。" in text
+
+
+def test_顶层索引_json缺失时回落md自身(tmp_path):
+    """json 是派生副产物，丢了不该让页面从索引里消失。"""
+    from wiki_aggregate import render_index_from_disk
+
+    d = _domain(tmp_path, "02-域B")
+    (d / "007-页面乙.md").write_text(
+        _PAGE_MD.replace("页面甲", "页面乙"), encoding="utf-8")
+
+    text = render_index_from_disk(tmp_path, [], set())
+
+    assert "(02-域B/007-页面乙.md)" in text
+    assert "页面乙" in text
+    assert "这是页面乙的摘要。" in text
+
+
+def test_顶层索引跳过index本身(tmp_path):
+    """各域的 index.md 是导航不是知识页，不该被列进顶层索引。"""
+    from wiki_aggregate import render_index_from_disk
+
+    d = _domain(tmp_path)
+    (d / "001-页面甲.md").write_text(_PAGE_MD, encoding="utf-8")
+
+    text = render_index_from_disk(tmp_path, [], set())
+
+    assert "index.md" not in text
+
+
+# ---------------------------------------------------------------------------
+# 全量清理：只清域目录，不碰用户的东西
+# ---------------------------------------------------------------------------
+
+def test_清理旧域目录时不动隐藏目录(tmp_path):
+    """实测踩过（2026-09-22）：产物目录被直接当 Obsidian vault 用时，
+    `.obsidian/` 会被"凡是不在本轮 keep 里的目录一律 rmtree"一起删掉 —— 不可逆。
+    隐藏目录是用户的编辑器配置，不是本脚本的派生物。
+    """
+    from wiki_aggregate import _prune_stale_domain_dirs
+
+    (tmp_path / ".obsidian").mkdir()
+    (tmp_path / ".obsidian" / "app.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "01-旧域").mkdir()
+    (tmp_path / "02-本轮域").mkdir()
+    (tmp_path / "用户自建目录").mkdir()
+
+    removed = _prune_stale_domain_dirs(tmp_path, {"02-本轮域"}, partial=False)
+
+    assert removed == 1
+    assert not (tmp_path / "01-旧域").exists(), "不属于本轮的域目录应被清掉"
+    assert (tmp_path / "02-本轮域").exists(), "本轮域目录必须保留"
+    assert (tmp_path / ".obsidian" / "app.json").exists(), "隐藏目录不能被删"
+    assert (tmp_path / "用户自建目录").exists(), "非域目录（用户自建）不能被删"
+
+
+def test_增量模式绝不清目录(tmp_path):
+    """增量只编了少数域，其它域产物都在磁盘上 —— 清了等于删掉整个知识库。"""
+    from wiki_aggregate import _prune_stale_domain_dirs
+
+    (tmp_path / "01-旧域").mkdir()
+    (tmp_path / "02-本轮域").mkdir()
+
+    assert _prune_stale_domain_dirs(tmp_path, {"02-本轮域"}, partial=True) == 0
+    assert (tmp_path / "01-旧域").exists()
+
+
+# ---------------------------------------------------------------------------
+# frontmatter aliases：让 Obsidian 的 [[标题]] 能解析
+# ---------------------------------------------------------------------------
+
+def test_渲染页面写出aliases供Obsidian解析():
+    """Obsidian 的 `[[X]]` 按**文件名或 frontmatter aliases** 解析、**不读 title**；
+    而 `**相关**` 里全是 `[[标题]]`，且 L2 文件名带 `NNN-` 前缀 —— 不给 aliases，
+    这些链接就全悬空。实测：补前 948 处链接 **0** 可解析，补后 **948/948**。
+    """
+    from wiki_aggregate import render_page
+
+    page = {"title": "ADBController 核心设计与功能清单", "type": "entity",
+            "summary": "摘要", "body": "正文", "related": [], "sources": [],
+            "from_titles": [], "from_files": []}
+    text = render_page(page, "01-ADBController-与-Android-自动化")
+
+    assert 'aliases: ["ADBController 核心设计与功能清单"]' in text
+    assert text.index("aliases:") < text.index("---\n\n#"), "aliases 必须在 frontmatter 内"
+
+
+def test_yaml标量转义():
+    """title 来自 LLM，不能假设干净：引号/反斜杠必须转义，否则写出非法 YAML。"""
+    from wiki_aggregate import _yaml_flow_scalar
+
+    assert _yaml_flow_scalar('正常标题') == '"正常标题"'
+    assert _yaml_flow_scalar('带"引号"的') == '"带\\"引号\\"的"'
+    assert _yaml_flow_scalar("反\\斜杠") == '"反\\\\斜杠"'
+    # 会被 YAML 当特殊含义开头的，也被引号保护住
+    assert _yaml_flow_scalar("[看起来像列表]").startswith('"[')
+

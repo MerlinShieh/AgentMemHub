@@ -253,3 +253,67 @@ def test_召回_页面层返回摘要与路径且正文截断():
     k = kind_of("wiki_" + "x" * 8)
     assert k == "page"
     assert len(long_text) > PAGE_TEXT_CAP
+
+
+# ---------------------------------------------------------------------------
+# 空页面（编辑器在产物目录里自动新建的文件）
+# ---------------------------------------------------------------------------
+
+def test_空页面不入召回面(env, monkeypatch):
+    """实测踩过（2026-09-25）：把产物目录当 Obsidian vault 打开时，点击**未解析**的
+    `[[链接]]` 会让编辑器在 vault 根**自动新建 0 字节 md**。这类文件会被 parse_page
+    照收 —— title 兜底成 path.stem（看着很正当）、domain 取父目录名（即 vault 根名，
+    一个根本不存在的域）、origin 标成 native —— 于是 3 个空文件差点变成 3 条召回单元。
+    """
+    conn, tmp_path = env
+    d = tmp_path / "l2"
+    _page(d, "01-域A", "001-正常.md", "正常页", "摘要", "正文")
+    # Obsidian 自动新建：0 字节、落在 vault 根（不在任何域目录内）
+    (d / "ADBController 核心设计与功能清单.md").write_text("", encoding="utf-8")
+    _patch_vectors(monkeypatch)
+
+    st = _project(conn, d)
+
+    titles = [r[0] for r in conn.execute(
+        "SELECT title FROM units WHERE source='wiki'")]
+    assert titles == ["正常页"], "空页面不该进召回面"
+    assert st["skipped_empty"] == 1
+    assert st["pages"] == 1
+    conn.close()
+
+
+def test_只有frontmatter没有正文的页面也被跳过(env, monkeypatch):
+    """判据是「正文为空」而不是文件大小 —— 有 frontmatter 但无正文同样是空页面。"""
+    conn, tmp_path = env
+    d = tmp_path / "l2"
+    _page(d, "01-域A", "001-正常.md", "正常页", "摘要", "正文")
+    f = d / "01-域A" / "002-空壳.md"
+    f.write_text("---\ntitle: 空壳\ndomain: 01-域A\n---\n\n", encoding="utf-8")
+    _patch_vectors(monkeypatch)
+
+    st = _project(conn, d)
+
+    assert st["skipped_empty"] == 1
+    assert [r[0] for r in conn.execute(
+        "SELECT title FROM units WHERE source='wiki'")] == ["正常页"]
+    conn.close()
+
+
+def test_带aliases的页面仍能正常解析(tmp_path):
+    """补 aliases 是为了 Obsidian；它不能影响 parse_page 的正则解析
+    （title / domain / origin / doc 都是行锚正则，多一行不该被带偏）。"""
+    from agentmemhub.wiki_index import parse_page
+
+    f = tmp_path / "001-页A.md"
+    f.write_text(
+        '---\ntitle: 页A\naliases: ["页A"]\ndomain: 域A\norigin: external\n'
+        'doc: web_abc123\n---\n\n# 页A\n\n**摘要**：要点\n\n正文内容\n',
+        encoding="utf-8")
+
+    p = parse_page(f)
+
+    assert p["title"] == "页A"
+    assert p["domain"] == "域A"
+    assert p["origin"] == "external"
+    assert "正文内容" in p["body"]
+    assert "aliases" not in p["body"], "frontmatter 不该混进正文"
