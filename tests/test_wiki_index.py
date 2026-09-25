@@ -299,6 +299,25 @@ def test_只有frontmatter没有正文的页面也被跳过(env, monkeypatch):
     conn.close()
 
 
+def test_点开头目录下的页面不入召回面(env, monkeypatch):
+    """`.obsidian/`（编辑器配置）与 `_swap_domain_dir()` 崩溃时残留的 `.tmp_*`
+    都可能含 md；它们一旦被投影，会以**错误的 domain**（点目录名）混进召回面。
+    """
+    conn, tmp_path = env
+    d = tmp_path / "l2"
+    _page(d, "01-域A", "001-正常.md", "正常页", "摘要", "正文")
+    _page(d, ".tmp_01-域A", "001-写盘中间态.md", "中间态页", "摘要", "正文")
+    _page(d, ".obsidian", "001-配置.md", "配置页", "摘要", "正文")
+    _patch_vectors(monkeypatch)
+
+    _project(conn, d)
+
+    titles = [r[0] for r in conn.execute(
+        "SELECT title FROM units WHERE source='wiki'")]
+    assert titles == ["正常页"], "点开头目录下的文件不该进召回面"
+    conn.close()
+
+
 def test_带aliases的页面仍能正常解析(tmp_path):
     """补 aliases 是为了 Obsidian；它不能影响 parse_page 的正则解析
     （title / domain / origin / doc 都是行锚正则，多一行不该被带偏）。"""

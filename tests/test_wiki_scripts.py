@@ -8,6 +8,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
@@ -612,4 +614,96 @@ def test_yaml标量转义():
     assert _yaml_flow_scalar("反\\斜杠") == '"反\\\\斜杠"'
     # 会被 YAML 当特殊含义开头的，也被引号保护住
     assert _yaml_flow_scalar("[看起来像列表]").startswith('"[')
+
+
+# ---------------------------------------------------------------------------
+# 写盘保护：LLM 故障时的降级结果不许覆盖好产物
+# （2026-09-25 丢页事故：33 页的域被降级结果整域替换成 1 页，整轮丢 73 页）
+# ---------------------------------------------------------------------------
+
+def test_页数崩塌判据():
+    """新页数远少于旧页数 → 判崩塌、拒写该域。小域要放行（别误伤）。"""
+    from wiki_aggregate import _is_page_collapse
+
+    assert _is_page_collapse(33, 1) is True          # 事故现场：33→1
+    assert _is_page_collapse(44, 1) is True
+    assert _is_page_collapse(10, 4) is True          # 低于一半
+    assert _is_page_collapse(10, 5) is False         # 恰好一半：放行（正常合并）
+    assert _is_page_collapse(10, 9) is False
+    assert _is_page_collapse(3, 1) is False          # 小域不启用判据
+    assert _is_page_collapse(0, 0) is False
+    assert _is_page_collapse(2, 1) is False          # 旧页数不足 COLLAPSE_MIN_OLD
+
+
+def test_整轮降级判据():
+    """fail-open 降级页占比过半 → 整轮不写盘（比逐域判据更早的一闸）。"""
+    from wiki_aggregate import _is_degraded_run
+
+    assert _is_degraded_run(10, 10) is True          # 全降级（LLM 全挂）
+    assert _is_degraded_run(5, 10) is True           # 恰好一半
+    assert _is_degraded_run(4, 10) is False
+    assert _is_degraded_run(0, 10) is False
+    assert _is_degraded_run(0, 0) is False           # 空任务不算降级
+
+
+def test_域目录整体换入(tmp_path):
+    """写盘改为「先写临时目录、再整体换入」——旧页必须消失，且不留 .tmp_/.bak_ 垃圾。"""
+    from wiki_aggregate import _count_domain_pages, _swap_domain_dir
+
+    d = tmp_path / "01-域A"
+    d.mkdir()
+    (d / "001-旧页.md").write_text("旧", encoding="utf-8")
+    (d / "002-旧页.md").write_text("旧", encoding="utf-8")
+    (d / "index.md").write_text("# 域A", encoding="utf-8")
+    (d / "001-旧页.json").write_text("{}", encoding="utf-8")
+    assert _count_domain_pages(d) == 2
+
+    _swap_domain_dir(tmp_path, d, {"001-新页.md": "新正文",
+                                   "001-新页.json": "{}",
+                                   "index.md": "# 域A"})
+
+    names = sorted(f.name for f in d.iterdir())
+    assert names == ["001-新页.json", "001-新页.md", "index.md"]
+    assert (d / "001-新页.md").read_text(encoding="utf-8") == "新正文"
+    assert _count_domain_pages(d) == 1
+    leftovers = [f.name for f in tmp_path.iterdir() if f.name.startswith(".")]
+    assert leftovers == [], "不该留下 .tmp_/.bak_ 临时目录"
+
+
+def test_域目录换入失败时还原旧目录(tmp_path, monkeypatch):
+    """换入中途失败必须把旧产物还原 —— 这正是"先删旧写新"做不到的事。"""
+    from wiki_aggregate import _swap_domain_dir
+
+    d = tmp_path / "01-域A"
+    d.mkdir()
+    (d / "001-旧页.md").write_text("旧", encoding="utf-8")
+
+    real_rename = Path.rename
+    calls = {"n": 0}
+
+    def flaky(self, target):
+        calls["n"] += 1
+        if calls["n"] == 2:                 # 第 1 次（旧→bak）放行，第 2 次（tmp→正式）失败
+            raise OSError("模拟磁盘故障")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", flaky)
+    with pytest.raises(OSError):
+        _swap_domain_dir(tmp_path, d, {"001-新页.md": "新"})
+
+    assert (d / "001-旧页.md").exists(), "换入失败必须还原旧产物"
+    assert not (d / "001-新页.md").exists()
+    assert not (tmp_path / ".bak_01-域A").exists()
+
+
+def test_域目录计数忽略index与json(tmp_path):
+    from wiki_aggregate import _count_domain_pages
+
+    d = tmp_path / "01-域A"
+    assert _count_domain_pages(d) == 0            # 目录不存在
+    d.mkdir()
+    (d / "index.md").write_text("x", encoding="utf-8")
+    (d / "001-页.md").write_text("x", encoding="utf-8")
+    (d / "001-页.json").write_text("{}", encoding="utf-8")
+    assert _count_domain_pages(d) == 1
 

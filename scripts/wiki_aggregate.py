@@ -59,6 +59,18 @@ L2_WORKERS = 6
 L2_MIN_PAGES = 2
 L2_DOMAIN_MAX = 60
 
+#: 写盘保护阈值（2026-09-25 丢页事故后加）。
+#: 事故：定时触发的 L2 聚合在 LLM 上游**全程 HTTP 524** 时仍照写 —— 域内细分失败
+#: 退化成"一域一页"，33 页的域被**整域替换**成 1 页，整轮 362 → 289 页、丢 73 页、
+#: 334 处 `[[链接]]` 变悬空。产物虽是派生物，但"降级结果覆盖好结果"不可逆，
+#: 所以宁可**不写**（保留上一轮产物 + 记日志/失败清单），也不要写下去。
+#:   · COLLAPSE_MIN_OLD    ：旧页数达到该值才启用页数崩塌判据（小域本就 1~2 页，别误伤）
+#:   · COLLAPSE_RATIO      ：新页数 < 旧页数 × 该比例 → 判崩塌，拒写该域
+#:   · ABORT_DEGRADE_RATIO ：本轮 fail-open 降级的页占比 ≥ 该值 → **整轮不写盘**
+COLLAPSE_MIN_OLD = 4
+COLLAPSE_RATIO = 0.5
+ABORT_DEGRADE_RATIO = 0.5
+
 
 def _l2_cfg(key: str, default: int) -> int:
     """读 `wiki.l2.<key>`；读不到（脚本独立运行 / 键缺失 / 非法）回落常量。
@@ -738,6 +750,57 @@ def _prune_stale_domain_dirs(out: Path, keep: set[str], *, partial: bool) -> int
     return removed
 
 
+def _is_degraded_run(n_degraded: int, n_tasks: int) -> bool:
+    """本轮是否"降级到不该写盘"（fail-open 降级页占比 ≥ 阈值）。
+
+    这一闸比逐域的页数崩塌更早：LLM 整体不可用时，**整轮都不该落盘**。
+    """
+    return n_tasks > 0 and n_degraded / n_tasks >= ABORT_DEGRADE_RATIO
+
+
+def _is_page_collapse(old_n: int, new_n: int) -> bool:
+    """页数是否"崩塌"到不该写的程度（判据见 COLLAPSE_* 的说明）。
+
+    抽成函数是为了可测：这个判据是**防止降级产物覆盖好产物**的最后一道闸。
+    """
+    return old_n >= COLLAPSE_MIN_OLD and new_n < old_n * COLLAPSE_RATIO
+
+
+def _count_domain_pages(ddir: Path) -> int:
+    """某域目录里**现有**的知识页数（不含 index.md）。目录不存在算 0。"""
+    if not ddir.is_dir():
+        return 0
+    return sum(1 for f in ddir.glob("*.md") if f.name != "index.md")
+
+
+def _swap_domain_dir(out: Path, ddir: Path, files: dict[str, str]) -> None:
+    """把一个域的产物**整体换入**：先全量写进临时目录，成功后再与目标目录交换。
+
+    为什么不能原地"删旧写新"：中途失败（磁盘满 / 进程被杀）会留下"旧页已删、新页
+    没写"的半成品；而且**降级结果一旦写下就不可逆**（见 COLLAPSE_* 的说明）。
+
+    临时目录与备份目录都用 `.` 前缀，`_prune_stale_domain_dirs` 不会碰它们；
+    正常路径下 `finally` 也会把备份清掉，不会留垃圾。
+    """
+    tmp = out / (".tmp_" + ddir.name)
+    bak = out / (".bak_" + ddir.name)
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True)
+    for fname, text in files.items():
+        (tmp / fname).write_text(text, encoding="utf-8")
+    shutil.rmtree(bak, ignore_errors=True)
+    try:
+        if ddir.exists():
+            ddir.rename(bak)
+        tmp.rename(ddir)
+    except Exception:
+        if not ddir.exists() and bak.exists():
+            bak.rename(ddir)              # 换入失败 → 尽力把旧目录还原回去
+        raise
+    finally:
+        shutil.rmtree(bak, ignore_errors=True)
+
+
 def assign_new_pages(client, table: list[dict], new_pages: list[dict],
                      rep_pages: dict[str, list[str]] | None = None) -> dict[str, list[dict]]:
     """把新增 L1 页归入**现有**域表（一次调用，便宜）。
@@ -956,6 +1019,10 @@ def run(args) -> None:
              for ti, pl in enumerate(plans, 1)]
     print("\n③ 重新编译（%d 个最终页，并发 %d）…" % (len(tasks), cfg_workers), flush=True)
 
+    # fail-open 降级过的页标题（LLM 失败 / 解析失败的代理信号）。线程安全：
+    # 只做 append，GIL 下足够；读完在写盘前，此时并发已结束。
+    degraded: list[str] = []
+
     def compile_task(t):
         name, ti, pl = t
         group = pl["group"]
@@ -973,6 +1040,7 @@ def run(args) -> None:
             except Exception as e:
                 # fail-open：编译失败就退化为"拼起来"，总比丢内容强
                 print("     编译失败，退化为直接拼接：%s" % str(e)[:70], flush=True)
+                degraded.append(pl["title"])
                 page = {"title": pl["title"], "type": group[0]["type"],
                         "summary": group[0]["summary"],
                         "body": "\n\n---\n\n".join(p["body"].strip() for p in group),
@@ -1026,28 +1094,51 @@ def run(args) -> None:
     if removed:
         print("  清理上一轮的 %d 个旧域目录（避免两轮产出混在一起）" % removed)
 
+    # ---- 降级保护：降级页占比过高时**整轮不写盘** ----
+    # fail-open 能保住内容，但质量会崩塌；而下面写盘是**整域替换**，把降级产物写下去
+    # 就是用差结果占掉好结果的位置。宁可本轮什么都不写、保留上一轮产物。
+    if _is_degraded_run(len(degraded), len(tasks)):
+        print("\n⚠️ 降级页占比 %.0f%%（%d/%d）≥ 阈值 %.0f%% —— **本轮不写盘**，"
+              "保留上一轮产物；请等 LLM 恢复后重跑。"
+              % (len(degraded) / len(tasks) * 100, len(degraded), len(tasks),
+                 ABORT_DEGRADE_RATIO * 100), flush=True)
+        _wlog(event="run_aborted", script="wiki_aggregate", stage="l2",
+              reason="degrade_ratio", degraded=len(degraded), tasks=len(tasks))
+        return
+
     results: list[tuple[str, list[dict]]] = []
     dir_of = {name: dirname for name, dirname in plan}
+    collapse_skipped: list[str] = []
     for di, name in enumerate(sorted(by_domain_pages), 1):
         pages_out = sorted(by_domain_pages[name], key=lambda p: p["_file"])
         ddir = out / dir_of[name]
-        ddir.mkdir(parents=True, exist_ok=True)
-        # 清掉本域上一轮的页产物：重编后页数/标题可能变化，旧文件名不再出现，
-        # 不清就新旧混杂（index 只列新页，幽灵文件却还在 —— linkfix、
-        # 对齐审计与阅读目录的人都会被误导）。index.md 随后覆盖，无需处理。
-        for old in ddir.glob("*.md"):
-            if old.name != "index.md":
-                old.unlink()
-        for old in ddir.glob("*.json"):
-            old.unlink()
+        old_n = _count_domain_pages(ddir)
+        new_n = len(pages_out)
+        # 页数崩塌保护：写盘是**整域替换**，降级结果一旦写下就不可逆。
+        # 实测 2026-09-25：LLM 上游全程 524 → 域内细分退化成"一域一页"，
+        # 33 页的域被写成 1 页，整轮丢 73 页、334 处链接悬空。
+        if _is_page_collapse(old_n, new_n):
+            collapse_skipped.append(name)
+            print("  ⚠️ 跳过写盘：%-24s %d → %d 页（疑似降级，保留旧产物）"
+                  % (name[:24], old_n, new_n), flush=True)
+            _wlog(event="domain_write_skipped", domain=name, reason="page_collapse",
+                  old_pages=old_n, new_pages=new_n)
+            fl.record(stage="l2-write", target=name,
+                      error="页数崩塌 %d→%d，已保留旧产物" % (old_n, new_n))
+            continue
+        # 先全量渲染到内存，再整体换入 —— 不再原地"删旧写新"
+        files: dict[str, str] = {}
         for p in pages_out:
             p["_dir"] = ddir.name
-            (ddir / p["_file"]).write_text(render_page(p, name), encoding="utf-8")
-            (ddir / p["_file"].replace(".md", ".json")).write_text(
-                json.dumps(p, ensure_ascii=False, indent=2), encoding="utf-8")
-        (ddir / "index.md").write_text(render_domain_index(name, pages_out),
-                                       encoding="utf-8")
+            files[p["_file"]] = render_page(p, name)
+            files[p["_file"].replace(".md", ".json")] = json.dumps(
+                p, ensure_ascii=False, indent=2)
+        files["index.md"] = render_domain_index(name, pages_out)
+        _swap_domain_dir(out, ddir, files)
         results.append((name, pages_out))
+    if collapse_skipped:
+        print("  共跳过 %d 个域（页数崩塌），它们保持上一轮产物：%s"
+              % (len(collapse_skipped), "、".join(collapse_skipped[:5])))
 
     if partial:
         # 增量：顶层索引 = 本轮域（内存）+ 其余域（磁盘，域名读各域 index.md 首行）

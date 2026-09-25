@@ -141,6 +141,13 @@ def project_pages(idx: sqlite3.Connection, l2_dir: Path | str,
     for f in sorted(root.rglob("*.md")):
         if f.name == "index.md":
             continue
+        # 跳过**点开头目录**下的文件：`.obsidian/`（编辑器配置）与
+        # `_swap_domain_dir()` 写盘崩溃时可能残留的 `.tmp_*` / `.bak_*`。
+        # 它们是配置或中间态，一旦被当成知识页投影，会以**错误的 domain**
+        # （点目录名）混进召回面（2026-09-25 加，与 `_prune_stale_domain_dirs`
+        # 的隐藏目录白名单同一原则）。
+        if any(p.startswith(".") for p in f.relative_to(root).parts[:-1]):
+            continue
         p = parse_page(f)
         if not p:
             continue
