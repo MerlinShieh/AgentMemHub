@@ -40,6 +40,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -501,6 +502,17 @@ def plan_prompt(domain_name: str, members: list[dict]) -> str:
     return USER_PLAN.format(domain=domain_name, n=len(members), listing=listing)
 
 
+def _domain_key(name: str) -> str:
+    """custom_id 里的域名段：`slug + 名称 crc32` 后缀。
+
+    为什么不能只用 slug：不同域名完全可能 slug 成同一个串（只差标点/分隔符），
+    而 custom_id 是**离线批处理的凭据** —— 撞了就是"把 A 域的结果填进 B 域"，
+    既花错钱又写错页。加个短哈希把唯一性钉死。
+    """
+    import zlib
+    return "%s-%08x" % (_slug(name), zlib.crc32(name.encode("utf-8")))
+
+
 def plan_requests(domain_key: str, domain_name: str, members: list[dict],
                   size: int) -> list[BatchRequest]:
     """把域内成员切成若干批，每批**一条请求**。
@@ -534,7 +546,7 @@ def stage_plan(client, domain: dict, members: list[dict], *,
     size = batch or L2_PLAN_BATCH_MAX
     if size <= 0:
         size = L2_PLAN_BATCH_MAX
-    reqs = plan_requests(domain.get("key") or _slug(domain.get("name", "")),
+    reqs = plan_requests(domain.get("key") or _domain_key(domain.get("name", "")),
                          domain.get("name", ""), members, size)
     if runner is None:
         runner = SyncRunner(
@@ -1148,6 +1160,28 @@ def run(args) -> None:
                   % (done, len(tasks), name[:24], page["title"][:38],
                      len(page["from_titles"])), flush=True)
 
+    # 本轮写盘的**如实回报**：谁进来了、谁被跳过、有没有整轮中止、写了多少页。
+    # 上层（`wiki.py`）必须靠它决定"新基线该记哪些输入" —— 少了它，被跳过/被中止
+    # 的那批输入仍会被记成"已编译"，下轮再也不会重试（静默丢失）。
+    status: dict[str, Any] = {"aborted": "", "written_domains": [],
+                              "skipped_domains": [], "pages": 0,
+                              "pages_by_domain": {}}
+
+    # ---- 整轮降级闸：**必须在一切破坏性动作之前** ----
+    # 关键在"之前"：下面的 `_prune_stale_domain_dirs` 会删掉不属于本轮的旧域目录，
+    # 那也是写盘的一部分 —— 先删了目录再中止，等于"声称中止了、磁盘却已经动了"。
+    # fail-open 能保住内容，但质量会崩塌；而写盘是**整域替换**，把降级产物写下去
+    # 就是用差结果占掉好结果的位置。宁可本轮什么都不做。
+    if _is_degraded_run(len(degraded), len(tasks)):
+        print("\n⚠️ 降级页占比 %.0f%%（%d/%d）≥ 阈值 %.0f%% —— **本轮不写盘**，"
+              "保留上一轮产物；请等 LLM 恢复后重跑。"
+              % (len(degraded) / len(tasks) * 100, len(degraded), len(tasks),
+                 ABORT_DEGRADE_RATIO * 100), flush=True)
+        _wlog(event="run_aborted", script="wiki_aggregate", stage="l2",
+              reason="degrade_ratio", degraded=len(degraded), tasks=len(tasks))
+        status["aborted"] = "degrade_ratio"
+        return status
+
     # ---- 写盘 ----
     # 全量模式：先算出本轮的域目录名，再清掉**不属于本轮**的旧域目录。
     # 不清的后果：重跑时域划分/命名一变就生成新目录，旧目录原地不动，
@@ -1163,18 +1197,6 @@ def run(args) -> None:
     removed = _prune_stale_domain_dirs(out, keep, partial=partial)
     if removed:
         print("  清理上一轮的 %d 个旧域目录（避免两轮产出混在一起）" % removed)
-
-    # ---- 降级保护：降级页占比过高时**整轮不写盘** ----
-    # fail-open 能保住内容，但质量会崩塌；而下面写盘是**整域替换**，把降级产物写下去
-    # 就是用差结果占掉好结果的位置。宁可本轮什么都不写、保留上一轮产物。
-    if _is_degraded_run(len(degraded), len(tasks)):
-        print("\n⚠️ 降级页占比 %.0f%%（%d/%d）≥ 阈值 %.0f%% —— **本轮不写盘**，"
-              "保留上一轮产物；请等 LLM 恢复后重跑。"
-              % (len(degraded) / len(tasks) * 100, len(degraded), len(tasks),
-                 ABORT_DEGRADE_RATIO * 100), flush=True)
-        _wlog(event="run_aborted", script="wiki_aggregate", stage="l2",
-              reason="degrade_ratio", degraded=len(degraded), tasks=len(tasks))
-        return
 
     results: list[tuple[str, list[dict]]] = []
     dir_of = {name: dirname for name, dirname in plan}
@@ -1206,6 +1228,9 @@ def run(args) -> None:
         files["index.md"] = render_domain_index(name, pages_out)
         _swap_domain_dir(out, ddir, files)
         results.append((name, pages_out))
+        status["written_domains"].append(name)
+        status["pages_by_domain"][name] = len(pages_out)
+    status["skipped_domains"] = list(collapse_skipped)
     if collapse_skipped:
         print("  共跳过 %d 个域（页数崩塌），它们保持上一轮产物：%s"
               % (len(collapse_skipped), "、".join(collapse_skipped[:5])))
@@ -1266,6 +1291,8 @@ def run(args) -> None:
             print("⚠️ 编译清单写入失败（不影响产物）：%s: %s" % (type(e).__name__, e))
     else:
         print("⚠️ 未提供索引库，跳过编译清单（对齐审计将没有 diff 锚点）")
+    status["pages"] = n_pages
+    return status
 
 
 def main() -> None:

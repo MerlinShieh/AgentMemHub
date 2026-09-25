@@ -161,9 +161,14 @@ def retry_failed(*, stage: str, out_dir: Path | str, src: str = "",
         recompile_single=False, thinking="", no_resume=False, resume=True,
         retry_failed=True,
     )
-    wiki_aggregate.run(args)
+    st = wiki_aggregate.run(args) or {}
     return {
         "stage": "l2", "retried": len(bad_domains),
+        # 如实回报：中止 / 跳过 / 实际写了几域几页（`--retry-failed` 也走同一条闸）
+        "aborted": str(st.get("aborted") or ""),
+        "written_domains": len(st.get("written_domains") or []),
+        "skipped_domains": list(st.get("skipped_domains") or []),
+        "pages": int(st.get("pages") or 0),
         "seconds": round(time.time() - t0, 1),
         "summary": failures_summary(out),
     }
@@ -339,6 +344,26 @@ def _delete_empty_session_outputs(l1_dir: Path, sessions: set, db: str) -> list[
     return removed
 
 
+def _l2_skip_ids(dom_out: dict[str, Any], dirty_domains: list[str],
+                 written: set[str], skipped: list[str]) -> set[int]:
+    """算出「**没真正写出来**的脏域」覆盖的记忆 id —— 它们必须被剔除出 L2 新基线。
+
+    没编译却记成已编译 = **永久掩盖**（align 下轮不再报脏、这批数据再也不会重编）。
+    三类都算在内：
+      · **页数崩塌保护跳过的域**（`skipped`）
+      · **逐最终页编译整域失败的域**（聚合的 `by_domain_pages` 里根本没有它）
+      · **聚合什么都没写的路径**（只归域的 dry-run、异常提前返回…）
+
+    宁可"多剔除、下轮重试"，也不能漏剔除 —— 重试只是多花一次钱，漏剔除是静默丢数据。
+    """
+    unwritten = set(skipped) | {n for n in (dirty_domains or [])
+                                if n not in written}
+    out: set[int] = set()
+    for n in unwritten:
+        out.update(dom_out.get(n, {}).get("mids") or [])
+    return out
+
+
 def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
            workers: int = 0, on_progress: Callable[[str], None] | None = None) -> dict[str, Any]:
     """增量更新：RAG 库变了，只重编受影响的 L1 页与 L2 域（**不全量重来**）。
@@ -471,17 +496,34 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
     # 全失败就跳过 —— 时间留给真正的重试（失败会话没进新基线，下次写入会重试）。
     l1_all_failed = bool(dirty_sessions) and not l1_ok and not removed_files
     fix: dict[str, Any] = {}
+    # 聚合的**如实回报**（中止 / 跳过的域 / 实际写了哪些域）。三者都必须影响下面的
+    # "新基线" —— 否则没真正编译的输入会被记成已编译，永久掩盖（本函数第 6 步
+    # 开头那段注释讲的正是这类静默丢失，只是此前没有把中止这条路径接上）。
+    l2_run: dict[str, Any] = {}
+    l2_aborted = ""
+    l2_skipped: list[str] = []
     if l1_all_failed:
         l2_stats: dict[str, Any] = {
             "domains_recompiled": 0, "pages": 0,
             "skipped": "L1 全部失败（%d 个会话），不基于旧 L1 重跑 L2" % len(l1_bad)}
     else:
-        wiki_aggregate.run(args)
-        # ---- 5. linkfix（L2 标题可能变）----
-        import wiki_linkfix
-        fix = wiki_linkfix.run_fix(l2, dry_run=False)
-        l2_stats = {"domains_recompiled": len(preset),
-                    "pages": sum(len(m) for _, _, m in preset)}
+        try:
+            l2_run = wiki_aggregate.run(args) or {}
+        except Exception as e:              # 聚合自身炸了 —— 与"主动中止"同等对待
+            l2_run = {"aborted": "%s: %s" % (type(e).__name__, str(e)[:160])}
+        l2_aborted = str(l2_run.get("aborted") or "")
+        l2_skipped = [str(x) for x in (l2_run.get("skipped_domains") or [])]
+        if l2_aborted:
+            # **中止时不跑 linkfix**：产物没被重写，linkfix 却会按新标题去改旧页面
+            # （去链/改写），等于绕过中止闸动了磁盘。
+            l2_stats = {"domains_recompiled": 0, "pages": 0, "aborted": l2_aborted}
+        else:
+            # ---- 5. linkfix（L2 标题可能变）----
+            import wiki_linkfix
+            fix = wiki_linkfix.run_fix(l2, dry_run=False)
+            l2_stats = {"domains_recompiled": len(l2_run.get("written_domains") or []),
+                        "pages": int(l2_run.get("pages") or 0),
+                        "skipped_domains": l2_skipped}
 
     # ---- 6. 刷新两级 manifest（新基线）----
     # **只写实际编译成功的输入**，两类失败都要剔除，否则 align 会认为它们已经
@@ -499,6 +541,7 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
     dirs = {n: (m.get("dir") or "") for n, m in dom_meta.items()}
     for n, dn, _ in preset:
         dirs[n] = dn
+    pages_by_domain = dict(l2_run.get("pages_by_domain") or {})
     dom_out = {}
     for n, files in domain_map.items():
         fs = set(files)
@@ -509,12 +552,29 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
                 mids.update(int(t[1:]) for t in (p.get("mids") or [])
                             if t[1:].isdigit())
         dom_out[n] = {"dir": dirs.get(n, ""),
-                      "pages": sum(1 for p in pages if p["file"] in fs),
+                      # **L2 页数**（聚合如实回报）；聚合没回报时退回"该域分到的
+                      # L1 页数"并标注，避免把两种口径混成一个数字而不自知。
+                      "pages": int(pages_by_domain.get(n, -1)) if n in pages_by_domain
+                               else sum(1 for p in pages if p["file"] in fs),
+                      "pages_source": ("l2" if n in pages_by_domain else "l1_fallback"),
                       "l1_files": sorted(fs), "mids": sorted(mids)}
-    mf2 = wm.build_manifest("l2", db, extra={
-        "src_dir": str(l1), "n_pages": sum(len(p) for _, p in dom_out.items()),
-        "domains": dom_out})
-    wm.write_manifest(wm.manifest_path(l2, "l2"), mf2)
+    mf2 = None
+    if l2_aborted:
+        # **中止时绝不刷新 L2 清单** —— 保留旧基线，脏数据保持"脏"，下次写入自然重试。
+        # 刷新了就等于告诉 align"这批脏数据已编译"，它们再也不会被重跑。
+        mf2 = wm.load_manifest(wm.manifest_path(l2, "l2")) or {"n_inputs": 0}
+    else:
+        # **没真正写出来的脏域，其输入绝不能进新基线** —— 没编译却记成已编译就是
+        # 永久掩盖。判据与理由见 `_l2_skip_ids()`。
+        written = set(l2_run.get("written_domains") or [])
+        skip_ids = _l2_skip_ids(dom_out, dirty_domains, written, l2_skipped)
+        mf2 = wm.build_manifest("l2", db, drop_sessions=bad_sessions,
+                                drop_ids=failed_ids | skip_ids, extra={
+            "src_dir": str(l1),
+            # 与聚合自己写的那份同口径：**本轮实际产出的 L2 页数**
+            "n_pages": int(l2_run.get("pages") or 0),
+            "domains": dom_out})
+        wm.write_manifest(wm.manifest_path(l2, "l2"), mf2)
 
     # 页面层投影：知识页变了，召回面必须跟着变（否则 Agent 检索到的是旧知识）。
     # 全量对齐、幂等——页面重编/改名/删除都会自动收敛。失败旁路不阻塞更新。
@@ -543,6 +603,14 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
         hints.append("L1 有 %d 条记忆所在的**分组**编译失败（会话整体成功，但这几组"
                      "没产出页面）—— 已剔除出新基线，下次增量更新会重试"
                      % len(failed_ids))
+    if l2_aborted:
+        hints.append("**L2 聚合本轮中止**（%s）—— 产物保持上一轮，且**未刷新 L2 基线**，"
+                     "这批脏域会在下次写入时自动重试。常见原因是上游 LLM 大面积超时/限流"
+                     % l2_aborted)
+    if l2_skipped:
+        hints.append("L2 有 %d 个域因**页数崩塌**被跳过（%s）—— 已保留旧产物且"
+                     "**未计入新基线**，下次会重试；若反复出现说明该域的细分仍不稳定"
+                     % (len(l2_skipped), "、".join(l2_skipped[:3])))
 
     return {
         "updated": True,

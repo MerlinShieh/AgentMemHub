@@ -789,6 +789,17 @@ def test_细分可换运行器_离线接缝():
 
     plans = stage_plan(None, {"name": "域A"}, _members(5), batch=2, runner=_Deferred())
 
-    assert seen == ["l2plan|域A|0", "l2plan|域A|1", "l2plan|域A|2"]
+    assert [c.rsplit("|", 1)[1] for c in seen] == ["0", "1", "2"]
+    assert all(c.startswith("l2plan|域A-") for c in seen), "域名段应带短哈希防撞"
     assert sorted(pl["title"] for pl in plans) == ["P1", "P2", "P3", "P4", "P5"]
+
+
+def test_域名段带哈希_防custom_id相撞():
+    """不同域名可能 slug 成同一个串（只差标点），而 custom_id 是**离线批处理的
+    凭据** —— 撞了就是"把 A 域的结果填进 B 域"，既花错钱又写错页。"""
+    from wiki_aggregate import _domain_key, _slug
+
+    n1, n2 = "DSH/Hermes 助手架构", "DSH-Hermes 助手架构"
+    assert _slug(n1) == _slug(n2), "前提：这两个名字 slug 后确实相同"
+    assert _domain_key(n1) != _domain_key(n2), "slug 相同时必须靠 crc32 后缀区分开"
 
