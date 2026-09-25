@@ -1291,17 +1291,24 @@ def create_app(db_path: Path | None = None):
         return JSONResponse({"job": job})
 
     @app.get("/api/wiki/align", summary="对齐审计：wiki 产物与索引库的差距（只读）")
-    def api_wiki_align(out: str = Query(..., description="wiki 产出目录（L1 或 L2）"),
-                       stage: str = Query(default="", description="l1 / l2；留空=两级都查"),
-                       db: str = Query(default="", description="索引库路径；留空=用配置默认")):
+    def api_wiki_align(out: str = Query(default="", description="单个产出目录（L1 或 L2）"),
+                       stage: str = Query(default="", description="l1 / l2；留空=按目录全查"),
+                       db: str = Query(default="", description="索引库路径；留空=用配置默认"),
+                       l1: str = Query(default="", description="第一级产出目录（与 l2 一起给=两级对齐）"),
+                       l2: str = Query(default="", description="第二级产出目录")):
         """审计 wiki 与 RAG 库的对齐状态：引用有效性、覆盖度、编译后库的变更。
 
         有编译清单（manifest_*.json）时能精确 diff 出 新增/变更/失去输入 的记忆
         与脏会话，并给出 `needs_recompile`；无清单则退回引用反推模式。
         只读操作，同步返回。
+
+        **两级要看同步性就同时给 `l1` + `l2`**：两级产物分居两个目录，manifest 名
+        固定是 `<目录>/manifest_<stage>.json`，只给一个 `out` 必然只能对上其中一级。
+        返回里的 `consistency` 给出同步判定（`l1_ahead` = L2 落后、需要重编 L2）。
+        三者都不给则按配置的 `wiki.out_l1` / `wiki.out_l2` 解析。
         """
         from agentmemhub import wiki
-        return JSONResponse(wiki.align(out, stage, db))
+        return JSONResponse(wiki.align(out, stage, db, l1_dir=l1, l2_dir=l2))
 
     # ---- 待更新记忆的查看与删除（软删除=不进 wiki；硬删除=真删）----------
     # 与 align 的分工：align 回答"差多少"（只有 id 列表、且会截断），

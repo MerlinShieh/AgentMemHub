@@ -217,7 +217,62 @@ def _default_db() -> str:
     return str(load_settings().index_db)
 
 
-def align(out_dir: Path | str, stage: str = "", db: str = "") -> dict[str, Any]:
+#: 两级 manifest 的时间差超过这个秒数就算"不同步"。
+#: 一次正常的 update 会在几秒内写完两级，所以 60s 以上一定是异常中间态。
+SKEW_TOL = 60
+
+
+def _ts_of(s: Any) -> float:
+    """把 manifest 的 `generated_at` 解析成 epoch 秒；解析不了返回 0。"""
+    if isinstance(s, (int, float)):
+        return float(s)
+    t = str(s or "").strip().replace("/", "-")
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(t[:19], fmt).timestamp()
+        except Exception:               # noqa: BLE001
+            continue
+    try:
+        return datetime.fromisoformat(t).timestamp()
+    except Exception:                   # noqa: BLE001
+        return 0.0
+
+
+def _consistency(stages: dict[str, Any]) -> dict[str, Any]:
+    """两级一致性：**L1 领先 L2** 这种中间态在单级视角下完全看不见。
+
+    为什么必须显式算：实测 2026-09-25 出现过 L2 产物 17:11、L1 产物 21:01
+    （落后近 4 小时），而 `pending` 报 0 —— 因为 `pending` 只比 L1 的 manifest。
+    "L1 已重编、L2 没跟上"意味着**页面里还是旧知识**，必须有个地方能一眼看出来。
+    """
+    a, b = stages.get("l1") or {}, stages.get("l2") or {}
+    miss = [s for s in ("l1", "l2") if not (stages.get(s) or {}).get("manifest")]
+    if miss:
+        return {"comparable": False,
+                "reason": "两级 manifest 不齐（缺 %s），无法比较同步性" % "、".join(miss)}
+    t1, t2 = _ts_of(a.get("generated_at")), _ts_of(b.get("generated_at"))
+    if not t1 or not t2:
+        return {"comparable": False, "reason": "manifest 的 generated_at 解析不了"}
+    skew = t1 - t2                     # >0 = L1 比 L2 新 → **L2 落后**
+    n1, n2 = a.get("n_inputs"), b.get("n_inputs")
+    return {
+        "comparable": True,
+        "l1_at": a.get("generated_at"),
+        "l2_at": b.get("generated_at"),
+        "skew_seconds": round(skew, 1),
+        "l1_inputs": n1,
+        "l2_inputs": n2,
+        "inputs_delta": (int(n1) - int(n2)
+                         if isinstance(n1, int) and isinstance(n2, int) else None),
+        # l1_ahead = L2 落后（**要重编 L2**）；l2_ahead = L1 落后（少见）；
+        # ok = 两级基本同步（≤ SKEW_TOL 秒）
+        "verdict": ("ok" if abs(skew) <= SKEW_TOL
+                    else ("l1_ahead" if skew > 0 else "l2_ahead")),
+    }
+
+
+def align(out_dir: Path | str = "", stage: str = "", db: str = "",
+          l1_dir: Path | str = "", l2_dir: Path | str = "") -> dict[str, Any]:
     """对齐审计：回答「wiki 和 RAG 库现在差多少」（**全程只读**）。
 
     三个方向：
@@ -226,10 +281,36 @@ def align(out_dir: Path | str, stage: str = "", db: str = "") -> dict[str, Any]:
       3. 变更检测 —— 有 manifest 时精确 diff（added/changed/removed + 脏会话/脏域），
          没有 manifest 则退回"引用反推"模式，只做 1、2 并明确标记缺锚点。
 
-    stage 留空 = l1、l2 都查（哪个目录有 manifest 查哪个）。
-    返回结构可直接 JSON 序列化（CLI 打印 / 面板展示共用）。
+    **两级目录（重要）**：两级产物**分居两个目录**（配置 `wiki.out_l1` /
+    `wiki.out_l2`），而 manifest 名固定是 `<目录>/manifest_<stage>.json`。
+    所以"只传一个 `out_dir`"**永远只能对上其中一级**，另一级会被误报成"缺失"。
+    要对齐两级：传 `l1_dir` + `l2_dir`；两者都留空且 `out_dir` 也为空时**从配置解析**。
+
+    返回结构可直接 JSON 序列化（CLI 打印 / 面板展示共用），其中 `consistency`
+    给出两级同步性判定（见 `_consistency`）。
     """
-    out = Path(out_dir)
+    dirs: dict[str, Path] = {}
+    if l1_dir:
+        dirs["l1"] = Path(l1_dir)
+    if l2_dir:
+        dirs["l2"] = Path(l2_dir)
+    if stage:                          # 限定单级时只留那一级
+        dirs = {k: v for k, v in dirs.items() if k == stage}
+    if not dirs and out_dir:
+        # 单目录用法：不带 stage 时**保持旧覆盖**（在该目录查两级），只是文案
+        # 不再编造原因（见 CLI 的"缺失"分支）。要正确的两级视图请用 --l1/--l2。
+        dirs = ({stage: Path(out_dir)} if stage
+                else {"l1": Path(out_dir), "l2": Path(out_dir)})
+    if not dirs:                       # 都没给 → 从配置解析两级
+        from agentmemhub import config as hub_config
+        w = hub_config.config().wiki or {}
+        for st, key in (("l1", "out_l1"), ("l2", "out_l2")):
+            if w.get(key):
+                dirs[st] = Path(w[key])
+    if not dirs:
+        return {"out": "", "dirs": {}, "db": db, "error":
+                "没给产出目录，也没配 wiki.out_l1 / wiki.out_l2"}
+    out = dirs.get("l1") or next(iter(dirs.values()))
     if not db:
         db = _default_db()
     conn = sqlite3.connect("file:%s?mode=ro" % Path(db).as_posix(), uri=True)
@@ -258,15 +339,20 @@ def align(out_dir: Path | str, stage: str = "", db: str = "") -> dict[str, Any]:
     uncovered = sorted(cur_inputs - covered)
 
     stages: dict[str, Any] = {}
-    check = ["l1", "l2"] if not stage else [stage]
-    for st in check:
-        mf = wm.load_manifest(wm.manifest_path(out, st))
+    for st, sdir in dirs.items():
+        mpath = wm.manifest_path(sdir, st)
+        mf = wm.load_manifest(mpath)
         if mf is None:
-            stages[st] = {"manifest": False}
+            # 带上**期望路径**：调用方据此能说出"是没这个文件，还是它在别的目录"
+            # （早先只回一个 False，CLI 就编出了"编译于该功能上线前"这种假原因）
+            stages[st] = {"manifest": False, "dir": str(sdir),
+                          "path": str(mpath)}
             continue
         d = wm.diff_manifest(mf, db)
         extra: dict[str, Any] = {
             "manifest": True,
+            "dir": str(sdir),
+            "path": str(mpath),
             "generated_at": mf.get("generated_at"),
             "src_db": mf.get("src_db"),
             "n_inputs": mf.get("n_inputs"),
@@ -294,6 +380,8 @@ def align(out_dir: Path | str, stage: str = "", db: str = "") -> dict[str, Any]:
 
     return {
         "out": str(out),
+        "dirs": {k: str(v) for k, v in dirs.items()},
+        "consistency": _consistency(stages),
         "db": db,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "refs": {"files": len(refs), "ids": len(all_refs)},

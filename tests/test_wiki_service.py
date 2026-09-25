@@ -628,3 +628,126 @@ def test_update_组级失败的记忆不写进新基线(tmp_path, monkeypatch):
     assert a["stages"]["l1"]["added_total"] == 1
     assert any("分组" in h for h in r["hints"])
 
+
+# ---------------------------------------------------------------------------
+# 两级一致性（2026-09-25：L2 落后于 L1 这种中间态此前完全查不出来）
+#
+# 背景：`pending` 只比 L1 的 manifest，所以"L1 已重编、L2 没跟上"它报 0；
+# 而 `align` 一次只吃一个目录，两级 manifest 却分居两个目录 —— 于是这个
+# 中间态（实测真的出现过：L2 17:11 / L1 21:01，差近 4 小时）谁也看不见。
+# ---------------------------------------------------------------------------
+
+def _stage(**kw) -> dict:
+    base = {"manifest": True, "generated_at": "2026-09-25T21:32:50",
+            "n_inputs": 1800}
+    base.update(kw)
+    return base
+
+
+def test_两级同步_同刻判ok():
+    c = wiki._consistency({"l1": _stage(), "l2": _stage()})
+    assert c["comparable"] is True
+    assert c["verdict"] == "ok" and c["skew_seconds"] == 0.0
+    assert c["inputs_delta"] == 0
+
+
+def test_两级同步_L1领先判l2落后():
+    """这是**需要重编 L2** 的信号：L1 已经按新输入重编，页面里还是旧知识。"""
+    c = wiki._consistency({
+        "l1": _stage(generated_at="2026-09-25T21:32:50", n_inputs=1800),
+        "l2": _stage(generated_at="2026-09-25T17:11:35", n_inputs=1798)})
+    assert c["verdict"] == "l1_ahead"
+    assert c["skew_seconds"] > 3600
+    assert c["inputs_delta"] == 2
+
+
+def test_两级同步_L2领先判l1落后():
+    c = wiki._consistency({
+        "l1": _stage(generated_at="2026-09-25T17:11:35"),
+        "l2": _stage(generated_at="2026-09-25T21:32:50")})
+    assert c["verdict"] == "l2_ahead"
+    assert c["skew_seconds"] < 0
+
+
+def test_两级同步_容差内不算落后():
+    """一次正常的 update 会在几秒内写完两级 —— 别把正常抖动报成异常。"""
+    c = wiki._consistency({
+        "l1": _stage(generated_at="2026-09-25T21:32:50"),
+        "l2": _stage(generated_at="2026-09-25T21:32:20")})
+    assert c["verdict"] == "ok"
+
+
+def test_两级同步_manifest不齐时明确说无法比较():
+    c = wiki._consistency({"l1": _stage(), "l2": {"manifest": False}})
+    assert c["comparable"] is False
+    assert "l2" in c["reason"]
+
+
+def test_两级同步_时间解析不了也不炸():
+    c = wiki._consistency({"l1": _stage(generated_at="坏值"), "l2": _stage()})
+    assert c["comparable"] is False
+    assert "解析" in c["reason"]
+
+
+def test_对齐_缺manifest时带上期望路径(tmp_path):
+    """**关键回归**：早先只回一个 False，CLI 就编出"编译于该功能上线前"这种
+    假原因 —— 而真相是"文件在另一个目录"。带上 path 才说得清。"""
+    from agentmemhub import wiki_manifest as wm
+
+    db = _mkdb(tmp_path, [(1, "a", "s1", "new", "h1")])
+    l1 = tmp_path / "l1"
+    l1.mkdir()
+    _page(l1, "p1.md", [1])
+    wm.write_manifest(wm.manifest_path(l1, "l1"),
+                      wm.build_manifest("l1", str(db)))   # 只有 L1 的清单
+
+    r = wiki.align(l1, db=str(db))              # 单目录用法（不带 stage）→ 查两级
+
+    assert r["stages"]["l1"]["manifest"] is True
+    assert r["stages"]["l1"]["path"].endswith("manifest_l1.json")
+    assert r["stages"]["l2"]["manifest"] is False
+    assert r["stages"]["l2"]["path"].endswith("manifest_l2.json")
+    assert r["consistency"]["comparable"] is False
+
+
+def test_对齐_两级一起对(tmp_path):
+    from agentmemhub import wiki_manifest as wm
+
+    db = _mkdb(tmp_path, [(1, "a", "s1", "new", "h1")])
+    l1, l2 = tmp_path / "l1", tmp_path / "l2"
+    _page(l1, "p1.md", [1])
+    _page(l2, "01-域/p1.md", [1])
+    for d, st in ((l1, "l1"), (l2, "l2")):
+        wm.write_manifest(wm.manifest_path(d, st),
+                          wm.build_manifest(st, str(db)))
+
+    r = wiki.align(l1_dir=l1, l2_dir=l2, db=str(db))
+
+    assert set(r["dirs"]) == {"l1", "l2"}
+    assert r["stages"]["l1"]["manifest"] and r["stages"]["l2"]["manifest"]
+    assert r["consistency"]["comparable"] is True
+    assert r["consistency"]["verdict"] == "ok"
+    _json.dumps(r, ensure_ascii=False)          # 必须可序列化（CLI/面板共用）
+
+
+def test_对齐_不给目录时按配置解析(tmp_path, monkeypatch):
+    """什么都不给 → 从 `wiki.out_l1` / `wiki.out_l2` 解析两级，而不是报错要求 --out。"""
+    from agentmemhub import config as hub_config
+    from agentmemhub import wiki_manifest as wm
+
+    db = _mkdb(tmp_path, [(1, "a", "s1", "new", "h1")])
+    l1, l2 = tmp_path / "l1", tmp_path / "l2"
+    _page(l1, "p1.md", [1])
+    _page(l2, "01-域/p1.md", [1])
+    for d, st in ((l1, "l1"), (l2, "l2")):
+        wm.write_manifest(wm.manifest_path(d, st),
+                          wm.build_manifest(st, str(db)))
+    monkeypatch.setattr(hub_config, "config",
+                        lambda: type("C", (), {"wiki": {"out_l1": str(l1),
+                                                        "out_l2": str(l2)}})())
+
+    r = wiki.align(db=str(db))
+
+    assert set(r["dirs"]) == {"l1", "l2"}
+    assert r["consistency"]["comparable"] is True
+

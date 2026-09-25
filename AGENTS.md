@@ -54,12 +54,23 @@
   （记忆排除 UI 已下线，后端能力保留）；记忆页承载筛选/溯源/⭐加权/👍👎/蒸馏入口。
   会话与记忆通过 `session_uid`（全局递增）双向绑定跳转。
 - **测试纪律**：每次改动带测试；bug 修复先写复现测试（红→绿）；
-  `uv run pytest` 全绿是提交门槛（数量以实测为准，当前 793 passed / 1 skipped）。
+  `uv run pytest` 全绿是提交门槛（数量以实测为准，当前 814 passed / 1 skipped）。
   ⚠️ **别并发跑两个 `uv run`**（例如后台跑全量测试、前台又跑脚本）—— uv 会争用环境锁，
   实测导致 10 个毫不相干的测试假失败（snapshot / wiki_triggers），干净重跑即全绿。
 - **日志纪律**：统一 `logs/` 按程序分文件；测试必须隔离日志与数据目录
   （`conftest` 的 autouse 夹具已强制把 `logs.log_dir` 指向临时目录）。
-  **三个事实流分工**：`logs/mcp.log` 记**协议层**（谁调了什么工具、耗时、成败，
+  **标准头五项**：**时间 / 等级 / 模块 / 行号 / 内容** —— 所有日志都必须有，
+  **调用方只写业务字段，标准头由写入口统一补齐**（`logs.standardize()`；
+  不要要求 60+ 个调用点各自写全，实测必然漂移）。三种形态的落法：
+  · **JSONL 事实流**（`mcp.log` / `memory.log` / `wiki.log` / `web.log` / `cli.log`）：
+    自动注入 `ts`（epoch 秒）/ `level`（`info|warn|error`，由 `ok=False`、`error`、
+    错误事件名自动推断）/ `module` + `line`（**由调用栈取业务调用点**，不是日志模块自己）
+    / `msg`（单行可读摘要，≤200 字；正文仍在业务字段里）。测试：`tests/test_logs_format.py`
+  · **文本日志**（`asrag-*.log`，见 `agentmemhub/rag/logkit.py`）：
+    `%(asctime)s %(levelname)-5s [%(name)s:%(lineno)d] %(message)s`
+  · **任务日志**（`logs/tasks/<id>.log`）：`YYYY-MM-DD HH:MM:SS INFO [module:line] 内容`
+    （早先只有 `[HH:MM:SS]`，跨天排查无法定位是哪天）
+  **三条事实流分工**：`logs/mcp.log` 记**协议层**（谁调了什么工具、耗时、成败，
   由服务端在唯一分发点自动写，不依赖 Agent 手动记）、`logs/memory.log` 记
   **数据层**（哪条记忆被写/读、**内容全文**、来自 `mcp`/`http`/`distill`/`cli`
   哪条路径；写入点埋在 `distill` 的落表处，一处覆盖所有路径，查询用

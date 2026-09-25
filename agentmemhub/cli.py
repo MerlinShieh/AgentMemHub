@@ -848,8 +848,16 @@ def cmd_wiki(args) -> int:
     # `required=True`，导致 `wiki --action trigger` 直接报"缺少 --out"而走不通
     # （实测踩到）。改为按动作校验。
     if args.action in ("failures", "align", "retry") and not args.out:
-        print("需要 --out 指定 wiki 产出目录（动作：%s）" % args.action)
-        return 2
+        # align 例外：它可以用 --l1/--l2（两级对齐），也可以什么都不给
+        # （按配置的 wiki.out_l1 / wiki.out_l2 解析）—— 强制 --out 就永远
+        # 只能对上单级，正是"L1 领先 L2 查不出来"的由来。
+        if args.action == "align" and (args.l1 or args.l2):
+            pass
+        elif args.action == "align":
+            pass                      # 交给 wiki.align 按配置解析；解析不到它自己会报
+        else:
+            print("需要 --out 指定 wiki 产出目录（动作：%s）" % args.action)
+            return 2
 
     if args.action == "failures":
         s = wiki.failures_summary(args.out, args.stage)
@@ -874,8 +882,13 @@ def cmd_wiki(args) -> int:
         return 0
 
     if args.action == "align":
-        r = wiki.align(args.out, args.stage, args.db)
-        print("对齐审计：%s" % r["out"])
+        r = wiki.align(args.out, args.stage, args.db,
+                       l1_dir=args.l1, l2_dir=args.l2)
+        if r.get("error"):
+            print(r["error"])
+            return 2
+        for st, d in (r.get("dirs") or {}).items():
+            print("对齐审计 %s：%s" % (st, d))
         print("索引库  ：%s" % r["db"])
         print("页面引用：%d 个 m-id / %d 个文件" % (r["refs"]["ids"], r["refs"]["files"]))
         inv = r["invalid_refs"]
@@ -886,10 +899,28 @@ def cmd_wiki(args) -> int:
         if cov["ratio"] is not None:
             print("正向覆盖：%d/%d = %.1f%%（被至少一个页面引用的当前输入）"
                   % (cov["covered"], cov["current_inputs"], cov["ratio"] * 100))
+        con = r.get("consistency") or {}
+        if con.get("comparable"):
+            verdict = {"ok": "✓ 两级同步",
+                       "l1_ahead": "⚠️ **L2 落后于 L1**（页面里可能还是旧知识）",
+                       "l2_ahead": "⚠️ L1 落后于 L2（少见）"}.get(
+                           con["verdict"], con["verdict"])
+            print("两级同步：%s（差值 %.1f 秒；输入 %s vs %s%s）"
+                  % (verdict, con["skew_seconds"], con["l1_inputs"], con["l2_inputs"],
+                     "，差 %+d" % con["inputs_delta"]
+                     if con.get("inputs_delta") else ""))
+        elif con.get("reason"):
+            print("两级同步：无法比较 —— %s" % con["reason"])
         print()
         for st, s in r["stages"].items():
             if not s.get("manifest"):
-                print("manifest_%s：缺失 —— 编译于该功能上线前，无 diff 锚点" % st)
+                # **区分两种情况**，别让"文件在另一个目录"被说成"从来没编译过"
+                # （早先那句"编译于该功能上线前"就是凭空断因，把人带偏）
+                others = [d for k, d in (r.get("dirs") or {}).items() if k != st]
+                hint = ("该阶段未参与本次审计（目录未提供）" if not others
+                        else "该目录下确实没有 manifest_%s.json" % st)
+                print("manifest_%s：缺失（%s）" % (st, s.get("path") or "?"))
+                print("    %s —— 两级产出目录不同，要一起对请传 --l1/--l2" % hint)
                 continue
             print("manifest_%s（%s 编译，输入 %d 条）：" % (st, s["generated_at"], s["n_inputs"]))
             print("   新增 %d / 内容变更 %d / 失去输入 %d（其中真删除 %d、状态迁移 %d）"
@@ -1265,8 +1296,8 @@ def build_parser() -> argparse.ArgumentParser:
     pwk.add_argument("--stage", default="", choices=["", "l1", "l2"],
                      help="限定阶段：l1=第一级；l2=第二级；留空=全部")
     pwk.add_argument("--src", default="", help="第二级补跑必需：第一级产出目录")
-    pwk.add_argument("--l1", default="", help="update 用：第一级产出目录")
-    pwk.add_argument("--l2", default="", help="update 用：第二级产出目录")
+    pwk.add_argument("--l1", default="", help="update/align 用：第一级产出目录")
+    pwk.add_argument("--l2", default="", help="update/align 用：第二级产出目录（与 --l1 同时给 对齐两级的同步性）")
     pwk.add_argument("--workers", type=int, default=0, help="并发数（0=用配置）")
     pwk.add_argument("--db", default="", help="索引库路径（align/update 用；默认读配置）")
     pwk.add_argument("--force", action="store_true",

@@ -20,6 +20,7 @@ import contextvars
 import gzip
 import json
 import shutil
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -33,6 +34,78 @@ _MAX_RING = 500
 _LOCK = threading.Lock()
 _FILE_LOCK = threading.Lock()      # 文件读写串行（多线程 append 竞态防护）
 _RING: list[dict] = []
+
+
+# ---------------------------------------------------------------------------
+# 统一日志字段（所有日志共用的**标准头**）
+#
+# 标准头五项：`ts`（时间）/ `level`（等级）/ `module`（模块）/ `line`（行号）
+# / `msg`（可读内容）；业务字段照旧附加。
+#
+# **为什么在写入口统一注入，而不是要求调用方写全**：写入点散落在 60+ 处
+# （`mcp_server` / `web/app` / `distill` / `wiki_*` / `scripts/*`），靠"每个人都
+# 记得写全"必然漂移 —— 实测 `wiki.log` 早期条目连 `ts` 都没有、`memory.log`
+# 出过一次全 `1970`。所以约定：**调用方只写业务字段，标准头由这里补齐**；
+# 调用方显式给了就以调用方为准（幂等，不覆盖）。
+# ---------------------------------------------------------------------------
+
+#: 允许的日志等级（小写）。与 Python logging 的 levelname 对齐。
+LEVELS = ("debug", "info", "warn", "error")
+
+#: `msg` 的长度上限：它是给人看的**单行摘要**，不是正文（正文在业务字段里）。
+MSG_MAX = 200
+
+
+def caller_site(depth: int = 2) -> tuple[str, int]:
+    """取调用点的 `(模块名, 行号)`。
+
+    取不到返回 `("", 0)` —— **日志设施绝不能因为取栈失败把业务写挂**。
+    """
+    try:
+        f = sys._getframe(depth)
+        return str(f.f_globals.get("__name__") or ""), int(f.f_lineno)
+    except Exception:                       # noqa: BLE001
+        return "", 0
+
+
+def _clip(s: Any) -> str:
+    t = str(s or "").replace("\n", " ").strip()
+    return t if len(t) <= MSG_MAX else t[:MSG_MAX] + "…"
+
+
+def standardize(entry: dict, *, msg: str = "", level: str = "info",
+                depth: int = 3) -> dict:
+    """补齐标准头：`ts / level / module / line / msg`（显式给的不覆盖）。
+
+    `depth` 是到**业务调用点**的栈深度：默认 3 =
+    `standardize` ← `audit_xxx` ← 业务代码。
+    """
+    out = dict(entry)
+    out.setdefault("ts", round(time.time(), 3))
+    lv = str(entry.get("level") or level).lower()
+    out["level"] = lv if lv in LEVELS else "info"
+    if not entry.get("module") or not entry.get("line"):
+        mod, ln = caller_site(depth)
+        if not entry.get("module"):
+            out["module"] = mod
+        if not entry.get("line"):
+            out["line"] = ln
+    if msg and not out.get("msg"):
+        out["msg"] = _clip(msg)
+    return out
+
+
+def _level_of(entry: dict, *, error_events: tuple[str, ...] = ()) -> str:
+    """按内容推断等级：显式 `level` > `ok=False` > 事件名像错误 > info。"""
+    if str(entry.get("level") or "").lower() in LEVELS:
+        return str(entry["level"]).lower()
+    if entry.get("ok") is False or entry.get("error"):
+        return "error"
+    ev = str(entry.get("event") or "")
+    if ev in error_events or ev.endswith("_error") or ev.endswith("_fail"):
+        return "error"
+    return "info"
+
 
 
 def log_dir() -> Path:
@@ -187,9 +260,11 @@ def record(msg: str, level: str = "info", actor: str = "web",
 
     dest=web：进内存环形缓冲（面板可读）+ logs/web.log（接口操作）；
     dest=cli：只写 logs/cli.log（终端/控制台操作，不进面板）。
-    返回条目。
+    返回条目（含标准头 ts/level/module/line/msg，调用点由栈自动取）。
     """
-    entry = {"ts": time.time(), "level": level, "actor": actor, "msg": msg}
+    # depth=3 与 audit_* 同口径：caller_site(0) ← standardize(1) ← 本函数(2) ← 业务(3)
+    entry = standardize({"ts": time.time(), "level": level, "actor": actor,
+                         "msg": msg}, depth=3)
     if dest == "web":
         with _LOCK:
             _RING.append(entry)
@@ -252,13 +327,30 @@ def mcp_audit_file() -> Path:
     return log_dir() / "mcp.log"
 
 
+def _mcp_msg(e: dict) -> str:
+    """把一条 MCP 审计渲染成单行可读摘要（`msg` 字段）。"""
+    bits = [str(e.get("tool") or e.get("event") or "mcp")]
+    if e.get("phase"):
+        bits.append(str(e["phase"]))
+    if e.get("ok") is False:
+        bits.append("失败")
+        if e.get("error"):
+            bits.append(str(e["error"])[:120])
+    elif e.get("ok") is True:
+        bits.append("OK" + (" %sms" % e["elapsed_ms"]
+                            if e.get("elapsed_ms") is not None else ""))
+    return " ".join(bits)
+
+
 def audit_mcp(entry: dict) -> None:
-    """追加一条 MCP 调用审计（JSONL）。
+    """追加一条 MCP 调用审计（JSONL，带标准头 ts/level/module/line/msg）。
 
     写失败一律静默：审计是旁路，绝不能因为它而让记忆操作本身失败。
     """
+    e = standardize(entry, msg=entry.get("msg") or _mcp_msg(entry),
+                    level=_level_of(entry), depth=3)
     _append_line(mcp_audit_file,
-                 json.dumps(entry, ensure_ascii=False) + "\n", name="mcp")
+                 json.dumps(e, ensure_ascii=False) + "\n", name="mcp")
 
 
 def read_mcp_audit(path: "Path | None" = None, limit: int = 0) -> list[dict]:
@@ -338,19 +430,32 @@ def memory_audit_file() -> Path:
     return log_dir() / "memory.log"
 
 
+def _memory_msg(e: dict) -> str:
+    """把一条记忆操作渲染成单行可读摘要（正文仍在业务字段里，这里只给摘要）。"""
+    bits = [str(e.get("event") or "memory")]
+    if e.get("memory_id") is not None:
+        bits.append("#%s" % e["memory_id"])
+    for k in ("path", "source", "conversation_id", "type", "status"):
+        if e.get(k):
+            bits.append("%s=%s" % (k, e[k]))
+    if e.get("query"):
+        bits.append("q=%s" % str(e["query"])[:80])
+    return " ".join(bits)
+
+
 def audit_memory(entry: dict) -> None:
-    """追加一条记忆操作事实（JSONL）。
+    """追加一条记忆操作事实（JSONL，带标准头 ts/level/module/line/msg）。
 
     写失败一律静默：审计是旁路，绝不能因为它而让记忆操作本身失败。
     调用方未显式给 `path` 时自动补当前上下文路径（见 memory_path）；
-    未给 `ts` 时自动补时间戳（漏了会让查询显示 1970，实测踩过）。
+    标准头（ts/level/module/line/msg）由 `standardize` 统一补齐。
     """
     if "path" not in entry:
         entry = {**entry, "path": current_memory_path()}
-    if "ts" not in entry:
-        entry = {**entry, "ts": round(time.time(), 3)}
+    e = standardize(entry, msg=entry.get("msg") or _memory_msg(entry),
+                    level=_level_of(entry), depth=3)
     _append_line(memory_audit_file,
-                 json.dumps(entry, ensure_ascii=False, default=str) + "\n",
+                 json.dumps(e, ensure_ascii=False, default=str) + "\n",
                  name="memory")
 
 
@@ -374,13 +479,36 @@ def wiki_log_file() -> Path:
     return log_dir() / "wiki.log"
 
 
+def _wiki_msg(e: dict) -> str:
+    """把一条 wiki 事件渲染成单行可读摘要。
+
+    写作进度这类事件自带 `message`，直接用它；否则按 script/stage/target 拼。
+    """
+    if e.get("message"):
+        return str(e["message"])
+    bits = [str(e.get("event") or "wiki")]
+    for k in ("script", "stage", "target", "domain", "name", "tag"):
+        if e.get(k):
+            bits.append(str(e[k]).strip())
+    if e.get("error"):
+        bits.append("error=%s" % str(e["error"])[:120])
+    return " ".join(bits)
+
+
+#: wiki 事件里天然属于"出错"的事件名（`ok=False` 之外还要认这些）
+_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted", "domain_write_skipped")
+
+
 def audit_wiki(entry: dict) -> None:
-    """追加一条 wiki 编译事件（JSONL）。
+    """追加一条 wiki 编译事件（JSONL，带标准头 ts/level/module/line/msg）。
 
     写失败一律静默：审计是旁路，绝不能因为它让编译本身失败。
     """
+    e = standardize(entry, msg=entry.get("msg") or _wiki_msg(entry),
+                    level=_level_of(entry, error_events=_WIKI_ERROR_EVENTS),
+                    depth=3)
     _append_line(wiki_log_file,
-                 json.dumps(entry, ensure_ascii=False) + "\n", name="wiki")
+                 json.dumps(e, ensure_ascii=False) + "\n", name="wiki")
 
 
 def read_wiki_audit(path: "Path | None" = None, limit: int = 0) -> list[dict]:
@@ -389,7 +517,12 @@ def read_wiki_audit(path: "Path | None" = None, limit: int = 0) -> list[dict]:
 
 
 def append_task_line(job_id: str, line: str) -> Path:
-    """把任务输出的一行追加到该 job 的完整日志文件（含时间戳前缀）。
+    """把任务输出的一行追加到该 job 的完整日志文件（**统一标准前缀**）。
+
+    以前只有 `[HH:MM:SS]`（没有日期、等级、模块、行号），跨天排查时无法定位是哪天；
+    现在与其他日志同口径：`YYYY-MM-DD HH:MM:SS LEVEL [module:line] 内容`。
+    任务输出本身是逐行透传的第三方/子进程文本，等级固定 `INFO`（不是日志库里
+    那种"带等级的事件"），模块/行号取**调用点**（即哪个组件在转写这些行）。
 
     顺带清理超期任务日志（`prune_task_logs`）——长任务输出是"一次性"文件，
     不参与滚动，靠按天清理控制总量。
@@ -397,7 +530,9 @@ def append_task_line(job_id: str, line: str) -> Path:
     p = task_log_path(job_id)
     if not p.exists():
         prune_task_logs()
-    _append_line(p, "[%s] %s\n" % (time.strftime("%H:%M:%S"), line))
+    mod, ln = caller_site(2)          # caller_site ← 本函数 ← 调用方
+    _append_line(p, "%s %-5s [%s:%d] %s\n" % (
+        time.strftime("%Y-%m-%d %H:%M:%S"), "INFO", mod or "task", ln, line))
     return p
 
 
