@@ -688,10 +688,22 @@ def render_page(page: dict, domain: str) -> str:
     return "\n".join(L)
 
 
+def _esc_links(s: str) -> str:
+    """把索引行里的 `[[…]]` 转义掉 —— 否则 Obsidian 会当成真链接。
+
+    `index.md` 的摘要/标题是**正文的浓缩**，而正文里可能**描述** wikilink 语法
+    （实测踩过：一条摘要里举例写了 `[[链接]]`）→ 渲染进索引后就成了死链，
+    **点击即新建一个空白笔记**。产物的链接验收（`obsidian check`）要求未解析为 0，
+    所以索引文本必须先转义。
+    """
+    return re.sub(r"\[\[([^\[\]]*)\]\]", r"\\[\\[\1\\]\\]", s or "")
+
+
 def render_domain_index(domain: str, pages: list[dict]) -> str:
     L = ["# %s" % domain, "", "共 %d 页。%s" % (len(pages), ""), ""]
     for p in pages:
-        L.append("- [%s](%s) — %s" % (p["title"], p["_file"], p["summary"]))
+        L.append("- [%s](%s) — %s" % (_esc_links(p["title"]), p["_file"],
+                                      _esc_links(p["summary"])))
     return "\n".join(L)
 
 
@@ -703,7 +715,8 @@ def render_index(domains: list[tuple[str, list[dict]]]) -> str:
         L += ["## %s" % name, ""]
         for p in pages:
             L.append("- [%s](%s) — %s"
-                     % (p["title"], "%s/%s" % (p["_dir"], p["_file"]), p["summary"]))
+                     % (_esc_links(p["title"]), "%s/%s" % (p["_dir"], p["_file"]),
+                        _esc_links(p["summary"])))
         L.append("")
     return "\n".join(L)
 
@@ -789,7 +802,8 @@ def render_index_from_disk(out: Path, include: list[tuple[str, list[dict]]],
     for name, pages in rows:
         L += ["## %s" % name, ""]
         for dname, fname, title, summary in pages:
-            L.append("- [%s](%s/%s) — %s" % (title, dname, fname, summary))
+            L.append("- [%s](%s/%s) — %s"
+                     % (_esc_links(title), dname, fname, _esc_links(summary)))
         L.append("")
     return "\n".join(L)
 

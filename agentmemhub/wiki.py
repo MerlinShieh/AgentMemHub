@@ -441,6 +441,28 @@ def _audit(entry: dict) -> None:
         pass
 
 
+def _verify_links(l2: Path | str) -> dict[str, Any]:
+    """产物链接验收（**Obsidian 权威口径**）—— 旁路，绝不抛。
+
+    产物最终是给人看的：`[[…]]` 必须点得开，否则点击会**新建一个空白笔记**。
+    `available=False` 表示"没法验"（Obsidian 没运行 / CLI 没注册）——**不是失败**；
+    `ok=True` 才是唯一通过标准（未解析链接为 0）。
+    """
+    try:
+        from agentmemhub import obsidian
+        r = obsidian.verify(vault=Path(l2).name)
+    except Exception as e:                  # noqa: BLE001 —— 验收绝不能把更新搞挂
+        r = {"ok": False, "available": False, "total_targets": 0,
+             "total_links": 0, "items": [],
+             "error": "%s: %s" % (type(e).__name__, str(e)[:160])}
+    _audit({"event": "link_check", "ok": bool(r.get("ok")),
+            "available": bool(r.get("available")),
+            "unresolved_targets": r.get("total_targets"),
+            "unresolved_links": r.get("total_links"),
+            "error": r.get("error", "")})
+    return r
+
+
 def _l2_skip_ids(dom_out: dict[str, Any], dirty_domains: list[str],
                  written: set[str], skipped: list[str]) -> set[int]:
     """算出「**没真正写出来**的脏域」覆盖的记忆 id —— 它们必须被剔除出 L2 新基线。
@@ -599,6 +621,7 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
     l2_run: dict[str, Any] = {}
     l2_aborted = ""
     l2_skipped: list[str] = []
+    link_check: dict[str, Any] = {}
     if l1_all_failed:
         l2_stats: dict[str, Any] = {
             "domains_recompiled": 0, "pages": 0,
@@ -618,6 +641,11 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
             # ---- 5. linkfix（L2 标题可能变）----
             import wiki_linkfix
             fix = wiki_linkfix.run_fix(l2, dry_run=False)
+            # ---- 5b. 产物链接验收（Obsidian 权威口径）----
+            # linkfix 已把链接写成 `[[文件名|显示]]` 形态；这里再用 Obsidian 自己的
+            # CLI 复核 —— 不通过说明 linkfix 没兜住（新写法 / 新边界），必须让人
+            # 看见，而不是等下一个人点出空白笔记来。全程旁路，不影响产物。
+            link_check = _verify_links(l2)
             l2_stats = {"domains_recompiled": len(l2_run.get("written_domains") or []),
                         "pages": int(l2_run.get("pages") or 0),
                         "skipped_domains": l2_skipped}
@@ -722,6 +750,14 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
         hints.append("L2 有 %d 个域因**页数崩塌**被跳过（%s）—— 已保留旧产物且"
                      "**未计入新基线**，下次会重试；若反复出现说明该域的细分仍不稳定"
                      % (len(l2_skipped), "、".join(l2_skipped[:3])))
+    # 链接验收：**不通过必须让人看见**（产物是给人看的，死链点一下就出现空白笔记）
+    if link_check.get("available") and not link_check.get("ok"):
+        hints.append("**产物链接验收未通过**：Obsidian 报 %d 个未解析目标 / %d 条链接"
+                     "（如 %s）—— linkfix 没兜住，请先跑 "
+                     "`python scripts/wiki_linkfix.py --dir <L2目录>` 再复查"
+                     % (link_check.get("total_targets", 0),
+                        link_check.get("total_links", 0),
+                        "、".join(x["link"][:24] for x in (link_check.get("items") or [])[:2])))
 
     return {
         "updated": True,
@@ -734,6 +770,9 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
         "l2": l2_stats,
         "linkfix": ({k: fix.get(k, 0) for k in ("total", "ok", "fixed", "dropped")}
                     if fix else {"skipped": True}),
+        # 产物链接验收（Obsidian 权威口径）：available=False 表示"没验成"（它没运行），
+        # 不是失败；ok=True 才是唯一通过标准。见 `_verify_links()`。
+        "link_check": link_check,
         "manifest": {"l1_inputs": mf1["n_inputs"], "l2_inputs": mf2["n_inputs"]},
         "page_index": page_index,
         "snapshot": {"id": snap.get("id"),
