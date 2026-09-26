@@ -87,6 +87,12 @@ DEFAULT_WIKI = {
     # 不配则这些功能需要显式传目录。
     "out_l1": "",
     "out_l2": "",
+    # Obsidian CLI 可执行文件（产物链接验收用，见 `agentmemhub/obsidian.py`）。
+    # **为什么不只靠 PATH**：进程环境是启动时捕获的 —— 实测把 Obsidian 目录加进
+    # 用户 PATH 后重启 DSH，35 条用户 PATH 里 34 条都继承了，**只有最后加的那条没**
+    # （DSH 从旧环境继承而来）。验收因此静默退化成"未验收"。配置位与进程启动时机
+    # 无关，是唯一稳的做法。留空则按 OBSIDIAN_CLI 环境变量 → PATH 解析。
+    "obsidian_cli": "",
     # 增量更新触发器：检测便宜（align 毫秒级只读）、编译昂贵（LLM），
     # 按规则攒批触发；任一规则命中且有脏数据才真的跑 update。
     "update": {

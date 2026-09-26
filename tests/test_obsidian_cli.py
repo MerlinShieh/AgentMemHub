@@ -11,14 +11,35 @@ import pytest
 from agentmemhub import obsidian
 
 
+def _no_config(monkeypatch, value: str = ""):
+    """把配置里的 `wiki.obsidian_cli` 钉成给定值（否则它会先命中，测不到后面的分支）。"""
+    class _C:
+        wiki = {"obsidian_cli": value}
+    import agentmemhub.config as cfg
+    monkeypatch.setattr(cfg, "config", lambda: _C())
+
+
 def test_找不到CLI时报可读错误(monkeypatch):
     monkeypatch.delenv("OBSIDIAN_CLI", raising=False)
     monkeypatch.setattr(obsidian.shutil, "which", lambda *a, **k: None)
+    _no_config(monkeypatch)
     with pytest.raises(obsidian.ObsidianUnavailable, match="找不到 Obsidian CLI"):
         obsidian.find_cli()
 
 
+def test_CLI路径优先取配置(monkeypatch):
+    """**配置位优先于环境变量/PATH**：进程环境是**启动时捕获**的 —— 实测把 Obsidian
+    目录加进用户 PATH 后重启，35 条用户 PATH 里只继承了 34 条（最后加的那条没），
+    验收于是静默退化成"未验收"。配置位与进程启动时机无关，才是稳的那个。"""
+    _no_config(monkeypatch, r"D:\tools\Obsidian\Obsidian.com")
+    monkeypatch.setenv("OBSIDIAN_CLI", "should-lose")
+    monkeypatch.setattr(obsidian.shutil, "which", lambda *a, **k: "should-also-lose")
+    assert obsidian.find_cli() == r"D:\tools\Obsidian\Obsidian.com"
+    assert obsidian.find_cli("X:/explicit") == "X:/explicit"      # 显式参数仍最优先
+
+
 def test_CLI路径按环境变量解析(monkeypatch):
+    _no_config(monkeypatch)
     monkeypatch.setenv("OBSIDIAN_CLI", r"D:\tools\Obsidian\Obsidian.com")
     assert obsidian.find_cli() == r"D:\tools\Obsidian\Obsidian.com"
     assert obsidian.find_cli("X:/explicit") == "X:/explicit"      # 显式参数最优先

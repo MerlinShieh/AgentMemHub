@@ -155,6 +155,13 @@ wiki:
   # enabled: **总开关**。置 false → 触发器不再跑、`status()` 报告目标未就绪。
   #   （2026-09-22 前它是**假开关**：没有任何消费点，关掉照样触发）
   enabled: true
+  # Obsidian CLI 可执行文件（**产物链接验收**用，见 `agentmemhub/obsidian.py`）。
+  #   为什么要有这个配置位：进程环境是**启动时捕获**的 —— 实测把 Obsidian 目录
+  #   加进用户 PATH 后重启，35 条用户 PATH 里 34 条都继承了、**只有最后加的那条没**，
+  #   验收于是静默退化成"未验收"。配置位与进程启动时机无关，是唯一稳的做法。
+  #   留空则按 `OBSIDIAN_CLI` 环境变量 → PATH 解析。
+  #   前置：Obsidian 正在运行 + 设置→通用 已开启「命令行界面」（安装器 1.12.7+）。
+  # obsidian_cli: "D:\\tools\\Obsidian\\Obsidian.com"
   # ---- 第一级：逐会话编译 ----
   llm:
     # 留空字段继承顶层 llm。**timeout 默认已是 900s** —— 第一级是长调用（一个

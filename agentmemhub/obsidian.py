@@ -35,9 +35,22 @@ class ObsidianUnavailable(RuntimeError):
 
 
 def find_cli(explicit: str = "") -> str:
-    """定位 Obsidian CLI：显式参数 → `OBSIDIAN_CLI` → PATH。"""
+    """定位 CLI：显式参数 → 配置 `wiki.obsidian_cli` → `OBSIDIAN_CLI` → PATH。
+
+    **配置优先于环境变量**：进程环境是**启动时捕获**的 —— 实测把 Obsidian 目录
+    加进用户 PATH 后重启 DSH，35 条用户 PATH 里 34 条继承了、**只有最后加的那条没**
+    （DSH 从旧环境继承而来），验收因此静默退化成"未验收"。配置位与进程启动时机
+    无关，才是稳的那个。
+    """
     if explicit:
         return explicit
+    try:
+        from agentmemhub import config
+        cfg = str(config.config().wiki.get("obsidian_cli") or "").strip()
+        if cfg:
+            return cfg
+    except Exception:                       # noqa: BLE001 —— 配置读不到就继续往下找
+        pass
     env = os.environ.get("OBSIDIAN_CLI", "").strip()
     if env:
         return env
@@ -46,8 +59,10 @@ def find_cli(explicit: str = "") -> str:
         if p:
             return p
     raise ObsidianUnavailable(
-        "找不到 Obsidian CLI。确认：① Obsidian 正在运行；② 设置→通用 已开启"
-        "「命令行界面」；③ 已注册 PATH（或设 OBSIDIAN_CLI 指向可执行文件）")
+        "找不到 Obsidian CLI。三种配法任选：① 在 agentmemhub.yaml 写 "
+        "`wiki.obsidian_cli`（推荐，与进程启动时机无关）；② 设 OBSIDIAN_CLI "
+        "环境变量；③ 把 Obsidian 安装目录加进 PATH。另需 Obsidian 正在运行、"
+        "且设置→通用 已开启「命令行界面」。")
 
 
 def default_vault() -> str:
