@@ -337,6 +337,10 @@ def test_configured_总开关关闭则视为未配置(monkeypatch):
     （2026-09-22 配置审计发现）。现在它是真正的总开关。"""
     from agentmemhub import config as _cfg
 
+    # 本用例只测**配置解析逻辑**，所以要临时摘掉测试沙箱熔断
+    # （沙箱下 `_targets()` 一律拒绝解析，会把三条断言全压成 False）
+    monkeypatch.delenv(wiki_triggers.SANDBOX_ENV, raising=False)
+
     class _C:
         wiki = {"enabled": True, "out_l1": "a", "out_l2": "b"}
 
@@ -354,3 +358,142 @@ def test_configured_总开关关闭则视为未配置(monkeypatch):
     # 键缺失时按"开"处理（与 DEFAULT_WIKI 的 true 一致）
     _C.wiki = {"out_l1": "a", "out_l2": "b"}
     assert wiki_triggers._configured() is True
+
+
+# ---------------------------------------------------------------------------
+# 触发链路的**可观测性**（2026-09-26：此前有四处静默点）
+#
+# 背景：一次触发从判定到收尾，检测（trigger_check）与流水线内部（run_start/
+# progress/manifest）都有日志，但中间这几段没有 ——
+#   ① update() 抛异常 → 只塞进返回值，而 MCP 那条 daemon 路径会**丢弃返回值**
+#      → 一次失败的触发完全无痕
+#   ② 并发时被跳过 → 无痕
+#   ③ 更新成功后的**汇总**（脏会话/L1成败/L2页数/投影耗时/提示）→ 无痕
+#   ④ 页面层投影本身 → 无痕，而它实测要跑 4.5 分钟
+# 这四条现在都必须能从 wiki.log 读出来。
+# ---------------------------------------------------------------------------
+
+def _wiki_events(ev: str) -> list[dict]:
+    """读 wiki.log 里指定事件（conftest 已把 log_dir 隔离到临时目录）。"""
+    from agentmemhub import logs
+    p = logs.log_dir() / "wiki.log"
+    if not p.exists():
+        return []
+    out = []
+    for ln in p.read_text(encoding="utf-8").splitlines():
+        try:
+            d = json.loads(ln)
+        except Exception:
+            continue
+        if d.get("event") == ev:
+            out.append(d)
+    return out
+
+
+def test_更新成功留痕_起止两条并带汇总(_tmp_state, tmp_path, monkeypatch):
+    db, l1, l2, calls = _mk_trigger_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(wiki, "update", lambda **kw: {
+        "updated": True, "dirty_sessions": ["mcp/direct"],
+        "l1": {"recompiled": 1, "failed": 0},
+        "l2": {"domains_recompiled": 3, "pages": 159},
+        "page_index": {"seconds": 271.0},
+        "hints": ["『待整理』域已有 41 页"]})
+
+    wiki_triggers.on_memories_written()
+
+    start, end = _wiki_events("trigger_update_start"), _wiki_events("trigger_update_end")
+    assert len(start) == 1 and len(end) == 1
+    assert start[0]["reasons"] == ["今日首次写入记忆"] or start[0]["reasons"]
+    e = end[0]
+    assert e["updated"] is True and e["dirty_sessions"] == 1
+    assert e["l1_recompiled"] == 1 and e["l1_failed"] == 0
+    assert e["l2_domains"] == 3 and e["l2_pages"] == 159
+    assert e["page_index_seconds"] == 271.0        # ★ 投影耗时（此前完全不可见）
+    assert e["hints"] == ["『待整理』域已有 41 页"]
+    assert isinstance(e["seconds"], (int, float))
+
+
+def test_更新失败留痕_日志与状态双份(_tmp_state, tmp_path, monkeypatch):
+    """**关键回归**：失败此前只塞进返回值 → MCP 路径丢弃 → 完全无痕。"""
+    db, l1, l2, calls = _mk_trigger_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(wiki, "update",
+                        lambda **kw: (_ for _ in ()).throw(RuntimeError("编译炸了")))
+
+    r = wiki_triggers.on_memories_written()
+
+    assert r["fired"] is False
+    errs = _wiki_events("trigger_update_error")
+    assert len(errs) == 1 and "编译炸了" in errs[0]["error"]
+    assert errs[0]["level"] == "error", "失败必须是 error 级，否则筛不出来"
+    st = json.loads(_tmp_state.read_text(encoding="utf-8"))
+    assert "编译炸了" in st["last_error"] and st["last_error_at"]
+    assert "update_started_at" not in st, "失败也要清掉『进行中』"
+    assert "first_write_date" not in st, "失败不消耗额度（下次重试）"
+
+
+def test_并发被跳过要留痕(_tmp_state, tmp_path, monkeypatch):
+    """被跳过此前完全查不到 —— 只能看到"有写入却没有 run_start"，无法区分
+    "没触发"和"被别人占着"。"""
+    _mk_trigger_env(tmp_path, monkeypatch)
+
+    with wiki_triggers._single_flight() as got:      # 占住锁，模拟另一次更新在跑
+        assert got
+        r = wiki_triggers.on_memories_written()
+
+    assert r["should_run"] is False and "已有一次增量更新在执行中" in r["message"]
+    skips = _wiki_events("trigger_skip")
+    assert len(skips) == 1 and skips[0]["hook"] == "write"
+
+
+def test_更新进行中可查(_tmp_state, tmp_path, monkeypatch):
+    """`update()` 写完 manifest 后还有页面投影（实测 4.5 分钟），期间标记未打上 ——
+    没有这一项，外部看到 run_end 就查状态只会看到上一轮的标记（实测误判过）。"""
+    _mk_trigger_env(tmp_path, monkeypatch)
+    assert wiki_triggers.status()["in_progress"]["running"] is False
+
+    wiki_triggers._mark_started(datetime.now(), "write")
+
+    ip = wiki_triggers.status()["in_progress"]
+    assert ip["running"] is True and ip["hook"] == "write"
+    assert ip["elapsed_seconds"] is not None and ip["elapsed_seconds"] >= 0
+
+    # 收工后清掉，并留下成功痕迹
+    wiki_triggers._mark_fired(wiki_triggers._load_state(), datetime.now(), [], "write")
+    assert wiki_triggers.status()["in_progress"]["running"] is False
+
+
+def test_成功后清掉上次错误(_tmp_state, tmp_path, monkeypatch):
+    """上一轮的错误不该长期挂在状态里吓人 —— 成功即清。"""
+    _mk_trigger_env(tmp_path, monkeypatch)
+    wiki_triggers._mark_failed("上一轮炸了")
+    assert wiki_triggers.status()["state"]["last_error"] == "上一轮炸了"
+
+    wiki_triggers._mark_fired(wiki_triggers._load_state(), datetime.now(), [], "write")
+
+    assert wiki_triggers.status()["state"]["last_error"] is None
+
+
+# ---------------------------------------------------------------------------
+# 测试沙箱熔断（2026-09-26 事故）
+# ---------------------------------------------------------------------------
+
+def test_沙箱熔断_进程级拦截真实产出目录():
+    """**关键回归**：`monkeypatch` 挡不住**活过测试的线程**。
+
+    MCP 的写入钩子会起 daemon 线程（`mcp_server._wiki_trigger_probe`）；线程可能
+    在本测试结束、monkeypatch 已被撤销之后才执行到 `_targets()` → 拿到真实配置。
+    2026-09-26 实测：就这么用**测试沙箱的 tmp 库**跑了一次"全量更新"，把真实
+    `out_l1` 当产物目录 —— 224 个 L1 页面删到 25 个、manifest 的 n_inputs
+    从 1804 覆盖成 8。所以必须有一道**进程级、不随测试撤销**的熔断。
+    """
+    import os
+
+    # conftest 的 session 级夹具已置位（这里只断言它真的在，且真的拦得住）
+    assert os.environ.get(wiki_triggers.SANDBOX_ENV), "conftest 应置位沙箱熔断"
+    with pytest.raises(RuntimeError, match="测试环境禁止解析真实 wiki 产出目录"):
+        wiki_triggers._targets()
+
+    # 熔断发生在 `_targets()` 第一行 ⇒ 钩子链路必然早退，不会走到 update
+    r = wiki_triggers.on_memories_written()
+    assert r.get("checked") is False
+    assert "测试环境禁止" in (r.get("error") or "")

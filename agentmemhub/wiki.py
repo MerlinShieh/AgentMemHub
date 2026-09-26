@@ -432,6 +432,15 @@ def _delete_empty_session_outputs(l1_dir: Path, sessions: set, db: str) -> list[
     return removed
 
 
+def _audit(entry: dict) -> None:
+    """写一条 wiki 流水线日志（**全程旁路**：日志失败绝不影响更新本身）。"""
+    try:
+        from agentmemhub.logs import audit_wiki
+        audit_wiki(entry)
+    except Exception:                       # noqa: BLE001
+        pass
+
+
 def _l2_skip_ids(dom_out: dict[str, Any], dirty_domains: list[str],
                  written: set[str], skipped: list[str]) -> set[int]:
     """算出「**没真正写出来**的脏域」覆盖的记忆 id —— 它们必须被剔除出 L2 新基线。
@@ -666,7 +675,12 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
 
     # 页面层投影：知识页变了，召回面必须跟着变（否则 Agent 检索到的是旧知识）。
     # 全量对齐、幂等——页面重编/改名/删除都会自动收敛。失败旁路不阻塞更新。
+    # **必须记耗时**：实测 466 页要投 **4.5 分钟**，而它发生在两级 manifest 写完
+    # 之后、`update()` 返回之前 —— 这段时间 wiki.log 一片空白，外部只看到
+    # "run_end 了、触发状态却还是上一轮"，极易误判成卡住或标记没打上
+    # （2026-09-26 实测因此误报过一次）。
     page_index: dict[str, Any] = {}
+    t_proj = time.time()
     try:
         from agentmemhub import wiki_index
         from agentmemhub.rag.ingest import open_index
@@ -678,6 +692,15 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
             conn.close()
     except Exception as e:                      # noqa: BLE001
         page_index = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+    page_index["seconds"] = round(time.time() - t_proj, 1)
+    _audit({"event": "page_index", "ok": "error" not in page_index,
+            "seconds": page_index["seconds"],
+            "pages": page_index.get("pages"),
+            "inserted": page_index.get("inserted"),
+            "updated": page_index.get("updated"),
+            "removed": page_index.get("removed"),
+            "skipped_empty": page_index.get("skipped_empty"),
+            "error": page_index.get("error", "")})
 
     hints: list[str] = []
     n_pending = len(domain_map.get("待整理") or [])

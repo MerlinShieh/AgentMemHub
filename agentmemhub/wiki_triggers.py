@@ -273,6 +273,42 @@ def evaluate(*, now: datetime, dirty: int, has_dirty: bool, hook: str,
             "due_slots": due_slots}
 
 
+def _audit(entry: dict) -> None:
+    """写一条触发器日志（**全程旁路**：日志失败绝不影响触发流程）。"""
+    try:
+        from agentmemhub.logs import audit_wiki
+        audit_wiki(entry)
+    except Exception:                       # noqa: BLE001
+        pass
+
+
+def _mark_started(now: datetime, hook: str) -> None:
+    """把「更新已开始」落到状态文件。
+
+    为什么需要：`update()` 在写完 manifest 之后还有**页面层投影**（实测 4.5 分钟），
+    期间状态文件仍是上一轮的标记 —— 外部看到 `run_end` 就去查状态，会以为
+    "标记没打上、今天会重复触发"（2026-09-26 实测误报）。有了这个字段，
+    `wiki --action triggers` 能直接显示"更新进行中（自 HH:MM:SS）"。
+    """
+    st = _load_state()
+    st["update_started_at"] = now.isoformat(timespec="seconds")
+    st["last_hook"] = hook
+    _save_state(st)
+
+
+def _mark_failed(err: str) -> None:
+    """更新失败留痕（并清掉"进行中"）。
+
+    失败原因此前只塞进返回值 —— 而 MCP 那条 daemon 路径会**丢弃返回值**，
+    于是一次失败的触发完全无痕（看起来像"触发了但什么都没发生"）。
+    """
+    st = _load_state()
+    st.pop("update_started_at", None)
+    st["last_error_at"] = datetime.now().isoformat(timespec="seconds")
+    st["last_error"] = str(err)[:300]
+    _save_state(st)
+
+
 def _mark_fired(state: dict[str, Any], now: datetime, due_slots: list[str],
                 hook: str) -> None:
     """update **成功之后**才打标记 —— 失败不记，下次写入自然重试。"""
@@ -289,6 +325,8 @@ def _mark_fired(state: dict[str, Any], now: datetime, due_slots: list[str],
     if hook == "write":
         state["first_write_date"] = today
     state["last_update_at"] = now.isoformat(timespec="seconds")
+    state.pop("update_started_at", None)        # 收工：清掉"进行中"
+    state.pop("last_error", None)
     _save_state(state)
 
 
@@ -296,8 +334,24 @@ def _mark_fired(state: dict[str, Any], now: datetime, due_slots: list[str],
 # 入口
 # ---------------------------------------------------------------------------
 
+#: 测试沙箱熔断开关（环境变量）。**进程级**，不随单个测试的 monkeypatch 撤销 ——
+#: 这一条专治"**活过测试的线程**"：MCP 的写入钩子会起 daemon 线程
+#: （`mcp_server._wiki_trigger_probe`），线程可能在本测试结束、monkeypatch 已被
+#: 撤销之后才真正执行到 `_targets()` → 于是它拿到**真实配置**。
+#:
+#: 2026-09-26 实测事故（与 2026-09-19 那次同型）：`test_memory_save_passes_tags`
+#: 调 MCP handler → 起线程 → 线程在 patch 撤销后执行，用**测试沙箱的 tmp 库**跑了
+#: 一次"全量更新"，把**真实 `out_l1`** 当成产物目录：224 个 L1 页面被删到 25 个、
+#: `manifest_l1.n_inputs` 从 1804 覆盖成 8、`pending` 一下涨到 200 条。
+#: 靠 `monkeypatch` 的隔离挡不住它，所以必须有一道进程级、不撤销的熔断。
+SANDBOX_ENV = "AGENTMEMHUB_TEST_SANDBOX"
+
+
 def _targets() -> tuple[Path, Path, str]:
     """从配置解析 l1/l2 产出目录与索引库；未配置则抛可读错误。"""
+    if os.environ.get(SANDBOX_ENV):
+        raise RuntimeError("测试环境禁止解析真实 wiki 产出目录（%s 已置）"
+                           % SANDBOX_ENV)
     from agentmemhub import config as hub_config
     w = hub_config.config().wiki
     l1, l2 = (w.get("out_l1") or "").strip(), (w.get("out_l2") or "").strip()
@@ -335,6 +389,10 @@ def _check_and_run(*, hook: str, force: bool = False) -> dict[str, Any]:
     # update 自己会把 manifest 刷新成新基线，天然防重复编译。
     with _single_flight() as got:
         if not got:
+            # **跳过也要留痕**：并发时"本次没跑"此前完全查不到，事后只能看到
+            # "明明有写入却没有 run_start"，无法区分"没触发"和"被跳过"。
+            _audit({"event": "trigger_skip", "hook": hook,
+                    "message": "已有一次增量更新在执行中（可能来自其它进程），本次跳过"})
             return {"checked": True, "should_run": False,
                     "message": "已有一次增量更新在执行中（可能来自其它进程），本次跳过"}
         return _run_locked(hook=hook, force=force)
@@ -374,13 +432,45 @@ def _run_locked(*, hook: str, force: bool = False) -> dict[str, Any]:
         pass
     if not verdict["should_run"]:
         return out
+
+    # 判定通过 → **开始**要留痕：`trigger_check` 只说了"为什么该跑"，从这里到
+    # 第一次 `run_start` 之间发生了什么（update 内部还有快照、align、投影）
+    # 此前是断的。
+    _audit({"event": "trigger_update_start", "hook": hook,
+            "reasons": verdict["reasons"], "dirty": dirty})
+    _mark_started(now, hook)
+    t0 = time.time()
     try:
         upd = wiki.update(l1_dir=l1, l2_dir=l2, db=db)
     except Exception as e:                  # noqa: BLE001 —— 失败如实返回，不打标记
-        out["update"] = {"error": "%s: %s" % (type(e).__name__, str(e)[:300])}
+        err = "%s: %s" % (type(e).__name__, str(e)[:300])
+        # **失败必须留痕**：此前只塞进返回值，而 MCP 那条 daemon 路径会**丢弃
+        # 返回值** → 一次失败的触发完全无痕（看起来像"触发了但什么都没发生"）。
+        _audit({"event": "trigger_update_error", "hook": hook, "error": err,
+                "seconds": round(time.time() - t0, 1),
+                "reasons": verdict["reasons"]})
+        _mark_failed(err)
+        out["update"] = {"error": err}
         out["fired"] = False
         return out
     out["update"] = upd
+
+    # 成功也留**汇总**：想回答"这次更新做了什么"，此前只能去流水线日志里拼
+    # （脏会话/域、L1 成败、L2 页数、投影耗时、提示都在返回值里，没人记）。
+    g = upd if isinstance(upd, dict) else {}
+    l1s, l2s = (g.get("l1") or {}), (g.get("l2") or {})
+    _audit({"event": "trigger_update_end", "hook": hook,
+            "seconds": round(time.time() - t0, 1),
+            "updated": bool(g.get("updated")),
+            "dirty_sessions": len(g.get("dirty_sessions") or []),
+            "l1_recompiled": l1s.get("recompiled"),
+            "l1_failed": l1s.get("failed"),
+            "l2_domains": l2s.get("domains_recompiled"),
+            "l2_pages": l2s.get("pages"),
+            "l2_aborted": l2s.get("aborted") or "",
+            "l2_skipped": l2s.get("skipped_domains") or [],
+            "page_index_seconds": (g.get("page_index") or {}).get("seconds"),
+            "hints": g.get("hints") or []})
 
     # **部分失败不算成功**：L1 有会话没编出来时不能打标记 —— 否则当日档位与
     # last_update_at 一起被消耗，而失败会话（已被剔除出新基线）要等到明天首次
@@ -411,6 +501,24 @@ def status() -> dict[str, Any]:
     if _configured():
         l1, l2, db = _targets()
         targets = {"l1": str(l1), "l2": str(l2), "db": db}
+    # 「更新进行中」要能被看到：`update()` 在写完 manifest 之后还有页面层投影
+    # （实测 4.5 分钟），期间标记还没打上。没有这一项，外部看到 `run_end` 就查
+    # 状态只会看到上一轮的标记，极易误判成"标记没打上/卡住了"（2026-09-26 实测）。
+    started = state.get("update_started_at")
+    in_progress: dict[str, Any] = {"running": False}
+    if started:
+        elapsed = None
+        try:
+            elapsed = round((datetime.now()
+                             - datetime.fromisoformat(str(started))).total_seconds(), 1)
+        except Exception:                   # noqa: BLE001 —— 格式坏就当算不出
+            pass
+        in_progress = {
+            "running": True, "started_at": started, "hook": state.get("last_hook"),
+            "elapsed_seconds": elapsed,
+            "note": ("更新进行中（含最后的页面投影）；若该值长期不变，说明上一轮"
+                     "异常退出，见 last_error"),
+        }
     return {
         "config": get_effective_config(),
         "state": {
@@ -419,7 +527,11 @@ def status() -> dict[str, Any]:
             "fired_today": (state.get("fired") or {}).get(
                 datetime.now().strftime("%Y-%m-%d")) or [],
             "overrides": state.get("overrides") or {},
+            # 失败留痕（此前失败只塞进返回值，MCP 路径会丢掉 → 完全无痕）
+            "last_error_at": state.get("last_error_at"),
+            "last_error": state.get("last_error"),
         },
+        "in_progress": in_progress,
         "state_file": str(STATE_FILE),
         "targets": targets,
     }

@@ -352,12 +352,24 @@ def _save(args: dict) -> str:
 
 
 def _wiki_trigger_probe() -> None:
-    """wiki 触发器检测（daemon 线程入口）——全程旁路，绝不影响 MCP 响应。"""
+    """wiki 触发器检测（daemon 线程入口）——全程旁路，绝不影响 MCP 响应。
+
+    ⚠️ 这条路径此前是 `except Exception: pass` **且丢弃返回值** —— 触发器在
+    MCP 这条链路上出问题时一个字都不留（成功/失败/被跳过全都看不见，实测因此
+    排查过一轮）。现在异常必须留痕：正常结果由 `on_memories_written` 内部的
+    `trigger_check` / `trigger_update_*` 事件覆盖，这里只兜住"连它都没兜住"的。
+    """
     try:
         from agentmemhub import wiki_triggers
         wiki_triggers.on_memories_written()
-    except Exception:
-        pass
+    except Exception as e:                  # noqa: BLE001 —— 兜底，但要留痕
+        try:
+            from agentmemhub import logs as _logs
+            _logs.audit_wiki({"event": "trigger_error", "hook": "write",
+                              "stage": "mcp_probe",
+                              "error": "%s: %s" % (type(e).__name__, str(e)[:200])})
+        except Exception:
+            pass
 
 
 def _score(args: dict) -> str:

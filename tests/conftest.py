@@ -46,6 +46,10 @@ def _no_wiki_side_effects(monkeypatch):
         raise RuntimeError("测试环境禁止解析真实 wiki 产出目录")
 
     monkeypatch.setattr(wt, "_targets", _forbidden)
+    # 上面这道 monkeypatch 挡不住**活过测试的线程**（MCP 写入钩子会起 daemon
+    # 线程，线程在 patch 撤销后才执行 → 拿到真实配置）。真正的兜底是
+    # `_sandbox_data_dir` 里那个**进程级**环境变量熔断，见 `wt.SANDBOX_ENV`。
+    # 实测事故：2026-09-26 一次测试越界把真实 out_l1 删剩 25 页。
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -53,8 +57,14 @@ def _sandbox_data_dir(tmp_path_factory):
     d = tmp_path_factory.mktemp("agentmemhub-data")
     old = os.environ.get("AGENTMEM_HUB_DATA_DIR")
     oldb = os.environ.get("AGENTMEMHUB_BACKEND")
+    olds = os.environ.get("AGENTMEMHUB_TEST_SANDBOX")
     os.environ["AGENTMEM_HUB_DATA_DIR"] = str(d)
     os.environ.setdefault("AGENTMEMHUB_BACKEND", "memos")
+    # **进程级** wiki 熔断：与上面按测试生效的 monkeypatch 不同，环境变量在整个
+    # 会话内始终置位，且会被子进程继承 —— 这样即使有线程/子进程在测试结束后才
+    # 执行到 `wiki_triggers._targets()`，也绝不可能解析到真实产物目录。
+    # （2026-09-26 实测：一次测试越界用 tmp 库"全量更新"了真实 out_l1。）
+    os.environ["AGENTMEMHUB_TEST_SANDBOX"] = "1"
     yield
     if old is None:
         os.environ.pop("AGENTMEM_HUB_DATA_DIR", None)
@@ -64,3 +74,7 @@ def _sandbox_data_dir(tmp_path_factory):
         os.environ.pop("AGENTMEMHUB_BACKEND", None)
     else:
         os.environ["AGENTMEMHUB_BACKEND"] = oldb
+    if olds is None:
+        os.environ.pop("AGENTMEMHUB_TEST_SANDBOX", None)
+    else:
+        os.environ["AGENTMEMHUB_TEST_SANDBOX"] = olds

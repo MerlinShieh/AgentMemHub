@@ -54,9 +54,18 @@
   （记忆排除 UI 已下线，后端能力保留）；记忆页承载筛选/溯源/⭐加权/👍👎/蒸馏入口。
   会话与记忆通过 `session_uid`（全局递增）双向绑定跳转。
 - **测试纪律**：每次改动带测试；bug 修复先写复现测试（红→绿）；
-  `uv run pytest` 全绿是提交门槛（数量以实测为准，当前 814 passed / 1 skipped）。
+  `uv run pytest` 全绿是提交门槛（数量以实测为准，当前 820 passed / 1 skipped）。
   ⚠️ **别并发跑两个 `uv run`**（例如后台跑全量测试、前台又跑脚本）—— uv 会争用环境锁，
   实测导致 10 个毫不相干的测试假失败（snapshot / wiki_triggers），干净重跑即全绿。
+  ⚠️ **`monkeypatch` 挡不住「活过测试的线程/子进程」**：MCP 的写入钩子会起 daemon
+  线程（`mcp_server._wiki_trigger_probe`），线程若在本测试结束后才执行，patch 已被
+  撤销 → 它拿到**真实配置**。**2026-09-26 实测事故**：某个 `memory_save` 测试的逃逸
+  线程用**测试沙箱的 tmp 库**跑了"全量更新"，把真实 `out_l1` 当产物目录 ——
+  224 个 L1 页面删到 25 个、`manifest_l1.n_inputs` 从 1804 覆盖成 8。
+  所以关涉真实路径的旁路必须有**进程级、不随测试撤销**的熔断：
+  `conftest._sandbox_data_dir`（session 级 autouse）置位 **`AGENTMEMHUB_TEST_SANDBOX=1`**
+  （环境变量会被子进程继承），`wiki_triggers._targets()` 见它即抛。
+  **新加"会起线程/子进程的旁路"时，务必确认它也被这道熔断覆盖。**
 - **日志纪律**：统一 `logs/` 按程序分文件；测试必须隔离日志与数据目录
   （`conftest` 的 autouse 夹具已强制把 `logs.log_dir` 指向临时目录）。
   **标准头五项**：**时间 / 等级 / 模块 / 行号 / 内容** —— 所有日志都必须有，
