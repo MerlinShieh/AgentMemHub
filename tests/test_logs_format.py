@@ -154,3 +154,62 @@ def test_取栈失败不抛(monkeypatch):
     assert logs.caller_site(1) == ("", 0)
     logs.audit_wiki({"event": "note"})          # 不抛即通过
     assert _last("wiki.log")["module"] in ("", None) or True
+
+
+# ---------------------------------------------------------------------------
+# 应用内 logger 的兜底 handler
+# （2026-09-26：一批 logger 从来没有 handler，info 级日志全丢）
+# ---------------------------------------------------------------------------
+
+def test_兜底handler_原本丢日志的logger现在能落盘():
+    """**关键回归**：`agentmemhub.distill` / `llm` / `store`、`asrag.cli-sync` /
+    `bridge` 这些 logger 直接 `getLogger(...).info(...)`，而 root 也没 handler
+    ⇒ 记录只走 `logging.lastResort`（仅 WARNING+ 到 stderr），**info 级全丢**
+    （实测 24 处调用点一直没人收）。挂到命名空间根上才能覆盖现有与将来的子 logger。
+    """
+    import logging
+
+    logs.setup_app_logging()
+
+    for ns in [n for n, _ in logs.APP_LOG_SPECS]:
+        lg = logging.getLogger(ns)
+        assert [h for h in lg.handlers if getattr(h, "_app_handler", False)], \
+            "%s 应有兜底 handler" % ns
+        assert lg.level != logging.NOTSET, "根 logger 不设级别的话 INFO 仍会被丢"
+
+    logging.getLogger("agentmemhub.distill").info("蒸馏写了一条 info")
+    logging.getLogger("asrag.bridge").info("桥接写了一条 info")
+
+    txt = (logs.log_dir() / "agentmemhub.log").read_text(encoding="utf-8")
+    line = [x for x in txt.splitlines() if "蒸馏写了一条 info" in x][0]
+    # 必须是**标准文本格式**：时间 等级 [模块:行号] 内容
+    assert re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} INFO\s+"
+                    r"\[agentmemhub\.distill:\d+\] ", line), \
+        "文本日志要含 时间/等级/模块:行号：%r" % line
+    assert "桥接写了一条 info" in \
+        (logs.log_dir() / "asrag.log").read_text(encoding="utf-8")
+
+
+def test_兜底handler_幂等且随目录重建(tmp_path, monkeypatch):
+    """测试把 `log_dir` 指到 tmp 时必须重绑，否则会写进上一个测试的目录。"""
+    import logging
+
+    d1 = tmp_path / "a"
+    monkeypatch.setattr(logs, "log_dir", lambda: d1)
+    logs.setup_app_logging()
+
+    def _n():
+        return len([h for h in logging.getLogger("agentmemhub").handlers
+                    if getattr(h, "_app_handler", False)])
+
+    assert _n() == 1
+    logs.setup_app_logging()                    # 同目录 → 幂等，不重复挂
+    assert _n() == 1
+
+    d2 = tmp_path / "b"
+    monkeypatch.setattr(logs, "log_dir", lambda: d2)
+    logs.setup_app_logging()                    # 换目录 → 重建
+    hs = [h for h in logging.getLogger("agentmemhub").handlers
+          if getattr(h, "_app_handler", False)]
+    assert len(hs) == 1
+    assert getattr(hs[0], "_app_dir", "").startswith(str(d2))

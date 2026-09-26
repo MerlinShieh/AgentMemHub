@@ -208,6 +208,69 @@ def _prune_archive(name: str, pol: dict) -> None:
         pass
 
 
+#: 应用内 logger 的**兜底 handler** 挂点：命名空间根 → 日志文件。
+#:
+#: 为什么挂根上而不是逐个登记：`agentmemhub.distill` / `llm` / `store`、
+#: `asrag.cli-sync` / `bridge` 这些 logger **从来没有 handler**（模块里直接
+#: `logging.getLogger(...)` 就 `.info(...)`，而 root 也没有 handler）⇒ 记录只走
+#: `logging.lastResort`（仅 WARNING+ 到 stderr），**info 级全丢**（实测 24 处调用点
+#: 的日志一直没人收）。逐名登记挡不住"以后新增模块"，挂在命名空间根上才能
+#: 一次覆盖全部子 logger。
+#:
+#: 不会与 `rag.logkit` 重复：`get_logger()` 给 `asrag.<组件>` 挂了专属文件并设了
+#: `propagate = False`，所以那批记录只进自己的文件，不会再到 `asrag.log`。
+APP_LOG_SPECS = (("agentmemhub", "agentmemhub.log"), ("asrag", "asrag.log"))
+
+#: 文本形态的标准头（与 `rag/logkit.py` 同口径，两处必须一致）。
+_TEXT_FORMAT = "%(asctime)s %(levelname)-5s [%(name)s:%(lineno)d] %(message)s"
+
+
+def setup_app_logging(level: int | None = None) -> list[str]:
+    """给应用内的 logger 挂标准格式的文件 handler（幂等，可重入）。
+
+    绑定目录变了（测试把 `log_dir` 指到 tmp）会**重建** handler —— 与
+    `logkit.get_logger` 同一套"同组件同目录才幂等"的做法。
+    返回实际挂上的文件路径列表；任何一步失败都静默（日志设施绝不能把业务写挂）。
+    """
+    import logging
+    import logging.handlers
+    out: list[str] = []
+    try:
+        d = log_dir()
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception:                       # noqa: BLE001
+        return out
+    for ns, fname in APP_LOG_SPECS:
+        try:
+            lg = logging.getLogger(ns)
+            target = d / fname
+            if any(getattr(h, "_app_handler", False)
+                   and getattr(h, "_app_dir", None) == str(target)
+                   for h in lg.handlers):
+                out.append(str(target))     # 已绑同一目录 → 幂等
+                continue
+            for h in list(lg.handlers):     # 目录变了（测试隔离）→ 重建
+                if getattr(h, "_app_handler", False):
+                    lg.removeHandler(h)
+                    try:
+                        h.close()
+                    except Exception:       # noqa: BLE001
+                        pass
+            fh = logging.handlers.RotatingFileHandler(
+                target, maxBytes=5 * 1024 * 1024, backupCount=3,
+                encoding="utf-8")
+            fh.setFormatter(logging.Formatter(_TEXT_FORMAT))
+            fh._app_handler = True          # type: ignore[attr-defined]
+            fh._app_dir = str(target)       # type: ignore[attr-defined]
+            lg.addHandler(fh)
+            if lg.level == logging.NOTSET:
+                lg.setLevel(level if level is not None else logging.INFO)
+            out.append(str(target))
+        except Exception:                   # noqa: BLE001
+            continue
+    return out
+
+
 def prune_task_logs() -> list[str]:
     """清理超期的**任务日志**（`logs/tasks/`），返回被删文件名。
 
@@ -250,6 +313,10 @@ def _append_line(path: "Path | Any", line: str, *, name: str = "") -> None:
                 _maybe_archive(p, name)
             with open(p, "a", encoding="utf-8") as f:
                 f.write(line)
+        # 顺带把应用内 logger 的兜底 handler 挂上（幂等、失败静默）——放在这里
+        # 是因为它是**所有**日志的唯一漏斗：任何会写日志的进程都会走到，不用去
+        # 逐个入口记得调 `setup_app_logging()`。
+        setup_app_logging()
     except Exception:                       # noqa: BLE001
         pass
 

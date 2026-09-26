@@ -75,8 +75,16 @@
     自动注入 `ts`（epoch 秒）/ `level`（`info|warn|error`，由 `ok=False`、`error`、
     错误事件名自动推断）/ `module` + `line`（**由调用栈取业务调用点**，不是日志模块自己）
     / `msg`（单行可读摘要，≤200 字；正文仍在业务字段里）。测试：`tests/test_logs_format.py`
-  · **文本日志**（`asrag-*.log`，见 `agentmemhub/rag/logkit.py`）：
+  · **文本日志**（`asrag-*.log`、`agentmemhub.log`、`asrag.log`，见
+    `agentmemhub/rag/logkit.py` 与 `logs.setup_app_logging()`）：
     `%(asctime)s %(levelname)-5s [%(name)s:%(lineno)d] %(message)s`
+    ⚠️ 应用内 `agentmemhub.*` / `asrag.*` 的 logger **必须能被收进文件**：
+    `logs.setup_app_logging()` 把兜底 handler 挂在**命名空间根**上（不是逐个登记 ——
+    新模块加进来就会再漏）。此前 `agentmemhub.distill` / `llm` / `store`、
+    `asrag.cli-sync` / `bridge` 五个 logger 从来没有 handler，root 也没有 ⇒
+    只走 `logging.lastResort`（仅 WARNING+ 到 stderr），**info 级全丢**（实测
+    24 处调用点）。它由 `_append_line`（所有日志的唯一漏斗）顺带调用，所以
+    任何写日志的进程都会自动挂上。
   · **任务日志**（`logs/tasks/<id>.log`）：`YYYY-MM-DD HH:MM:SS INFO [module:line] 内容`
     （早先只有 `[HH:MM:SS]`，跨天排查无法定位是哪天）
   **三条事实流分工**：`logs/mcp.log` 记**协议层**（谁调了什么工具、耗时、成败，
