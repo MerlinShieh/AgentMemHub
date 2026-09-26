@@ -141,42 +141,105 @@ def test_load_pages_没有库映射时不静默丢正文(tmp_path):
 # 链接修复
 # ---------------------------------------------------------------------------
 
-def test_linkfix_精确命中():
-    from wiki_linkfix import build_index, resolve
-    titles = {"页面 A"}
-    assert resolve("页面 A", titles, build_index(titles)) == "页面 A"
+def _mkpage(d, name, title, aliases=(), body=""):
+    """造一个带 frontmatter 的页面（wiki_linkfix 的测试夹具）。"""
+    d.mkdir(parents=True, exist_ok=True)
+    al = ("aliases: [%s]\n" % ", ".join('"%s"' % a for a in aliases)) if aliases else ""
+    (d / name).write_text(
+        "---\ntitle: %s\n%s---\n\n# %s\n%s\n" % (title, al, title, body),
+        encoding="utf-8")
 
 
-def test_linkfix_规范化后唯一命中():
-    from wiki_linkfix import build_index, resolve
-    titles = {"ADB 命令实现中的 shell 注入防御约束：不要在命令里用管道"}
-    idx = build_index(titles)
-    assert resolve("ADB命令实现中的shell注入防御约束-不要在命令里用管道",
-                   titles, idx) == next(iter(titles))
+def test_linkfix_精确命中(tmp_path):
+    from wiki_linkfix import collect_pages, resolve
+    d = tmp_path / "l2"
+    _mkpage(d, "001-页面-A.md", "页面 A")
+    idx, _ = collect_pages(d)
+    assert resolve("页面 A", idx, {}) == "001-页面-A"      # 按标题
+    assert resolve("001-页面-A", idx, {}) == "001-页面-A"   # 按文件名
 
 
-def test_linkfix_按合并关系重定向():
+def test_linkfix_规范化后唯一命中(tmp_path):
+    from wiki_linkfix import collect_pages, resolve
+    d = tmp_path / "l2"
+    _mkpage(d, "005-x.md", "ADB 命令实现中的 shell 注入防御约束：不要在命令里用管道")
+    idx, _ = collect_pages(d)
+    assert resolve("ADB命令实现中的shell注入防御约束-不要在命令里用管道", idx, {}) == "005-x"
+
+
+def test_linkfix_按合并关系重定向(tmp_path):
     """第二级把第一级的多个页面合并成一页，旧标题要能重定向过去。"""
-    from wiki_linkfix import build_index, resolve
-    titles = {"合并后的大页"}
-    idx = build_index(titles)
-    red = {"旧页 A": "合并后的大页", "旧页 B": "合并后的大页"}
-    assert resolve("旧页 A", titles, idx, red) == "合并后的大页"
-    assert resolve("旧页 B", titles, idx, red) == "合并后的大页"
+    from wiki_linkfix import collect_redirects, collect_pages, resolve
+    d = tmp_path / "l2"
+    _mkpage(d, "009-大页.md", "合并后的大页")
+    (d / "009-大页.json").write_text(json.dumps(
+        {"title": "合并后的大页", "from_titles": ["旧页 A", "旧页 B"]},
+        ensure_ascii=False), encoding="utf-8")
+    idx, _ = collect_pages(d)
+    red = collect_redirects(d)
+    assert resolve("旧页 A", idx, red) == "009-大页"
+    assert resolve("旧页 B", idx, red) == "009-大页"
 
 
-def test_linkfix_歧义时宁可不猜():
+def test_linkfix_歧义时宁可不猜(tmp_path):
     """`AgentMemHub` 对应二十多个标题，猜错比留死链更糟。"""
-    from wiki_linkfix import build_index, resolve
-    titles = {"AgentMemHub 数据库概览", "AgentMemHub 配置体系"}
-    assert resolve("AgentMemHub", titles, build_index(titles)) is None
+    from wiki_linkfix import collect_pages, resolve
+    d = tmp_path / "l2"
+    _mkpage(d, "001-a.md", "AgentMemHub 数据库概览")
+    _mkpage(d, "002-b.md", "AgentMemHub 配置体系")
+    idx, _ = collect_pages(d)
+    assert resolve("AgentMemHub", idx, {}) is None
 
 
-def test_linkfix_重定向目标不存在时不算命中():
-    from wiki_linkfix import build_index, resolve
-    titles = {"真正的页"}
-    idx = build_index(titles)
-    assert resolve("旧页", titles, idx, {"旧页": "已被删掉的页"}) is None
+def test_linkfix_重定向目标不存在时不算命中(tmp_path):
+    from wiki_linkfix import collect_pages, resolve
+    d = tmp_path / "l2"
+    _mkpage(d, "001-真正的页.md", "真正的页")
+    idx, _ = collect_pages(d)
+    assert resolve("旧页", idx, {"旧页": "已被删掉的页"}) is None
+
+
+def test_linkfix_输出文件名形态_Obsidian可解析(tmp_path):
+    """**关键回归（硬性要求）**：Obsidian 的 `[[X]]` **只按文件名/路径解析，
+    `aliases` 不参与**（2026-09-26 用 `obsidian eval` 实测：`getFirstLinkpathDest(
+    "标题")` → null，而 `getFirstLinkpathDest("041-…")` → 命中）。
+
+    所以改写必须输出 `[[<文件名>|<标题>]]` —— 输出 `[[标题]]` 的话全库都是死链，
+    **点击就新建一个空白笔记**（实测 228 个目标 / 1136 条）。产物是给人看的，
+    这条不能退让。
+    """
+    from wiki_linkfix import run_fix
+    d = tmp_path / "l2"
+    _mkpage(d, "041-RAG-与-LLM-Wiki-互补架构.md", "RAG 与 LLM Wiki：互补架构",
+            body="见 [[RAG 与 LLM Wiki：互补架构]]。")
+    r = run_fix(d)
+
+    txt = (d / "041-RAG-与-LLM-Wiki-互补架构.md").read_text(encoding="utf-8")
+    assert "[[041-RAG-与-LLM-Wiki-互补架构|RAG 与 LLM Wiki：互补架构]]" in txt, txt
+    assert r["fixed"] == 1 and r["dropped"] == 0
+    # 幂等：已是正确形态不该再改（否则每次更新都白写一遍全库）
+    assert run_fix(d)["files_changed"] == 0
+
+
+def test_linkfix_标题自带斜杠不被当成路径(tmp_path):
+    """标题里可能自带 `/`（如 `视觉/OCR 定位`）—— 整串必须先当标题试，
+    先拆路径就会把这类标题拆坏。"""
+    from wiki_linkfix import collect_pages, resolve
+    d = tmp_path / "l2"
+    _mkpage(d, "020-定位.md", "界面元素定位：视觉/OCR 定位的缺陷与分工")
+    idx, _ = collect_pages(d)
+    assert resolve("界面元素定位：视觉/OCR 定位的缺陷与分工", idx, {}) == "020-定位"
+
+
+def test_linkfix_无法确定时去链但保留文字(tmp_path):
+    """歧义/无对应页 → 去掉链接标记（读者仍读得到文字，且不产生空白笔记）。"""
+    from wiki_linkfix import run_fix
+    d = tmp_path / "l2"
+    _mkpage(d, "001-a.md", "页面 A", body="见 [[根本不存在的页]]。")
+    r = run_fix(d)
+    assert "根本不存在的页" in (d / "001-a.md").read_text(encoding="utf-8")
+    assert "[[" not in (d / "001-a.md").read_text(encoding="utf-8")
+    assert r["dropped"] == 1
 
 
 def test_collect_redirects_从产物建表(tmp_path):
@@ -191,29 +254,32 @@ def test_collect_redirects_从产物建表(tmp_path):
         {"title": "不该收进来", "from_titles": ["噪音"]}, ensure_ascii=False),
         encoding="utf-8")
     red = collect_redirects(d)
-    assert red == {"旧页 A": "合并后的大页", "旧页 B": "合并后的大页"}
+    # 重定向目标记的是**页面文件名 stem**（Obsidian 只认这个）
+    assert red["旧页 A"] == "a" and red["旧页 B"] == "a"
+    assert "噪音" not in red
 
 
-def test_collect_titles_两级产出的标题都能收到(tmp_path):
+def test_collect_pages_两级产出的标题都能收到(tmp_path):
     """第二级 frontmatter 是页面标题；第一级是"发起/会话 id"，标题在正文 `# ` 里。"""
-    from wiki_linkfix import collect_titles
+    from wiki_linkfix import collect_pages
     d = tmp_path / "mix"
     d.mkdir()
     (d / "l2.md").write_text("---\ntitle: 页面标题\n---\n\n# 页面标题\n\n正文\n",
                              encoding="utf-8")
     (d / "l1.md").write_text("---\ntitle: src / cid\n---\n\n# 正文里的页标题\n\n*type: x*\n",
                              encoding="utf-8")
-    titles, files = collect_titles(d)
-    assert "页面标题" in titles and "正文里的页标题" in titles
+    idx, files = collect_pages(d)
+    assert idx.lookup.get("页面标题") == "l2"
+    assert idx.lookup.get("正文里的页标题") == "l1"
     assert len(files) == 2
 
 
-def test_collect_titles_跳过索引文件(tmp_path):
-    from wiki_linkfix import collect_titles
+def test_collect_pages_跳过索引文件(tmp_path):
+    from wiki_linkfix import collect_pages
     d = tmp_path / "x"
     d.mkdir()
     (d / "index.md").write_text("# 知识库索引\n", encoding="utf-8")
-    titles, files = collect_titles(d)
+    _, files = collect_pages(d)
     assert files == []
 
 
