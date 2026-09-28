@@ -244,22 +244,26 @@ wiki:
 | 8 | **密钥治理** | key 只进本地 yaml（gitignore），example 占位，`sensitive_scan.py` 过审；⚠️ 该 key 已出现于对话记录，**M0 验证后到小米控制台轮换** |
 | 9 | 30 天文件保留期 → `batch_state.json` 里的 batch_id 失效 | retrieve 404/过期 → BatchJob 标记失效 → 数据回待更新池（与作废同路径） |
 | 10 | **数据出域**：批量上传=记忆内容发往小米批量服务（闲时执行、保留 30 天） | 与实时经 Command Code 路由同级，无新增暴露面；在文档明示 |
+| 11 | **文档欠账**：实现完成后再补文档必然失真（本项目已有 26 个模块零模块文档的先例） | 文档与日志**随里程碑同步写**（§17.5）；每个里程碑的验收含文档项，不为收尾补账 |
 
 ---
 
 ## 13. 里程碑与追踪
 
-| 里程碑 | 内容 | 验收标准 | 状态 |
-|---|---|---|---|
-| **M0** 探测+客户端 | 连通性探测脚本（域名两种拼写 / key / 模型名小写 / completion_window 可选值 / 错误响应形状）+ `MiMoBatchClient` 五方法 + 沙箱熔断 | 探测报告落 docs/；mock 单测全绿；沙箱下直连抛 | ☐ 未开始 |
-| **M1** 标记与决策扩展 | `BatchJob` 扩展（input/output/error_file_id、provider_status、expire_at、stage=l2compile、voided）+ `decide()` 终局判定 + 作废/取消回池 + `notify.py` 最小闭环 | 单测覆盖状态机全转移；notify 落库/降级路径有测试 | ☐ 未开始 |
-| **M2** 离线运行器 | `OfflineRunner`（plan）+ **compile 阶段 runner 化** + 三段式 `run()` 状态机 + `update_wiki(mode=)` 入口抽离 + §11 三补丁 | fake uploader 下三段全链路跑通；PendingError 不触发降级（复现测试） | ☐ 未开始 |
-| **M3** CLI 四动作 | `batch-status / batch-submit / batch-import / batch-cancel` | 手动剧本（§14）全程可操作；状态展示 request_counts | ☐ 未开始 |
-| **M4** 开关与配置接口 | `wiki.update_mode` 生效 + 模式切换作废逻辑 + override 层 + HTTP 配置/通知接口 + 审计通知 | 白名单外键拒绝；主 yaml 注释零损失；切换后数据回池验证 | ☐ 未开始 |
-| **M5** 触发器调整 | `triggers.enabled` 开关 + 阈值 30 + 27 个触发器测试适配 | 自动判定短路且不写状态文件；手动触发不受影响 | ☐ 未开始 |
-| **M6** 收尾 | fake uploader e2e + 真凭据小额实测（1 个域）+ 全量回归 + `check_config_keys` + 文档（本计划更新状态、`llm-batch-offline.md` 升级为实施记录、`API.md` 补契约） | 全量测试全绿；实测域产物与实时路 diff 可解释 | ☐ 未开始 |
+> 「随附文档与日志」列是**验收的一部分**，不是可选项 —— 该里程碑合入时文档未同步即视为未完成。
 
-工作量估算：合计 **4.5~6 天**（M0 是硬前置——域名 / key / 窗口三个疑点全靠它落地）。
+| 里程碑 | 内容 | 随附文档与日志 | 验收标准 | 状态 |
+|---|---|---|---|---|
+| **M0** 探测+客户端 | 连通性探测脚本（域名两种拼写 / key / 模型名小写 / completion_window 可选值 / 错误响应形状）+ `MiMoBatchClient` 五方法 + 沙箱熔断 | 新建 `docs/modules/batch-offline.md`（厂商契约 + 探测结论）；`docs/logging.md` 事件字典登记 `batch_*` 五事件骨架 | 探测结论回填 §15；mock 单测全绿；沙箱下直连抛 | ☐ 未开始 |
+| **M1** 标记与决策扩展 | `BatchJob` 扩展（input/output/error_file_id、provider_status、expire_at、stage=l2compile、voided）+ `decide()` 终局判定 + 作废/取消回池 + `notify.py` 最小闭环 | 新建 `docs/logging.md`（三条事实流 + 标准头 + **事件字典**）；`batch-offline.md` 补状态机图；字典登记 `notify_write` | 单测覆盖状态机全转移；notify 落库 / 降级路径均有测试 | ☐ 未开始 |
+| **M2** 离线运行器 | `OfflineRunner`（plan）+ **compile 阶段 runner 化** + 三段式 `run()` 状态机 + `update_wiki(mode=)` 入口抽离 + §11 三补丁 | `batch-offline.md` 补三段式流水线图与 runner 契约；字典补 `offline_submitted` / `batch_consumed` / `batch_voided` / `batch_expired` | fake uploader 下三段全链路跑通；PendingError 不触发降级（复现测试） | ☐ 未开始 |
+| **M3** CLI 四动作 | `batch-status / batch-submit / batch-import / batch-cancel` | `docs/API.md` §五 CLI 表 + 根 README「命令行」表；`batch-offline.md` 收录操作剧本（§14） | 手动剧本（§14）全程可操作；状态展示 request_counts | ☐ 未开始 |
+| **M4** 开关与配置接口 | `wiki.update_mode` 生效 + 模式切换作废逻辑 + override 层 + HTTP 配置/通知接口 + 审计通知 | `docs/API.md` §三 HTTP 分组行（含 Swagger `summary` + Query `description`）与 §六 现状表；新建 `docs/modules/config.md` 的 override 小节；字典补 `config_change` | 白名单外键拒绝（400）；主 yaml 注释零损失；切换后数据回池验证 | ☐ 未开始 |
+| **M5** 触发器调整 | `triggers.enabled` 开关 + 阈值 30 + 27 个触发器测试适配 | 新建 `docs/modules/wiki.md`（两级编译 + 触发器 + 失败兜底）；配置项表更新 | 自动判定短路且不写状态文件；手动触发不受影响 | ☐ 未开始 |
+| **M6** 收尾 | fake uploader e2e + 真凭据小额实测（1 个域）+ 全量回归 + `check_config_keys` + 文档一致性复查 | 根 README「模块地图」；AGENTS.md「相关文档」；`llm-batch-offline.md` 升级为实施记录；`API.md` §六 复查；`logging.md` 字典覆盖全部新事件 | 全量测试全绿；实测域产物与实时路 diff 可解释；§17.5 文档门槛全过 | ☐ 未开始 |
+
+工作量估算：合计 **5~6.5 天**（M0 是硬前置——域名 / key / 窗口三个疑点全靠它落地；
+文档与日志随里程碑写，不额外占收尾工期）。
 
 ---
 
@@ -299,6 +303,84 @@ wiki:
 - 批量只支持 `mimo-v2.6-pro` / `mimo-v2.6-flash`，价格为实时 50%，只计成功请求；
 - 不支持任务内重试 / 续跑（失败重建任务）、不支持流式；
 - 输入与结果文件保留 30 天，过期自动清理。
+
+---
+
+## 17. 文档与日志的落实（本次一并纳入交付）
+
+> 依据：Merlin 2026-09-27 的要求 ——「日志和文档的落实，包括接口文档和各个功能模块的 README 文档」。
+
+### 17.1 现状盘点（2026-09-27 实测）
+
+| 项 | 现状 | 结论 |
+|---|---|---|
+| 项目自有文档 | 根 `README.md`（全面，面向使用者）+ `docs/` 15 份（架构 / 设计 / 接口）+ `scripts/e2e/README.md` | 顶层文档**不欠账** |
+| **模块文档** | `agentmemhub/` **26 个顶层模块 + 3 个子目录（`rag` / `web` / `adapters`）零模块文档**；`scripts/` 16 个脚本同样为零 | ⚠️ **主要缺口**（`memOS/` 下那份 40+ README 是 vendored 上游，不算我们的） |
+| 接口文档 | `docs/API.md`（333 行）已有完整骨架：三层接口 / 通用约定 / 长任务约定 / HTTP 分组 / MCP / CLI / **§七 维护约定** | 新接口**按既有约定追加**，不另起体系 |
+| 日志 | `logs.standardize()` 已落地标准头五项 + 三条事实流分工（AGENTS.md 有纪律） | ⚠️ **事件字典缺失**：每个 `event` 的字段含义散在代码里，排查时靠读代码 |
+
+### 17.2 模块文档策略：按职责域，不逐文件
+
+逐文件 README（26 + 3 + 16 ≈ 45 份）**必然腐化**，且多数模块是内部实现细节。
+改为按**职责域**分 9 份，放 `docs/modules/`：
+
+| 文档 | 覆盖 | 优先级 |
+|---|---|---|
+| `batch-offline.md` | `llm_batch.py` / `batch_client.py`（新）/ `notify.py`（新） | **A2 随附** |
+| `wiki.md` | `wiki.py` / `wiki_index.py` / `wiki_manifest.py` / `wiki_pending.py` / `wiki_triggers.py` / `scripts/wiki_*.py` / `scripts/obsidian.py` | **A2 随附**（A2 主战场） |
+| `config.md` | `config.py` / `scripts/check_config_keys.py` / `sync_llm_*.py`（A2 先落 override 小节） | **A2 部分** |
+| `observability.md` | `logs.py` / `failures.py` / `notify.py` / `snapshot.py` | Phase 2（事件字典先行，见 §17.4） |
+| `memory-engine.md` | `agentmemhub/rag/**`（search / ingest / memstore / embedder / ext / eval / runtime / source） | Phase 2 |
+| `panel.md` | `agentmemhub/web/**`（app / aggregates / tasks） | Phase 2 |
+| `ingest-adapters.md` | `agentmemhub/adapters/**` / `store.py` / `models.py` / `watermarks.py` | Phase 2 |
+| `distill-llm.md` | `distill.py` / `scoring.py` / `llm.py` / `export.py` | Phase 2 |
+| `interfaces.md` | `mcp_server.py` / `cli.py` / `console.py` / `health.py` | Phase 2 |
+
+**每份固定 6 小节（缺一不可，防退化成"介绍性废话"）**：
+
+1. **职责边界** —— 做什么、**明确不做什么**
+2. **对外入口** —— 谁调用它（函数 / CLI / HTTP / MCP）
+3. **数据流与不变量** —— 读写哪些表与文件、哪些不能破
+4. **配置项** —— 该域消费的键 → 默认值 → 生效形态（继承还是覆盖）
+5. **调试与排障** —— 看哪条日志、跑哪个命令、常见故障与对策
+6. **测试在哪** —— 对应 `tests/` 文件 + 改动时的回归清单
+
+**索引**：根 `README.md` 增加「模块地图」小节（模块 / 目录 → 一句话职责 → 文档链接），
+让任一模块**一跳可达**。
+
+### 17.3 接口文档落实（`docs/API.md`，按 §七 既有约定）
+
+| 类型 | 要追加的内容 |
+|---|---|
+| **HTTP** | `GET /api/notifications`（`level` / `unread` / 分页）、`POST /api/notifications/read`；`GET /api/config`（生效值 + 来源标注）、`PUT /api/config`（白名单）。每个端点补 `summary` + 每个 Query 参数 `description`（Swagger 自解释）→ 本文分组表格行 → §六 现状表 |
+| **CLI** | `wiki --action batch-status / batch-submit / batch-import / batch-cancel`、`notify list`、`config get\|set` → 本文 §五 + 根 README「命令行」表 |
+| **长任务约定** | **新增形态**：离线模式把长任务从"后台跑"变成"**跨运行的异步提交 / 回读**"。提交轮返回 `offline_submitted`（**不是失败、不阻塞、不占单并发锁**）必须写进 §二「长任务约定」 |
+| **错误语义** | 批量特有错误（鉴权失败 / 余额不足 / 文件过期 / 任务终局失败 / 白名单外键 400）的对外表达与用户可执行动作 |
+
+### 17.4 日志落实
+
+- **新建 `docs/logging.md`**：三条事实流分工 + 标准头五项 + **事件字典表**
+  （`event` / 所属流 / 关键字段 / 含义 / 排查用途）+ **排查剧本**
+  （"跑到哪了"、"花了多少"、"等了多久"、"哪些失败了"）。
+- **A2 新增事件必须登记**：
+  - `logs/wiki.log`：`batch_upload` / `batch_create` / `batch_retrieve` / `batch_cancel` / `batch_download`
+  - 流水线：`offline_submitted` / `batch_consumed` / `batch_voided` / `batch_expired`
+  - 通知与配置：`notify_write`（含降级路径）、`config_change`（审计：谁 / 何时 / 哪个键 / 旧值 → 新值）
+- **必须能被日志回答的 5 个问题**（验收）：① 这轮 wiki 跑到哪了、断在哪
+  ② 花了多少 token / 多少钱 ③ 离线任务等了多久、进度几比几、卡在哪个域
+  ④ 哪些域失败了、为什么 ⑤ 配置被谁改成了什么。
+- 长任务落 `logs/wiki.log`（AGENTS.md 既有纪律）；批量任务额外落 `batch_state.json` 现场，
+  二者职责不重叠（日志=事实流水，state=可续跑的现场）。
+
+### 17.5 文档门槛（纳入 M6 验收）
+
+- [ ] `docs/modules/batch-offline.md`、`docs/modules/wiki.md`、`docs/modules/config.md`(override 小节)
+      —— A2 随附三份，6 小节齐全
+- [ ] `docs/logging.md` 事件字典覆盖 A2 全部新事件
+- [ ] `docs/API.md`：新端点均有表格行 + Swagger `summary` / Query `description`；§六 现状表按实情更新
+- [ ] 根 `README.md`「模块地图」可一跳到达任一模块文档（含 Phase 2 占位条目）
+- [ ] `AGENTS.md`「相关文档」补齐；`llm-batch-offline.md` 升级为实施记录
+- [ ] 提交前跑 `scripts/sensitive_scan.py`（新文档含真实 base_url / 路径，需确认无密钥）
 
 ---
 
