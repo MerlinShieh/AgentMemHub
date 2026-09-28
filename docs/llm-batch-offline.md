@@ -1,6 +1,8 @@
 # 离线批处理（Batch API）接入设计
 
 > 状态：**接缝已就位，上传/轮询/下载未实现**
+> 2026-09-27 起接通小米 MiMo Batch API：计划、决策记录（D1–D6）与里程碑追踪见
+> [`batch-offline-plan.md`](batch-offline-plan.md)，本文档是其接缝前置。
 > 代码：`agentmemhub/llm_batch.py`（编解码 + 运行器协议）、
 > `scripts/wiki_aggregate.py` 的 `stage_plan(..., runner=...)`
 > 日期：2026-09-25

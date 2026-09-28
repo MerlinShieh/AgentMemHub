@@ -118,7 +118,10 @@
 - `docs/llm-wiki.md` — LLM Wiki 两级编译、失败兜底与格式修复的实测记录
 - `docs/llm-batch-offline.md` — 离线批处理（Batch API）接入设计：**接缝已就位、
   上传/轮询/下载未实现**；接缝是 `stage_plan(..., runner=)`，编解码在
-  `agentmemhub/llm_batch.py`。⚠️ 接通前**不要加** `plan_mode` 这类配置键（假开关）
+  `agentmemhub/llm_batch.py`。⚠️ 配置键随实现里程碑落地（M4），不提前埋（假开关）
+- `docs/batch-offline-plan.md` — 离线批处理接入计划（A2 · MiMo Batch API）：
+  决策记录 D1–D6、三段式流水线状态机、里程碑 M0–M6 追踪表与风险清单
+  （**动工前先读它**；llm-batch-offline.md 是它的接缝前置）
 - `docs/model-selection.md` — LLM 模型选型与定价（推荐 MiMo / 免费 LongCat）
 - `docs/API.md` — 对外接口契约（HTTP / MCP / CLI；含长任务约定与错误语义）
 - `docs/recall-fusion.md` — 召回融合的机制与实测数据（**最新权威描述见 `docs/data-architecture.md` §4**）
