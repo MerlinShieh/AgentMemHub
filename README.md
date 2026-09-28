@@ -847,6 +847,24 @@ uv run python -m agentmemhub llm-config --json   # 机器读
 
 服务运行时另有交互式接口文档 `/api/docs`（Swagger UI）。
 
+## 模块地图（改代码用）
+
+上面的技术文档按"想知道什么"索引；这里是按**职责域**的代码地图，
+每份固定六小节（职责边界 / 对外入口 / 数据流与不变量 / 配置项 / 调试与排障 / 测试在哪）。
+**不逐文件写 README**（几十份必然与实现漂移），按域合并。
+
+| 职责域 | 代码 | 模块文档 | 状态 |
+|---|---|---|---|
+| LLM Wiki 编译链 | `wiki.py`、`wiki_index.py`、`wiki_manifest.py`、`wiki_pending.py`、`wiki_triggers.py`、`scripts/wiki_*.py`、`obsidian.py` | [docs/modules/wiki.md](docs/modules/wiki.md) | 已写 |
+| 配置体系 | `config.py`、`scripts/check_config_keys.py`、`scripts/sync_llm_*.py` | [docs/modules/config.md](docs/modules/config.md) | 已写 |
+| 日志与可观测性 | `logs.py`、`failures.py`、`snapshot.py`、`notify.py` | [docs/logging.md](docs/logging.md)（**事件字典 + 排查剧本**） | 已写 |
+| 离线批处理（Batch API） | `llm_batch.py`、`batch_client.py`、`notify.py` | [docs/modules/batch-offline.md](docs/modules/batch-offline.md) | 随 A2 落地（见 [计划](docs/batch-offline-plan.md)） |
+| 记忆引擎（内置 rag） | `agentmemhub/rag/**` | `docs/modules/memory-engine.md` | 计划中 |
+| 面板后端网关 | `agentmemhub/web/**` | `docs/modules/panel.md` | 计划中 |
+| 采集与适配 | `agentmemhub/adapters/**`、`store.py`、`models.py`、`watermarks.py` | `docs/modules/ingest-adapters.md` | 计划中 |
+| 蒸馏与 LLM 接入 | `distill.py`、`scoring.py`、`llm.py`、`export.py` | `docs/modules/distill-llm.md` | 计划中 |
+| 三层对外入口 | `mcp_server.py`、`cli.py`、`console.py`、`health.py` | `docs/modules/interfaces.md` | 计划中 |
+
 ## 需求
 
 - **Python 3.10+**（推荐用 [uv](https://docs.astral.sh/uv/) 管理：`uv sync` 即可装齐依赖）

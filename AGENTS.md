@@ -122,6 +122,11 @@
 - `docs/batch-offline-plan.md` — 离线批处理接入计划（A2 · MiMo Batch API）：
   决策记录 D1–D6、三段式流水线状态机、里程碑 M0–M6 追踪表与风险清单
   （**动工前先读它**；llm-batch-offline.md 是它的接缝前置）
+- `docs/modules/*.md` — **按职责域的模块文档**（改代码前先读对应那份）：
+  `wiki.md`（两级编译/触发器/链接验收）、`config.md`（配置继承与僵尸键）、
+  `batch-offline.md`（随 A2 落地）。根 README「模块地图」是索引
+- `docs/logging.md` — **日志事件字典 + 排查剧本**：三条事实流、标准头五项、
+  每个 event 的字段含义与用途（**加新事件必须登记在此**）
 - `docs/model-selection.md` — LLM 模型选型与定价（推荐 MiMo / 免费 LongCat）
 - `docs/API.md` — 对外接口契约（HTTP / MCP / CLI；含长任务约定与错误语义）
 - `docs/recall-fusion.md` — 召回融合的机制与实测数据（**最新权威描述见 `docs/data-architecture.md` §4**）

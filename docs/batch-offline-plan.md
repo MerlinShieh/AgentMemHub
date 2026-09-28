@@ -209,13 +209,30 @@ wiki:
 
 ---
 
-## 10. 触发器调整
+## 10. 触发器调整（2026-09-28 修正：**不新增开关**）
 
-- `wiki.triggers.enabled: false`：**只关自动判定**（定时槽 09:00/12:00/18:00、
-  脏数据阈值、当日首写三条路径全部短路，返回明确"已关闭"状态，**且不写状态文件**，
-  避免重开时误判）；**手动触发保留**（CLI `--action trigger` / MCP probe 照常）。
-- 阈值 10 → 30：自动触发关闭期间不生效；将来配合离线模式重开后，攒批提交
-  本来就该更高阈值（离线单价再低也架不住高频小批），30 合理，甚至可再高。
+**勘察结论（读代码核实，推翻了本计划初稿的设计）**：现有开关已有三层，再加
+`wiki.triggers.enabled` 会变成第四个语义相近的开关 —— 必须禁止。
+
+| 现有开关 | 真实消费点 | 实际作用 |
+|---|---|---|
+| `wiki.update.enabled`（可被状态文件 `overrides.enabled` 覆盖） | `wiki_triggers.evaluate()` 第一行 | **真正的触发器总闸**：置 false → 自动链（`on_memories_written`）与**不带 `--force`** 的手动触发一律短路 |
+| `wiki.enabled` | 仅 `wiki_triggers._configured()`，而它**只被 `status()` 调用** | ⚠️ **假开关**：关掉它照样触发（`_targets()` 不检查它）。其 docstring 自称"真正的总开关"，与实际不符 |
+| `wiki.update.schedule` / `dirty_memories` / `first_write_daily` | `evaluate()` 的三条规则 | 规则级细调 |
+
+**所以需求"关闭自动触发、保留手动"用现有键即可实现**：
+`wiki.update.enabled: false` 拦住自动链；手动走
+`agentmemhub wiki --action trigger --force`（`_run_locked()` 在 force 下直接给出
+`should_run=True`，绕过 `evaluate()`）。
+**注意**：不带 `--force` 的手动触发同样会被拦住 —— 这是现状语义，本期不改
+（改它要动 27 个触发器测试和既有语义，收益不足）。
+
+- 阈值 10 → 30：改 `wiki.update.dirty_memories`（或状态文件 overrides 段）。
+  自动触发关闭期间它不生效；将来配合离线模式重开时，攒批提交本来就该更高阈值，
+  30 合理，甚至可再高。
+- **顺带处置 `wiki.enabled`（小任务，纳入 M5，二选一）**：① 在 `_targets()` 里
+  接通它（成为真总闸）；② 删掉该键并同步 `agentmemhub.yaml.example` 与文档。
+  **倾向 ②**：不再维护语义重叠的开关。⚠️ **此项待 Merlin 拍板**（见 §18）。
 - 测试适配：`test_wiki_triggers.py`（27 个）在"默认关闭"的新默认下显式开启再跑。
 
 ---
@@ -374,13 +391,55 @@ wiki:
 
 ### 17.5 文档门槛（纳入 M6 验收）
 
-- [ ] `docs/modules/batch-offline.md`、`docs/modules/wiki.md`、`docs/modules/config.md`(override 小节)
-      —— A2 随附三份，6 小节齐全
-- [ ] `docs/logging.md` 事件字典覆盖 A2 全部新事件
-- [ ] `docs/API.md`：新端点均有表格行 + Swagger `summary` / Query `description`；§六 现状表按实情更新
-- [ ] 根 `README.md`「模块地图」可一跳到达任一模块文档（含 Phase 2 占位条目）
-- [ ] `AGENTS.md`「相关文档」补齐；`llm-batch-offline.md` 升级为实施记录
-- [ ] 提交前跑 `scripts/sensitive_scan.py`（新文档含真实 base_url / 路径，需确认无密钥）
+**已完成（2026-09-28，按"按职责域 + 现在就写"的决策落地）**：
+
+- [x] `docs/modules/wiki.md` —— 365 行：两级编译全链、12 个 CLI action、12 条不变量、
+      18 个配置键、15 类日志事件、10 个测试文件；含 7 处 `> A2 改动点：`
+- [x] `docs/modules/config.md` —— 271 行：四种继承形态 + 真实例子、僵尸键审计流程、
+      `rag.retrieval` 死键清单、override 层预留小节
+- [x] `docs/logging.md` —— 350 行：**23 个真实事件**的字典（wiki.log 21 + memory.log 2）
+      + mcp/web/cli 的非 `event` 形态 + 5 类排查剧本
+- [x] 根 `README.md`「模块地图」（9 个职责域 → 文档 → 状态）
+- [x] `AGENTS.md`「相关文档」补 `docs/modules/*.md` 与 `docs/logging.md`
+
+**待做（随 A2 里程碑，不再单独排期）**：
+
+- [ ] `docs/modules/batch-offline.md`（M0 起随写）
+- [ ] `docs/logging.md` 补登 A2 新增的 11 个事件（M1 / M2 / M4）
+- [ ] `docs/API.md`：新端点表格行 + Swagger `summary` / Query `description`；§六 现状表更新（M3 / M4）
+- [ ] `docs/modules/config.md` override 小节由"计划中"改为已实现（M4）
+- [ ] `llm-batch-offline.md` 升级为实施记录（M6）
+- [ ] 提交前跑 `scripts/sensitive_scan.py`（新文档含真实 base_url 与路径，需确认无密钥）
+
+---
+
+## 18. 勘察发现的待修缺陷（2026-09-28，全部经代码 / 实盘核实）
+
+> 本轮为写模块文档而通读代码，**顺带查出 9 个既有缺陷**。它们不属于 A2 的功能范围，
+> 但其中 D-1 会直接决定 A2 离线模式的可靠性，D-2 决定"关自动触发"怎么配，故一并登记。
+
+| # | 缺陷 | 证据 | 影响 | 处置建议 |
+|---|---|---|---|---|
+| **D-1** | **L2 域目录换入失败会中止整轮** | 2026-09-28 21:00 `l2_aborted: PermissionError WinError 5`（`04-AgentMemHub-记忆系统` → `.bak_…`）；`.tmp_04-…` 残留 153 文件；`manifest_l2` 停在 09-26 | 一次文件句柄占用 = 整轮 L2 白跑（88 分钟）；**离线模式多轮提交会更频繁** | `_swap_domain_dir` 失败改为"**跳过该域 + 记通知 + 下轮重试**"，不中止整轮；纳入 M2 |
+| **D-2** | `wiki.enabled` 是假开关 | `_configured()` 只被 `status()` 调用；`_targets()` 不检查它 | 关掉它照样触发，而 docstring 自称"真正的总开关" | 见 §10 二选一（接通 / 删除），**待拍板** |
+| **D-3** | `logs/web.log` / `cli.log` **缺 `module`/`line`** | 实盘 `cli.log` 121 行、含 `module` 的行 **0**；同时 `wiki.log` 有 | 标准头纪律在这两条流从未生效；`tests/test_logs_format.py` 的断言**假绿** | 修 `logs.record()` 路径 + 让测试真正走该路径（红→绿） |
+| **D-4** | `record()` 的 `msg` 绕开 `_clip` | 实盘含 `\n`、600 字终态文本的条目 | 与"msg ≤200 字"口径不符，破坏单行可读性 | 在 `record()` 内补 `_clip` |
+| **D-5** | `rag.retrieval` **5 个键配了不生效** | `candidate_k` / `threshold_floor` 被档位表 `RECALL_LEVELS` 遮蔽（`search.py:721` 读 profile 而非 settings）；`search_max_hits` / `max_per_conversation` / `rrf_k` 同类 | "配了不生效"，且 `check_config_keys.py` 一律报 OK | 要么接线、要么从 yaml 与文档移除；审计脚本扩展到 `agentmemhub/rag/config.py` |
+| **D-6** | 触发器锁/状态文件用**相对路径** | `wiki_triggers._LOCK_FILE` / `STATE_FILE` = `Path("logs")/…` | CWD 不同 → 锁与状态写到别处 → **并发更新可能没被锁住**（单飞行失效） | 改用 `logs.log_dir()` 派生 |
+| **D-7** | 记忆删除与快照**零审计** | `wiki_pending.drop()/restore()`、`snapshot.py` 全文无日志调用 | "哪条记忆被谁删了"查不到 | 接 `audit_memory` / `audit_wiki` |
+| **D-8** | `web/app.py:_logged_task` docstring 与实际不符 | 实现走 `logs.task_log_path()`，docstring 写 `<data_dir>/tasks/` | 误导排查方向 | 改 docstring |
+| **D-9** | `logs/tasks/*.log` 实盘仍是旧格式 `[HH:MM:SS]` | 格式变更前的历史遗留文件 | 跨天排查定位不到日期 | 随 `keep_days` 自然淘汰，无需专项 |
+
+**优先级**：D-1（产物可靠性，且与 A2 耦合）> D-2（配置语义，直接决定需求 7 的配法）
+> D-3 / D-4（日志纪律 + **假绿测试**）> D-6（并发安全）> 其余。
+
+**关于 D-1 的现场**：被占用的两个文件是
+`04-AgentMemHub-记忆系统/001-仓库治理与交付约定-v2-0-0-发布-分支冻结与中文化输出规范.md` 与
+`…/020-测试与并发的假故障-测试污染真实环境与批量任务通用坑.md`（均不在新一轮 `.tmp` 产物内
+—— 它们在新一轮被合并 / 淘汰，而 Obsidian 仍打开着它们）。同目录的 `03-API-调用-协议与网关`
+60 个文件可全部独占打开、换入成功，对照组坐实了"句柄占用"这一根因。
+
+---
 
 ---
 
