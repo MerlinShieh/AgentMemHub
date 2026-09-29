@@ -1062,3 +1062,170 @@ def test_离线提交轮_运行器没抛Pending时如实报空(tmp_path):
     assert status["written_domains"] == [] and status["pages"] == 0
 
 
+# ---------------------------------------------------------------------------
+# M2b-2：回读轮的两个纯函数（细分结果合并 + 编译请求生成）
+# ---------------------------------------------------------------------------
+
+def _member(title: str, body: str = "正文") -> dict:
+    """细分/编译现场用的成员快照（比 `_pg` 多带 `body` / `source` / `cid`）。"""
+    return {"title": title, "summary": "摘要-" + title, "type": "主题",
+            "body": "%s [m1]" % body, "mids": [1], "file": "%s.md" % title,
+            "source": "a", "cid": "c1"}
+
+
+def test_合并细分结果_批内编号映射回全局编号():
+    """细分的下标是**批内 1 起** —— 不按 `批号 × plan_batch` 偏移就会取错成员，
+    而且越靠后的批次错得越离谱。"""
+    from wiki_aggregate import merge_plan_results
+
+    members = {"域A": [_member("P%d" % i) for i in range(1, 6)]}
+    items = {"l2plan|域A-x|0": {"domain": "域A", "batch_no": 0},
+             "l2plan|域A-x|1": {"domain": "域A", "batch_no": 1},
+             "l2plan|域A-x|2": {"domain": "域A", "batch_no": 2}}
+    results = {
+        "l2plan|域A-x|0": {"ok": True, "data": {"pages": [
+            {"title": "页1", "members": [1, 2]}]}},
+        "l2plan|域A-x|1": {"ok": True, "data": {"pages": [
+            {"title": "页2", "members": [1]}]}},        # 批内1 → 全局 3
+        "l2plan|域A-x|2": {"ok": True, "data": {"pages": [
+            {"title": "页3", "members": [1]}]}},        # 批内1 → 全局 5
+    }
+
+    plans = merge_plan_results(items, members, results, plan_batch=2)
+
+    assert [n for n, _ in plans] == ["域A"]
+    groups = plans[0][1]
+    assert [[m["title"] for m in g["group"]] for g in groups] == [
+        ["P1", "P2"], ["P3"], ["P5"], ["P4"]], "P4 没被任何页覆盖 → 各自成页"
+    assert groups[0]["title"] == "页1"
+
+
+def test_合并细分结果_某批失败时该批成员各自成页():
+    """与实时路同一兜底：一批失败只影响那批覆盖的成员，**不丢内容、也不塌成一页**。"""
+    from wiki_aggregate import merge_plan_results
+
+    members = {"域A": [_member("P%d" % i) for i in range(1, 5)]}
+    items = {"l2plan|域A-x|0": {"domain": "域A", "batch_no": 0},
+             "l2plan|域A-x|1": {"domain": "域A", "batch_no": 1}}
+    results = {"l2plan|域A-x|0": {"ok": True, "data": {"pages": [
+        {"title": "页1", "members": [1, 2]}]}},
+        "l2plan|域A-x|1": {"ok": False, "error": "HTTP 524"}}
+
+    groups = merge_plan_results(items, members, results, plan_batch=2)[0][1]
+
+    assert [[m["title"] for m in g["group"]] for g in groups] == [
+        ["P1", "P2"], ["P3"], ["P4"]]
+
+
+def test_编译请求_只把需要LLM的页交出去():
+    """单成员页直接沿用源页（实时路也这么省），不占批量额度、不花钱。"""
+    from wiki_aggregate import compile_requests
+
+    plans = [("域A", [{"title": "单页", "group": [_member("P1")]},
+                     {"title": "合并页", "group": [_member("P2"), _member("P3")]}])]
+
+    reqs, items, members = compile_requests(plans, all_titles=["单页", "合并页"])
+
+    assert len(reqs) == 1, "只有多成员页需要 LLM"
+    cid = reqs[0].custom_id
+    assert cid.startswith("l2page|域A-") and cid.endswith("|2")
+    assert items[cid] == {"domain": "域A", "page_no": 2}
+    assert [m["needs_llm"] for m in members["域A"]] == [False, True]
+    assert [m["ti"] for m in members["域A"]] == [1, 2]
+    # 现场必须存**页组成员**：落盘轮是另一次运行，那时 L1 页面已不在内存里
+    assert [m["title"] for m in members["域A"][1]["group"]] == ["P2", "P3"]
+    assert "P2" in reqs[0].user and "合并页" in reqs[0].user
+
+
+def test_编译请求_单成员也强制重编时全部交出去():
+    from wiki_aggregate import compile_requests
+
+    plans = [("域A", [{"title": "单页", "group": [_member("P1")]}])]
+
+    reqs, items, members = compile_requests(plans, all_titles=[], recompile_single=True)
+
+    assert len(reqs) == 1 and members["域A"][0]["needs_llm"] is True
+
+
+def test_编译提示词两路共用():
+    """抽 `compile_prompt` 的意义：实时路与离线路发出去的是**同一份提示词**。"""
+    from wiki_aggregate import compile_prompt
+
+    system, user, dropped = compile_prompt("目标标题", [_member("P1"), _member("P2")],
+                                           ["已有A", "已有B"])
+
+    assert system
+    assert "目标标题" in user and "以下是 2 个来源页面" in user
+    assert "已有A" in user and "P1" in user
+    assert dropped == 0
+
+
+def test_编译段提交_消费细分结果后交出第二段(tmp_path):
+    """M2b-2 的第二步：回读到的细分结果 → 合并 → 生成编译请求 → **再交一次**。
+
+    这是三段式的中间一环：运行 1 交细分、运行 2 交编译、运行 3 才落盘。
+    """
+    from agentmemhub.llm_batch import BatchJob, OfflineRunner, load_state
+
+    from wiki_aggregate import STATE_NAME, submit_offline_compile
+
+    plan_job = BatchJob(
+        batch_id="batch-plan", stage="l2plan", submitted_at=1.0,
+        items={"l2plan|域A-x|0": {"domain": "域A", "batch_no": 0},
+               "l2plan|域A-x|1": {"domain": "域A", "batch_no": 1},
+               "l2plan|域B-x|0": {"domain": "域B", "batch_no": 0}},
+        members={"域A": [_member("P1"), _member("P2"), _member("P3")],
+                 "域B": [_member("Q1")]})
+    results = {                            # 域A：批0 合成一页；批1 空 → P3 各自成页
+        "l2plan|域A-x|0": {"ok": True, "data": {"pages": [
+            {"title": "合并页", "members": [1, 2]}]}},
+        "l2plan|域A-x|1": {"ok": True, "data": {"pages": []}},
+        "l2plan|域B-x|0": {"ok": True, "data": {"pages": [
+            {"title": "Q1", "members": [1]}]}},
+    }
+    up = _FakeBatchUploader()
+    runner = OfflineRunner(uploader=up, model="m")
+
+    status = submit_offline_compile(tmp_path, runner, plan_job, results,
+                                    all_titles=["合并页", "P3", "Q1"], plan_batch=2)
+
+    sub = status["offline_submitted"]
+    assert sub["stage"] == "l2compile"
+    assert len(up.creates) == 1 and up.creates[0][1] == 1, "只有'合并页'需要 LLM"
+
+    jobs = load_state(tmp_path / STATE_NAME)
+    assert len(jobs) == 1 and jobs[0].stage == "l2compile"
+    assert jobs[0].batch_id == "batch-1"
+    snap = jobs[0].members["域A"]
+    assert [m["title"] for m in snap] == ["合并页", "P3"]
+    assert [m["needs_llm"] for m in snap] == [True, False], \
+        "单成员页本地生成，不进批量请求"
+    assert [m["ti"] for m in snap] == [1, 2]
+    assert next(iter(jobs[0].items)).startswith("l2page|域A-")
+
+
+def test_编译段提交_没有需要LLM的页时不提交(tmp_path):
+    """全部是单成员页时，编译段无事可做 —— 不该建一个空任务。"""
+    from agentmemhub.llm_batch import BatchJob, OfflineRunner, load_state
+
+    from wiki_aggregate import STATE_NAME, submit_offline_compile
+
+    plan_job = BatchJob(batch_id="b1", items={"c": {"domain": "域A", "batch_no": 0}},
+                        members={"域A": [_member("P1")]})
+    results = {"c": {"ok": True, "data": {"pages": [
+        {"title": "P1", "members": [1]}]}}}
+
+    class _Up:
+        def upload(self, *a, **k):
+            raise AssertionError("没有需要 LLM 的页，不该上传")
+
+        def create(self, *a, **k):
+            raise AssertionError("没有需要 LLM 的页，不该建任务")
+
+    status = submit_offline_compile(tmp_path, OfflineRunner(uploader=_Up()),
+                                    plan_job, results, all_titles=[])
+
+    assert status["offline_submitted"] == {}
+    assert load_state(tmp_path / STATE_NAME) == []
+
+

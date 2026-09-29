@@ -587,8 +587,14 @@ def stage_plan(client, domain: dict, members: list[dict], *,
 # 阶段 ③：编译最终页
 # ---------------------------------------------------------------------------
 
-def stage_compile(client, title_hint: str, group: list[dict],
-                  all_titles: list[str]) -> dict:
+def compile_prompt(title_hint: str, group: list[dict],
+                   all_titles: list[str]) -> tuple[str, str, int]:
+    """构造编译最终页的 `(system, user, dropped)`。
+
+    **抽出来是为了两条路共用同一份提示词**：实时路当场调它，离线路把同一份编进
+    JSONL。提示词一旦分叉，两条路的产物就会漂移 —— 这是本项目反复踩过的教训
+    （离线路若绕过清洗、少发开关，产物看着像但实质不同）。
+    """
     budget = MAX_GROUP_CHARS
     parts, dropped = [], 0
     for p in group:
@@ -615,10 +621,26 @@ def stage_compile(client, title_hint: str, group: list[dict],
             '  "related": ["相关页面标题"]\n'
             "}\n\n%s" % (title_hint, len(group), "\n\n".join(parts), listing,
                          _PAGE_RULES))
-    r = call_json(client, SYSTEM_COMPILE, user, max_tokens=32000, tag="编译 ")
+    return SYSTEM_COMPILE, user, dropped
+
+
+def stage_compile(client, title_hint: str, group: list[dict],
+                  all_titles: list[str]) -> dict:
+    system, user, dropped = compile_prompt(title_hint, group, all_titles)
+    r = call_json(client, system, user, max_tokens=32000, tag="编译 ")
     # SRC_RE.findall 返回的是**捕获组**（纯数字），必须补回 `m` 前缀，
     # 否则会渲染出 `**来源**：[3669]` 这种缺前缀的编号、失去可追溯性（实测踩过）。
     nums = sorted({"m" + x for p in group for x in SRC_RE.findall(p["body"])})
+    return _compile_page(r, title_hint, group, nums, dropped)
+
+
+def _compile_page(r: dict, title_hint: str, group: list[dict],
+                  nums: list[str], dropped: int) -> dict:
+    """把 LLM 的返回（或离线回读到的同一形状）补成落盘用的页面对象。
+
+    两条路共用：`sources` / `from_files` / `from_titles` 这些**派生字段**必须由
+    这里统一算，否则离线路会漏掉它们（页面就失去可追溯性）。
+    """
     return {"title": r.get("title") or title_hint,
             "type": r.get("type") or "concept",
             "summary": (r.get("summary") or "").strip(),
@@ -628,6 +650,91 @@ def stage_compile(client, title_hint: str, group: list[dict],
             "from_files": sorted({p["file"] for p in group}),
             "from_titles": [p["title"] for p in group],
             "truncated": dropped}
+
+
+def merge_plan_results(items: dict[str, dict], members: dict[str, list[dict]],
+                       results: dict[str, dict],
+                       plan_batch: int) -> list[tuple[str, list[dict]]]:
+    """把回读到的**细分结果**合并成「域 → 页面分组」（与实时路径同一套编号映射）。
+
+    编号映射是这里唯一容易错的地方：细分的 `members` 下标是**批内 1 起**，必须
+    按 `批号 × plan_batch` 偏移回**全局编号**才能取对成员（越靠后的批次错得越离谱）。
+
+    · 某批**失败或没回来** → 该批成员**各自成页**（与实时路同一兜底：绝不丢内容、
+      也不会塌成一页）；
+    · 细分的页面都没覆盖到的成员 → 同样各自成页。
+    """
+    by_domain: dict[str, list[tuple[int, dict]]] = {}
+    for cid, meta in (items or {}).items():
+        r = (results or {}).get(cid) or {}
+        if not r.get("ok"):
+            continue                        # 失败/未到的批，交给下面的"各自成页"
+        domain = str((meta or {}).get("domain") or "")
+        if not domain:
+            continue
+        by_domain.setdefault(domain, []).append(
+            (int((meta or {}).get("batch_no") or 0), r.get("data") or {}))
+
+    out: list[tuple[str, list[dict]]] = []
+    for name, mem in (members or {}).items():
+        groups: list[dict] = []
+        seen: set[int] = set()
+        for bi, data in sorted(by_domain.get(name, []), key=lambda x: x[0]):
+            base = bi * int(plan_batch)
+            for pl in ((data or {}).get("pages") or []):
+                idx = []
+                for x in (pl.get("members") or []):
+                    if not str(x).isdigit():
+                        continue
+                    g = base + int(x)
+                    if 1 <= g <= len(mem) and g not in seen:
+                        idx.append(g)
+                if not idx:
+                    continue
+                seen.update(idx)
+                groups.append({"title": pl.get("title") or "(无标题)",
+                               "group": [mem[i - 1] for i in idx]})
+        for i in range(1, len(mem) + 1):     # 遗漏成员各自成页 —— 绝不丢内容
+            if i not in seen:
+                groups.append({"title": mem[i - 1].get("title") or "(无标题)",
+                               "group": [mem[i - 1]]})
+        out.append((name, groups))
+    return out
+
+
+def compile_requests(domain_plans: list[tuple[str, list[dict]]],
+                     all_titles: list[str], *,
+                     recompile_single: bool = False) -> tuple[
+                         list[BatchRequest], dict[str, dict], dict[str, list[dict]]]:
+    """把「域 → 页面分组」转成**编译阶段**的批量请求 + 现场。
+
+    只把**需要 LLM 的页**放进去：单成员页在实时路也是直接沿用源页内容（省一次调用），
+    离线路同样本地生成 —— 不占批量额度、不花钱。
+
+    现场（`members`）存的是**每个页组的编译输入**：落盘轮是**另一次运行**，那时
+    L1 页面早已不在内存里，没有这份快照就没法编译、也没法给单成员页取正文。
+    """
+    reqs: list[BatchRequest] = []
+    items: dict[str, dict] = {}
+    members: dict[str, list[dict]] = {}
+    for name, groups in domain_plans:
+        key = _domain_key(name)
+        snap: list[dict] = []
+        for ti, pl in enumerate(groups, 1):
+            group = list(pl.get("group") or [])
+            needs_llm = bool(recompile_single or len(group) > 1)
+            snap.append({"ti": ti, "title": pl.get("title") or "(无标题)",
+                         "group": group, "needs_llm": needs_llm})
+            if not needs_llm:
+                continue
+            system, user, _dropped = compile_prompt(pl.get("title") or "",
+                                                    group, all_titles)
+            cid = "l2page|%s|%d" % (key, ti)
+            reqs.append(BatchRequest(custom_id=cid, system=system, user=user,
+                                     max_tokens=32000, tag="编译[%d] " % ti))
+            items[cid] = {"domain": name, "page_no": ti}
+        members[name] = snap
+    return reqs, items, members
 
 
 # ---------------------------------------------------------------------------
@@ -1045,18 +1152,80 @@ def _refresh_domains_file(dom_file: Path, args, pages: list[dict]) -> None:
     print("  域成员已按最新页序重写 → %s" % dom_file)
 
 
+def _submit_stage(out: Path, runner, reqs: list[BatchRequest],
+                  items: dict[str, dict[str, Any]],
+                  members: dict[str, list[dict]], *, stage: str,
+                  label: str = "离线提交") -> dict[str, Any]:
+    """**提交内核**：落现场 → 交出请求 → 如实回报。细分段与编译段共用。
+
+    它只关心"把已经准备好的请求交出去"，不关心请求怎么来的 —— 所以细分的
+    `plan_requests()` 与编译的 `compile_requests()` 都能接在它后面。
+
+    返回的 status 带 `offline_submitted`（**不是失败**）：上层据此保留现场、
+    不刷 manifest、不跑 linkfix —— 结果几小时后才有，下轮再来回读。
+    """
+    status: dict[str, Any] = {"aborted": "", "written_domains": [],
+                              "skipped_domains": [], "pages": 0,
+                              "pages_by_domain": {}, "offline_submitted": {}}
+    if not reqs:
+        print("\n没有可提交的请求（%s），本轮不做任何事" % stage)
+        return status
+
+    state_path = out / STATE_NAME
+
+    def _persist(info: dict[str, Any]) -> None:
+        """把「已交给厂商」落盘。**由运行器在抛异常之前调用**（顺序见 OfflineRunner）。"""
+        jobs = [j for j in load_state(state_path) if not j.voided]
+        jobs.append(BatchJob(
+            batch_id=str(info.get("batch_id") or ""), provider="mimo",
+            stage=str(info.get("stage") or stage),
+            submitted_at=float(info.get("submitted_at") or 0.0),
+            items=dict(items), members=dict(members),
+            input_file_id=str(info.get("input_file_id") or ""),
+            provider_status=str(info.get("provider_status") or ""),
+            expire_at=float(info.get("expire_at") or 0.0)))
+        save_state(state_path, jobs)
+        print("  现场已落盘：%s（%d 个域 / %d 条请求）"
+              % (state_path, len(members), len(reqs)))
+
+    runner.stage = stage
+    runner.on_submitted = _persist
+    n_domains = len(members)
+    print("\n② %s：%d 个域 / %d 条请求 → 一次上传 + 一个任务"
+          % (label, n_domains, len(reqs)), flush=True)
+    t0 = time.time()
+    try:
+        runner.run(reqs)
+    except PendingError as e:
+        subs = list(getattr(runner, "submissions", []) or [])
+        sub = {"batch_id": str(subs[-1].get("batch_id") or "") if subs else "",
+               "stage": stage, "n_requests": len(reqs), "n_domains": n_domains,
+               "domains": sorted(members), "pending_ids": list(e.pending_ids)}
+        status["offline_submitted"] = sub
+        _wlog(event="offline_submitted", stage=stage, batch_id=sub["batch_id"],
+              n_requests=len(reqs), n_domains=n_domains,
+              seconds=round(time.time() - t0, 1))
+        print("  离线任务已提交（结果未回）：batch=%s，%d 个域等待回读"
+              % (sub["batch_id"] or "(未知)", n_domains))
+        return status
+
+    # 运行器正常返回 = 它没把"结果未回"表达出来（实现有问题）。
+    # **不猜、不假装提交成功**，如实记一条 error 让运维看见。
+    _wlog(event="offline_submitted", stage=stage, ok=False,
+          error="离线运行器没有抛 PendingError —— 本轮未提交任何任务")
+    print("  ⚠️ 离线运行器没有抛 PendingError：本轮未提交任务")
+    return status
+
+
 def _submit_offline(out: Path, runner, dom_list: list[tuple[str, list[dict]]],
                     plan_batch: int) -> dict[str, Any]:
-    """离线**提交轮**：把整个域集合的请求**一次**交给厂商，然后如实回报。
+    """**细分提交轮**：把整个域集合的请求**一次**交给厂商，然后如实回报。
 
     与实时路径的关系：请求怎么切分、批内编号怎么映射回全局编号，与实时路是
     **同一段代码**（`plan_requests`）；分叉只在"谁执行、什么时候执行"。
 
     为什么**整体一次**提交：逐域提交会变成 N 次上传 + N 个任务（实测生产有 19 个
     域），对账与管理成本随域数线性膨胀。一次提交只有一份 JSONL、一个 `batch_id`。
-
-    返回的 status 带 `offline_submitted`（**不是失败**）：上层据此保留现场、
-    不刷 manifest、不跑 linkfix —— 结果几小时后才有，下轮再来回读。
     """
     reqs: list[BatchRequest] = []
     items: dict[str, dict[str, Any]] = {}
@@ -1067,57 +1236,36 @@ def _submit_offline(out: Path, runner, dom_list: list[tuple[str, list[dict]]],
             reqs.append(r)
             items[r.custom_id] = {"domain": name, "batch_no": bi}
         members[name] = list(mem)
+    return _submit_stage(out, runner, reqs, items, members, stage="l2plan")
 
-    status: dict[str, Any] = {"aborted": "", "written_domains": [],
-                              "skipped_domains": [], "pages": 0,
-                              "pages_by_domain": {}, "offline_submitted": {}}
-    if not reqs:
-        print("\n没有可提交的请求（域集合为空），本轮不做任何事")
-        return status
 
-    state_path = out / STATE_NAME
+def submit_offline_compile(out: Path, runner, plan_job: "BatchJob",
+                           results: dict[str, dict],
+                           all_titles: list[str], *,
+                           plan_batch: int = L2_PLAN_BATCH_MAX,
+                           recompile_single: bool = False) -> dict[str, Any]:
+    """**回读轮的第二步**：消费细分结果 → 生成编译请求 → 再交出去。
 
-    def _persist(info: dict[str, Any]) -> None:
-        """把「已交给厂商」落盘。**由运行器在抛异常之前调用**（顺序见 OfflineRunner）。"""
-        jobs = [j for j in load_state(state_path) if not j.voided]
-        jobs.append(BatchJob(
-            batch_id=str(info.get("batch_id") or ""), provider="mimo",
-            stage=str(info.get("stage") or "l2plan"),
-            submitted_at=float(info.get("submitted_at") or 0.0),
-            items=dict(items), members=dict(members),
-            input_file_id=str(info.get("input_file_id") or ""),
-            provider_status=str(info.get("provider_status") or ""),
-            expire_at=float(info.get("expire_at") or 0.0)))
-        save_state(state_path, jobs)
-        print("  现场已落盘：%s（%d 个域 / %d 条请求）"
-              % (state_path, len(members), len(reqs)))
+    `results` 是回读到的细分结果（`{custom_id: {ok, data|error}}`），`plan_job` 是
+    运行 1 落盘的那个任务（`items` 给 custom_id→域映射、`members` 给成员快照）。
 
-    runner.on_submitted = _persist
-    n_domains = len(members)
-    print("\n② 离线提交：%d 个域 / %d 条请求 → 一次上传 + 一个任务"
-          % (n_domains, len(reqs)), flush=True)
-    t0 = time.time()
-    try:
-        runner.run(reqs)
-    except PendingError as e:
-        subs = list(getattr(runner, "submissions", []) or [])
-        sub = {"batch_id": str(subs[-1].get("batch_id") or "") if subs else "",
-               "n_requests": len(reqs), "n_domains": n_domains,
-               "domains": sorted(members), "pending_ids": list(e.pending_ids)}
-        status["offline_submitted"] = sub
-        _wlog(event="offline_submitted", stage="l2plan", batch_id=sub["batch_id"],
-              n_requests=len(reqs), n_domains=n_domains,
-              seconds=round(time.time() - t0, 1))
-        print("  离线任务已提交（结果未回）：batch=%s，%d 个域等待回读"
-              % (sub["batch_id"] or "(未知)", n_domains))
-        return status
+    产出的是**编译阶段**的现场：`域 → 每个页组的 {ti, title, group, needs_llm}`。
+    落盘轮靠它编译多成员页、或给单成员页取正文。
+    """
+    domain_plans = merge_plan_results(plan_job.items, plan_job.members,
+                                      results, plan_batch)
+    reqs, items, members = compile_requests(domain_plans, all_titles,
+                                            recompile_single=recompile_single)
+    n_groups = sum(len(g) for _, g in domain_plans)
+    print("  细分结果已合并：%d 个域 / %d 个页组（其中 %d 页需要 LLM）"
+          % (len(domain_plans), n_groups, len(reqs)), flush=True)
+    return _submit_stage(out, runner, reqs, items, members, stage="l2compile",
+                         label="离线编译提交")
 
-    # 运行器正常返回 = 它没把"结果未回"这件事表达出来（实现有问题）。
-    # **不猜、不假装提交成功**，如实记一条 error 让运维看见。
-    _wlog(event="offline_submitted", stage="l2plan", ok=False,
-          error="离线运行器没有抛 PendingError —— 本轮未提交任何任务")
-    print("  ⚠️ 离线运行器没有抛 PendingError：本轮未提交任务")
-    return status
+
+def load_jobs(out: Path) -> list["BatchJob"]:
+    """读产物目录里的在飞任务（`batch_state.json`）。"""
+    return load_state(out / STATE_NAME)
 
 
 # ---------------------------------------------------------------------------
