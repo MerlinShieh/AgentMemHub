@@ -179,7 +179,7 @@
 | `鉴权失败（invalid_api_key）` | `llm_batch.api_key` | key 无效/过期；或误用了实时路由的 key（两套不通用） |
 | `余额/配额不足` | 小米控制台 | 批量走**现金余额**，Token Pack/套餐额度不抵扣 |
 | `对象不存在（batch_not_found）` | 文件是否超 30 天 | 过期即不可恢复，该批数据回待更新池重新提交 |
-| 任务一直 `validating` / `created` | 正常 | 闲时调度，提交后可能长时间不启动（不是故障） |
+| 任务一直 `validating` / `created` | 先看 `request_counts.total` | 闲时调度，提交后可能长时间不启动（**不是故障**）。⚠️ 但 `total=0` 且**数小时不动**要另判：2026-09-29 实测平台侧未调度时，连"官方文档逐字示例"的单条任务也一直 `validating`/`total=0`。**排除法两步**：① `client.download(input_file_id)` 把输入文件拉回来数行数 —— 与提交条数一致、且文件 `status=active`，即**数据无问题**（`request_counts` 是"开始执行后才填"，不是解析结果）；② 再建一个"官方示例逐字照抄"的单条对照任务，它也不动 → **平台侧问题**（去控制台查**现金余额**／联系平台支持），与我们无关 |
 | 任务 `expired` | `completion_window` 太小 | 调大窗口后重新提交（**不支持续跑**） |
 | 想确认某笔提交建成没 | `client.find_batch(name=…)` | 不要重试 `create()` |
 | 日志在哪 | `logs/wiki.log` | 事件：`batch_upload` / `batch_create` / `batch_retrieve` / `batch_list` / `batch_cancel` / `batch_download` |
