@@ -338,9 +338,26 @@ wiki 第二级编译可以走厂商**离线批处理**（价格是实时的 50%�
 | **CLI**：`wiki --action batch-status`（查状态）· `batch-run`（推进一段）· `batch-cancel`（取消作废） | ✅ 就绪（见 §五） |
 | **HTTP**：`/api/wiki/batch-*`；以及 `wiki.update_mode` 开关 | ⏳ **M4，未实现** |
 
-> ⚠️ **现状：没有任何对外入口**。离线通道目前只能由代码注入 `args.offline_runner`
-> 触发，**用户此刻无法从 CLI / 面板操作它**。本表存在的意义是：下次排查时不必再
-> 把"到底有没有这些接口"重新确认一遍。
+> **现在怎么用**（2026-09-29 起 CLI 已就绪）：
+>
+> ```bash
+> agentmemhub wiki --action batch-status   # 查在飞任务（只读）
+> agentmemhub wiki --action batch-run      # 推进一段（提交 / 交编译段 / 落盘，状态机自判）
+> agentmemhub wiki --action batch-cancel   # 取消并作废所有在飞任务
+> ```
+>
+> 直连厂商（OpenAI Batch 兼容，需自备 API Key；`region` 段是 `-cn`）：
+>
+> ```bash
+> curl -H "Authorization: Bearer $ARK_API_KEY" \
+>   https://batch-api-cn.xiaomimimo.com/v1/batches/<batch_id>
+> curl -H "Authorization: Bearer $ARK_API_KEY" \
+>   "https://batch-api-cn.xiaomimimo.com/v1/batches?limit=10"   # 列出最近任务（文档未写、实测有）
+> ```
+>
+> 代码接口：`batch_client.MiMoBatchClient.retrieve/list_batches/find_batch`、
+> `wiki_batch.poll/import_results`、`wiki.update(offline_client=, offline_runner=)`。
+> 事实流：`logs/wiki.log` 的 `batch_*` 事件（见 [logging.md](logging.md) §5.1）。
 
 ## 七、维护约定
 
