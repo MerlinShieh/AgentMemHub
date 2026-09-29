@@ -227,8 +227,14 @@ uv run python scripts/check_config_keys.py     # llm_batch.* 六个键都要有�
     交第二段）、`compile_prompt()` 抽出给两条路共用、`agentmemhub/wiki_batch.py` 的
     **回读**（`poll` → `decide` → `fetch_results` → 作废回池 + 通知）、`_submit_stage()`
     提交内核
-  · **待做（M2b-3）**：落盘轮（回读编译结果 → 写页 → linkfix → 刷 manifest）、
-    回读时的 `repair_model` 兜底（当前坏 JSON 的条目会退化成"成员各自成页" ——
-    不丢内容，但不如实时路救得回来；`load_batch_results` 已保留 `content` 原文备用）
+  · ✅ **M2b-3 落盘轮**：`assemble_pages()`（编译结果 → 页面，三条规则与实时路的
+    `compile_task()` **逐条对应**：单成员沿用源页 / 成功走 `_compile_page` 补派生字段 /
+    失败 fail-open 拼接并计入 degraded）、`finalize_outputs()`（**写盘收尾抽出来给两条路
+    共用**：清旧目录 → 逐域原子换入 → 顶层索引 → 域成员刷新）、`_dir_map_from_disk()`
+    （落盘轮**沿用既有目录名**、不重排）、`write_offline_stage()`（落盘轮入口）
+  · **待做**：**状态机编排**（`update()` 里按在飞任务决定推进哪一段：无在飞 → 提交轮；
+    plan 结果到位 → 交编译段；compile 结果到位 → 落盘）、回读时的 `repair_model` 兜底
+    （当前坏 JSON 会退化成 fail-open 拼接 —— 不丢内容但质量差；`load_batch_results`
+    已保留 `content` 原文备用）
 - **M3**：CLI `batch-status` / `batch-submit` / `batch-import` / `batch-cancel`
 - **M6**：回读冒烟任务 `batch_04cc53ea36324c8598abbffa`，验证真实执行与结果形状

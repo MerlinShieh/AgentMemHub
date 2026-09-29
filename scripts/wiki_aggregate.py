@@ -713,6 +713,8 @@ def compile_requests(domain_plans: list[tuple[str, list[dict]]],
 
     现场（`members`）存的是**每个页组的编译输入**：落盘轮是**另一次运行**，那时
     L1 页面早已不在内存里，没有这份快照就没法编译、也没法给单成员页取正文。
+    连 `dropped`（合并时截断了几个来源页）也一并存 —— 它是 `compile_prompt()`
+    当场算出来的，落盘轮重算既浪费又可能与当时不一致。
     """
     reqs: list[BatchRequest] = []
     items: dict[str, dict] = {}
@@ -723,18 +725,79 @@ def compile_requests(domain_plans: list[tuple[str, list[dict]]],
         for ti, pl in enumerate(groups, 1):
             group = list(pl.get("group") or [])
             needs_llm = bool(recompile_single or len(group) > 1)
-            snap.append({"ti": ti, "title": pl.get("title") or "(无标题)",
-                         "group": group, "needs_llm": needs_llm})
-            if not needs_llm:
-                continue
-            system, user, _dropped = compile_prompt(pl.get("title") or "",
-                                                    group, all_titles)
-            cid = "l2page|%s|%d" % (key, ti)
-            reqs.append(BatchRequest(custom_id=cid, system=system, user=user,
-                                     max_tokens=32000, tag="编译[%d] " % ti))
-            items[cid] = {"domain": name, "page_no": ti}
+            entry: dict = {"ti": ti, "title": pl.get("title") or "(无标题)",
+                           "group": group, "needs_llm": needs_llm, "dropped": 0}
+            if needs_llm:
+                system, user, dropped = compile_prompt(pl.get("title") or "",
+                                                       group, all_titles)
+                entry["dropped"] = dropped
+                cid = "l2page|%s|%d" % (key, ti)
+                reqs.append(BatchRequest(custom_id=cid, system=system, user=user,
+                                         max_tokens=32000, tag="编译[%d] " % ti))
+                items[cid] = {"domain": name, "page_no": ti}
+            snap.append(entry)
         members[name] = snap
     return reqs, items, members
+
+
+def assemble_pages(members: dict[str, list[dict]],
+                   results: dict[str, dict]) -> tuple[dict[str, list[dict]], list[str]]:
+    """把回读到的**编译结果**组装成「域 → 页面列表」（落盘轮用）。
+
+    三条规则与实时路的 `compile_task()` **逐条对应** —— 这是"两条路产物一致"的落点：
+
+    · **单成员页**（`needs_llm=False`）→ 直接沿用源页内容，不调 LLM（实时路也这么省）；
+    · **有结果且成功** → 走 `_compile_page()` 补派生字段（`sources` / `from_*` / `truncated`）；
+    · **结果缺失或失败** → **fail-open 退化为直接拼接**（绝不丢内容），并计入 `degraded`
+      —— 后者供整轮降级闸判断，与实时路的 fail-open 语义相同。
+
+    返回 `(by_domain_pages, degraded_titles)`。
+    """
+    by_domain: dict[str, list[dict]] = {}
+    degraded: list[str] = []
+    for name, snap in (members or {}).items():
+        pages_out: list[dict] = []
+        for item in snap or []:
+            group = list(item.get("group") or [])
+            if not group:
+                continue
+            ti = int(item.get("ti") or 0)
+            title = item.get("title") or "(无标题)"
+            nums = sorted({"m" + x for p in group
+                           for x in SRC_RE.findall(p.get("body") or "")})
+            if not item.get("needs_llm"):
+                src = group[0]
+                page = {"title": src.get("title") or title,
+                        "type": src.get("type") or "concept",
+                        "summary": src.get("summary") or "",
+                        "body": src.get("body") or "",
+                        "related": list(src.get("related") or []),
+                        "sources": sorted(set(src.get("mids") or [])),
+                        "from_files": [src.get("file") or ""],
+                        "from_titles": [src.get("title") or ""],
+                        "truncated": 0}
+            else:
+                cid = "l2page|%s|%d" % (_domain_key(name), ti)
+                r = (results or {}).get(cid) or {}
+                if r.get("ok") and isinstance(r.get("data"), dict):
+                    page = _compile_page(r["data"], title, group, nums,
+                                         int(item.get("dropped") or 0))
+                else:
+                    degraded.append(title)
+                    page = {"title": title,
+                            "type": group[0].get("type") or "concept",
+                            "summary": group[0].get("summary") or "",
+                            "body": "\n\n---\n\n".join(
+                                (p.get("body") or "").strip() for p in group),
+                            "related": [], "truncated": 0, "sources": nums,
+                            "from_files": sorted({p.get("file") or "" for p in group
+                                                  if p.get("file")}),
+                            "from_titles": [p.get("title") or "" for p in group]}
+            page["_file"] = "%03d-%s.md" % (ti, _slug(page["title"]))
+            pages_out.append(page)
+        if pages_out:
+            by_domain[name] = pages_out
+    return by_domain, degraded
 
 
 # ---------------------------------------------------------------------------
@@ -1079,6 +1142,104 @@ def _write_domain_outputs(out: Path, by_domain_pages: dict[str, list[dict]],
             continue
         results.append((name, pages_out))
     return results, skipped, details
+
+
+def finalize_outputs(out: Path, by_domain_pages: dict[str, list[dict]], *,
+                     dir_of: dict[str, str], partial: bool, fl: FailureLog,
+                     dom_file: "Path | None" = None, args=None,
+                     pages: "list[dict] | None" = None,
+                     status: "dict[str, Any] | None" = None
+                     ) -> list[tuple[str, list[dict]]]:
+    """**落盘收尾**：清旧域目录 → 逐域原子换入 → 顶层索引 → 域成员刷新。
+
+    实时路与离线**落盘轮**共用这一段 —— 域级原子写、页数崩塌闸、跳过通路、
+    顶层索引的两种写法（全量 / 增量）全在这里；两条路各写一份必然漂移。
+
+    `dir_of` 由调用方给：实时路按本轮域集合重新编号，落盘轮必须**沿用提交轮当时
+    的目录名**，否则域目录会重排（互链与索引跟着乱）。
+    """
+    keep = set(dir_of.values())
+    removed = _prune_stale_domain_dirs(out, keep, partial=partial)
+    if removed:
+        print("  清理上一轮的 %d 个旧域目录（避免两轮产出混在一起）" % removed)
+    results, skipped_names, _details = _write_domain_outputs(
+        out, by_domain_pages, dir_of, fl)
+    if status is not None:
+        status["written_domains"] = [n for n, _ in results]
+        status["pages_by_domain"] = {n: len(ps) for n, ps in results}
+        status["skipped_domains"] = list(skipped_names)
+    if skipped_names:
+        print("  共跳过 %d 个域（保持上一轮产物、下轮自动重试）：%s"
+              % (len(skipped_names), "、".join(skipped_names[:5])))
+    if partial:
+        # 增量：顶层索引 = 本轮域（内存）+ 其余域（磁盘，域名读各域 index.md 首行）
+        (out / "index.md").write_text(
+            render_index_from_disk(out, results, keep), encoding="utf-8")
+        # 域成员重写为最新平铺序号 —— L1 页数变化会让旧 members 序号漂移失效
+        if dom_file is not None and args is not None and pages is not None:
+            _refresh_domains_file(dom_file, args, pages)
+    else:
+        (out / "index.md").write_text(render_index(results), encoding="utf-8")
+    return results
+
+
+def _dir_map_from_disk(out: Path) -> dict[str, str]:
+    """从磁盘上的域目录读出「域名 → 目录名」。
+
+    域名写在各域 `index.md` 的首行（`# 域名`）。落盘轮靠它**沿用既有目录名**，
+    而不是重新编号 —— 重排会让互链与索引一起乱。
+    """
+    m: dict[str, str] = {}
+    if not out.is_dir():
+        return m
+    for d in sorted(out.iterdir()):
+        if not d.is_dir() or d.name.startswith(".") or not d.name[:1].isdigit():
+            continue
+        idx = d / "index.md"
+        if not idx.exists():
+            continue
+        try:
+            first = idx.read_text(encoding="utf-8").splitlines()[0]
+        except Exception:                   # noqa: BLE001
+            continue
+        name = first.lstrip("#").strip()
+        if name and name not in m:
+            m[name] = d.name
+    return m
+
+
+def write_offline_stage(out: Path, members: dict[str, list[dict]],
+                        results: dict[str, dict], fl: FailureLog, *,
+                        partial: bool = True) -> dict[str, Any]:
+    """离线**落盘轮**：把回读到的编译结果组装成页面并写盘。
+
+    与实时路的差别**只有一处**：页面不是当场编译的，而是从批量结果组装
+    （`assemble_pages`）。写盘本身完全共用 `finalize_outputs()` —— 域级原子写、
+    页数崩塌闸、跳过通路、顶层索引全部一致。
+    """
+    by_domain, degraded = assemble_pages(members, results)
+    status: dict[str, Any] = {"aborted": "", "written_domains": [],
+                              "skipped_domains": [], "pages": 0,
+                              "pages_by_domain": {}, "offline_submitted": {},
+                              "degraded": len(degraded)}
+    if not by_domain:
+        print("\n没有可落盘的页面（编译结果为空）")
+        return status
+    dir_of = _dir_map_from_disk(out)
+    # 新域（磁盘上还没有目录）按现有最大编号往后补，沿用 `%02d-<slug>` 形态
+    next_no = 1 + max([int(n[:2]) for n in dir_of.values() if n[:2].isdigit()] or [0])
+    for name in sorted(by_domain):
+        if name not in dir_of:
+            dir_of[name] = "%02d-%s" % (next_no, _slug(name))
+            next_no += 1
+    written = finalize_outputs(out, by_domain, dir_of=dir_of, partial=partial,
+                               fl=fl, status=status)
+    status["pages"] = sum(len(p) for _, p in written)
+    _wlog(event="offline_written", domains=len(written), pages=status["pages"],
+          degraded=len(degraded))
+    print("\n离线落盘完成：%d 域 / %d 页（其中降级拼接 %d 页）"
+          % (len(written), status["pages"], len(degraded)))
+    return status
 
 
 def assign_new_pages(client, table: list[dict], new_pages: list[dict],
@@ -1524,32 +1685,13 @@ def run(args) -> None:
     plan = [(name, (preset_dirs.get(name) if preset
                     else "%02d-%s" % (i, _slug(name))))
             for i, name in enumerate(sorted(by_domain_pages), 1)]
-    keep = {dirname for _, dirname in plan}
-    removed = _prune_stale_domain_dirs(out, keep, partial=partial)
-    if removed:
-        print("  清理上一轮的 %d 个旧域目录（避免两轮产出混在一起）" % removed)
-
     dir_of = {name: dirname for name, dirname in plan}
-    # 逐域写盘。**单个域写不进去绝不中止整轮** —— 换入失败（文件被别的程序占着）
-    # 与页数崩塌走同一条跳过通路：该域保留旧产物，且不进新基线 → 下轮自动重试。
-    results, skipped_names, _skip_details = _write_domain_outputs(
-        out, by_domain_pages, dir_of, fl)
-    status["written_domains"] = [n for n, _ in results]
-    status["pages_by_domain"] = {n: len(ps) for n, ps in results}
-    status["skipped_domains"] = list(skipped_names)
-    if skipped_names:
-        print("  共跳过 %d 个域（保持上一轮产物、下轮自动重试）：%s"
-              % (len(skipped_names), "、".join(skipped_names[:5])))
-
-    if partial:
-        # 增量：顶层索引 = 本轮域（内存）+ 其余域（磁盘，域名读各域 index.md 首行）
-        (out / "index.md").write_text(
-            render_index_from_disk(out, results, keep), encoding="utf-8")
-        # 域成员重写为最新平铺序号 —— L1 页数变化会让旧 members 序号漂移失效，
-        # 不修正的话下次全量跑会按错误成员聚合。
-        _refresh_domains_file(dom_file, args, pages)
-    else:
-        (out / "index.md").write_text(render_index(results), encoding="utf-8")
+    # 逐域写盘 + 顶层索引 —— 与离线**落盘轮**共用 `finalize_outputs()`。
+    # **单个域写不进去绝不中止整轮**：换入失败（文件被别的程序占着）与页数崩塌走
+    # 同一条跳过通路，该域保留旧产物、不进新基线 → 下轮自动重试。
+    results = finalize_outputs(out, by_domain_pages, dir_of=dir_of,
+                               partial=partial, fl=fl, dom_file=dom_file,
+                               args=args, pages=pages, status=status)
     n_pages = sum(len(p) for _, p in results)
     print("\n完成：%d 域 / %d 页，用时 %.0fs" % (len(results), n_pages, time.time() - t0))
     print(_usage_report("第二级"))

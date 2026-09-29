@@ -1229,3 +1229,91 @@ def test_编译段提交_没有需要LLM的页时不提交(tmp_path):
     assert load_state(tmp_path / STATE_NAME) == []
 
 
+# ---------------------------------------------------------------------------
+# M2b-3：落盘轮 —— 把回读到的编译结果组装成页面并写盘
+# ---------------------------------------------------------------------------
+
+def test_组装页面_三条规则与实时路逐条对应():
+    """单成员沿用源页 / 成功走 `_compile_page` / 失败 fail-open 拼接。"""
+    from wiki_aggregate import _domain_key, assemble_pages
+
+    members = {"域A": [
+        {"ti": 1, "title": "单页", "needs_llm": False, "dropped": 0,
+         "group": [_member("P1")]},
+        {"ti": 2, "title": "合并页", "needs_llm": True, "dropped": 1,
+         "group": [_member("P2"), _member("P3")]},
+        {"ti": 3, "title": "失败页", "needs_llm": True, "dropped": 0,
+         "group": [_member("P4"), _member("P5")]},
+    ]}
+    cid2 = "l2page|%s|2" % _domain_key("域A")
+    results = {cid2: {"ok": True, "data": {"title": "合并后的页", "type": "entity",
+                                           "summary": "摘要", "body": "正文",
+                                           "related": ["别的页"]}}}
+
+    by_domain, degraded = assemble_pages(members, results)
+
+    pages = by_domain["域A"]
+    assert [p["title"] for p in pages] == ["P1", "合并后的页", "失败页"]
+    assert pages[0]["_file"] == "001-P1.md"
+    assert pages[0]["body"] == "正文 [m1]", "单成员页原样沿用源页内容"
+    assert pages[1]["type"] == "entity" and pages[1]["related"] == ["别的页"]
+    assert pages[1]["from_titles"] == ["P2", "P3"]
+    assert pages[1]["truncated"] == 1, "dropped 用现场存的，不重算"
+    assert pages[1]["sources"] == ["m1"], "来源编号要补回 m 前缀"
+    assert degraded == ["失败页"], "失败页计入降级（供整轮降级闸判断）"
+    assert pages[2]["body"] == "正文 [m1]\n\n---\n\n正文 [m1]", "fail-open 直接拼接"
+    assert pages[2]["from_titles"] == ["P4", "P5"]
+    assert pages[2]["_file"] == "003-失败页.md"
+
+
+def test_组装页面_域名取不到目录时也不会崩(tmp_path):
+    from wiki_aggregate import assemble_pages
+
+    by_domain, degraded = assemble_pages({"域A": [{"ti": 1, "needs_llm": True,
+                                                  "group": []}]}, {})
+    assert by_domain == {} and degraded == []
+
+
+def test_落盘轮_沿用既有目录名并整域替换(tmp_path):
+    from agentmemhub.failures import FailureLog
+
+    from wiki_aggregate import write_offline_stage
+
+    out = tmp_path / "out_l2"
+    d = out / "01-域A"
+    d.mkdir(parents=True)
+    (d / "index.md").write_text("# 域A\n", encoding="utf-8")
+    (d / "001-旧页.md").write_text("旧", encoding="utf-8")
+
+    members = {"域A": [{"ti": 1, "title": "新页", "needs_llm": False, "dropped": 0,
+                       "group": [_member("P1")]}],
+               "域B": [{"ti": 1, "title": "B页", "needs_llm": False, "dropped": 0,
+                       "group": [_member("Q1")]}]}
+    fl = FailureLog(out / "failures.jsonl")
+
+    status = write_offline_stage(out, members, {}, fl, partial=False)
+
+    assert set(status["written_domains"]) == {"域A", "域B"}
+    assert status["pages"] == 2 and status["degraded"] == 0
+    assert (out / "01-域A" / "001-P1.md").exists(), "域A 必须沿用既有目录名"
+    assert not (out / "01-域A" / "001-旧页.md").exists(), "整域替换：旧页应消失"
+    new_dirs = [p.name for p in out.iterdir()
+                if p.is_dir() and p.name[:1].isdigit() and p.name != "01-域A"]
+    assert len(new_dirs) == 1 and new_dirs[0].startswith("02-"), "新域补号到 02"
+    assert (out / "index.md").exists(), "顶层索引要写出"
+
+
+def test_落盘轮_没有页面时什么都不写(tmp_path):
+    from agentmemhub.failures import FailureLog
+
+    from wiki_aggregate import write_offline_stage
+
+    out = tmp_path / "out_l2"
+    out.mkdir()
+
+    status = write_offline_stage(out, {"域A": []}, {}, FailureLog(out / "f.jsonl"))
+
+    assert status["written_domains"] == [] and status["pages"] == 0
+    assert not (out / "index.md").exists()
+
+

@@ -132,7 +132,7 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 （见 §5.3 / §5.4）。本节的事件名全部来自代码 grep，**不含仅测试文件里出现的值**
 （`tests/test_logs_format.py` 用过 `event="note"`、`"x"`、`"a"`、`"b"`，生产代码没有写入点）。
 
-### 5.1 `logs/wiki.log`（32 个事件：21 个流水线 + 11 个离线批处理）
+### 5.1 `logs/wiki.log`（33 个事件：21 个流水线 + 12 个离线批处理）
 
 | event | 所属流 | 关键字段 | 含义 | 排查用途 |
 |---|---|---|---|---|
@@ -173,6 +173,7 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 | `batch_consumed` | wiki.log | `batch_id`、`file_id`、`kind`（`output`/`error`）、`n` | 从某个结果文件取到并解析了 N 条结果 | 成功文件与错误文件**是两份**，`kind` 区分；两边都不为空才算真的消费完 |
 | `batch_voided` | wiki.log | `batch_id`、`stage`、`status`、`n_domains` | 任务被**作废**（终局：失败/过期/取消）→ 它覆盖的域回到待更新池 | 这是"这批要重跑"的依据；配合通知一起看（人会收到 `warning`） |
 | `batch_expired` | wiki.log | `batch_id`、`stage`、`expire_at` | 任务**过期**（厂商侧 `expired`，等于没在窗口内跑完） | 反复出现说明 `completion_window` 太小或厂商资源紧张；调大窗口后重新提交 |
+| `offline_written` | wiki.log | `domains`、`pages`、`degraded` | 离线**落盘轮**完成：编译结果已组装成页面并写盘 | 三段式的终点；`degraded > 0` 说明有页面走了 fail-open 拼接（结果缺失/失败）—— 不丢内容，但质量不如正常编译 |
 
 ### 5.2 `logs/memory.log`（2 个事件）
 
