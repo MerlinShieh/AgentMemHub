@@ -427,6 +427,149 @@ def test_update_新增记忆触发L1重编与脏域重编(tmp_path, monkeypatch)
     assert a2["needs_recompile"] is False
 
 
+def _offline_job(**kw):
+    from agentmemhub.llm_batch import BatchJob
+    base = dict(batch_id="batch-x", stage="l2plan", submitted_at=1000.0)
+    base.update(kw)
+    return BatchJob(**base)
+
+
+class _OfflineClient:
+    """假批量客户端（不发任何请求）。"""
+
+    def __init__(self, *, status="completed", files=None):
+        self.status = status
+        self.files = files or {}
+
+    def retrieve(self, batch_id):
+        return {"status": self.status}
+
+    def download(self, file_id):
+        return self.files.get(file_id, "")
+
+
+def _member_snap(title="新页", body="正文 [m1]", fname="a__s1.md"):
+    return {"title": title, "type": "concept", "summary": "摘要",
+            "body": body, "mids": [1], "file": fname}
+
+
+def test_离线模式_编译结果到位就落盘并刷基线(tmp_path, monkeypatch):
+    """M2 收尾：有在飞任务时 update() 先回读；编译结果到位 → 落盘 + 刷基线 + 消费任务。"""
+    db, l1, l2 = _mk_wiki(tmp_path)
+    from agentmemhub.llm_batch import STATE_NAME, load_state, save_state
+
+    save_state(l2 / STATE_NAME, [_offline_job(
+        batch_id="batch-page", stage="l2compile", provider_status="completed",
+        items={"l2page|域A-x|1": {"domain": "域A", "page_no": 1}},
+        members={"域A": [{"ti": 1, "title": "新页", "needs_llm": False,
+                          "dropped": 0, "group": [_member_snap()]}]})])
+    monkeypatch.setattr(wiki, "_verify_links",
+                        lambda p: {"available": False, "ok": True})
+
+    r = wiki.update(l1_dir=l1, l2_dir=l2, db=str(db),
+                    offline_client=_OfflineClient())
+
+    assert r["step"] == "landed" and r["updated"] is True
+    assert list(l2.glob("0*-*/001-新页.md")), "页面要写进域目录"
+    assert load_state(l2 / STATE_NAME) == [], "落盘后任务被消费，不再留在 state"
+    assert r["manifest"]["l2_inputs"] >= 1, "基线必须刷新，否则下轮会重复提交"
+
+
+def test_离线模式_零请求时直接落盘而不是空等(tmp_path, monkeypatch):
+    """全是单成员页时编译段**没有请求可交** → 必须直接落盘。
+
+    否则下次调用会因为没有在飞任务而重新走提交轮，永远到不了落盘。
+    """
+    db, l1, l2 = _mk_wiki(tmp_path)
+    from agentmemhub.llm_batch import STATE_NAME, load_state, save_state
+
+    save_state(l2 / STATE_NAME, [_offline_job(
+        batch_id="batch-plan", stage="l2plan", provider_status="completed",
+        items={"l2plan|域A-x|0": {"domain": "域A", "batch_no": 0}},
+        members={"域A": [_member_snap()]},
+        results={"l2plan|域A-x|0": {"ok": True, "data": {
+            "pages": [{"title": "新页", "members": [1]}]}}})])
+    monkeypatch.setattr(wiki, "_verify_links",
+                        lambda p: {"available": False, "ok": True})
+
+    class _Runner:
+        submissions: list = []
+        on_submitted = None
+        stage = ""
+
+        def run(self, reqs):
+            raise AssertionError("全是单成员页，不该提交任何请求")
+
+    r = wiki.update(l1_dir=l1, l2_dir=l2, db=str(db),
+                    offline_client=_OfflineClient(), offline_runner=_Runner())
+
+    assert r["step"] == "landed", "零请求时应当直接落盘"
+    assert list(l2.glob("0*-*/001-新页.md"))
+    assert load_state(l2 / STATE_NAME) == []
+
+
+def test_离线模式_还在等就如实报告进度(tmp_path):
+    db, l1, l2 = _mk_wiki(tmp_path)
+    from agentmemhub.llm_batch import STATE_NAME, save_state
+
+    save_state(l2 / STATE_NAME, [_offline_job(
+        batch_id="batch-wait", stage="l2plan", submitted_at=1000.0,
+        items={"a": {"domain": "域A", "batch_no": 0},
+               "b": {"domain": "域A", "batch_no": 1}})])
+
+    r = wiki.update(l1_dir=l1, l2_dir=l2, db=str(db),
+                    offline_client=_OfflineClient(status="in_progress"))
+
+    assert r["step"] == "waiting" and r["updated"] is False
+    w = r["waiting"][0]
+    assert w["batch_id"] == "batch-wait" and w["status"] == "in_progress"
+    assert w["got"] == 0 and w["total"] == 2
+    assert any("仍在等厂商" in h for h in r["hints"])
+
+
+def test_离线模式_没有在飞任务时走提交轮(tmp_path, monkeypatch):
+    """没有在飞任务 → `_offline_advance` 返回 None → 落到正常流程，并把运行器
+    透传给聚合层（由它走"整体一次提交"）。"""
+    db, l1, l2 = _mk_wiki(tmp_path)
+    conn = _sqlite3.connect(db)
+    conn.execute("INSERT INTO distilled_memories VALUES "
+                 "(5,'c','s3','concept','high','t','new','离线提交正文','h5',3000)")
+    conn.commit()
+    conn.close()
+
+    wiki._ensure_scripts_on_path()
+    import wiki_aggregate as _wa
+    import wiki_compile as _wc
+    monkeypatch.setattr(_wc, "_make_client", lambda thinking="": None)
+    monkeypatch.setattr(_wc, "compile_session",
+                        lambda client, memories, log=print: {
+                            "session_summary": "概要",
+                            "pages": [{"title": "页A", "type": "concept",
+                                       "summary": "摘A", "sources": [1],
+                                       "body": "正文", "related": []}]})
+    monkeypatch.setattr(_wa, "make_client", lambda thinking="": _FakeClient())
+
+    seen = {}
+
+    def _fake_run(args):
+        seen["offline_runner"] = getattr(args, "offline_runner", "缺字段")
+        return {"aborted": "", "written_domains": [], "skipped_domains": [],
+                "pages": 0, "pages_by_domain": {},
+                "offline_submitted": {"batch_id": "batch-new", "stage": "l2plan",
+                                      "n_requests": 2, "n_domains": 1,
+                                      "domains": ["域A"], "pending_ids": ["x"]}}
+
+    monkeypatch.setattr(_wa, "run", _fake_run)
+    marker = object()
+
+    r = wiki.update(l1_dir=l1, l2_dir=l2, db=str(db),
+                    offline_client=_OfflineClient(), offline_runner=marker)
+
+    assert seen["offline_runner"] is marker, "提交轮必须把运行器透传到聚合层"
+    assert r["l2"]["offline_submitted"]["batch_id"] == "batch-new"
+    assert r["l2"]["offline_submitted"]["stage"] == "l2plan"
+
+
 def test_update_离线提交轮不刷L2基线也不跑linkfix(tmp_path, monkeypatch):
     """M2b-1：离线提交轮**不是失败**，但同样绝不能刷 L2 基线 —— 刷了那批脏数据
     就被当成"已编译"，回读轮回来也没得编（与中止闸同一个理由）。"""

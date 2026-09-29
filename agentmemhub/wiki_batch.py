@@ -115,6 +115,21 @@ def fetch_results(client, job: BatchJob) -> dict[str, dict[str, Any]]:
     return results
 
 
+def finish(out: "Path | str", job: BatchJob, reason: str = "") -> None:
+    """把任务标记为**已消费完**：作废 + 落盘（不在飞的任务不再留在 state 里）。
+
+    这里的"作废"是"已处理"的意思，不是失败 —— 它让"哪些域还在飞"的判断不再把它
+    算进去，避免同一批数据被重复提交、重复付费。
+    """
+    job.void(reason)
+    state_path = Path(out) / STATE_NAME
+    # ⚠️ 必须**按 batch_id 删掉磁盘上那一份**：传进来的 `job` 是调用方手里的内存
+    # 对象（刚 `void()`），而磁盘上那份仍是作废之前的快照 —— 只过滤 `voided`
+    # 是删不掉它的（实测踩过：落盘成功，任务却还留在 state 里）。
+    save_state(state_path, [j for j in load_state(state_path)
+                            if not j.voided and j.batch_id != job.batch_id])
+
+
 def import_results(client, out: "Path | str", *, now: Optional[float] = None,
                    deadline_s: float = 0.0,
                    notify_fn: Optional[Notify] = None) -> dict[str, Any]:

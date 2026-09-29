@@ -1420,8 +1420,12 @@ def submit_offline_compile(out: Path, runner, plan_job: "BatchJob",
     n_groups = sum(len(g) for _, g in domain_plans)
     print("  细分结果已合并：%d 个域 / %d 个页组（其中 %d 页需要 LLM）"
           % (len(domain_plans), n_groups, len(reqs)), flush=True)
-    return _submit_stage(out, runner, reqs, items, members, stage="l2compile",
-                         label="离线编译提交")
+    status = _submit_stage(out, runner, reqs, items, members, stage="l2compile",
+                           label="离线编译提交")
+    # 把编译现场带回去：**一条请求都没交出去**时（全是单成员页，本地就能生成），
+    # 调用方要能直接落盘 —— 而不是"提交一个不存在的任务然后空等"。
+    status["compile_members"] = members
+    return status
 
 
 def load_jobs(out: Path) -> list["BatchJob"]:

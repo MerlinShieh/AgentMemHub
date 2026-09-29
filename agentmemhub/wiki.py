@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import sys
@@ -483,9 +484,183 @@ def _l2_skip_ids(dom_out: dict[str, Any], dirty_domains: list[str],
     return out
 
 
+# ---------------------------------------------------------------------------
+# 离线模式：回读 → 按在飞任务推进一段
+# ---------------------------------------------------------------------------
+
+def _offline_ready(job, now: float, deadline_s: float) -> bool:
+    """这个离线任务的结果够不够"往下走一步"。
+
+    齐了当然走；不齐但**厂商已终局 / 已完成**也要走（否则永远卡在"部分到位"）；
+    再不然只有超预算才将就 —— 与 `decide()` 的 PARTIAL 语义一致。
+    """
+    if not job.results:
+        return job.is_terminal() or job.provider_status == "completed"
+    if job.results_state == "complete":
+        return True
+    if job.is_terminal():
+        return True
+    return deadline_s > 0 and (now - job.submitted_at) >= deadline_s
+
+
+def _rebuild_l2_manifest(l2: Path, db: str, *, src_dir: str = "") -> dict[str, Any]:
+    """按**磁盘产物**重建 L2 清单（离线落盘轮用）。
+
+    与实时路的差别只是"从哪算"：实时路从本轮内存里的编译结果算，这里从磁盘上的
+    页面 json 算 —— **口径一致**（都是"这些输入确实编译出来了"）。不刷它的话，
+    下轮 `align` 仍认为这批数据是脏的，会重复提交、重复付费。
+    """
+    dom_out: dict[str, dict[str, Any]] = {}
+    n_pages = 0
+    for d in (sorted(l2.iterdir()) if l2.is_dir() else []):
+        if not d.is_dir() or d.name.startswith(".") or not d.name[:1].isdigit():
+            continue
+        idx = d / "index.md"
+        name = ""
+        if idx.exists():
+            try:
+                name = idx.read_text(encoding="utf-8").splitlines()[0].lstrip("#").strip()
+            except Exception:               # noqa: BLE001
+                name = ""
+        if not name:
+            continue
+        files: set[str] = set()
+        mids: set[int] = set()
+        cnt = 0
+        for j in sorted(d.glob("*.json")):
+            if j.name == "index.json":
+                continue
+            try:
+                p = json.loads(j.read_text(encoding="utf-8"))
+            except Exception:               # noqa: BLE001
+                continue
+            if not isinstance(p, dict) or not p.get("title"):
+                continue
+            cnt += 1
+            files.update(str(x) for x in (p.get("from_files") or []) if x)
+            mids.update(int(x) for x in re.findall(r"\[m(\d+)\]", p.get("body") or ""))
+            for t in (p.get("sources") or []):
+                s = str(t)
+                if s[:1] == "m" and s[1:].isdigit():
+                    mids.add(int(s[1:]))
+        if cnt:
+            dom_out[name] = {"dir": d.name, "pages": cnt, "pages_source": "l2",
+                             "l1_files": sorted(files), "mids": sorted(mids)}
+            n_pages += cnt
+    mf2 = wm.build_manifest("l2", db, extra={"src_dir": src_dir,
+                                             "n_pages": n_pages,
+                                             "domains": dom_out})
+    wm.write_manifest(wm.manifest_path(l2, "l2"), mf2)
+    return mf2
+
+
+def _offline_advance(*, l1: Path, l2: Path, db: str, runner, client,
+                     deadline_s: float) -> dict[str, Any] | None:
+    """离线模式下**先回读再决定**：能推进就推进并返回结果；否则返回 `None`。
+
+    `None` 的意思是"没有在飞任务"—— 上层据此走**提交轮**。返回 dict（包括
+    "还在等"）则表示本轮到此为止，**不再提交新任务**（避免重复付费）。
+
+    三段式里"回读"这半边全在这里：
+
+    · `l2compile` 结果到位 → **落盘**（写页 → linkfix → 验收 → 刷基线）= 终点；
+    · `l2plan` 结果到位    → 合并 → **交编译段**（第二次离线提交）；
+    · 都还没到位           → 如实报"还在等"（带进度与已等多久）。
+    """
+    import time
+
+    import wiki_aggregate as wa
+    from agentmemhub import wiki_batch
+
+    def _land(job, members: dict, results: dict) -> dict[str, Any]:
+        """落盘 + linkfix + 验收 + 刷基线 —— 三段式的**终点**（两条路径共用）。"""
+        status = wa.write_offline_stage(l2, members, results,
+                                        FailureLog(l2 / "failures.jsonl"))
+        fix: dict[str, Any] = {}
+        link_check: dict[str, Any] = {}
+        try:
+            import wiki_linkfix
+            fix = wiki_linkfix.run_fix(l2, dry_run=False)
+            link_check = _verify_links(l2)
+        except Exception as e:              # noqa: BLE001 —— 产物已写，验收失败不该回滚
+            fix = {"error": "%s: %s" % (type(e).__name__, str(e)[:160])}
+        mf2 = _rebuild_l2_manifest(l2, db, src_dir=str(l1))
+        wiki_batch.finish(l2, job, "落盘完成")
+        hints = ["离线批次 %s 已落盘：%d 域 / %d 页（降级拼接 %d 页）"
+                 % (job.batch_id, len(status.get("written_domains") or []),
+                    int(status.get("pages") or 0), int(status.get("degraded") or 0))]
+        if link_check.get("available") and not link_check.get("ok"):
+            hints.append("**产物链接验收未通过**：Obsidian 报 %d 个未解析目标"
+                         % link_check.get("total_targets", 0))
+        return {"updated": True, "mode": "offline", "step": "landed",
+                "l2": {**status, "linkfix": fix, "link_check": link_check},
+                "manifest": {"l2_inputs": mf2.get("n_inputs", 0)},
+                "hints": hints}
+
+    now = time.time()
+    st = wiki_batch.import_results(client, l2, now=now, deadline_s=deadline_s)
+    jobs = [j for j in st["jobs"] if not j.voided]
+    if not jobs:
+        return None
+
+    for job in jobs:                        # ① 编译结果到位 → 落盘（三段式的终点）
+        if job.stage != "l2compile" or not _offline_ready(job, now, deadline_s):
+            continue
+        return _land(job, job.members,
+                     st["results"].get(job.batch_id) or dict(job.results))
+
+    for job in jobs:                        # ② 细分结果到位 → 交编译段
+        if job.stage != "l2plan" or not _offline_ready(job, now, deadline_s):
+            continue
+        res = st["results"].get(job.batch_id) or dict(job.results)
+        try:
+            all_titles = [p["title"] for p in wa.load_pages(l1, {})]
+        except Exception:                   # noqa: BLE001 —— 取不到只影响 related 建议
+            all_titles = []
+        status = wa.submit_offline_compile(l2, runner, job, res, all_titles)
+        sub = status.get("offline_submitted") or {}
+        if sub:
+            wiki_batch.finish(l2, job, "细分结果已消费，已交编译段")
+            return {"updated": False, "mode": "offline", "step": "compile_submitted",
+                    "l2": status,
+                    "hints": ["细分结果已消费，编译任务已提交（batch=%s，%d 条请求）"
+                              "—— 等厂商跑完后再回读即可落盘"
+                              % (sub.get("batch_id") or "(未知)",
+                                 sub.get("n_requests", 0))]}
+        # **一条请求都没交出去**（全是单成员页，本地就能生成）→ 直接落盘。
+        # 不能"提交一个不存在的任务然后空等"：那样下次调用会因为"没有在飞任务"
+        # 而重新走提交轮，于是永远到不了落盘。
+        return _land(job, status.get("compile_members") or job.members, res)
+
+    waiting = [{"batch_id": j.batch_id, "stage": j.stage,
+                "status": j.provider_status or "(未知)",
+                "got": len(j.results), "total": len(j.items),
+                "waited_s": round(now - j.submitted_at, 1)} for j in jobs]
+    return {"updated": False, "mode": "offline", "step": "waiting",
+            "waiting": waiting,
+            "hints": ["离线任务仍在等厂商（闲时调度）：%s"
+                      % "；".join("%s(%s) %d/%d 条，已等 %.0f 分钟"
+                                  % (w["batch_id"], w["status"], w["got"],
+                                     w["total"], (w["waited_s"] or 0) / 60)
+                                  for w in waiting)]}
+
+
 def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
-           workers: int = 0, on_progress: Callable[[str], None] | None = None) -> dict[str, Any]:
+           workers: int = 0, on_progress: Callable[[str], None] | None = None,
+           offline_runner=None, offline_client=None,
+           offline_deadline_s: float = 0.0) -> dict[str, Any]:
     """增量更新：RAG 库变了，只重编受影响的 L1 页与 L2 域（**不全量重来**）。
+
+    **离线模式**（`offline_client` 非空时启用）：L2 的细分与编译不再当场调 LLM，
+    而是交给厂商的批量接口（价格是实时的 50%，闲时调度）。每次调用**只推进一段**
+    —— 段与段之间要等厂商（可能几小时），所以这是个跨多次调用的状态机：
+
+      无在飞任务        → 提交轮（归域 → 细分请求 → 一次提交）
+      细分结果到位      → 合并 → 交编译段
+      编译结果到位      → 组装页面 → 落盘 → linkfix → 刷基线
+
+    传入 `offline_client`（`batch_client.MiMoBatchClient`）与 `offline_runner`
+    （`llm_batch.OfflineRunner`）即可；返回值里的 `step` 说明这次推进到哪一段。
 
     链路（对齐"会话为脏单位"的设计）：
       1. align 两级 manifest → 脏会话清单；
@@ -508,6 +683,16 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
     if not db:
         db = _default_db()
     t0 = time.time()
+
+    # **离线模式先回读**：有在飞任务时，这一次要推进的是"回读"那一段（交编译段 /
+    # 落盘），而不是再提交一批新请求 —— 否则就是重复付费。只有**没有**在飞任务时
+    # 才落到下面的正常流程（此时 `args.offline_runner` 会让聚合层走**提交轮**）。
+    if offline_client is not None:
+        _step = _offline_advance(l1=l1, l2=l2, db=db, runner=offline_runner,
+                                 client=offline_client,
+                                 deadline_s=offline_deadline_s)
+        if _step is not None:
+            return _step
 
     # ---- 1. 对齐审计 ----
     a1 = align(l1, "l1", db)
@@ -609,7 +794,10 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
         limit=0, domain="", dmin=20, dmax=60, batch=120, min_pages=2,
         recompile_single=False, thinking="", no_resume=False, resume=True,
         retry_failed=False, partial=True, preset_domains=preset,
-        domain_map=domain_map)
+        domain_map=domain_map,
+        # 非空即走**离线提交轮**：聚合层会把整个域集合的请求一次交出去（见
+        # `wiki_aggregate._submit_offline`），而不是逐域并发调 LLM。
+        offline_runner=offline_runner)
     # L1 一条都没编出来时，L2 只会拿**磁盘上的旧 L1** 重跑一遍同样的域：
     # 实测白烧 1290 秒 / 42 万 prompt token，产出还只是"同义不同措辞"。
     # 全失败就跳过 —— 时间留给真正的重试（失败会话没进新基线，下次写入会重试）。
