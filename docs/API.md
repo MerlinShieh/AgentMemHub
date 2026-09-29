@@ -334,8 +334,8 @@ wiki 第二级编译可以走厂商**离线批处理**（价格是实时的 50%�
 | 提交轮 `scripts/wiki_aggregate._submit_offline()`（**整体一次提交**） | ✅ 就绪 |
 | 回读 + 第二段提交（`merge_plan_results()` / `submit_offline_compile()`） | ✅ 就绪 |
 | 落盘轮 `scripts/wiki_aggregate.write_offline_stage()`（组装页面 → 写盘） | ✅ 就绪 |
-| **状态机编排**（`update()` 按在飞任务决定推进哪一段） | ⏳ **M2 收尾，未实现** |
-| **CLI**：`batch-status` / `batch-submit` / `batch-import` / `batch-cancel` | ⏳ **M3，未实现** |
+| 状态机编排（`wiki.update(offline_client=, offline_runner=)` 按在飞任务推进一段） | ✅ 就绪 |
+| **CLI**：`wiki --action batch-status`（查状态）· `batch-run`（推进一段）· `batch-cancel`（取消作废） | ✅ 就绪（见 §五） |
 | **HTTP**：`/api/wiki/batch-*`；以及 `wiki.update_mode` 开关 | ⏳ **M4，未实现** |
 
 > ⚠️ **现状：没有任何对外入口**。离线通道目前只能由代码注入 `args.offline_runner`

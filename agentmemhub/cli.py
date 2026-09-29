@@ -1064,6 +1064,10 @@ def cmd_wiki(args) -> int:
         print(_j.dumps(res, ensure_ascii=False, indent=2, default=str))
         return 0
 
+    # ---- 离线批处理（Batch API）----
+    if args.action in ("batch-status", "batch-run", "batch-cancel"):
+        return _cmd_wiki_batch(args)
+
     # ---- retry ----
     if args.stage == "l2" and not args.src:
         print("第二级补跑需要 --src（第一级产出目录）")
@@ -1079,6 +1083,108 @@ def cmd_wiki(args) -> int:
         res = wiki.retry_all(out_dir=args.out, src=args.src,
                              workers=args.workers)
     print(_json.dumps(res, ensure_ascii=False, indent=2, default=str))
+    return 0
+
+
+def _batch_status(client, l2: "Path") -> int:
+    """列出在飞的离线任务（**只读**：查状态、进度、已等多久、建议动作）。"""
+    import time as _t
+    from pathlib import Path as _P
+
+    from agentmemhub.llm_batch import STATE_NAME, decide, load_state
+
+    l2 = _P(l2)
+    jobs = [j for j in load_state(l2 / STATE_NAME) if not j.voided]
+    if not jobs:
+        print("没有在飞的离线任务（%s）" % (l2 / STATE_NAME))
+        print("用 `agentmemhub wiki --action batch-run` 发起一轮离线更新")
+        return 0
+
+    now = _t.time()
+    print("在飞的离线任务（%d 个）：" % len(jobs))
+    for j in jobs:
+        try:
+            b = client.retrieve(j.batch_id) or {}
+        except Exception as e:              # noqa: BLE001 —— 查不到就如实说
+            print("  %s：查状态失败（%s）" % (j.batch_id, str(e)[:140]))
+            continue
+        st = str(b.get("status") or "").lower()
+        j.provider_status = st
+        cnt = b.get("request_counts") or {}
+        done = cnt.get("completed", len(j.results))
+        total = cnt.get("total", len(j.items))
+        print("  %s  stage=%-9s 厂商状态=%-11s 进度=%s/%s  已等 %.0f 分钟  建议=%s"
+              % (j.batch_id, j.stage, st or "?", done, total,
+                 (now - j.submitted_at) / 60.0, decide(j, now=now)))
+        if b.get("output_file_id"):
+            print("     成功文件：%s" % b["output_file_id"])
+        if b.get("error_file_id"):
+            print("     错误文件：%s" % b["error_file_id"])
+    print("\n下一步：`agentmemhub wiki --action batch-run`（状态机会自己判断推进哪一段）")
+    return 0
+
+
+def _cmd_wiki_batch(args) -> int:
+    """离线批处理（MiMo Batch API）：查状态 / 推进一段 / 取消作废。
+
+    与实时路径的关系：请求怎么切分、编号怎么映射、页面怎么组装**全部共用**
+    （见 `scripts/wiki_aggregate.py`），差别只在"谁执行、什么时候执行"。
+
+    `batch-run` 之所以是一个动作而不是"提交 / 回读"两个：状态机会自己判断该做
+    哪一段 —— 无在飞就提交、细分结果到了就交编译、编译结果到了就落盘。
+    """
+    import json as _j
+    from pathlib import Path as _P
+
+    from agentmemhub import config as hub_config
+    from agentmemhub import wiki, wiki_batch
+    from agentmemhub.batch_client import MiMoBatchClient
+    from agentmemhub.llm_batch import STATE_NAME, OfflineRunner, load_state
+
+    conf = hub_config.config()
+    cfg = conf.llm_batch
+    l1 = args.l1 or (conf.wiki.get("out_l1") or "").strip()
+    l2 = args.l2 or (conf.wiki.get("out_l2") or "").strip()
+    if not (l1 and l2):
+        print("需要 --l1 / --l2，或在配置里设 wiki.out_l1 / wiki.out_l2")
+        return 2
+    if not str(cfg.get("api_key") or "").strip():
+        print("未配置 llm_batch.api_key —— 离线通道用不了（见 docs/modules/batch-offline.md）")
+        return 2
+    client = MiMoBatchClient(cfg)
+    l2p = _P(l2)
+
+    if args.action == "batch-status":
+        return _batch_status(client, l2p)
+
+    if args.action == "batch-cancel":
+        jobs = [j for j in load_state(l2p / STATE_NAME) if not j.voided]
+        if not jobs:
+            print("没有在飞的离线任务")
+            return 0
+        for j in jobs:
+            try:
+                client.cancel(j.batch_id)
+            except Exception as e:          # noqa: BLE001 —— 取消失败也要作废本地标记
+                print("  取消 %s 失败（仍作废本地标记）：%s" % (j.batch_id, str(e)[:120]))
+            n = len(j.domains())
+            wiki_batch.finish(l2p, j, "手动取消")
+            print("  已取消并作废：%s（%d 个域回到待更新池）" % (j.batch_id, n))
+        _cli_log("wiki batch-cancel：作废 %d 个离线任务" % len(jobs))
+        return 0
+
+    # batch-run：推进一段
+    runner = OfflineRunner(uploader=client, model=str(cfg.get("model") or ""),
+                           stage="l2plan")
+    res = wiki.update(l1_dir=l1, l2_dir=l2, db=args.db, workers=args.workers,
+                      offline_client=client, offline_runner=runner,
+                      offline_deadline_s=float(getattr(args, "deadline", 0) or 0))
+    print(_j.dumps(res, ensure_ascii=False, indent=2, default=str))
+    step = res.get("step") or ""
+    if not step and (res.get("l2") or {}).get("offline_submitted"):
+        step = "plan_submitted"
+    print("\n本次推进：%s" % (step or "(未推进)"))
+    _cli_log("wiki batch-run → %s" % (step or "未推进"))
     return 0
 
 
@@ -1280,7 +1386,8 @@ def build_parser() -> argparse.ArgumentParser:
                      choices=["failures", "retry", "align", "update",
                               "triggers", "trigger", "backfill-manual",
                               "index-pages", "pending", "drop", "ignored",
-                              "restore"],
+                              "restore",
+                              "batch-status", "batch-run", "batch-cancel"],
                      help="failures=查看失败清单（默认）；retry=只重跑失败项；"
                           "align=审计 wiki 产物与索引库的差距（只读）；"
                           "update=增量更新（只重编脏会话 L1 与受影响 L2 域）；"
@@ -1289,7 +1396,10 @@ def build_parser() -> argparse.ArgumentParser:
                           "index-pages=L2 知识页投影进召回面（页级召回）；"
                           "pending=待更新记忆明细；drop=删除待更新记忆"
                           "（--mode soft=不进 wiki / hard=真删）；"
-                          "ignored=已软删除的记忆；restore=取消软删除")
+                          "ignored=已软删除的记忆；restore=取消软删除；"
+                          "batch-status=离线批处理任务状态（只读）；"
+                          "batch-run=离线模式推进一段（提交/交编译/落盘，状态机自判）；"
+                          "batch-cancel=取消并作废所有在飞离线任务")
     pwk.add_argument("--out", default="",
                      help="wiki 产出目录（failures/align/retry 必需；"
                           "其余从配置或 --l1/--l2 读）")
@@ -1302,6 +1412,8 @@ def build_parser() -> argparse.ArgumentParser:
     pwk.add_argument("--db", default="", help="索引库路径（align/update 用；默认读配置）")
     pwk.add_argument("--force", action="store_true",
                      help="trigger 用：绕过规则强制执行一次增量更新")
+    pwk.add_argument("--deadline", type=float, default=0.0,
+                     help="batch-run 用：等待厂商的预算秒数（0=不限时，默认）")
     pwk.add_argument("--ids", default="",
                      help="drop/restore 用：记忆 id 列表，逗号分隔（如 4388,4392）")
     pwk.add_argument("--mode", default="soft", choices=["soft", "hard"],
