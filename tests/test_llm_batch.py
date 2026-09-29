@@ -339,3 +339,135 @@ def test_结果状态与厂商状态不是一回事():
 
     assert job.results_state == "complete"
     assert job.provider_status == "in_progress", "两者互不影响、互不覆盖"
+
+
+# ---------------------------------------------------------------------------
+# M2a：离线运行器 —— 把请求交出去、当场抛 Pending 保留现场
+# ---------------------------------------------------------------------------
+
+class _FakeUploader:
+    """假上传器：记下每次调用，全程不发真请求。"""
+
+    def __init__(self, *, status="Created", expires_at=999.0):
+        self.uploads: list[tuple[str, str]] = []
+        self.creates: list[tuple[str, str, int]] = []
+        self.status = status
+        self.expires_at = expires_at
+
+    def upload(self, jsonl_text, *, filename="input.jsonl"):
+        self.uploads.append((jsonl_text, filename))
+        return {"id": "file-1", "bytes": len(jsonl_text.encode("utf-8"))}
+
+    def create(self, input_file_id, *, name="", n_requests=0):
+        self.creates.append((input_file_id, name, n_requests))
+        return {"id": "batch-1", "status": self.status,
+                "expires_at": self.expires_at}
+
+
+def _members(n: int) -> list[dict]:
+    return [{"title": "P%d" % i, "summary": "摘要", "type": "主题",
+             "body": "正文", "mids": [], "file": "f%03d.md" % i}
+            for i in range(1, n + 1)]
+
+
+def test_离线运行器_提交后抛Pending并留下现场():
+    from agentmemhub.llm_batch import OfflineRunner
+
+    up = _FakeUploader()
+    seen = []
+    runner = OfflineRunner(uploader=up, model="mimo-v2.6-flash", stage="l2plan",
+                           job_name="agentmemhub-wiki-l2plan",
+                           on_submitted=seen.append)
+    reqs = [BatchRequest(custom_id="l2plan|域A|0", system="S", user="U"),
+            BatchRequest(custom_id="l2plan|域A|1", system="S2", user="U2")]
+
+    with pytest.raises(PendingError) as e:
+        runner.run(reqs)
+
+    assert e.value.pending_ids == ["l2plan|域A|0", "l2plan|域A|1"], \
+        "现场要带全部 custom_id（回读时靠它对号入座）"
+    assert seen and seen[0]["batch_id"] == "batch-1"
+    assert seen[0]["input_file_id"] == "file-1"
+    assert seen[0]["provider_status"] == "created", "厂商状态一律 lower()"
+    assert seen[0]["expire_at"] == 999.0 and seen[0]["n_requests"] == 2
+
+    text, fname = up.uploads[0]
+    assert fname == "l2plan.jsonl"
+    assert '"custom_id": "l2plan|域A|0"' in text
+    assert '"model": "mimo-v2.6-flash"' in text
+    assert up.creates == [("file-1", "agentmemhub-wiki-l2plan", 2)]
+
+
+def test_离线运行器_空请求不提交():
+    from agentmemhub.llm_batch import OfflineRunner
+
+    up = _FakeUploader()
+    assert OfflineRunner(uploader=up).run([]) == []
+    assert up.uploads == [] and up.creates == [], "没有请求就不该上传/建任务"
+
+
+def test_离线运行器_建任务失败时不落现场也不吞异常():
+    """建任务失败可能是"结果未知" —— 不能当成"已提交"，也别自己重试。"""
+    from agentmemhub.llm_batch import OfflineRunner
+
+    seen = []
+
+    class _Boom:
+        def upload(self, t, **kw):
+            return {"id": "f"}
+
+        def create(self, i, **kw):
+            raise RuntimeError("网络断了")
+
+    with pytest.raises(RuntimeError):
+        OfflineRunner(uploader=_Boom(), on_submitted=seen.append).run(
+            [BatchRequest(custom_id="c", system="s", user="u")])
+
+    assert seen == [], "没拿到 batch_id 就没有现场可落"
+
+
+def test_离线运行器_能直接接进stage_plan接缝():
+    """端到端接缝：`stage_plan(runner=离线运行器)` 把请求交出去并冒泡 Pending。"""
+    from agentmemhub.llm_batch import OfflineRunner
+    from wiki_aggregate import stage_plan
+
+    up = _FakeUploader()
+
+    with pytest.raises(PendingError):
+        stage_plan(None, {"name": "域A"}, _members(5), batch=2,
+                   runner=OfflineRunner(uploader=up, model="m", stage="l2plan"))
+
+    assert len(up.creates) == 1, "一个域 = 一次提交（请求全部装进同一个 JSONL）"
+    assert up.creates[0][2] == 3, "5 个成员按 batch=2 切成 3 条请求"
+    lines = [ln for ln in up.uploads[0][0].splitlines() if ln.strip()]
+    assert len(lines) == 3, "3 条请求 → JSONL 三行"
+    assert all("l2plan|" in t for t, _ in up.uploads), "custom_id 要带定位信息"
+
+
+# ---------------------------------------------------------------------------
+# M2c：两路一致性补丁（正文清洗 + 可选项透传）
+# ---------------------------------------------------------------------------
+
+def test_编码时剥离零宽与控制字符():
+    """与实时路一致：那些码点最易触发审核与解析异常。"""
+    reqs = [BatchRequest(custom_id="c1", system="正常\u200b文本", user="u\ufeff")]
+
+    body = json.loads(batch_to_jsonl(reqs, "m").strip())["body"]
+
+    assert "\u200b" not in body["messages"][0]["content"]
+    assert "\ufeff" not in body["messages"][1]["content"]
+    assert "正常" in body["messages"][0]["content"]
+
+
+def test_可选项透传进请求体():
+    """`thinking` / `reasoning_effort` 这些开关由配置传入，保证两条路发出去一致。"""
+    reqs = [BatchRequest(custom_id="c1", system="s", user="u")]
+
+    body = json.loads(batch_to_jsonl(
+        reqs, "m",
+        extra={"thinking": {"type": "disabled"}, "reasoning_effort": "low"}
+    ).strip())["body"]
+
+    assert body["thinking"] == {"type": "disabled"}
+    assert body["reasoning_effort"] == "low"
+    assert body["model"] == "m" and body["max_tokens"] == 16000, "原有字段不受影响"

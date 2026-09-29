@@ -88,6 +88,29 @@
 > 这条策略成立的前提正是第 2 节里"文档没写、实测有"的列表接口 —— 没有它，
 > 建任务超时后只能人工去控制台翻。
 
+### 3.2 离线运行器（`llm_batch.OfflineRunner`）
+
+`stage_plan(..., runner=OfflineRunner(uploader=…, model=…, stage=…))` 就把一个域的
+细分从"当场调用"换成"交出去"：
+
+```
+请求（一个域的全部批次）
+  └─ batch_to_jsonl()        正文过 scrub_text，extra 透传 thinking / reasoning_effort
+       └─ uploader.upload()  → input_file_id
+            └─ uploader.create() → batch_id
+                 └─ on_submitted(info)    ← 上层在这里把 BatchJob 落盘
+                      └─ raise PendingError  ← "还没算" ≠ "算不出来"
+```
+
+- **顺序不能反**：`on_submitted` 必须在 `raise` **之前**调用 —— 反过来的话，
+  `PendingError` 一旦被上层吞掉或进程中断，"已交给厂商"就丢了，下轮会重复提交、
+  重复付费。
+- **一次提交的粒度是"一个域"**：`stage_plan` 把该域的全部批次请求一次性交给 runner
+  （5 个成员按 `plan_batch_max=2` 切成 3 条请求 → **1 次上传、1 个任务、3 行 JSONL**），
+  不是每批一个任务。
+- `BatchUploader` 协议只要求 `upload` / `create` 两个动作（生产实现是
+  `MiMoBatchClient`），所以测试注入假实现即可**全程不发真请求**。
+
 ---
 
 ## 4. 数据流与不变量
@@ -192,6 +215,9 @@ uv run python scripts/check_config_keys.py     # llm_batch.* 六个键都要有�
   （SQLite 微库 `database/notify.db` + 落库失败降级 `logs/notify_fallback.jsonl` +
   事实流 `logs/notify.log`）。⚠️ **遗留**：`stage="l2compile"` 的**页组现场**（编译输入
   快照）留到 M2，与三段式状态机一起做 —— 单有 stage 字符串没有现场是没用的
-- **M2**：`OfflineRunner` + compile 阶段 runner 化 + 三段式 `run()` 状态机 + 两路一致性三补丁（`thinking` 字段 / `repair_model` / `scrub_text`）
+- **M2**（进行中，2026-09-29）：✅ `OfflineRunner`（plan 侧，含"先落现场再抛"）与两个
+  一致性补丁（`scrub_text` 清洗、`extra` 透传 `thinking` / `reasoning_effort`）已完成；
+  **待做**：compile 阶段 runner 化、三段式 `run()` 状态机、回读时的 `repair_model` 兜底、
+  `wiki.py` 对 `PendingError` / `offline_submitted` 的处理（**绝不能进降级分支**）
 - **M3**：CLI `batch-status` / `batch-submit` / `batch-import` / `batch-cancel`
 - **M6**：回读冒烟任务 `batch_04cc53ea36324c8598abbffa`，验证真实执行与结果形状

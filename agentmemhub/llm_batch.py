@@ -39,6 +39,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
@@ -63,14 +64,23 @@ class BatchRequest:
     #: 只用于日志/可读性，不进请求体
     tag: str = ""
 
-    def body(self, model: str) -> dict[str, Any]:
-        return {
+    def body(self, model: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        """请求体。**与实时路保持一致**：正文先过 `scrub_text()`（剥离零宽/控制
+        字符，那些码点最易触发审核与解析异常），可选项（`thinking` /
+        `reasoning_effort` 之类）由调用方通过 `extra` 传入 —— 批量段是独立配置，
+        这些开关不该在这里猜。
+        """
+        from agentmemhub.llm import scrub_text
+        b: dict[str, Any] = {
             "model": model,
-            "messages": [{"role": "system", "content": self.system},
-                         {"role": "user", "content": self.user}],
+            "messages": [{"role": "system", "content": scrub_text(self.system)},
+                         {"role": "user", "content": scrub_text(self.user)}],
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
         }
+        if extra:
+            b.update(extra)
+        return b
 
 
 class PendingError(RuntimeError):
@@ -86,16 +96,19 @@ class PendingError(RuntimeError):
 
 
 def batch_to_jsonl(requests: Iterable[BatchRequest], model: str,
-                   *, url: str = DEFAULT_URL) -> str:
+                   *, url: str = DEFAULT_URL,
+                   extra: dict[str, Any] | None = None) -> str:
     """把请求编成 **JSONL 文本**（一行一个请求，OpenAI Batch 兼容）。
 
     末尾保留换行 —— 各家的上传接口对此要求不一，但带换行是更安全的那个。
+    `extra` 是逐条附加进请求体的可选项（见 `BatchRequest.body`），保证离线路与
+    实时路**发出去的东西一致**。
     """
     lines = []
     for r in requests:
         lines.append(json.dumps(
             {"custom_id": r.custom_id, "method": "POST", "url": url,
-             "body": r.body(model)},
+             "body": r.body(model, extra)},
             ensure_ascii=False))
     return ("\n".join(lines) + "\n") if lines else ""
 
@@ -198,6 +211,78 @@ class SyncRunner:
                     self.on_error(r, e)
                 out.append({})
         return out
+
+
+class BatchUploader(Protocol):
+    """把 JSONL 交到厂商手上的**两个动作**（生产实现是 `batch_client.MiMoBatchClient`）。
+
+    只要求这两个：编排（何时提交、提交什么、结果怎么回读）属于 `OfflineRunner`
+    与上层。测试注入一个假实现即可**全程不发真请求**。
+    """
+
+    def upload(self, jsonl_text: str, *, filename: str = ...) -> dict[str, Any]: ...
+
+    def create(self, input_file_id: str, *, name: str = ...,
+               n_requests: int = ...) -> dict[str, Any]: ...
+
+
+@dataclass
+class OfflineRunner:
+    """把一个域的请求**交给厂商**，然后抛 `PendingError` 保留现场。
+
+    与 `SyncRunner` 的差别只有"谁执行、什么时候执行"：请求怎么切分、批内编号怎么
+    映射回全局编号、遗漏成员怎么兜底 —— 全是同一段代码。所以两条路产物一致，
+    切换只改一个 `runner=` 参数。
+
+    抛 `PendingError` 而不是返回结果：结果要几小时后才有，**"还没算"不等于
+    "算不出来"**。上层收到它就落盘现场、本轮提前结束，**绝不进降级分支**。
+    """
+
+    uploader: "BatchUploader"
+    model: str = ""
+    stage: str = "l2plan"
+    #: 建任务用的 name —— 建任务超时后的**对账**（`find_batch(name=…)`）靠它
+    job_name: str = ""
+    #: 附加进请求体的可选项（如 `{"thinking": {"type": "disabled"}}`），与实时路对齐
+    extra: dict[str, Any] | None = None
+    #: 提交成功后的回调（上层用它把 `BatchJob` 落盘）。**在抛 PendingError 之前调用**
+    on_submitted: Callable[[dict[str, Any]], None] | None = None
+    #: 已提交记录（测试与排查用）
+    submissions: list[dict[str, Any]] = field(default_factory=list)
+
+    def run(self, requests: list[BatchRequest]) -> list[dict[str, Any]]:
+        reqs = list(requests or [])
+        if not reqs:
+            return []
+        jsonl = batch_to_jsonl(reqs, self.model, extra=self.extra)
+        up = self.uploader.upload(jsonl, filename="%s.jsonl" % self.stage) or {}
+        info: dict[str, Any] = {
+            "stage": self.stage,
+            "input_file_id": str(up.get("id") or ""),
+            "n_requests": len(reqs),
+            "custom_ids": [r.custom_id for r in reqs],
+            "submitted_at": time.time(),
+            "batch_id": "",
+            "provider_status": "",
+            "expire_at": 0.0,
+        }
+        # 建任务**不重试**（理由见 batch_client）：失败可能是"结果未知"，
+        # 那种情况交给上层用 `find_batch()` 对账，不能在这里盲目再发一次。
+        b = self.uploader.create(info["input_file_id"],
+                                 name=self.job_name or ("agentmemhub-%s" % self.stage),
+                                 n_requests=len(reqs)) or {}
+        info["batch_id"] = str(b.get("id") or "")
+        info["provider_status"] = str(b.get("status") or "").lower()
+        info["expire_at"] = float(b.get("expires_at") or 0.0)
+        self.submissions.append(info)
+        if self.on_submitted is not None:
+            # **先落现场、再抛异常**：反过来的话，PendingError 若被上层吞掉或进程
+            # 中断，"已交给厂商"这件事就丢了 —— 下轮会重复提交、重复付费。
+            self.on_submitted(info)
+        raise PendingError(
+            "已提交离线批量任务 %s（%d 条请求，stage=%s）—— 结果尚未返回，保留现场"
+            % (info["batch_id"] or "(未知 id)", len(reqs), self.stage),
+            pending_ids=info["custom_ids"])
 
 
 # ---------------------------------------------------------------------------
