@@ -621,6 +621,10 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
     l2_run: dict[str, Any] = {}
     l2_aborted = ""
     l2_skipped: list[str] = []
+    #: 离线**提交轮**的回报（`{"batch_id", "n_requests", "n_domains", "domains", ...}`）。
+    #: 它与 `aborted` 一样属于"本轮没写产物"，但**性质不同**：中止是出事了，
+    #: 离线提交是**按计划把活交出去了**（结果几小时后才有）。
+    l2_offline: dict[str, Any] = {}
     link_check: dict[str, Any] = {}
     if l1_all_failed:
         l2_stats: dict[str, Any] = {
@@ -633,10 +637,13 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
             l2_run = {"aborted": "%s: %s" % (type(e).__name__, str(e)[:160])}
         l2_aborted = str(l2_run.get("aborted") or "")
         l2_skipped = [str(x) for x in (l2_run.get("skipped_domains") or [])]
-        if l2_aborted:
-            # **中止时不跑 linkfix**：产物没被重写，linkfix 却会按新标题去改旧页面
-            # （去链/改写），等于绕过中止闸动了磁盘。
-            l2_stats = {"domains_recompiled": 0, "pages": 0, "aborted": l2_aborted}
+        l2_offline = dict(l2_run.get("offline_submitted") or {})
+        if l2_aborted or l2_offline:
+            # **中止 / 离线提交时都不跑 linkfix**：产物没被重写，linkfix 却会按新标题
+            # 去改旧页面（去链/改写），等于绕过闸门动了磁盘。
+            l2_stats = ({"domains_recompiled": 0, "pages": 0,
+                         "offline_submitted": l2_offline} if l2_offline else
+                        {"domains_recompiled": 0, "pages": 0, "aborted": l2_aborted})
         else:
             # ---- 5. linkfix（L2 标题可能变）----
             import wiki_linkfix
@@ -684,9 +691,10 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
                       "pages_source": ("l2" if n in pages_by_domain else "l1_fallback"),
                       "l1_files": sorted(fs), "mids": sorted(mids)}
     mf2 = None
-    if l2_aborted:
-        # **中止时绝不刷新 L2 清单** —— 保留旧基线，脏数据保持"脏"，下次写入自然重试。
-        # 刷新了就等于告诉 align"这批脏数据已编译"，它们再也不会被重跑。
+    if l2_aborted or l2_offline:
+        # **中止 / 离线提交时都绝不刷新 L2 清单** —— 保留旧基线，脏数据保持"脏"，
+        # 下次写入（或离线回读轮）自然重试。刷新了就等于告诉 align"这批脏数据
+        # 已编译"，它们再也不会被重跑。
         mf2 = wm.load_manifest(wm.manifest_path(l2, "l2")) or {"n_inputs": 0}
     else:
         # **没真正写出来的脏域，其输入绝不能进新基线** —— 没编译却记成已编译就是
@@ -742,6 +750,13 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
         hints.append("L1 有 %d 条记忆所在的**分组**编译失败（会话整体成功，但这几组"
                      "没产出页面）—— 已剔除出新基线，下次增量更新会重试"
                      % len(failed_ids))
+    if l2_offline:
+        hints.append("**L2 已提交离线批量任务**（batch=%s，%d 个域 / %d 条请求）——"
+                     "产物保持上一轮、**未刷新 L2 基线**；结果要等厂商闲时调度后才有，"
+                     "届时回读即可产出页面"
+                     % (l2_offline.get("batch_id") or "(未知 id)",
+                        l2_offline.get("n_domains", 0),
+                        l2_offline.get("n_requests", 0)))
     if l2_aborted:
         hints.append("**L2 聚合本轮中止**（%s）—— 产物保持上一轮，且**未刷新 L2 基线**，"
                      "这批脏域会在下次写入时自动重试。常见原因是上游 LLM 大面积超时/限流"

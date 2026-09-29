@@ -48,7 +48,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from wiki_compile import _usage_report  # noqa: E402  （复用用量/成本统计）
 from agentmemhub.failures import FailureLog  # noqa: E402
 from agentmemhub.llm_batch import (  # noqa: E402
-    BatchRequest, PendingError, SyncRunner,
+    STATE_NAME,
+    BatchJob,
+    BatchRequest,
+    PendingError,
+    SyncRunner,
+    load_state,
+    save_state,
 )
 
 # Windows 控制台默认 GBK，用量报告里的 ¥ 会抛 UnicodeEncodeError。
@@ -1039,6 +1045,81 @@ def _refresh_domains_file(dom_file: Path, args, pages: list[dict]) -> None:
     print("  域成员已按最新页序重写 → %s" % dom_file)
 
 
+def _submit_offline(out: Path, runner, dom_list: list[tuple[str, list[dict]]],
+                    plan_batch: int) -> dict[str, Any]:
+    """离线**提交轮**：把整个域集合的请求**一次**交给厂商，然后如实回报。
+
+    与实时路径的关系：请求怎么切分、批内编号怎么映射回全局编号，与实时路是
+    **同一段代码**（`plan_requests`）；分叉只在"谁执行、什么时候执行"。
+
+    为什么**整体一次**提交：逐域提交会变成 N 次上传 + N 个任务（实测生产有 19 个
+    域），对账与管理成本随域数线性膨胀。一次提交只有一份 JSONL、一个 `batch_id`。
+
+    返回的 status 带 `offline_submitted`（**不是失败**）：上层据此保留现场、
+    不刷 manifest、不跑 linkfix —— 结果几小时后才有，下轮再来回读。
+    """
+    reqs: list[BatchRequest] = []
+    items: dict[str, dict[str, Any]] = {}
+    members: dict[str, list[dict]] = {}
+    for name, mem in dom_list:
+        batch_reqs = plan_requests(_domain_key(name), name, mem, plan_batch)
+        for bi, r in enumerate(batch_reqs):
+            reqs.append(r)
+            items[r.custom_id] = {"domain": name, "batch_no": bi}
+        members[name] = list(mem)
+
+    status: dict[str, Any] = {"aborted": "", "written_domains": [],
+                              "skipped_domains": [], "pages": 0,
+                              "pages_by_domain": {}, "offline_submitted": {}}
+    if not reqs:
+        print("\n没有可提交的请求（域集合为空），本轮不做任何事")
+        return status
+
+    state_path = out / STATE_NAME
+
+    def _persist(info: dict[str, Any]) -> None:
+        """把「已交给厂商」落盘。**由运行器在抛异常之前调用**（顺序见 OfflineRunner）。"""
+        jobs = [j for j in load_state(state_path) if not j.voided]
+        jobs.append(BatchJob(
+            batch_id=str(info.get("batch_id") or ""), provider="mimo",
+            stage=str(info.get("stage") or "l2plan"),
+            submitted_at=float(info.get("submitted_at") or 0.0),
+            items=dict(items), members=dict(members),
+            input_file_id=str(info.get("input_file_id") or ""),
+            provider_status=str(info.get("provider_status") or ""),
+            expire_at=float(info.get("expire_at") or 0.0)))
+        save_state(state_path, jobs)
+        print("  现场已落盘：%s（%d 个域 / %d 条请求）"
+              % (state_path, len(members), len(reqs)))
+
+    runner.on_submitted = _persist
+    n_domains = len(members)
+    print("\n② 离线提交：%d 个域 / %d 条请求 → 一次上传 + 一个任务"
+          % (n_domains, len(reqs)), flush=True)
+    t0 = time.time()
+    try:
+        runner.run(reqs)
+    except PendingError as e:
+        subs = list(getattr(runner, "submissions", []) or [])
+        sub = {"batch_id": str(subs[-1].get("batch_id") or "") if subs else "",
+               "n_requests": len(reqs), "n_domains": n_domains,
+               "domains": sorted(members), "pending_ids": list(e.pending_ids)}
+        status["offline_submitted"] = sub
+        _wlog(event="offline_submitted", stage="l2plan", batch_id=sub["batch_id"],
+              n_requests=len(reqs), n_domains=n_domains,
+              seconds=round(time.time() - t0, 1))
+        print("  离线任务已提交（结果未回）：batch=%s，%d 个域等待回读"
+              % (sub["batch_id"] or "(未知)", n_domains))
+        return status
+
+    # 运行器正常返回 = 它没把"结果未回"这件事表达出来（实现有问题）。
+    # **不猜、不假装提交成功**，如实记一条 error 让运维看见。
+    _wlog(event="offline_submitted", stage="l2plan", ok=False,
+          error="离线运行器没有抛 PendingError —— 本轮未提交任何任务")
+    print("  ⚠️ 离线运行器没有抛 PendingError：本轮未提交任务")
+    return status
+
+
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
@@ -1143,6 +1224,14 @@ def run(args) -> None:
     cfg_workers = args.workers or _l2_cfg("workers", L2_WORKERS)
     plan_batch = _l2_cfg("plan_batch_max", L2_PLAN_BATCH_MAX)
     t0 = time.time()
+
+    # ---- 离线模式：整个域集合**一次交出去**，本轮到此为止 ----
+    # 刻意不走下面的逐域并发（那会变成"一个域一次上传 + 一个任务"）。运行器由
+    # 调用方注入（`args.offline_runner`）—— 这里不关心"用哪家、凭据是什么"，
+    # 只知道"把请求交给它，它会抛 PendingError 表示结果未回"。
+    offline_runner = getattr(args, "offline_runner", None)
+    if offline_runner is not None:
+        return _submit_offline(out, offline_runner, dom_list, plan_batch)
 
     def plan_domain(item):
         """把一个域细分成若干"最终页"。

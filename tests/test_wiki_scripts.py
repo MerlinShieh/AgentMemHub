@@ -976,3 +976,89 @@ def test_换入失败不留下tmp与bak垃圾(tmp_path, monkeypatch):
     assert leftovers == [], "不该留下 .tmp_/.bak_ 垃圾"
 
 
+# ---------------------------------------------------------------------------
+# M2b-1：离线提交轮 —— 整个域集合**一次**交出去，现场落盘
+# ---------------------------------------------------------------------------
+
+def _pg(title: str) -> dict:
+    """够 `plan_requests()` 用的最小成员（第一级页面）。"""
+    return {"title": title, "summary": "摘要", "type": "主题", "body": "正文",
+            "mids": [], "file": "%s.md" % title}
+
+
+class _FakeBatchUploader:
+    def __init__(self):
+        self.uploads: list[str] = []
+        self.creates: list[tuple[str, int]] = []
+
+    def upload(self, jsonl_text, *, filename="input.jsonl"):
+        self.uploads.append(jsonl_text)
+        return {"id": "file-1"}
+
+    def create(self, input_file_id, *, name="", n_requests=0):
+        self.creates.append((name, n_requests))
+        return {"id": "batch-1", "status": "Created", "expires_at": 999.0}
+
+
+def test_离线提交轮_整体一次提交并落现场(tmp_path):
+    """**一次提交**（不是逐域）：19 个域逐个提交会变成 19 个任务，对账成本爆炸。"""
+    from agentmemhub.llm_batch import OfflineRunner, load_state
+
+    from wiki_aggregate import STATE_NAME, _submit_offline
+
+    up = _FakeBatchUploader()
+    runner = OfflineRunner(uploader=up, model="mimo-v2.6-flash", stage="l2plan")
+    dom_list = [("域A", [_pg("P1"), _pg("P2"), _pg("P3")]), ("域B", [_pg("Q1")])]
+
+    status = _submit_offline(tmp_path, runner, dom_list, plan_batch=2)
+
+    sub = status["offline_submitted"]
+    assert sub["batch_id"] == "batch-1"
+    assert sub["n_domains"] == 2
+    assert sub["n_requests"] == 3, "域A 3 成员按 batch=2 切 2 条 + 域B 1 条"
+    assert sub["domains"] == ["域A", "域B"]
+    assert len(up.creates) == 1, "整体一次提交 = 只建一个任务"
+    assert up.creates[0][1] == 3
+
+    jobs = load_state(tmp_path / STATE_NAME)
+    assert len(jobs) == 1
+    job = jobs[0]
+    assert sorted(job.domains()) == ["域A", "域B"]
+    assert job.input_file_id == "file-1" and job.provider_status == "created"
+    assert job.stage == "l2plan" and job.expire_at == 999.0
+    assert set(job.items) == set(sub["pending_ids"]), "现场要能对上每一条请求"
+    assert len(job.members["域A"]) == 3, "成员快照必须原样保留（回读时还原全局编号）"
+
+
+def test_离线提交轮_域集合为空时不提交(tmp_path):
+    from agentmemhub.llm_batch import OfflineRunner
+
+    from wiki_aggregate import _submit_offline
+
+    class _Up:
+        def upload(self, *a, **k):
+            raise AssertionError("空域集合不该上传")
+
+        def create(self, *a, **k):
+            raise AssertionError("空域集合不该建任务")
+
+    status = _submit_offline(tmp_path, OfflineRunner(uploader=_Up()), [], plan_batch=2)
+    assert status["offline_submitted"] == {}
+
+
+def test_离线提交轮_运行器没抛Pending时如实报空(tmp_path):
+    """实现有问题时**不假装提交成功** —— 宁可让运维看见"本轮什么都没提交"。"""
+    from wiki_aggregate import _submit_offline
+
+    class _Noop:
+        submissions: list = []
+        on_submitted = None
+
+        def run(self, reqs):
+            return []                       # 忘了抛 PendingError
+
+    status = _submit_offline(tmp_path, _Noop(), [("域A", [_pg("P1")])], plan_batch=2)
+    assert status["offline_submitted"] == {}, "没抛 Pending 就是没提交"
+    assert status["written_domains"] == [] and status["pages"] == 0
+
+

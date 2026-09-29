@@ -215,9 +215,13 @@ uv run python scripts/check_config_keys.py     # llm_batch.* 六个键都要有�
   （SQLite 微库 `database/notify.db` + 落库失败降级 `logs/notify_fallback.jsonl` +
   事实流 `logs/notify.log`）。⚠️ **遗留**：`stage="l2compile"` 的**页组现场**（编译输入
   快照）留到 M2，与三段式状态机一起做 —— 单有 stage 字符串没有现场是没用的
-- **M2**（进行中，2026-09-29）：✅ `OfflineRunner`（plan 侧，含"先落现场再抛"）与两个
-  一致性补丁（`scrub_text` 清洗、`extra` 透传 `thinking` / `reasoning_effort`）已完成；
-  **待做**：compile 阶段 runner 化、三段式 `run()` 状态机、回读时的 `repair_model` 兜底、
-  `wiki.py` 对 `PendingError` / `offline_submitted` 的处理（**绝不能进降级分支**）
+- **M2**（进行中，2026-09-29）：
+  · ✅ `OfflineRunner`（plan 侧，含"先落现场再抛"）+ 两个一致性补丁（`scrub_text`、
+    `extra` 透传 `thinking` / `reasoning_effort`）
+  · ✅ **M2b-1 提交轮**：`run(args.offline_runner=…)` → `_submit_offline()` **整体一次提交**
+    （一份 JSONL、一个 `batch_id`）、`BatchJob` 落盘、`run()` 返回 `offline_submitted`；
+    `wiki.py` 识别它走**现有的中止分支**（不跑 linkfix、不刷 L2 基线）并给一条可读提示
+  · **待做（M2b-2 / M2b-3）**：回读轮（消费 plan 结果 → 生成 compile 请求 → 第二次提交）、
+    落盘轮（回读 compile → 写页 → linkfix → 刷 manifest）、回读时的 `repair_model` 兜底
 - **M3**：CLI `batch-status` / `batch-submit` / `batch-import` / `batch-cancel`
 - **M6**：回读冒烟任务 `batch_04cc53ea36324c8598abbffa`，验证真实执行与结果形状

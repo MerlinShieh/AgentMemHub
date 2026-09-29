@@ -132,7 +132,7 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 （见 §5.3 / §5.4）。本节的事件名全部来自代码 grep，**不含仅测试文件里出现的值**
 （`tests/test_logs_format.py` 用过 `event="note"`、`"x"`、`"a"`、`"b"`，生产代码没有写入点）。
 
-### 5.1 `logs/wiki.log`（27 个事件：21 个流水线 + 6 个批量）
+### 5.1 `logs/wiki.log`（28 个事件：21 个流水线 + 7 个离线批处理）
 
 | event | 所属流 | 关键字段 | 含义 | 排查用途 |
 |---|---|---|---|---|
@@ -168,6 +168,7 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 | `batch_list` | wiki.log | `n`、`seconds` | 列最近任务（**建任务超时后的对账**） | 与 `client.find_batch()` 配合确认"到底建成没"，避免重复提交、重复计费 |
 | `batch_cancel` | wiki.log | `batch_id`、`status`（`cancelling` / `cancelled` / `not_found`） | 取消任务（**异步**：先 `cancelling`，再查才 `cancelled`） | 作废回池的依据；`not_found` 表示任务已消失 |
 | `batch_download` | wiki.log | `file_id`、`bytes`、`lines`、`seconds` | 下载成功 / 错误结果文件 | 回读了多少条；与 `batch_create` 的 `n_requests` 比对可发现缺失 |
+| `offline_submitted` | wiki.log | `batch_id`、`n_requests`、`n_domains`、`seconds`；**失败时**带 `ok=False` + `error` | 离线**提交轮**结束：活已交出去、结果还没回来（**不是失败、不阻塞**；本轮不刷 manifest、不跑 linkfix） | 这是"离线模式跑了一轮"的唯一锚点；`ok=False` 表示运行器没抛 `PendingError`（实现有问题，本轮其实什么都没提交） |
 
 ### 5.2 `logs/memory.log`（2 个事件）
 
@@ -334,13 +335,12 @@ rg '"phase": "call"' logs/mcp.log                  # 所有 MCP 调用发起
 以下事件**尚未实现**，登记在此是为了让 A2（离线批处理 · MiMo Batch API）后续里程碑落地时一次补齐。
 来源：[batch-offline-plan.md](batch-offline-plan.md) §17.4「日志落实」。
 
-> 已转正的：**批量动作的 6 个事件**（M0，见 §5.1 末尾「批量任务事件」表）与
-> **`notify_write`**（M1，见 §5.6 —— 通知落库 + 降级路径都留痕）。
+> 已转正的：**批量动作的 6 个事件**（M0）、**`notify_write`**（M1，见 §5.6）与
+> **`offline_submitted`**（M2b-1，见 §5.1 末尾「批量任务事件」表的最后一行）。
 > 其中 `batch_list` 是探测时才发现厂商有列表接口、后补的第 6 个。
 
 | event | 计划所属流 | 计划记录的内容 |
 |---|---|---|
-| `offline_submitted` | 流水线 | 提交轮提前返回（**不是失败、不阻塞、不占单并发锁**；不刷 manifest、不跑 linkfix） |
 | `batch_consumed` | 流水线 | 批次结果被消费（回读轮） |
 | `batch_voided` | 流水线 | 批次作废、脏数据回池 |
 | `batch_expired` | 流水线 | 批次过期（`expire_at`） |

@@ -427,6 +427,45 @@ def test_update_新增记忆触发L1重编与脏域重编(tmp_path, monkeypatch)
     assert a2["needs_recompile"] is False
 
 
+def test_update_离线提交轮不刷L2基线也不跑linkfix(tmp_path, monkeypatch):
+    """M2b-1：离线提交轮**不是失败**，但同样绝不能刷 L2 基线 —— 刷了那批脏数据
+    就被当成"已编译"，回读轮回来也没得编（与中止闸同一个理由）。"""
+    db, l1, l2 = _mk_wiki(tmp_path)
+    # 必须先制造脏数据：没有待编译内容时 update() 会走"库未变化"分支提前返回
+    conn = _sqlite3.connect(db)
+    conn.execute("INSERT INTO distilled_memories VALUES "
+                 "(5,'c','s3','concept','high','t','new','离线提交测试正文','h5',3000)")
+    conn.commit()
+    conn.close()
+
+    wiki._ensure_scripts_on_path()
+    import wiki_aggregate as _wa
+    import wiki_compile as _wc
+    monkeypatch.setattr(_wc, "_make_client", lambda thinking="": None)
+    monkeypatch.setattr(_wc, "compile_session",
+                        lambda client, memories, log=print: {
+                            "session_summary": "概要",
+                            "pages": [{"title": "页A", "type": "concept",
+                                       "summary": "摘A", "sources": [1],
+                                       "body": "正文", "related": []}]})
+    monkeypatch.setattr(_wa, "make_client", lambda thinking="": _FakeClient())
+    # 让聚合层"把活交出去了"：如实回报 offline_submitted（不是 aborted）
+    monkeypatch.setattr(_wa, "run", lambda args: {
+        "aborted": "", "written_domains": [], "skipped_domains": [], "pages": 0,
+        "pages_by_domain": {},
+        "offline_submitted": {"batch_id": "batch-x", "n_requests": 1, "n_domains": 1,
+                              "domains": ["域A"], "pending_ids": ["l2plan|域A-abc|0"]}})
+
+    mf_before = (l2 / "manifest_l2.json").read_text(encoding="utf-8")
+    r = wiki.update(l1_dir=l1, l2_dir=l2, db=str(db))
+
+    assert r["l2"]["offline_submitted"]["batch_id"] == "batch-x"
+    assert r["linkfix"] == {"skipped": True}, "提交轮不该跑 linkfix（产物没被重写）"
+    assert (l2 / "manifest_l2.json").read_text(encoding="utf-8") == mf_before, \
+        "提交轮绝不能刷 L2 基线（内容必须一字不变）：刷了脏数据就被当成已编译"
+    assert any("离线批量任务" in h for h in r["hints"]), "要给人一条可读提示"
+
+
 def test_update_全新会话走L1编译并归入现有域(tmp_path, monkeypatch):
     """用户点名的特殊场景：全新会话的 RAG 记忆，现有 wiki 完全没有 ——
     L1 从零编译出全新页，再归入现有域，所在域跟着重编。"""
