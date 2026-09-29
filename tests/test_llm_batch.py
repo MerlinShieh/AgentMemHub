@@ -323,6 +323,17 @@ def test_决策_进行中的状态不算终局():
     assert decide(_job(provider_status="in_progress"), now=1000.0, deadline_s=0) == WAIT
 
 
+@pytest.mark.parametrize("deadline", [0.0, 3600.0])
+def test_决策_厂商完成后立刻消费不受deadline影响(deadline):
+    """`completed` 的意义就是"结果已经在那儿了" —— 与等多久无关。
+
+    漏掉这一条时（M1 初版就没有），`completed` 且 `deadline_s <= 0`（**默认不限时**）
+    会被判成 `WAIT`，等于永远不去取结果。
+    """
+    job = _job(provider_status="completed")
+    assert decide(job, now=1000.0, deadline_s=deadline) == CONSUME
+
+
 def test_作废_返回覆盖的域供回池():
     job = _job()
 

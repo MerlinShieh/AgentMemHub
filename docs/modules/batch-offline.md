@@ -221,12 +221,14 @@ uv run python scripts/check_config_keys.py     # llm_batch.* 六个键都要有�
   · ✅ **M2b-1 提交轮**：`run(args.offline_runner=…)` → `_submit_offline()` **整体一次提交**
     （一份 JSONL、一个 `batch_id`）、`BatchJob` 落盘、`run()` 返回 `offline_submitted`；
     `wiki.py` 识别它走**现有的中止分支**（不跑 linkfix、不刷 L2 基线）并给一条可读提示
-  · 🔄 **M2b-2 进行中**：✅ `merge_plan_results()`（细分结果 → 域→页面分组；批内→全局
-    编号映射 + "失败/遗漏成员各自成页"兜底）、✅ `compile_requests()`（只把**需要 LLM 的
-    页**交出去，单成员页本地生成）、✅ `submit_offline_compile()`（消费结果 → 生成编译
-    请求 → 交第二段）、✅ `compile_prompt()` 抽出给两条路共用；**待做**：**回读**
-    （retrieve → 按 `decide()` 处置 → download → 解析成 `results`）、M2b-3 落盘轮
-    （写页 → linkfix → 刷 manifest）、回读时的 `repair_model` 兜底（当前坏 JSON 的条目
-    会退化成"成员各自成页" —— 不丢内容，但确实不如实时路救得回来）
+  · ✅ **M2b-2 完成**：`merge_plan_results()`（细分结果 → 域→页面分组，含批内→全局编号
+    映射与"失败/遗漏成员各自成页"兜底）、`compile_requests()`（只把**需要 LLM 的页**交
+    出去，单成员页本地生成）、`submit_offline_compile()`（消费结果 → 生成编译请求 →
+    交第二段）、`compile_prompt()` 抽出给两条路共用、`agentmemhub/wiki_batch.py` 的
+    **回读**（`poll` → `decide` → `fetch_results` → 作废回池 + 通知）、`_submit_stage()`
+    提交内核
+  · **待做（M2b-3）**：落盘轮（回读编译结果 → 写页 → linkfix → 刷 manifest）、
+    回读时的 `repair_model` 兜底（当前坏 JSON 的条目会退化成"成员各自成页" ——
+    不丢内容，但不如实时路救得回来；`load_batch_results` 已保留 `content` 原文备用）
 - **M3**：CLI `batch-status` / `batch-submit` / `batch-import` / `batch-cancel`
 - **M6**：回读冒烟任务 `batch_04cc53ea36324c8598abbffa`，验证真实执行与结果形状

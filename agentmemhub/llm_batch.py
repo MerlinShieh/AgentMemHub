@@ -161,7 +161,9 @@ def load_batch_results(text: str) -> dict[str, dict[str, Any]]:
         try:
             out[cid] = {"ok": True, "data": extract_json(content)}
         except Exception as e:
-            out[cid] = {"ok": False,
+            # **保留原文**：坏 JSON 有两条出路（重试 / 交给修复模型），两条都需要
+            # 原文。丢掉它就只剩"退化成成员各自成页"这一条路（不丢内容，但质量差）。
+            out[cid] = {"ok": False, "content": content,
                         "error": "正文不是可解析的 JSON：%s" % str(e)[:120]}
     return out
 
@@ -437,9 +439,15 @@ def decide(job: BatchJob, *, now: float, deadline_s: float = 0.0) -> str:
     限时是调用方"我这次就想拿到结果"时临时给的。
 
     **终局优先于 deadline**：厂商已 `failed` / `expired` / `cancelled` 时立刻给
-    结论、不等超时 —— 否则终局失败会被当成"还在等"而干等到 deadline。
+    结论，不等超时 —— 否则终局失败会被当成"还在等"而干等到 deadline。
+
+    **已完成也优先于 deadline**：`completed` 的意思正是"结果已经在那儿了"，与
+    等多久无关。漏掉这一条时，`completed` 且 `deadline_s <= 0`（**默认就是
+    不限时**）的任务会被判成 `WAIT` —— 等于永远不去取结果。
     """
     if not job.pending_ids():
+        return CONSUME
+    if job.provider_status == "completed":
         return CONSUME
     if job.is_terminal():
         return PARTIAL if job.results else FALLBACK

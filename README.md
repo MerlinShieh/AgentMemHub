@@ -840,6 +840,7 @@ uv run python -m agentmemhub llm-config --json   # 机器读
 | [docs/recall-fusion.md](docs/recall-fusion.md) | 多路召回融合的机制、算法与评测数据 |
 | [docs/memory-distillation.md](docs/memory-distillation.md) | 记忆蒸馏：切片 / 合并 / 去重 / 投影全流程 |
 | [docs/llm-wiki.md](docs/llm-wiki.md) | LLM Wiki 两级编译、增量更新、触发器、失败兜底与格式修复 |
+| [docs/batch-offline-plan.md](docs/batch-offline-plan.md) | **离线批处理（Batch API）接入计划（进行中）**：决策记录、三段式流水线状态机、里程碑追踪与风险清单 |
 | [docs/model-selection.md](docs/model-selection.md) | LLM 模型选型与定价（含免费档与跑批注意事项） |
 | [docs/API.md](docs/API.md) | 对外契约：HTTP / MCP / CLI（含错误语义与长任务约定） |
 | [docs/EXAMPLES.md](docs/EXAMPLES.md) | SQL / CLI / Python 查询示例 |
@@ -858,7 +859,7 @@ uv run python -m agentmemhub llm-config --json   # 机器读
 | LLM Wiki 编译链 | `wiki.py`、`wiki_index.py`、`wiki_manifest.py`、`wiki_pending.py`、`wiki_triggers.py`、`scripts/wiki_*.py`、`obsidian.py` | [docs/modules/wiki.md](docs/modules/wiki.md) | 已写 |
 | 配置体系 | `config.py`、`scripts/check_config_keys.py`、`scripts/sync_llm_*.py` | [docs/modules/config.md](docs/modules/config.md) | 已写 |
 | 日志与可观测性 | `logs.py`、`failures.py`、`snapshot.py`、`notify.py` | [docs/logging.md](docs/logging.md)（**事件字典 + 排查剧本**） | 已写 |
-| 离线批处理（Batch API） | `llm_batch.py`、`batch_client.py`、`notify.py`（待建） | [docs/modules/batch-offline.md](docs/modules/batch-offline.md) | 已写（M0；见 [计划](docs/batch-offline-plan.md)） |
+| 离线批处理（Batch API） | `llm_batch.py`、`batch_client.py`、`wiki_batch.py`、`notify.py` | [docs/modules/batch-offline.md](docs/modules/batch-offline.md) | 已写（M0–M2b-2；见 [计划](docs/batch-offline-plan.md)） |
 | 记忆引擎（内置 rag） | `agentmemhub/rag/**` | `docs/modules/memory-engine.md` | 计划中 |
 | 面板后端网关 | `agentmemhub/web/**` | `docs/modules/panel.md` | 计划中 |
 | 采集与适配 | `agentmemhub/adapters/**`、`store.py`、`models.py`、`watermarks.py` | `docs/modules/ingest-adapters.md` | 计划中 |
