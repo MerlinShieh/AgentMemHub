@@ -869,3 +869,110 @@ def test_域名段带哈希_防custom_id相撞():
     assert _slug(n1) == _slug(n2), "前提：这两个名字 slug 后确实相同"
     assert _domain_key(n1) != _domain_key(n2), "slug 相同时必须靠 crc32 后缀区分开"
 
+
+# ---------------------------------------------------------------------------
+# 单个域写盘失败**不得**拖垮整轮
+#
+# 2026-09-28 实测事故：用户在 Obsidian 里打开着 `04-AgentMemHub-记忆系统` 的两个
+# 笔记 → `ddir.rename(bak)` 报 `PermissionError [WinError 5]` → 异常一路穿透到
+# `wiki.py` 的整轮中止闸，**88 分钟的一轮里 L1 编完、L2 一个域都没写**。
+# 修法：换入失败与页数崩塌走同一条"跳过该域"通路（保留旧产物 + 进失败清单 +
+# 不进新基线 → 下轮自动重试），绝不中止整轮。
+# ---------------------------------------------------------------------------
+
+def _write_test_page(title: str, fname: str) -> dict:
+    """够 `render_page()` / `render_domain_index()` 用的最小页面。"""
+    return {"title": title, "type": "主题", "summary": "摘要", "body": "正文",
+            "related": [], "sources": [], "from_titles": [title],
+            "from_files": [fname], "_file": fname}
+
+
+def test_域换入失败只跳过该域_不中止整轮(tmp_path, monkeypatch):
+    from agentmemhub.failures import FailureLog
+
+    import wiki_aggregate as wa
+
+    for name in ("01-域A", "02-域B"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "001-旧页.md").write_text("旧", encoding="utf-8")
+
+    by_domain = {"域A": [_write_test_page("A 页", "001-A.md")],
+                 "域B": [_write_test_page("B 页", "001-B.md")]}
+    dir_of = {"域A": "01-域A", "域B": "02-域B"}
+    fl = FailureLog(tmp_path / "failures.jsonl")
+
+    real_swap = wa._swap_domain_dir
+
+    def flaky(out, ddir, files):
+        if ddir.name == "02-域B":            # 模拟"该域的文件被别的程序占着"
+            raise PermissionError("[WinError 5] 拒绝访问。")
+        return real_swap(out, ddir, files)
+
+    monkeypatch.setattr(wa, "_swap_domain_dir", flaky)
+    results, skipped, details = wa._write_domain_outputs(
+        tmp_path, by_domain, dir_of, fl)
+
+    assert [n for n, _ in results] == ["域A"], "写得进去的域必须照写"
+    assert skipped == ["域B"], "写不进去的域要如实报出来（上层靠它剔出新基线）"
+    assert "拒绝访问" in details[0], "跳过原因要能追溯到原始错误"
+    assert (tmp_path / "02-域B" / "001-旧页.md").exists(), "旧产物必须保留"
+    assert not (tmp_path / "02-域B" / "001-B.md").exists(), "不留半成品"
+    assert "域B" in set(fl.targets("l2-write")), "失败要进清单，否则下轮无从补跑"
+
+
+def test_页数崩塌仍走同一条跳过通路(tmp_path, monkeypatch):
+    """重构保护：崩塌路径照样跳过该域，且**根本不去动磁盘**。"""
+    from agentmemhub.failures import FailureLog
+
+    import wiki_aggregate as wa
+
+    d = tmp_path / "01-域A"
+    d.mkdir()
+    for i in range(1, 5):                    # 旧 4 页 → 新 1 页 = 崩塌
+        (d / ("%03d-旧.md" % i)).write_text("旧", encoding="utf-8")
+
+    called = {"n": 0}
+
+    def boom(*a, **kw):
+        called["n"] += 1
+        raise AssertionError("页数崩塌时不该尝试换入")
+
+    monkeypatch.setattr(wa, "_swap_domain_dir", boom)
+    fl = FailureLog(tmp_path / "failures.jsonl")
+    results, skipped, _ = wa._write_domain_outputs(
+        tmp_path, {"域A": [_write_test_page("新页", "001-新.md")]},
+        {"域A": "01-域A"}, fl)
+
+    assert results == [] and skipped == ["域A"]
+    assert called["n"] == 0
+    assert sorted(f.name for f in d.iterdir()) == [
+        "001-旧.md", "002-旧.md", "003-旧.md", "004-旧.md"]
+    assert "域A" in set(fl.targets("l2-write"))
+
+
+def test_换入失败不留下tmp与bak垃圾(tmp_path, monkeypatch):
+    """失败路径也要收干净：`.tmp_<域>` 就躺在 Obsidian vault 里（实测残留过 153 个文件）。"""
+    import wiki_aggregate as wa
+
+    d = tmp_path / "01-域A"
+    d.mkdir()
+    (d / "001-旧页.md").write_text("旧", encoding="utf-8")
+
+    real_rename = Path.rename
+    calls = {"n": 0}
+
+    def flaky(self, target):
+        calls["n"] += 1
+        if calls["n"] == 2:                  # 第 1 次（旧→bak）放行，第 2 次（tmp→正式）失败
+            raise PermissionError("[WinError 5] 拒绝访问。")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", flaky)
+    err = wa._write_domain(tmp_path, d, {"001-新页.md": "新"})
+
+    assert err, "失败必须返回可读原因而不是抛出去"
+    assert (d / "001-旧页.md").read_text(encoding="utf-8") == "旧", "旧产物要还原"
+    leftovers = sorted(f.name for f in tmp_path.iterdir() if f.name.startswith("."))
+    assert leftovers == [], "不该留下 .tmp_/.bak_ 垃圾"
+
+

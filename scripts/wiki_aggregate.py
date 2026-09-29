@@ -867,7 +867,10 @@ def _swap_domain_dir(out: Path, ddir: Path, files: dict[str, str]) -> None:
     没写"的半成品；而且**降级结果一旦写下就不可逆**（见 COLLAPSE_* 的说明）。
 
     临时目录与备份目录都用 `.` 前缀，`_prune_stale_domain_dirs` 不会碰它们；
-    正常路径下 `finally` 也会把备份清掉，不会留垃圾。
+    无论成功还是失败，`finally` 都会把两个临时目录收干净，不留垃圾。
+
+    **失败仍然抛**（还原旧产物后抛给上层）——上层 `_write_domain()` 把它降级成
+    "跳过这个域"，而不是让整轮中止。
     """
     tmp = out / (".tmp_" + ddir.name)
     bak = out / (".bak_" + ddir.name)
@@ -885,7 +888,84 @@ def _swap_domain_dir(out: Path, ddir: Path, files: dict[str, str]) -> None:
             bak.rename(ddir)              # 换入失败 → 尽力把旧目录还原回去
         raise
     finally:
+        # 失败路径也要收干净：`.tmp_<域>` 留在产物目录里既是视觉垃圾（它就在
+        # Obsidian vault 里），又会被下一次换入开头 rmtree 掉（白写一遍）。
+        # 实测 2026-09-28：换入失败留下 153 个文件的 `.tmp_04-…`。
+        shutil.rmtree(tmp, ignore_errors=True)
         shutil.rmtree(bak, ignore_errors=True)
+
+
+def _write_domain(out: Path, ddir: Path, files: dict[str, str]) -> str:
+    """把单个域换入磁盘；**成功返回空串，失败返回可读原因（不抛）**。
+
+    为什么不在这里抛：一次换入失败不该让整轮 L2 白跑。Windows 上最常见的成因
+    是**该域目录里有文件被别的程序占着** —— 2026-09-28 实测：用户在 Obsidian 里
+    打开着 `04-AgentMemHub-记忆系统` 的两个笔记，`ddir.rename(bak)` 报
+    `PermissionError [WinError 5]`，于是 88 分钟的一轮里 L1 编完、**L2 一个域都没写**。
+    """
+    try:
+        _swap_domain_dir(out, ddir, files)
+        return ""
+    except Exception as e:                      # noqa: BLE001 —— 任何失败都只跳过该域
+        return "%s: %s" % (type(e).__name__, str(e)[:160])
+
+
+def _write_domain_outputs(out: Path, by_domain_pages: dict[str, list[dict]],
+                          dir_of: dict[str, str], fl: FailureLog
+                          ) -> tuple[list[tuple[str, list[dict]]], list[str],
+                                     list[str]]:
+    """逐域写盘（整域原子换入），返回 `(成功域, 被跳过的域, 跳过原因)`。
+
+    两条跳过路径**必须走同一个出口**（都进 `skipped_domains`）：
+
+    · **页数崩塌**（`_is_page_collapse`）—— 降级产物不可逆，保留旧页；
+    · **换入失败**（`_write_domain`）—— 例如该域的文件被 Obsidian 占着。
+
+    上层（`wiki.py`）靠 `skipped_domains` 把"**没真正写出来**"的域剔出新基线，
+    它们因此保持"脏"、下轮自然重试 —— **跳过一次绝不等于永久不更新**。
+    """
+    results: list[tuple[str, list[dict]]] = []
+    skipped: list[str] = []
+    details: list[str] = []
+    for name in sorted(by_domain_pages):
+        pages_out = sorted(by_domain_pages[name], key=lambda p: p["_file"])
+        ddir = out / dir_of[name]
+        old_n = _count_domain_pages(ddir)
+        new_n = len(pages_out)
+        # 页数崩塌保护：写盘是**整域替换**，降级结果一旦写下就不可逆。
+        # 实测 2026-09-25：LLM 上游全程 524 → 域内细分退化成"一域一页"，
+        # 33 页的域被写成 1 页，整轮丢 73 页、334 处链接悬空。
+        if _is_page_collapse(old_n, new_n):
+            skipped.append(name)
+            details.append("%s %d→%d 页（疑似降级）" % (name, old_n, new_n))
+            print("  ⚠️ 跳过写盘：%-24s %d → %d 页（疑似降级，保留旧产物）"
+                  % (name[:24], old_n, new_n), flush=True)
+            _wlog(event="domain_write_skipped", domain=name, reason="page_collapse",
+                  old_pages=old_n, new_pages=new_n)
+            fl.record(stage="l2-write", target=name,
+                      error="页数崩塌 %d→%d，已保留旧产物" % (old_n, new_n))
+            continue
+        # 先全量渲染到内存，再整体换入 —— 不再原地"删旧写新"
+        files: dict[str, str] = {}
+        for p in pages_out:
+            p["_dir"] = ddir.name
+            files[p["_file"]] = render_page(p, name)
+            files[p["_file"].replace(".md", ".json")] = json.dumps(
+                p, ensure_ascii=False, indent=2)
+        files["index.md"] = render_domain_index(name, pages_out)
+        err = _write_domain(out, ddir, files)
+        if err:
+            skipped.append(name)
+            details.append("%s 换入失败（%s）" % (name, err))
+            print("  ⚠️ 跳过写盘：%-24s 目录换入失败，保留旧产物：%s"
+                  % (name[:24], err), flush=True)
+            _wlog(event="domain_write_skipped", domain=name, reason="swap_failed",
+                  error=err)
+            fl.record(stage="l2-write", target=name,
+                      error="域目录换入失败：%s" % err)
+            continue
+        results.append((name, pages_out))
+    return results, skipped, details
 
 
 def assign_new_pages(client, table: list[dict], new_pages: list[dict],
@@ -1212,42 +1292,17 @@ def run(args) -> None:
     if removed:
         print("  清理上一轮的 %d 个旧域目录（避免两轮产出混在一起）" % removed)
 
-    results: list[tuple[str, list[dict]]] = []
     dir_of = {name: dirname for name, dirname in plan}
-    collapse_skipped: list[str] = []
-    for di, name in enumerate(sorted(by_domain_pages), 1):
-        pages_out = sorted(by_domain_pages[name], key=lambda p: p["_file"])
-        ddir = out / dir_of[name]
-        old_n = _count_domain_pages(ddir)
-        new_n = len(pages_out)
-        # 页数崩塌保护：写盘是**整域替换**，降级结果一旦写下就不可逆。
-        # 实测 2026-09-25：LLM 上游全程 524 → 域内细分退化成"一域一页"，
-        # 33 页的域被写成 1 页，整轮丢 73 页、334 处链接悬空。
-        if _is_page_collapse(old_n, new_n):
-            collapse_skipped.append(name)
-            print("  ⚠️ 跳过写盘：%-24s %d → %d 页（疑似降级，保留旧产物）"
-                  % (name[:24], old_n, new_n), flush=True)
-            _wlog(event="domain_write_skipped", domain=name, reason="page_collapse",
-                  old_pages=old_n, new_pages=new_n)
-            fl.record(stage="l2-write", target=name,
-                      error="页数崩塌 %d→%d，已保留旧产物" % (old_n, new_n))
-            continue
-        # 先全量渲染到内存，再整体换入 —— 不再原地"删旧写新"
-        files: dict[str, str] = {}
-        for p in pages_out:
-            p["_dir"] = ddir.name
-            files[p["_file"]] = render_page(p, name)
-            files[p["_file"].replace(".md", ".json")] = json.dumps(
-                p, ensure_ascii=False, indent=2)
-        files["index.md"] = render_domain_index(name, pages_out)
-        _swap_domain_dir(out, ddir, files)
-        results.append((name, pages_out))
-        status["written_domains"].append(name)
-        status["pages_by_domain"][name] = len(pages_out)
-    status["skipped_domains"] = list(collapse_skipped)
-    if collapse_skipped:
-        print("  共跳过 %d 个域（页数崩塌），它们保持上一轮产物：%s"
-              % (len(collapse_skipped), "、".join(collapse_skipped[:5])))
+    # 逐域写盘。**单个域写不进去绝不中止整轮** —— 换入失败（文件被别的程序占着）
+    # 与页数崩塌走同一条跳过通路：该域保留旧产物，且不进新基线 → 下轮自动重试。
+    results, skipped_names, _skip_details = _write_domain_outputs(
+        out, by_domain_pages, dir_of, fl)
+    status["written_domains"] = [n for n, _ in results]
+    status["pages_by_domain"] = {n: len(ps) for n, ps in results}
+    status["skipped_domains"] = list(skipped_names)
+    if skipped_names:
+        print("  共跳过 %d 个域（保持上一轮产物、下轮自动重试）：%s"
+              % (len(skipped_names), "、".join(skipped_names[:5])))
 
     if partial:
         # 增量：顶层索引 = 本轮域（内存）+ 其余域（磁盘，域名读各域 index.md 首行）

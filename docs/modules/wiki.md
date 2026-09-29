@@ -207,6 +207,7 @@ rag 六路通道召回（kind=page；两阶段召回的第二阶段按 wiki_path
 1. **写盘三道闸门，全部作用于"整域替换"这个动作。**写作方式是 `_swap_domain_dir()`：先把一个域的全部 md/json/index 渲进内存，写进隐藏临时目录 `.tmp_<域目录>`，再把原目录改名为 `.bak_<域目录>`、临时目录改名为正式目录，失败时尽力还原。
    - **域级原子写**：不允许原地"删旧写新"——中途失败会留下"旧页已删、新页没写"的半成品。
    - **页数崩塌拒写**：`_is_page_collapse(old_n, new_n)` 判据是 `old_n >= COLLAPSE_MIN_OLD(4)` 且 `new_n < old_n * COLLAPSE_RATIO(0.5)`；命中则该域**跳过写盘、保留旧产物**，进 `skipped_domains` 与失败清单（`stage='l2-write'`），日志 `event="domain_write_skipped"`。
+   - **换入失败也只跳过该域**（2026-09-29 修，缺陷 D-1）：`_write_domain_outputs()` 是逐域写盘的唯一出口，内部用 `_write_domain()` 收口 `_swap_domain_dir()` 抛出的任何异常，返回可读原因并记 `reason="swap_failed"`。**单个域换不进去绝不中止整轮** —— 此前异常一路穿透到整轮中止闸（2026-09-28 实测：Obsidian 打开着 `04-AgentMemHub-记忆系统` 的两个笔记 → `ddir.rename(bak)` 报 `WinError 5` → 88 分钟一轮里 L1 编完、**L2 一个域都没写**）。两类跳过都进 `skipped_domains` → `_l2_skip_ids()` 剔出新基线 → 下轮自动重试；失败路径也不再残留 `.tmp_<域>`。
    - **整轮降级中止**：`_is_degraded_run(n_degraded, n_tasks)` 判据是降级页占比 `>= ABORT_DEGRADE_RATIO(0.5)`；命中则 `run()` 立即返回 `{"aborted": "degrade_ratio", ...}`，日志 `event="run_aborted"`。**这道闸必须在 `_prune_stale_domain_dirs()` 之前**——先删旧域目录再中止，等于"声称中止了、磁盘却已经动了"。
 2. **manifest 的语义是「实际编译成了什么」，不是「库里现在有什么」。**`build_manifest(..., drop_sessions=, drop_ids=)` 两个剔除参数分别对应会话级失败与组级失败（L1 逐组编译是 fail-open 的，会话整体成功但失败那几组的记忆没进任何页面）。漏剔除 = 下轮 align 认为已编译 = **永久掩盖**，这是 2026-09-21 静默丢失事故的根因。
 3. **`_l2_skip_ids(dom_out, dirty_domains, written, skipped)`：没真正写出来的脏域，其覆盖的记忆 id 必须从 L2 新基线里剔除。**三类都算：页数崩塌跳过的域、逐最终页编译整域失败的域、聚合什么都没写的路径（dry-run、异常提前返回）。原则是"宁可多剔除、下轮重试，也不漏剔除"。

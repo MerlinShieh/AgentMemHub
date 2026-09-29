@@ -143,7 +143,7 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 | `domain_planned` | wiki.log | `name`、`pages` | 一个域细分完成、计划出 N 页 | 域级进度；并 `fl.resolve("l2-plan", name)` 销账 |
 | `page_done` | wiki.log | `domain`、`title`、`merged`、`truncated` | 一个最终页编译完成 | 页面级进度；`merged` = 合并了几个源页 |
 | `page_fail` | wiki.log | `domain`、`title`、`error` | 单个最终页编译失败（`level=error`，属错误事件表） | 哪些页没出来；同时进 `failures.jsonl` 的 `stage='l2-compile'` |
-| `domain_write_skipped` | wiki.log | `domain`、`reason="page_collapse"`、`old_pages`、`new_pages` | 页数崩塌保护触发，跳过该域写盘、保留旧产物（`level=error`，属错误事件表） | 保护生效而非产物损坏；同时进 `failures.jsonl` 的 `stage='l2-write'` |
+| `domain_write_skipped` | wiki.log | `domain`、`reason`（`page_collapse` / `swap_failed`）、`old_pages`+`new_pages`（崩塌时）、`error`（换入失败时） | 该域**跳过写盘、保留旧产物**（`level=error`，属错误事件表）：`page_collapse` = 页数崩塌保护；`swap_failed` = 整域换入失败（如该域文件被 Obsidian 占着，`rename` 报 WinError 5） | 两类都是**保护生效**而非产物损坏；该域不进新基线 → 下轮自动重试；同时进 `failures.jsonl` 的 `stage='l2-write'` |
 | `run_aborted` | wiki.log | `script="wiki_aggregate"`、`stage="l2"`、`reason="degrade_ratio"`、`degraded`、`tasks` | 降级页占比超阈值 → **本轮完全不写盘**（`level=error`，属错误事件表） | 上游 LLM 大面积故障的判据；旧产物与旧基线都保留，下次写入自动重试 |
 | `run_end` | wiki.log | `script`、`ok` / `failed`（L1）或 `domains`（L2）、`pages`、`skipped`、`seconds`、`call_seconds`、`usage` | 一轮结束汇总 | 花了多少 token / 钱；`seconds` 是**墙钟**（机器休眠会撑大）、`call_seconds` 是**累计调用耗时**（真实在等 LLM 的时间），两者并列防误判 |
 | `manifest` | wiki.log | `script`、`stage`（`l1` / `l2`）、`n_inputs`、`domains`（L2） | 编译清单（`manifest_l1.json` / `manifest_l2.json`）已写 | 与 `align` 的 diff 锚点；没有它，"库改了什么"无从得知 |
