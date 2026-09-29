@@ -147,7 +147,7 @@ wiki:
 | 方法 | 端点 | 重试 / 兜底 |
 |---|---|---|
 | `upload(jsonl)` | `POST /v1/files`（multipart，purpose=batch） | 可安全重传（旧 file 等自然过期） |
-| `create(input_file_id)` | `POST /v1/batches` | **只对明确 4xx 重试**；超时→不自动重试→通知人工确认（无 list 接口，防重复建任务重复计费） |
+| `create(input_file_id)` | `POST /v1/batches` | **绝不自动重试**（不幂等：重试 = 建出第二个任务 = 重复计费）；网络类失败抛 `BatchUnknownStateError`，由 `client.find_batch()` 按 `name` / `input_file_id` **对账**（2026-09-29 实测：厂商有列表接口，文档没写） |
 | `retrieve(batch_id)` | `GET /v1/batches/{id}` | 只读，可积极重试 |
 | `cancel(batch_id)` | `POST /v1/batches/{id}/cancel` | 幂等（已 cancelled 再调按成功处理） |
 | `download(file_id)` | `GET /v1/files/{id}/content` | 只读，可重试 |
@@ -173,7 +173,7 @@ wiki:
 | 情形 | 判定 | 动作 |
 |---|---|---|
 | 明确 4xx（鉴权失败 / 余额不足 / 参数错） | 任务**确定没建成** | 当轮该域**回退实时**（SyncRunner）+ `notify(warning, batch, ...)` |
-| 网络超时（不确定建成没建成） | 无 list 接口可查 | 当轮该域**回退实时** + `notify(warning)` 附"**请到控制台确认任务是否已建成，若建成请手动取消**"（重复计费风险靠人工确认兜底） |
+| 网络超时（不确定建成没建成） | `client.find_batch()` **对账**（实测有 `GET /v1/batches`） | 先对账：**已建成** → 按在飞任务处理（不重复提交）；**确实没建成** → 当轮该域**回退实时** + `notify(warning)`；**对账本身也失败**（网络仍不通）→ 不改本地状态、下轮重试，并 `notify(warning)` 提示人工确认 |
 | 回退后产物语义 | — | 与纯实时模式完全一致（批量故障期间离线模式自动降级为实时，**会产生实时价格费用**，通知里写明） |
 
 ---
@@ -253,7 +253,7 @@ wiki:
 |---|---|---|
 | 1 | **真实付费操作**：建任务即可能计费，测试逃逸=真金白银 | 双保险：沙箱熔断硬抛 + e2e 全用 fake uploader；真凭据只在 M0 / M6 各一次小额实测（1 个域、几条请求） |
 | 2 | **PendingError 被误当失败** → 触发降级污染产物 | 提交轮 `run()` 状态机单独处理（`offline_submitted` 提前返回，不进降级分支）；专门写复现测试（红→绿） |
-| 3 | **建任务重试导致重复建任务、重复计费** | 只对明确 4xx 重试；超时→通知+人工确认（§6 / §7） |
+| 3 | **建任务重试导致重复建任务、重复计费** | `create()` 硬性 `retries=1`（绝不自动重试）；不确定时用 `find_batch()` 对账（§6 / §7）；对账也失败则**不猜测**、下轮重试 |
 | 4 | **三段运行 + 闲时调度 → 更新周期 1~2 天** | §3.1 已摊开并接受；`batch-status` 展示 request_counts 进度 |
 | 5 | `llm.py` HTTP 基建重构**动生产关键路径** | 对外签名 / 错误类型零变化；全量回归 + 一次真实 wiki 更新灰度对比 |
 | 6 | **配置热更语义不清** → "改了没生效"排查地狱 | §9 明确语义并写入 docs/API.md；通知带生效范围提示 |
@@ -271,7 +271,7 @@ wiki:
 
 | 里程碑 | 内容 | 随附文档与日志 | 验收标准 | 状态 |
 |---|---|---|---|---|
-| **M0** 探测+客户端 | 连通性探测脚本（域名两种拼写 / key / 模型名小写 / completion_window 可选值 / 错误响应形状）+ `MiMoBatchClient` 五方法 + 沙箱熔断 | 新建 `docs/modules/batch-offline.md`（厂商契约 + 探测结论）；`docs/logging.md` 事件字典登记 `batch_*` 五事件骨架 | 探测结论回填 §15；mock 单测全绿；沙箱下直连抛 | ☐ 未开始 |
+| **M0** 探测+客户端 | ✅ **已完成（2026-09-29）**：真凭据全链路探测（域名 / key / 窗口上限 / 错误形状 / **列表接口**）+ `MiMoBatchClient` 六动作 + `find_batch()` 对账 + 沙箱熔断 | `docs/modules/batch-offline.md`（含实测契约表）；`docs/logging.md` 登记 6 个批量事件（从"待实现"转正） | 探测结论回填 §15 ✅；22 条 mock 测试全绿；全量 **859 passed / 1 skipped**；僵尸键审计 0 | ✅ 完成 |
 | **M1** 标记与决策扩展 | `BatchJob` 扩展（input/output/error_file_id、provider_status、expire_at、stage=l2compile、voided）+ `decide()` 终局判定 + 作废/取消回池 + `notify.py` 最小闭环 | 新建 `docs/logging.md`（三条事实流 + 标准头 + **事件字典**）；`batch-offline.md` 补状态机图；字典登记 `notify_write` | 单测覆盖状态机全转移；notify 落库 / 降级路径均有测试 | ☐ 未开始 |
 | **M2** 离线运行器 | `OfflineRunner`（plan）+ **compile 阶段 runner 化** + 三段式 `run()` 状态机 + `update_wiki(mode=)` 入口抽离 + §11 三补丁 | `batch-offline.md` 补三段式流水线图与 runner 契约；字典补 `offline_submitted` / `batch_consumed` / `batch_voided` / `batch_expired` | fake uploader 下三段全链路跑通；PendingError 不触发降级（复现测试） | ☐ 未开始 |
 | **M3** CLI 四动作 | `batch-status / batch-submit / batch-import / batch-cancel` | `docs/API.md` §五 CLI 表 + 根 README「命令行」表；`batch-offline.md` 收录操作剧本（§14） | 手动剧本（§14）全程可操作；状态展示 request_counts | ☐ 未开始 |
@@ -302,15 +302,18 @@ wiki:
 
 ---
 
-## 15. 待验证项（M0 探测清单）
+## 15. 待验证项（M0 探测清单 —— **2026-09-29 已全部完成**）
 
-- [ ] 域名：`batch-apicn.xiaomimimo.com` vs `batch-api-cn.xiaomimimo.com`（文档模板是后者，配置值是前者，以实测为准）
-- [ ] ApiKey 有效性（鉴权失败的响应形状 → 错误分类依据）
-- [ ] 模型名 `mimo-v2.6-flash`（小写、无前缀）在批量端点可用
-- [ ] `completion_window` 能否传非 24h 值（48h / 72h / 168h）
-- [ ] 上传 → 建任务 → 取消 → 下载 全链路（1~2 条请求，最小费用）
-- [ ] 余额不足 / 文件过期 的错误响应形状
-- [ ] 状态字段实际取值集合（文档表格 6 种 vs 字段说明 9 种，finalizing / expired 未列全）
+| 项 | 实测结论 |
+|---|---|
+| 域名 | ✅ **`batch-api-cn.xiaomimimo.com`**。配置里给的 `batch-apicn.…` **DNS 解析失败**（少一个连字符，是笔误）；正确域名解析到 220.181.52.24 等 3 个 IP |
+| ApiKey 有效性 | ✅ 有效。错误体统一 `{"error":{"message","type","code"}}`：无效 key → 401 `invalid_api_key`、对象不存在 → 404 `batch_not_found` —— **这就是错误分类的依据** |
+| 模型名 `mimo-v2.6-flash` | ⏳ **待冒烟任务回读**：已留 `batch_04cc53ea36324c8598abbffa`（1 条 `max_tokens=32` 请求，不取消）等闲时执行，M6 回读验证真实结果形状 |
+| `completion_window` | ✅ 支持大窗口：`168h` 与 **`336h`（14 天）**均被接受，且返回的 `expires_at - created_at` 与之精确一致 → 文档"当前固定 24h"**是错的** |
+| 全链路 | ✅ 上传（200）→ 建任务（**201**）→ 取消（`cancelling`）→ 4 秒后查得 `cancelled`；取消后 output/error 均为空、`counts=0/0/0` |
+| 余额不足 / 文件过期 的错误形状 | 部分：`not_found` 系列形状已知（`batch_not_found`）；**余额不足未实测**（要真把余额耗尽，不做），按 `code` / `message` 关键字识别 |
+| 状态取值集合 | ✅ 文档未列的 **`created`** 确实存在（建任务后的初始状态）；`completed` / `failed` 在文档表格里被误写成首字母大写，判定一律 `lower()` |
+| **文档没写、探测挖到的** | ✅ **`GET /v1/batches` 与 `GET /v1/files` 列表接口存在** → 建任务超时后的**对账**靠它（`client.find_batch()`）；原计划里"超时只能人工去控制台确认"的结论**就此作废**（§6 / §7 / §12 已同步） |
 
 ---
 
@@ -404,8 +407,8 @@ wiki:
 
 **待做（随 A2 里程碑，不再单独排期）**：
 
-- [ ] `docs/modules/batch-offline.md`（M0 起随写）
-- [ ] `docs/logging.md` 补登 A2 新增的 11 个事件（M1 / M2 / M4）
+- [x] `docs/modules/batch-offline.md` —— ✅ **M0 已写**（实测契约表 + 六动作 + 对账 + 排障 + 测试清单）
+- [x] `docs/logging.md` **6 个批量事件已转正**（M0；`batch_list` 是探测发现列表接口后补的第 6 个）；待 M1 / M2 / M4 再补 6 个（`offline_submitted` / `batch_consumed` / `batch_voided` / `batch_expired` / `notify_write` / `config_change`）
 - [ ] `docs/API.md`：新端点表格行 + Swagger `summary` / Query `description`；§六 现状表更新（M3 / M4）
 - [ ] `docs/modules/config.md` override 小节由"计划中"改为已实现（M4）
 - [ ] `llm-batch-offline.md` 升级为实施记录（M6）
@@ -456,17 +459,26 @@ wiki:
 
 ---
 
-## 附录 A：厂商契约速查（MiMo Batch API，2026-09-27 通读官方文档）
+## 附录 A：厂商契约速查（MiMo Batch API）
 
-- Base URL：`https://batch-api-${region}.xiaomimimo.com/v1`（region 取值文档未给，控制台批量推理页获取）
+> 来源：2026-09-27 通读官方文档 + **2026-09-29 真凭据探测校正**（差异处标 ⚠️）。
+> 现场记录（含探测命令与返回）见 [modules/batch-offline.md](modules/batch-offline.md) §2。
+
+- Base URL：⚠️ **实测 `https://batch-api-cn.xiaomimimo.com/v1`** —— region 段是 `-cn`。
+  文档只给模板 `${region}`，写成 `batch-apicn.…`（少一个连字符）会 **DNS 解析失败**
 - 调用链：`POST /v1/files`（multipart purpose=batch）→ `POST /v1/batches`
   {input_file_id, endpoint:"/v1/chat/completions", completion_window, name} →
   `GET /v1/batches/{id}` → `GET /v1/files/{output_file_id|error_file_id}/content`；
-  另有 `POST /v1/batches/{id}/cancel`（异步：cancelling → cancelled，完成后
-  output/error file 非空——已完成部分会产出且已计费）。
+  另有 `POST /v1/batches/{id}/cancel`（异步：cancelling → cancelled；**取消后
+  output/error 文件为空** —— 只有已有完成请求时才产出，且那部分照常计费）
+- ⚠️ **文档未写、实测存在**：`GET /v1/batches?limit=N` 与 `GET /v1/files?purpose=batch`
+  两个**列表接口**（返回 `{object:"list", data:[…]}`，files 另带 `first_id`/`last_id`/`has_more`）
+- ⚠️ 建任务成功码是 **HTTP 201**（上传是 200）；建任务后的初始状态是 **`created`**
+- ⚠️ `completion_window` 实测可传 **`168h` / `336h`**；文档字段说明那句"当前固定 24h"是错的
 - 结果行形状（与 `llm_batch._content_of()` / `load_batch_results()` 兼容）：
   `{"custom_id":..,"response":{"status_code":200,"body":{"choices":[{"message":{"content":".."}}]}},"error":null}`
-- 状态：validating / in_progress / completed / failed / cancelling / cancelled
-  （+ finalizing / expired，文档未列全；completed/failed 在表格中误写为大写，判定一律 lower()）。
+- 状态：`created` / `validating` / `in_progress` / `finalizing` / `completed` / `failed` /
+  `expired` / `cancelling` / `cancelled`（文档表格只列 6 种；`completed`/`failed` 被误写成
+  首字母大写，判定一律 `lower()`）
 - 限制：单文件 ≤128MB 且只能一个 endpoint（body 里 model 可逐条不同）；custom_id
   文件内唯一字符串；数据保留 30 天；闲时调度，提交后可能长时间不启动。

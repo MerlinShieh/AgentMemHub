@@ -113,6 +113,30 @@ DEFAULT_WIKI = {
 }
 
 
+#: 离线批处理（Batch API）配置（`llm_batch` 段）。
+#:
+#: **刻意独立成段、不与顶层 `llm` 合并**：批量推理是**另一套端点与凭据** —— 实测
+#: 小米 MiMo 的批量主机 `batch-api-cn.xiaomimimo.com` 与实时路由
+#: `api.commandcode.ai` 不是一套 key，模型名写法也不同（批量要**小写、不带厂商
+#: 前缀**：`mimo-v2.6-flash`，而实时段里是 `xiaomi/mimo-v2.6-flash`）。
+#: 让它们互相继承只会把两套凭据搅在一起，出问题时无从判断用的是哪一套。
+#:
+#: 实测结论（2026-09-29 真凭据探测，详见 docs/modules/batch-offline.md）：
+#:   · `completion_window` 实测支持到 **`336h`（14 天）**；官方文档里那句
+#:     "当前固定 24h"是错的（同页正文写的"1–14 天"才对）
+#:   · 建任务成功码是 **HTTP 201**（不是 200），初始状态是文档未列的 `created`
+#:   · 取消是**异步**的：先 `cancelling`，再查询才是 `cancelled`
+#:   · 另有文档未提的 `GET /v1/batches` 与 `GET /v1/files` 列表接口
+DEFAULT_LLM_BATCH = {
+    "endpoint": "https://batch-api-cn.xiaomimimo.com/v1",
+    "api_key": "",                      # 只写本地 yaml；example 里留空占位
+    "model": "mimo-v2.6-flash",         # 批量仅支持 mimo-v2.6-pro / mimo-v2.6-flash
+    "completion_window": "24h",         # 实测可到 336h；默认 24h（夜间闲时通常够）
+    "timeout": 60,                      # 单次 HTTP 超时（秒）
+    "max_retries": 3,                   # 只作用于幂等动作（见 batch_client 的重试策略）
+}
+
+
 #: 快照保留策略（`snapshot` 段）。
 #:
 #: 为什么值得单独配：快照是**不可重建产物**的最后一道后悔药——wiki 页面重编要
@@ -412,6 +436,17 @@ class Config:
         l2 = dict(merged.get("l2") or {})
         l2["llm"] = self._merge_llm(self.llm, l2.get("llm") or {})
         return l2
+
+    # -- 离线批处理（Batch API）--------------------------------------------
+
+    @property
+    def llm_batch(self) -> dict[str, Any]:
+        """离线批处理配置（已合并默认值）。
+
+        **不与顶层 `llm` 合并** —— 两套端点与凭据互相独立（见 DEFAULT_LLM_BATCH
+        的说明）。`api_key` 为空即"没配好"，客户端应当直接拒绝而不是发请求。
+        """
+        return _deep_merge(DEFAULT_LLM_BATCH, self._get("llm_batch", {}) or {})
 
     # -- 快照 -------------------------------------------------------------
 

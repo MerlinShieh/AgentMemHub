@@ -138,6 +138,29 @@ llm:
   #   User-Agent: "AgentMemHub/1.0"
 
 # ---------------------------------------------------------------------------
+# 离线批处理（Batch API）：批量推理的**独立配置**（不继承顶层 llm）
+#
+# 为什么独立成段：批量是**另一套端点与凭据** —— 实测小米 MiMo 的批量主机与
+# 实时路由不是一套 key，模型名写法也不同（批量要小写、不带厂商前缀）。
+# 让它们互相继承，出问题时无从判断用的是哪一套。
+#
+# 实测要点（2026-09-29 真凭据探测，详见 docs/modules/batch-offline.md）：
+#   · endpoint 的 region 段是 `-cn`（写成 `batch-apicn.…` 会 DNS 解析失败）
+#   · `completion_window` 支持到 **336h（14 天）**；官方文档那句"当前固定 24h"是错的
+#   · 建任务成功码是 **HTTP 201**、初始状态 `created`（文档未列）；取消是**异步**的
+#   · 文件与结果**只保留 30 天**；不支持任务内重试/续跑；不支持流式
+# 设计与决策见 docs/batch-offline-plan.md。
+# ---------------------------------------------------------------------------
+llm_batch:
+  endpoint: "https://batch-api-cn.xiaomimimo.com/v1"
+  api_key: ""                  # 小米开放平台 API Key（sk-…）；需**实名认证 + 现金余额**
+                               # （Token Plan 额度不抵扣批量）。留空 = 未启用离线通道
+  model: "mimo-v2.6-flash"     # 批量仅支持 mimo-v2.6-pro / mimo-v2.6-flash
+  completion_window: "24h"     # 实测可到 336h；资源紧张时调大
+  timeout: 60                  # 单次 HTTP 超时（秒）
+  max_retries: 3               # 只作用于幂等动作（建任务绝不自动重试，见客户端说明）
+
+# ---------------------------------------------------------------------------
 # LLM Wiki 编译：零散记忆 → 可读页面
 #   第一级 scripts/wiki_compile.py   逐会话编译（碎片 → 会话内页面）
 #   第二级 scripts/wiki_aggregate.py 跨会话聚合（会话内页面 → 主题实体页）
@@ -152,8 +175,10 @@ llm:
 # **计入输出计费**（实测第一级思维链占其输出的 66%）。
 # ---------------------------------------------------------------------------
 wiki:
-  # enabled: **总开关**。置 false → 触发器不再跑、`status()` 报告目标未就绪。
-  #   （2026-09-22 前它是**假开关**：没有任何消费点，关掉照样触发）
+  # enabled: ⚠️ **目前是假开关**（2026-09-29 复核仍如此 —— 缺陷 D-2）：唯一消费点
+  #   `wiki_triggers._configured()` 只被 `status()` 调用，`_targets()` 并不检查它
+  #   ⇒ 置 false **拦不住**自动触发链。要停自动触发请改用 `wiki.update.enabled: false`
+  #   （手动补跑需加 `--force`）。处置方案见 docs/batch-offline-plan.md §18 D-2
   enabled: true
   # Obsidian CLI 可执行文件（**产物链接验收**用，见 `agentmemhub/obsidian.py`）。
   #   为什么要有这个配置位：进程环境是**启动时捕获**的 —— 实测把 Obsidian 目录

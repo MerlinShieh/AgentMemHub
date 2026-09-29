@@ -131,7 +131,7 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 （见 §5.3 / §5.4）。本节的事件名全部来自代码 grep，**不含仅测试文件里出现的值**
 （`tests/test_logs_format.py` 用过 `event="note"`、`"x"`、`"a"`、`"b"`，生产代码没有写入点）。
 
-### 5.1 `logs/wiki.log`（21 个事件）
+### 5.1 `logs/wiki.log`（27 个事件：21 个流水线 + 6 个批量）
 
 | event | 所属流 | 关键字段 | 含义 | 排查用途 |
 |---|---|---|---|---|
@@ -156,6 +156,17 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 | `trigger_update_error` | wiki.log | `hook`、`error`、`seconds`、`reasons[]` | `wiki.update()` 抛异常（`level=error`） | MCP 那条 daemon 路径会丢弃返回值，这条是它**唯一的**留痕 |
 | `trigger_fired_skipped` | wiki.log | `hook`、`l1_failed`、`reasons[]` | L1 有会话编译失败 → 不算成功、不消耗当日触发额度 | "部分失败不算成功"的判据；下次写入自然重试 |
 | `trigger_error` | wiki.log | `hook`、`error`；MCP 侧另有 `stage="mcp_probe"` | 触发器外层兜底异常 | 连 `on_memories_written()` 都没兜住的情况（正常结果由 `trigger_check` / `trigger_update_*` 覆盖） |
+
+**批量任务事件**（6 个，2026-09-29 随 M0 落地，写点在 `agentmemhub/batch_client.py::_audit`）：
+
+| event | 所属流 | 关键字段 | 含义 | 排查用途 |
+|---|---|---|---|---|
+| `batch_upload` | wiki.log | `file_id`、`bytes`、`seconds` | 批次输入 JSONL 已上传（文件 30 天后过期） | 上传是否成功、文件多大；`file_id` 是后续建任务的凭据 |
+| `batch_create` | wiki.log | `batch_id`、`status`、`completion_window`、`n_requests`、`name`、`seconds` | 批量任务已建（成功码 **HTTP 201**，初始 `status=created`） | 花钱的起点；`n_requests` 应与 `batch_retrieve` 的 `counts.total` 一致 |
+| `batch_retrieve` | wiki.log | `batch_id`、`status`、`counts{total,completed,failed}`、`seconds` | 查一次任务状态 | 回答"离线任务等了多久、进度几比几"（`counts` 直接来自厂商） |
+| `batch_list` | wiki.log | `n`、`seconds` | 列最近任务（**建任务超时后的对账**） | 与 `client.find_batch()` 配合确认"到底建成没"，避免重复提交、重复计费 |
+| `batch_cancel` | wiki.log | `batch_id`、`status`（`cancelling` / `cancelled` / `not_found`） | 取消任务（**异步**：先 `cancelling`，再查才 `cancelled`） | 作废回池的依据；`not_found` 表示任务已消失 |
+| `batch_download` | wiki.log | `file_id`、`bytes`、`lines`、`seconds` | 下载成功 / 错误结果文件 | 回读了多少条；与 `batch_create` 的 `n_requests` 比对可发现缺失 |
 
 ### 5.2 `logs/memory.log`（2 个事件）
 
@@ -306,18 +317,17 @@ rg '"event": "write"' logs/memory.log              # 全部记忆写入
 rg '"phase": "call"' logs/mcp.log                  # 所有 MCP 调用发起
 ```
 
-## 8. A2 计划新增的事件（未实现）
+## 8. A2 待实现的事件
 
-以下事件**尚未实现**，登记在此是为了让 A2（离线批处理 · MiMo Batch API）落地时一次补齐。
-来源：[batch-offline-plan.md](batch-offline-plan.md) §17.4「日志落实」。里程碑当前状态均为"未开始"。
+以下事件**尚未实现**，登记在此是为了让 A2（离线批处理 · MiMo Batch API）后续里程碑落地时一次补齐。
+来源：[batch-offline-plan.md](batch-offline-plan.md) §17.4「日志落实」。
+
+> 已转正的：**批量动作的 6 个事件**（`batch_upload` / `batch_create` / `batch_retrieve` /
+> `batch_list` / `batch_cancel` / `batch_download`）已于 2026-09-29 随 M0 实现，见 §5.1
+> 末尾的「批量任务事件」表 —— 其中 `batch_list` 是探测时才发现厂商有列表接口后补的。
 
 | event | 计划所属流 | 计划记录的内容 |
 |---|---|---|
-| `batch_upload` | wiki.log | 批次输入文件上传 |
-| `batch_create` | wiki.log | 创建批次任务 |
-| `batch_retrieve` | wiki.log | 轮询 / 回读批次进度与结果 |
-| `batch_cancel` | wiki.log | 取消批次 |
-| `batch_download` | wiki.log | 下载批次结果文件 |
 | `offline_submitted` | 流水线 | 提交轮提前返回（**不是失败、不阻塞、不占单并发锁**；不刷 manifest、不跑 linkfix） |
 | `batch_consumed` | 流水线 | 批次结果被消费（回读轮） |
 | `batch_voided` | 流水线 | 批次作废、脏数据回池 |
@@ -327,7 +337,9 @@ rg '"phase": "call"' logs/mcp.log                  # 所有 MCP 调用发起
 
 A2 的验收要求是**这五个问题必须能被日志回答**：① 这轮 wiki 跑到哪了、断在哪 ② 花了多少 token / 多少钱
 ③ 离线任务等了多久、进度几比几、卡在哪个域 ④ 哪些域失败了、为什么 ⑤ 配置被谁改成了什么。
-其中 ①② 已由现有事件覆盖，③④⑤ 依赖上表。
+其中 ①② 由既有流水线事件覆盖、③ 由 M0 的批量事件覆盖（`batch_create` 记 `n_requests`、
+`batch_retrieve` 记厂商 `counts`）、④ 部分覆盖（`domain_write_skipped` / `page_fail` / `run_aborted`）、
+⑤ 依赖上表最后一行。
 
 另：A2 计划把 `docs/logging.md` 本身纳入验收门槛（事件字典覆盖 A2 全部新事件），
 并在 `docs/modules/*.md` 之外单独评估一份 `observability.md`（覆盖 `logs.py` / `failures.py` / `notify.py` / `snapshot.py`，
