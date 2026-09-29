@@ -223,6 +223,10 @@ FALLBACK = "fallback"
 #: 默认落盘文件名（放产物目录，与 manifest_l2.json / failures.jsonl 同级）
 STATE_NAME = "batch_state.json"
 
+#: 厂商任务的**终局**状态：到了这里就不会再变，继续等就是白等
+#: （厂商不支持任务内重试/续跑，失败只能新建任务）。
+TERMINAL_STATES = ("failed", "expired", "cancelled")
+
 
 @dataclass
 class BatchJob:
@@ -248,6 +252,22 @@ class BatchJob:
     #: custom_id -> {"ok": bool, "data"|"error": ...}（回读后填）
     results: dict[str, dict[str, Any]] = field(default_factory=dict)
 
+    # -- 厂商侧的可观测字段（回读 / 作废 / 过期判定都要用）-------------------
+    #: 上传得到的输入文件 id（重新提交、审计对账要用）
+    input_file_id: str = ""
+    #: 成功结果文件 id（`completed` 后才有；`cancelled` 时保留已完成部分）
+    output_file_id: str = ""
+    #: 错误结果文件 id（有失败请求时才有值）
+    error_file_id: str = ""
+    #: 厂商原始状态，**一律 lower()**：created / validating / in_progress /
+    #: finalizing / completed / failed / expired / cancelling / cancelled
+    provider_status: str = ""
+    #: 任务过期时刻（epoch 秒）。文件与结果只留 30 天，过期后回读报 `batch_not_found`
+    expire_at: float = 0.0
+    #: 已作废（取消 / 模式切换 / 终局失败）→ 它覆盖的域**回到待更新池**
+    voided: bool = False
+    voided_reason: str = ""
+
     def pending_ids(self) -> list[str]:
         """已提交但还没拿到结果的 custom_id。"""
         return sorted(k for k in self.items if k not in self.results)
@@ -256,27 +276,62 @@ class BatchJob:
         return sorted({str(v.get("domain", "")) for v in self.items.values()} - {""})
 
     @property
-    def status(self) -> str:
-        """`complete`（齐了）/ `partial`（部分到）/ `pending`（全等）。"""
+    def results_state(self) -> str:
+        """**结果**齐了没：`complete` / `partial` / `pending`。
+
+        刻意**不叫 `status`** —— 厂商也有一个 status（任务处于哪个阶段，见
+        `provider_status`），同名不同义最容易误用（2026-09-29 随 M1 改名）。
+        """
         if not self.items or len(self.results) >= len(self.items):
             return "complete"
         return "partial" if self.results else "pending"
+
+    def is_terminal(self) -> bool:
+        """厂商侧是否已到终局（`failed` / `expired` / `cancelled`）。
+
+        到了终局就**不该再等 deadline**：它永远不会再变，继续等只是白等。
+        """
+        return self.provider_status in TERMINAL_STATES
+
+    def void(self, reason: str = "") -> list[str]:
+        """作废这个任务，返回它覆盖的**域名列表**（供上层放回待更新池）。
+
+        为什么"放回待更新池"不需要搬数据：提交轮**不刷 manifest**，那批输入本来
+        就还是"脏"的；作废只是把"已交给厂商"这个显式标记清掉，隐式差集自动接管。
+        """
+        self.voided = True
+        self.voided_reason = str(reason or "")
+        return self.domains()
 
     def to_dict(self) -> dict[str, Any]:
         return {"batch_id": self.batch_id, "provider": self.provider,
                 "stage": self.stage, "submitted_at": self.submitted_at,
                 "items": self.items, "members": self.members,
-                "results": self.results}
+                "results": self.results,
+                "input_file_id": self.input_file_id,
+                "output_file_id": self.output_file_id,
+                "error_file_id": self.error_file_id,
+                "provider_status": self.provider_status,
+                "expire_at": self.expire_at,
+                "voided": self.voided, "voided_reason": self.voided_reason}
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "BatchJob":
+        # 一律用 get 取值：**旧版 state 文件没有新字段**也要能读回来（向后兼容）
         return cls(batch_id=str(d.get("batch_id", "")),
                    provider=str(d.get("provider", "")),
                    stage=str(d.get("stage", "l2plan")),
                    submitted_at=float(d.get("submitted_at") or 0.0),
                    items=dict(d.get("items") or {}),
                    members=dict(d.get("members") or {}),
-                   results=dict(d.get("results") or {}))
+                   results=dict(d.get("results") or {}),
+                   input_file_id=str(d.get("input_file_id", "")),
+                   output_file_id=str(d.get("output_file_id", "")),
+                   error_file_id=str(d.get("error_file_id", "")),
+                   provider_status=str(d.get("provider_status", "")).lower(),
+                   expire_at=float(d.get("expire_at") or 0.0),
+                   voided=bool(d.get("voided")),
+                   voided_reason=str(d.get("voided_reason", "")))
 
 
 def decide(job: BatchJob, *, now: float, deadline_s: float = 0.0) -> str:
@@ -295,9 +350,14 @@ def decide(job: BatchJob, *, now: float, deadline_s: float = 0.0) -> str:
 
     `deadline_s <= 0` 表示**不限时**（一直等）—— 离线批处理本来就慢，默认不该催；
     限时是调用方"我这次就想拿到结果"时临时给的。
+
+    **终局优先于 deadline**：厂商已 `failed` / `expired` / `cancelled` 时立刻给
+    结论、不等超时 —— 否则终局失败会被当成"还在等"而干等到 deadline。
     """
     if not job.pending_ids():
         return CONSUME
+    if job.is_terminal():
+        return PARTIAL if job.results else FALLBACK
     if deadline_s <= 0 or (now - job.submitted_at) < deadline_s:
         return WAIT
     return PARTIAL if job.results else FALLBACK

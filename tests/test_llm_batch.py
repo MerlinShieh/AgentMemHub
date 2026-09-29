@@ -181,16 +181,16 @@ def _job(**kw) -> BatchJob:
 def test_标记_待回读与状态():
     job = _job()
     assert job.pending_ids() == ["l2plan|域A|0", "l2plan|域A|1", "l2plan|域B|0"]
-    assert job.status == "pending"
+    assert job.results_state == "pending"
     assert job.domains() == ["域A", "域B"]
 
     job.results["l2plan|域A|0"] = {"ok": True, "data": {}}
-    assert job.status == "partial"
+    assert job.results_state == "partial"
     assert job.pending_ids() == ["l2plan|域A|1", "l2plan|域B|0"]
 
     job.results["l2plan|域A|1"] = {"ok": True, "data": {}}
     job.results["l2plan|域B|0"] = {"ok": True, "data": {}}
-    assert job.status == "complete"
+    assert job.results_state == "complete"
     assert job.pending_ids() == []
 
 
@@ -265,3 +265,77 @@ def test_决策_超预算且有部分结果_先用已到其余走实时():
 def test_决策_超预算且一条都没到_整批走实时():
     job = _job()
     assert decide(job, now=1000.0 + 7200, deadline_s=3600) == FALLBACK
+
+
+# ---------------------------------------------------------------------------
+# M1：厂商侧字段、终局判定、作废回池
+#
+# 这些字段是**回读轮**与**模式切换**的依据：不知道厂商把任务跑到哪一步，就没法
+# 判断"该继续等"还是"该改走实时"；不作废标记，切换模式时那批域既不进基线、
+# 也不回池，就会永久卡住。
+# ---------------------------------------------------------------------------
+
+def test_标记_厂商字段能落盘再读回():
+    job = _job()
+    job.input_file_id = "file-in"
+    job.output_file_id = "file-out"
+    job.error_file_id = "file-err"
+    job.provider_status = "Completed"
+    job.expire_at = 123456.0
+
+    back = BatchJob.from_dict(job.to_dict())
+
+    assert back.input_file_id == "file-in"
+    assert back.output_file_id == "file-out" and back.error_file_id == "file-err"
+    assert back.provider_status == "completed", "厂商状态一律 lower() 存取"
+    assert back.expire_at == 123456.0
+    assert back.voided is False
+
+
+def test_标记_旧版状态文件没有新字段也能读回():
+    """向后兼容：产物目录里可能躺着 M1 之前写的 `batch_state.json`。"""
+    old = {"batch_id": "batch_old", "stage": "l2plan", "submitted_at": 1.0,
+           "items": {"c1": {"domain": "域A"}}, "members": {}, "results": {}}
+
+    back = BatchJob.from_dict(old)
+
+    assert back.batch_id == "batch_old" and back.voided is False
+    assert back.provider_status == "" and back.expire_at == 0.0
+
+
+@pytest.mark.parametrize("state", ["failed", "expired", "cancelled"])
+def test_决策_厂商已终局时不必等deadline(state):
+    """终局任务永远不会再变 —— 继续等只是白等（实测 `expired` 会一直躺着）。"""
+    job = _job(provider_status=state)
+    assert job.is_terminal() is True
+    assert decide(job, now=1000.0 + 1, deadline_s=0) == FALLBACK
+
+
+def test_决策_终局但有部分结果_消费已到的其余走实时():
+    job = _job(provider_status="expired")
+    job.results["l2plan|域A|0"] = {"ok": True, "data": {}}
+    assert decide(job, now=1000.0, deadline_s=0) == PARTIAL
+
+
+def test_决策_进行中的状态不算终局():
+    for st in ("created", "validating", "in_progress", "finalizing", "cancelling"):
+        assert _job(provider_status=st).is_terminal() is False
+    assert decide(_job(provider_status="in_progress"), now=1000.0, deadline_s=0) == WAIT
+
+
+def test_作废_返回覆盖的域供回池():
+    job = _job()
+
+    assert job.void("模式切回实时") == ["域A", "域B"], "作废要报出需要回池的域"
+    assert job.voided is True and job.voided_reason == "模式切回实时"
+    assert BatchJob.from_dict(job.to_dict()).voided is True, "作废标记必须能落盘"
+
+
+def test_结果状态与厂商状态不是一回事():
+    """`results_state` 说"结果齐没齐"，`provider_status` 说"厂商跑到哪个阶段"。"""
+    job = _job(provider_status="in_progress")
+    for k in list(job.items):
+        job.results[k] = {"ok": True, "data": {}}
+
+    assert job.results_state == "complete"
+    assert job.provider_status == "in_progress", "两者互不影响、互不覆盖"

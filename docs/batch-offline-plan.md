@@ -272,7 +272,7 @@ wiki:
 | 里程碑 | 内容 | 随附文档与日志 | 验收标准 | 状态 |
 |---|---|---|---|---|
 | **M0** 探测+客户端 | ✅ **已完成（2026-09-29）**：真凭据全链路探测（域名 / key / 窗口上限 / 错误形状 / **列表接口**）+ `MiMoBatchClient` 六动作 + `find_batch()` 对账 + 沙箱熔断 | `docs/modules/batch-offline.md`（含实测契约表）；`docs/logging.md` 登记 6 个批量事件（从"待实现"转正） | 探测结论回填 §15 ✅；22 条 mock 测试全绿；全量 **859 passed / 1 skipped**；僵尸键审计 0 | ✅ 完成 |
-| **M1** 标记与决策扩展 | `BatchJob` 扩展（input/output/error_file_id、provider_status、expire_at、stage=l2compile、voided）+ `decide()` 终局判定 + 作废/取消回池 + `notify.py` 最小闭环 | 新建 `docs/logging.md`（三条事实流 + 标准头 + **事件字典**）；`batch-offline.md` 补状态机图；字典登记 `notify_write` | 单测覆盖状态机全转移；notify 落库 / 降级路径均有测试 | ☐ 未开始 |
+| **M1** 标记与决策扩展 | ✅ **已完成（2026-09-29）**：`BatchJob` 补齐厂商侧字段（input/output/error_file_id、provider_status、expire_at、voided）+ `status` → `results_state` 改名（与厂商状态消歧）+ `is_terminal()` + `void()` 回池 + `decide()` **终局优先** + `notify.py`（SQLite 微库 + 降级兜底 + `logs/notify.log` 事实流） | `docs/logging.md`：新增 `notify.log` 流、`notify_write` 事件转正（§2 / §5.6 / §8）；`batch-offline.md` 补任务现场字段与三个判定 | 20 条新测试（通知 11 + 状态机 9）；全量 **879 passed / 1 skipped** | ✅ 完成（`stage=l2compile` 的**页组现场**随 M2） |
 | **M2** 离线运行器 | `OfflineRunner`（plan）+ **compile 阶段 runner 化** + 三段式 `run()` 状态机 + `update_wiki(mode=)` 入口抽离 + §11 三补丁 | `batch-offline.md` 补三段式流水线图与 runner 契约；字典补 `offline_submitted` / `batch_consumed` / `batch_voided` / `batch_expired` | fake uploader 下三段全链路跑通；PendingError 不触发降级（复现测试） | ☐ 未开始 |
 | **M3** CLI 四动作 | `batch-status / batch-submit / batch-import / batch-cancel` | `docs/API.md` §五 CLI 表 + 根 README「命令行」表；`batch-offline.md` 收录操作剧本（§14） | 手动剧本（§14）全程可操作；状态展示 request_counts | ☐ 未开始 |
 | **M4** 开关与配置接口 | `wiki.update_mode` 生效 + 模式切换作废逻辑 + override 层 + HTTP 配置/通知接口 + 审计通知 | `docs/API.md` §三 HTTP 分组行（含 Swagger `summary` + Query `description`）与 §六 现状表；新建 `docs/modules/config.md` 的 override 小节；字典补 `config_change` | 白名单外键拒绝（400）；主 yaml 注释零损失；切换后数据回池验证 | ☐ 未开始 |
@@ -408,7 +408,7 @@ wiki:
 **待做（随 A2 里程碑，不再单独排期）**：
 
 - [x] `docs/modules/batch-offline.md` —— ✅ **M0 已写**（实测契约表 + 六动作 + 对账 + 排障 + 测试清单）
-- [x] `docs/logging.md` **6 个批量事件已转正**（M0；`batch_list` 是探测发现列表接口后补的第 6 个）；待 M1 / M2 / M4 再补 6 个（`offline_submitted` / `batch_consumed` / `batch_voided` / `batch_expired` / `notify_write` / `config_change`）
+- [x] `docs/logging.md` **7 个事件已转正**：6 个批量事件（M0；`batch_list` 是探测发现列表接口后补的第 6 个）+ `notify_write`（M1）；待 M2 / M4 再补 5 个（`offline_submitted` / `batch_consumed` / `batch_voided` / `batch_expired` / `config_change`）
 - [ ] `docs/API.md`：新端点表格行 + Swagger `summary` / Query `description`；§六 现状表更新（M3 / M4）
 - [ ] `docs/modules/config.md` override 小节由"计划中"改为已实现（M4）
 - [ ] `llm-batch-offline.md` 升级为实施记录（M6）

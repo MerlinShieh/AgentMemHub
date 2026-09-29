@@ -36,7 +36,8 @@
 |---|---|---|---|
 | `logs/mcp.log` | MCP 唯一分发点 `mcp_server._audited()` → `logs.audit_mcp()`（stdio 与 Streamable HTTP 共用） | 协议层：`tool` / `args` / `elapsed_ms` / `ok` / `error`，**每次调用两条**（`phase=call` 与 `phase=result`，用 `call_id` 关联） | 查"Agent 调了什么、失败没有"；`scripts/mcp_log.py` |
 | `logs/memory.log` | `distill._audit_memory_write()` → `logs.audit_memory()`，挂在**落表处**（`save_memories` / `save_direct_memory` / 回填） | 数据层：哪条记忆被写/读、**内容全文**、`source`/`type`/`result`，来源路径由 `logs.memory_path()` contextvar 标记 | 查"某条记忆的来龙去脉"；`python -m agentmemhub memory-log` |
-| `logs/wiki.log` | `logs.audit_wiki()`：两个 wiki 脚本的 `_wlog()`、`wiki._audit()`、`wiki_triggers._audit()` | 流水线层：阶段 / 目标 / 每次 LLM 调用 / token 用量 / 成败 / 触发器判定 | 长任务"跑到哪、花多少、断在哪" |
+| `logs/wiki.log` | `logs.audit_wiki()`：两个 wiki 脚本的 `_wlog()`、`wiki._audit()`、`wiki_triggers._audit()`、`batch_client._audit()` | 流水线层：阶段 / 目标 / 每次 LLM 调用 / token 用量 / 成败 / 触发器判定 / **批量动作** | 长任务"跑到哪、花多少、断在哪" |
+| `logs/notify.log` | `logs.audit_notify()`，由 `notify.notify()` 的写入点调用 | 通知事实流：`level` / `category` / `title`（通知**本身**落 SQLite `database/notify.db`，这里留的是"谁在何时发了什么"） | 查"发过哪些通知、落库成没成功"；⚠️ 通知的等级写 `warning`，进本流时映射成 `warn` |
 | `logs/web.log` | `logs.record(dest="web")`（`web/app.py` 各处） | 看板操作：任务提交 / 开始 / 完成 / 失败、记忆打分、记忆加权、索引清理失败 | 面板留痕；`GET /api/logs` 与内存环形缓冲（`_MAX_RING = 500`） |
 | `logs/cli.log` | `logs.record(dest="cli")`：`cli._cli_log()`、`console._action_log()`，以及 `mcp_server` 的两条 `memory_save` 失败提示 | 终端 / 控制台操作的结果摘要 | 查"命令行侧干了什么" |
 | `logs/agentmemhub.log` | 命名空间根 logger `agentmemhub` 的兜底 handler（`logs.setup_app_logging()`，由 `_append_line` 顺带挂上） | 应用内 `logging.getLogger("agentmemhub.*")` 的文本日志：LLM 瞬态重试 / 格式修复、蒸馏失败与判重、`store` 提示 | 看应用内部发生了什么；标准库 `RotatingFileHandler`，**5 MB × 3 份** |
@@ -220,6 +221,17 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 （待核实：现存 `logs/tasks/*.log` 实盘是旧格式 `[HH:MM:SS] 内容`，没有日期/等级/模块/行号 ——
 应属格式变更前的历史遗留文件，只是按 `keep_days` 还没被清掉；未逐个核对每个文件的写入时刻。）
 
+### 5.6 `logs/notify.log`（1 个事件）
+
+| event | 所属流 | 关键字段 | 含义 | 排查用途 |
+|---|---|---|---|---|
+| `notify_write` | notify.log | `ok`（落库成功否）、`level`、`category`、`title` | 发了一条通知。**通知本身**落 SQLite `database/notify.db`（有已读态、可筛选）；这条是"谁在何时发了什么、落库成没成功"的**事实流水** | `ok=False` 说明走的是**降级路径**（落库失败，正文在 `logs/notify_fallback.jsonl`）——此时通知查不到，只能从降级文件里捞 |
+
+⚠️ **等级写法两条流不同**：通知 API 用 `warning`（更标准），写进本流时由
+`logs.audit_notify()` 映射成日志流的 `warn`。**映射必须在进 `standardize` 之前做** ——
+它的规则是"`entry["level"]` 优先于传参的 `level`"，而 `warning` 不在日志流的
+`LEVELS`（`debug/info/warn/error`）里，不先改写就会被静默回落成 `info`（实测踩过）。
+
 ## 6. 排查剧本
 
 ### ① 这轮 wiki 编译跑到哪了、断在哪
@@ -322,9 +334,9 @@ rg '"phase": "call"' logs/mcp.log                  # 所有 MCP 调用发起
 以下事件**尚未实现**，登记在此是为了让 A2（离线批处理 · MiMo Batch API）后续里程碑落地时一次补齐。
 来源：[batch-offline-plan.md](batch-offline-plan.md) §17.4「日志落实」。
 
-> 已转正的：**批量动作的 6 个事件**（`batch_upload` / `batch_create` / `batch_retrieve` /
-> `batch_list` / `batch_cancel` / `batch_download`）已于 2026-09-29 随 M0 实现，见 §5.1
-> 末尾的「批量任务事件」表 —— 其中 `batch_list` 是探测时才发现厂商有列表接口后补的。
+> 已转正的：**批量动作的 6 个事件**（M0，见 §5.1 末尾「批量任务事件」表）与
+> **`notify_write`**（M1，见 §5.6 —— 通知落库 + 降级路径都留痕）。
+> 其中 `batch_list` 是探测时才发现厂商有列表接口、后补的第 6 个。
 
 | event | 计划所属流 | 计划记录的内容 |
 |---|---|---|
@@ -332,7 +344,6 @@ rg '"phase": "call"' logs/mcp.log                  # 所有 MCP 调用发起
 | `batch_consumed` | 流水线 | 批次结果被消费（回读轮） |
 | `batch_voided` | 流水线 | 批次作废、脏数据回池 |
 | `batch_expired` | 流水线 | 批次过期（`expire_at`） |
-| `notify_write` | 通知 | 通知落库（含降级路径） |
 | `config_change` | 配置审计 | 谁 / 何时 / 哪个键 / 旧值 → 新值（`PUT /api/config` 白名单） |
 
 A2 的验收要求是**这五个问题必须能被日志回答**：① 这轮 wiki 跑到哪了、断在哪 ② 花了多少 token / 多少钱

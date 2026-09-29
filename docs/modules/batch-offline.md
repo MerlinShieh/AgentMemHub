@@ -110,6 +110,27 @@
 | 文件与结果**只保留 30 天** | `batch_id` 有保质期；过期后 retrieve 报 `batch_not_found` |
 | **不支持任务内重试 / 续跑**（厂商限制） | 失败只能**新建任务**；`BatchJob` 必须允许一个域被多个 job 覆盖 |
 
+### 4.1 任务现场的字段与两个判定（M1，2026-09-29）
+
+| 字段 | 用途 |
+|---|---|
+| `input_file_id` / `output_file_id` / `error_file_id` | 重新提交、回读结果文件（后两者 `completed` 之后才有值） |
+| `provider_status` | 厂商原始状态（一律 `lower()`）；**回读轮据此判断"继续等"还是"改走实时"** |
+| `expire_at` | 任务过期时刻。文件与结果只留 30 天，过期后回读报 `batch_not_found` |
+| `voided` / `voided_reason` | 已作废 → 它覆盖的域**回到待更新池**（模式切换 / 手动取消 / 终局失败） |
+
+三个方法回答三个**容易混**的问题：
+
+- **`results_state`**（`complete` / `partial` / `pending`）—— **我们**收齐结果没有。
+  刻意**不叫 `status`**：厂商也有一个 status（见 `provider_status`），同名不同义
+  最容易误用（M1 改名）。
+- **`is_terminal()`**（`failed` / `expired` / `cancelled`）—— **厂商**是否已经放弃。
+  终局后 `decide()` **不等 deadline** 直接给结论；否则终局失败会被当成"还在等"
+  而干等到天荒地老。
+- **`void(reason)`** —— 作废并返回它覆盖的**域名列表**（供上层放回池）。
+  **不需要搬数据**：提交轮没刷 manifest，那批输入本来就还是"脏"的，作废只是把
+  显式标记清掉，隐式差集自动接管。
+
 ---
 
 ## 5. 配置项
@@ -166,7 +187,11 @@ uv run python scripts/check_config_keys.py     # llm_batch.* 六个键都要有�
 
 ## 8. 待办（随计划里程碑）
 
-- **M1**：`BatchJob` 扩展（`input/output/error_file_id`、`provider_status`、`expire_at`、`stage="l2compile"`、`voided`）+ `decide()` 加**厂商终局状态**入参（failed / expired / cancelled 时不等 deadline 直接回退）+ `notify.py`
+- ~~**M1**~~：✅ **已完成（2026-09-29）** —— `BatchJob` 补齐厂商侧字段 + `status` → `results_state`
+  改名 + `is_terminal()` + `void()` 回池 + `decide()` 终局优先 + `notify.py`
+  （SQLite 微库 `database/notify.db` + 落库失败降级 `logs/notify_fallback.jsonl` +
+  事实流 `logs/notify.log`）。⚠️ **遗留**：`stage="l2compile"` 的**页组现场**（编译输入
+  快照）留到 M2，与三段式状态机一起做 —— 单有 stage 字符串没有现场是没用的
 - **M2**：`OfflineRunner` + compile 阶段 runner 化 + 三段式 `run()` 状态机 + 两路一致性三补丁（`thinking` 字段 / `repair_model` / `scrub_text`）
 - **M3**：CLI `batch-status` / `batch-submit` / `batch-import` / `batch-cancel`
 - **M6**：回读冒烟任务 `batch_04cc53ea36324c8598abbffa`，验证真实执行与结果形状

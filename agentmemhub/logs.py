@@ -583,6 +583,50 @@ def read_wiki_audit(path: "Path | None" = None, limit: int = 0) -> list[dict]:
     return _read_jsonl(path, "wiki.log", limit)
 
 
+# ---------------------------------------------------------------------------
+# 通知事实流（logs/notify.log）
+#
+# 通知本身已落 SQLite（`agentmemhub/notify.py`，可查询、有已读态）；这里留的是
+# **事实流水**：谁在什么时候发了什么通知、落库成没成功。两者职责不同，都要有。
+# ---------------------------------------------------------------------------
+
+def notify_log_file() -> Path:
+    return log_dir() / "notify.log"
+
+
+def _notify_msg(e: dict) -> str:
+    return "%s [%s] %s" % (e.get("level", ""), e.get("category", ""),
+                           e.get("title", ""))
+
+
+#: 通知的等级用 `warning`（更标准的写法），日志流统一用 `warn` —— 在入口映射一次，
+#: 免得两条流各写各的、grep 时漏。
+_NOTIFY_LEVEL_MAP = {"warning": "warn"}
+
+
+def audit_notify(entry: dict) -> None:
+    """追加一条通知事件（JSONL，带标准头 ts/level/module/line/msg）。
+
+    写失败一律静默：通知是旁路，绝不能因为它让业务失败。
+
+    ⚠️ 等级必须在**进 `standardize` 之前**改写：`standardize` 的规则是
+    "`entry["level"]` 优先于传参的 `level`"（`lv = entry.get("level") or level`），
+    而通知用的 `warning` 不在日志流的 `LEVELS`（`debug/info/warn/error`）里 ——
+    不先改写就会被回落成 `info`，白白丢掉"这是警告"这个信息（实测踩过）。
+    """
+    src = dict(entry)
+    lv = str(src.get("level") or "info").strip().lower()
+    src["level"] = _NOTIFY_LEVEL_MAP.get(lv, lv)
+    e = standardize(src, msg=entry.get("msg") or _notify_msg(entry), depth=3)
+    _append_line(notify_log_file,
+                 json.dumps(e, ensure_ascii=False) + "\n", name="notify")
+
+
+def read_notify_audit(path: "Path | None" = None, limit: int = 0) -> list[dict]:
+    """读通知事件（坏行跳过）。path 默认 `logs/notify.log`，也接受日志目录。"""
+    return _read_jsonl(path, "notify.log", limit)
+
+
 def append_task_line(job_id: str, line: str) -> Path:
     """把任务输出的一行追加到该 job 的完整日志文件（**统一标准前缀**）。
 
