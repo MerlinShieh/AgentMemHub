@@ -648,7 +648,8 @@ def _offline_advance(*, l1: Path, l2: Path, db: str, runner, client,
 def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
            workers: int = 0, on_progress: Callable[[str], None] | None = None,
            offline_runner=None, offline_client=None,
-           offline_deadline_s: float = 0.0) -> dict[str, Any]:
+           offline_deadline_s: float = 0.0, offline_plan: bool = False
+           ) -> dict[str, Any]:
     """增量更新：RAG 库变了，只重编受影响的 L1 页与 L2 域（**不全量重来**）。
 
     **离线模式**（`offline_client` 非空时启用）：L2 的细分与编译不再当场调 LLM，
@@ -805,9 +806,13 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
         recompile_single=False, thinking="", no_resume=False, resume=True,
         retry_failed=False, partial=True, preset_domains=preset,
         domain_map=domain_map,
-        # 非空即走**离线提交轮**：聚合层会把整个域集合的请求一次交出去（见
-        # `wiki_aggregate._submit_offline`），而不是逐域并发调 LLM。
-        offline_runner=offline_runner)
+        # **细分离线**（默认关）：细分只有「域数 × 批数」条（实测 3 个域 = 11 条），
+        # 实时跑是分钟级；离线省下的绝对值很小，却要多付**一整轮排队延迟**
+        # （实测细分段排了 24 小时）。要两段都离线就传 `offline_plan=True`。
+        offline_runner=offline_runner if offline_plan else None,
+        # **编译离线**（默认开）：编译是「每个最终页一条」（实测 113 条），正是离线
+        # 划算的场景。两段都离线 ⇒ 一轮约 48 小时；只离线编译 ⇒ 一轮约 24 小时。
+        offline_compile_runner=None if offline_plan else offline_runner)
     # L1 一条都没编出来时，L2 只会拿**磁盘上的旧 L1** 重跑一遍同样的域：
     # 实测白烧 1290 秒 / 42 万 prompt token，产出还只是"同义不同措辞"。
     # 全失败就跳过 —— 时间留给真正的重试（失败会话没进新基线，下次写入会重试）。

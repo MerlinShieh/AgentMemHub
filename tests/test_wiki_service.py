@@ -553,6 +553,8 @@ def test_离线模式_没有在飞任务时走提交轮(tmp_path, monkeypatch):
 
     def _fake_run(args):
         seen["offline_runner"] = getattr(args, "offline_runner", "缺字段")
+        seen["offline_compile_runner"] = getattr(args, "offline_compile_runner",
+                                                 "缺字段")
         return {"aborted": "", "written_domains": [], "skipped_domains": [],
                 "pages": 0, "pages_by_domain": {},
                 "offline_submitted": {"batch_id": "batch-new", "stage": "l2plan",
@@ -565,7 +567,8 @@ def test_离线模式_没有在飞任务时走提交轮(tmp_path, monkeypatch):
     r = wiki.update(l1_dir=l1, l2_dir=l2, db=str(db),
                     offline_client=_OfflineClient(), offline_runner=marker)
 
-    assert seen["offline_runner"] is marker, "提交轮必须把运行器透传到聚合层"
+    assert seen["offline_runner"] is None, "默认**细分走实时**（只离线编译）"
+    assert seen["offline_compile_runner"] is marker, "运行器要透传到编译段"
     assert r["l2"]["offline_submitted"]["batch_id"] == "batch-new"
     assert r["l2"]["offline_submitted"]["stage"] == "l2plan"
 

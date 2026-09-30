@@ -1595,6 +1595,24 @@ def run(args) -> None:
     # 串行跑光这一个域就要一小时。
     tasks = [(name, ti, pl) for name, plans in domain_plans
              for ti, pl in enumerate(plans, 1)]
+
+    # ---- ③ 的离线分支：**只把编译段交出去**（细分已经在本轮实时跑完了）----
+    # 为什么这样切分（2026-10-01 实测后的决定）：
+    #   · **细分**只有「域数 × 批数」条请求（实测 3 个域 = 11 条），实时跑 1 分钟级；
+    #     离线省下的绝对值很小，却要**多付一整轮排队延迟**（实测细分段排了 24 小时）。
+    #   · **编译**是「每个最终页一条」（实测 113 条），正是离线划算的场景。
+    #   两段都离线 ⇒ 48 小时；只离线编译 ⇒ 24 小时。少一段等待、成本只多几分钱。
+    compile_runner = getattr(args, "offline_compile_runner", None)
+    if compile_runner is not None:
+        dplans = [(name, [{"title": pl["title"], "group": pl["group"]}
+                          for pl in plans]) for name, plans in domain_plans]
+        reqs, items, members = compile_requests(
+            dplans, all_titles, recompile_single=bool(args.recompile_single))
+        print("\n③ 离线编译提交（%d 个最终页 → %d 条请求）"
+              % (len(tasks), len(reqs)), flush=True)
+        return _submit_stage(out, compile_runner, reqs, items, members,
+                             stage="l2compile", label="离线编译提交")
+
     print("\n③ 重新编译（%d 个最终页，并发 %d）…" % (len(tasks), cfg_workers), flush=True)
 
     # fail-open 降级过的页标题（LLM 失败 / 解析失败的代理信号）。线程安全：
