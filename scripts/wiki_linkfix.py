@@ -153,6 +153,12 @@ def collect_redirects(root: Path) -> dict[str, str]:
             d = json.loads(f.read_text(encoding="utf-8"))
         except Exception:                   # noqa: BLE001
             continue
+        # 目录里不只有"页面 json"：早期版本的产物可能是**数组**。实测
+        # `'list' object has no attribute 'get'` 会让整条 linkfix 挂掉 ——
+        # 于是链接修复与 Obsidian 验收**一起没跑**（而异常被上层当成 linkfix 失败
+        # 记了下来，产物却已经写盘）。扫目录的代码必须有这类类型容错。
+        if not isinstance(d, dict):
+            continue
         title = (d.get("title") or "").strip()
         if not title:
             continue

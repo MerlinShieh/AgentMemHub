@@ -1317,3 +1317,32 @@ def test_落盘轮_没有页面时什么都不写(tmp_path):
     assert not (out / "index.md").exists()
 
 
+def test_落盘轮_旧目录首行是目录名时按slug兜底(tmp_path):
+    """老产物的 `index.md` 首行写的是**目录名**（`# 04-AgentMemHub-记忆系统`）而不是
+    域名 —— 只靠首行匹配不到就会**新建一个重复目录**（2026-10-01 实测：域目录从
+    19 涨到 21，同一个域出现 `04-…` 与 `20-…` 两份）。这里验证 slug 兜底能拦住它。"""
+    from agentmemhub.failures import FailureLog
+
+    from wiki_aggregate import write_offline_stage
+
+    out = tmp_path / "out_l2"
+    d = out / "04-AgentMemHub-记忆系统"
+    d.mkdir(parents=True)
+    (d / "index.md").write_text("# 04-AgentMemHub-记忆系统\n", encoding="utf-8")
+    (d / "001-旧页.md").write_text("旧", encoding="utf-8")
+
+    members = {"AgentMemHub 记忆系统": [
+        {"ti": 1, "title": "新页", "needs_llm": False, "dropped": 0,
+         "group": [_member("P1")]}]}
+    fl = FailureLog(out / "failures.jsonl")
+
+    status = write_offline_stage(out, members, {}, fl, partial=True)
+
+    assert (out / "04-AgentMemHub-记忆系统" / "001-P1.md").exists(), "应复用既有目录"
+    assert status["written_domains"] == ["AgentMemHub 记忆系统"]
+    others = [p.name for p in out.iterdir()
+              if p.is_dir() and p.name[:1].isdigit()
+              and p.name != "04-AgentMemHub-记忆系统"]
+    assert others == [], "不该新建重复目录（实测踩过：域目录 19 → 21）"
+
+

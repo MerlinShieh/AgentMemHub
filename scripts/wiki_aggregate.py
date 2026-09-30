@@ -1226,12 +1226,23 @@ def write_offline_stage(out: Path, members: dict[str, list[dict]],
         print("\n没有可落盘的页面（编译结果为空）")
         return status
     dir_of = _dir_map_from_disk(out)
+    # **slug 兜底**：老产物的 `index.md` 首行写的是**目录名**（`# 04-AgentMemHub-记忆系统`）
+    # 而不是域名，靠首行匹配不到 → 会**新建一个重复目录**。实测踩过：域目录从 19 涨到 21，
+    # 同一个域出现 `04-…`（旧）与 `20-…`（新）两份，Obsidian 里看到两个同名域。
+    # `wiki.py::_dir_for()` 早就用 slug 兜底解决过同一个坑（它注释里写着"一度躺着 9 个
+    # 99-* 残留目录"）—— 这里沿用同一策略。
+    by_slug = {dn.split("-", 1)[-1]: dn for dn in dir_of.values() if "-" in dn}
     # 新域（磁盘上还没有目录）按现有最大编号往后补，沿用 `%02d-<slug>` 形态
     next_no = 1 + max([int(n[:2]) for n in dir_of.values() if n[:2].isdigit()] or [0])
     for name in sorted(by_domain):
-        if name not in dir_of:
-            dir_of[name] = "%02d-%s" % (next_no, _slug(name))
-            next_no += 1
+        if name in dir_of:
+            continue
+        slug = _slug(name)
+        if slug in by_slug:
+            dir_of[name] = by_slug[slug]
+            continue
+        dir_of[name] = "%02d-%s" % (next_no, slug)
+        next_no += 1
     written = finalize_outputs(out, by_domain, dir_of=dir_of, partial=partial,
                                fl=fl, status=status)
     status["pages"] = sum(len(p) for _, p in written)
