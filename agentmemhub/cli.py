@@ -1065,7 +1065,8 @@ def cmd_wiki(args) -> int:
         return 0
 
     # ---- 离线批处理（Batch API）----
-    if args.action in ("batch-status", "batch-run", "batch-cancel"):
+    if args.action in ("batch-status", "batch-run", "batch-cancel",
+                       "batch-resubmit"):
         return _cmd_wiki_batch(args)
 
     # ---- retry ----
@@ -1153,6 +1154,19 @@ def _cmd_wiki_batch(args) -> int:
         return 2
     client = MiMoBatchClient(cfg)
     l2p = _P(l2)
+
+    if args.action == "batch-resubmit":
+        done = wiki_batch.resubmit_terminal(client, l2p)
+        if not done:
+            print("没有需要重提的已终局任务（还在飞的任务不会被重建）")
+            return 0
+        for d in done:
+            print("  重提 %s：%s → %s（%d 条请求，复用输入文件 %s）"
+                  % (d["stage"], d["old"], d["new"], d["n_requests"],
+                     d["input_file_id"]))
+        print("\n用原输入文件重建，**不重跑 L1/归域**（不额外花实时的钱）")
+        _cli_log("wiki batch-resubmit：重建 %d 个任务" % len(done))
+        return 0
 
     if args.action == "batch-status":
         return _batch_status(client, l2p)
@@ -1387,7 +1401,8 @@ def build_parser() -> argparse.ArgumentParser:
                               "triggers", "trigger", "backfill-manual",
                               "index-pages", "pending", "drop", "ignored",
                               "restore",
-                              "batch-status", "batch-run", "batch-cancel"],
+                              "batch-status", "batch-run", "batch-cancel",
+                              "batch-resubmit"],
                      help="failures=查看失败清单（默认）；retry=只重跑失败项；"
                           "align=审计 wiki 产物与索引库的差距（只读）；"
                           "update=增量更新（只重编脏会话 L1 与受影响 L2 域）；"
@@ -1399,7 +1414,9 @@ def build_parser() -> argparse.ArgumentParser:
                           "ignored=已软删除的记忆；restore=取消软删除；"
                           "batch-status=离线批处理任务状态（只读）；"
                           "batch-run=离线模式推进一段（提交/交编译/落盘，状态机自判）；"
-                          "batch-cancel=取消并作废所有在飞离线任务")
+                          "batch-cancel=取消并作废所有在飞离线任务；"
+                          "batch-resubmit=用**原输入文件**重建已终局的任务"
+                          "（平台侧 validation_failed 时用，不重跑 L1/归域）")
     pwk.add_argument("--out", default="",
                      help="wiki 产出目录（failures/align/retry 必需；"
                           "其余从配置或 --l1/--l2 读）")

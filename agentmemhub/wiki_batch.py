@@ -33,6 +33,7 @@ from agentmemhub.llm_batch import (
     PARTIAL,
     STATE_NAME,
     WAIT,
+    TERMINAL_STATES,
     BatchJob,
     decide,
     load_batch_results,
@@ -113,6 +114,48 @@ def fetch_results(client, job: BatchJob) -> dict[str, dict[str, Any]]:
         _audit("batch_consumed", batch_id=job.batch_id, file_id=fid, kind=kind,
                n=len([c for c in parsed if c]))
     return results
+
+
+def resubmit_terminal(client, out: "Path | str") -> list[dict[str, Any]]:
+    """把**已终局**的任务用**原输入文件**重新提交一遍，返回重建记录。
+
+    为什么这样重提（而不是重跑一轮 `update`）：输入文件还躺在厂商那边（30 天有效），
+    `create()` 直接指过去就行 —— 重新生成 JSONL 意味着重跑 L1 编译与归域，
+    **白花一次实时费用**。平台自己的错误文案就是"任务排队执行过程中遇到异常，
+    **请尝试重新创建任务**"（2026-09-30 实测：连官方文档的示例任务也因同一条失败）。
+
+    只动**已终局**的任务（`failed` / `expired` / `cancelled`）：还在飞的绝不能重建，
+    否则同一批数据会被提交两次、重复计费。
+    """
+    import time
+
+    path = Path(out) / STATE_NAME
+    jobs = list(load_state(path))
+    done: list[dict[str, Any]] = []
+    for job in jobs:
+        if str(job.provider_status or "") not in TERMINAL_STATES:
+            continue                        # 还在飞：不动它
+        if not job.input_file_id:
+            continue                        # 没有输入文件凭据，重建不了
+        b = client.create(job.input_file_id,
+                          name="agentmemhub-%s" % (job.stage or "l2plan"),
+                          n_requests=len(job.items)) or {}
+        old = job.batch_id
+        job.batch_id = str(b.get("id") or "")
+        job.provider_status = str(b.get("status") or "").lower()
+        job.submitted_at = time.time()
+        job.results = {}                    # 新任务的结果要从头收
+        job.output_file_id = ""
+        job.error_file_id = ""
+        job.expire_at = float(b.get("expires_at") or 0.0)
+        done.append({"stage": job.stage, "old": old, "new": job.batch_id,
+                     "input_file_id": job.input_file_id,
+                     "n_requests": len(job.items)})
+        _audit("batch_resubmit", stage=job.stage, old_batch=old,
+               batch_id=job.batch_id, n_requests=len(job.items))
+    if done:
+        save_state(path, jobs)
+    return done
 
 
 def finish(out: "Path | str", job: BatchJob, reason: str = "") -> None:
@@ -211,7 +254,11 @@ def import_results(client, out: "Path | str", *, now: Optional[float] = None,
                  meta={"batch_id": job.batch_id, "stage": job.stage,
                        "pending": pend})
 
-    save_state(state_path, [j for j in jobs if not j.voided])
+    # **保留已作废的任务**（只标记、不删除）：`members` / `items` 现场是"重提"与
+    # "回读落盘"的**唯一依据**，删掉就再也拼不回来 —— 2026-09-30 实测：守卫把
+    # `validation_failed` 的任务作废后，12 条请求的成员快照一并丢失，只能重新生成
+    # 一遍请求。**"不在飞"由 `voided` 标记表达，与"是否留在 state 里"是两件事。**
+    save_state(state_path, jobs)
     _audit("batch_import", n_jobs=len(jobs), n_consumed=len(consumed),
            n_voided=len(voided), n_waited=len(waited))
     return {"jobs": jobs, "decisions": decisions, "results": results,

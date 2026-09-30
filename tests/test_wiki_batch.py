@@ -206,7 +206,10 @@ def test_终局即作废回池并通知人(tmp_path):
     assert out["voided"][0]["status"] == "expired"
     assert out["voided"][0]["domains"] == ["域A"], "作废要报出需要回池的域"
     assert ("download", "file-out") not in c.calls, "终局不捞已完成部分（D2）"
-    assert load_state(tmp_path / STATE_NAME) == [], "作废的任务不再留在 state 里"
+    kept = load_state(tmp_path / STATE_NAME)
+    assert len(kept) == 1 and kept[0].voided is True, \
+        "作废后要**保留现场**（members/items 是重提与回读落盘的唯一依据），" \
+        "只是不再算在飞（2026-09-30 实测：删掉后 12 条请求的成员快照一起丢了）"
     assert seen and seen[0][0] == "warning" and "expired" in seen[0][2]
 
 
@@ -222,3 +225,65 @@ def test_poll刷新厂商侧的各个字段(tmp_path):
     assert job.output_file_id == "f1" and job.error_file_id == "f2"
     assert job.expire_at == 55.0
     assert info["batch-1"]["counts"]["completed"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 重提：平台侧 validation_failed 时，用原输入文件重建（不重跑 L1/归域）
+# ---------------------------------------------------------------------------
+
+def test_重提_只重建已终局的任务并复用输入文件(tmp_path):
+    """2026-09-30 实测：平台"排队执行过程中遇到异常"会让任务 failed（连官方示例
+    也如此），官方建议"重新创建任务"。这里复用原输入文件，避免重跑 L1 编译与归域。"""
+    from agentmemhub.wiki_batch import resubmit_terminal
+
+    failed = _job(batch_id="batch-old", stage="l2plan",
+                  provider_status="failed", input_file_id="file-1")
+    flying = _job(batch_id="batch-fly", stage="l2plan",
+                  provider_status="in_progress", input_file_id="file-2")
+    save_state(tmp_path / STATE_NAME, [failed, flying])
+
+    class _C:
+        def __init__(self):
+            self.created: list = []
+
+        def create(self, fid, *, name="", n_requests=0):
+            self.created.append((fid, name, n_requests))
+            return {"id": "batch-new", "status": "Created", "expires_at": 99.0}
+
+    c = _C()
+    done = resubmit_terminal(c, tmp_path)
+
+    assert len(done) == 1 and done[0]["old"] == "batch-old"
+    assert done[0]["new"] == "batch-new" and done[0]["n_requests"] == 1
+    assert c.created == [("file-1", "agentmemhub-l2plan", 1)], \
+        "只重建终局的任务，且复用原输入文件"
+    jobs = {j.batch_id: j for j in load_state(tmp_path / STATE_NAME)}
+    assert "batch-old" not in jobs, "旧 id 应被新 id 取代"
+    assert jobs["batch-new"].provider_status == "created"
+    assert jobs["batch-new"].results == {}, "新任务的结果要从头收"
+    assert jobs["batch-fly"].provider_status == "in_progress", "在飞的任务不许动"
+
+
+def test_重提_没有终局任务时什么都不做(tmp_path):
+    from agentmemhub.wiki_batch import resubmit_terminal
+
+    save_state(tmp_path / STATE_NAME, [_job(provider_status="in_progress")])
+
+    class _C:
+        def create(self, *a, **k):
+            raise AssertionError("不该重建在飞任务")
+
+    assert resubmit_terminal(_C(), tmp_path) == []
+
+
+def test_重提_没有输入文件凭据的任务会被跳过(tmp_path):
+    from agentmemhub.wiki_batch import resubmit_terminal
+
+    save_state(tmp_path / STATE_NAME,
+               [_job(batch_id="b1", provider_status="failed", input_file_id="")])
+
+    class _C:
+        def create(self, *a, **k):
+            raise AssertionError("没有输入文件就没法重建")
+
+    assert resubmit_terminal(_C(), tmp_path) == []

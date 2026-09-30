@@ -789,6 +789,16 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
         fs = set(domain_map[n])
         members = [p for p in pages if p["file"] in fs]
         preset.append((n, _dir_for(n), members))
+    # **离线模式下没有脏域就别往下走**：`preset` 为空时聚合层会回退到"全量归域 +
+    # 全库重编"（实测 449 页，极贵）。而走到这里说明 L2 基线确实落后
+    # （`a2.needs_recompile` 为真）却没有可定位的脏域 —— 典型场景正是"离线批次被
+    # 平台判失败、已作废回池，但 L1 之后没有新变化"（2026-09-30 实测踩到）。
+    # 正确动作是**重提**（`batch-resubmit` 复用原输入文件），而不是悄悄重编整库。
+    if offline_runner is not None and not preset:
+        return {"updated": False, "mode": "offline", "step": "nothing",
+                "hints": ["没有可提交的脏域（L2 基线落后，但 L1 没有新变化可定位到域）"
+                          "—— 请用 `agentmemhub wiki --action batch-resubmit` 重提"
+                          "已终局的任务；确需全量重编请显式跑实时 update"]}
     args = SimpleNamespace(
         src=str(l1), out=str(l2), db=db, stage="all", workers=workers or 0,
         limit=0, domain="", dmin=20, dmax=60, batch=120, min_pages=2,
