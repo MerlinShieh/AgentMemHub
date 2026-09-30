@@ -69,6 +69,25 @@ def test_带BOM的JSON能解析(monkeypatch):
     assert got == [{"link": "某页", "count": 3, "sources": "a.md"}]
 
 
+def test_命令不可用时报没法验而不是有死链(monkeypatch):
+    """Obsidian 刚启动 / 插件没加载时，CLI 会回
+    `Error: Command "unresolved" not found. It may require a plugin`。
+
+    那是"**没法验**"，不是"有 1 个未解析目标" —— 2026-10-01 实测被这条误报成
+    "验收不通过"，差点让人去修一批根本不存在的死链。
+    """
+    monkeypatch.setattr(
+        obsidian, "run",
+        lambda *a, **k: 'Error: Command "unresolved" not found. '
+                        'It may require a plugin to be enabled.')
+
+    with pytest.raises(obsidian.ObsidianUnavailable):
+        obsidian.unresolved()
+
+    r = obsidian.verify()
+    assert r["available"] is False, "命令不可用 ⇒ 没法验，而不是不通过"
+
+
 def test_验收不可用时不算失败(monkeypatch):
     """Obsidian 没运行 → `available=False`（**不是失败**），流程照常。"""
     monkeypatch.setattr(obsidian, "app_running", lambda *a, **k: False)

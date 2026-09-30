@@ -95,6 +95,13 @@ def collect_pages(root: Path) -> tuple[Index, list[Path]]:
     for f in sorted(root.rglob("*.md")):
         if f.name == "index.md":
             continue
+        # **跳过隐藏目录**里的文件（`.bak_*` / `.tmp_*` / `.obsidian`）：`rglob` 会扫到
+        # 它们，但 Obsidian **不索引** `.` 开头的目录 —— 两边口径不一致的后果很严重：
+        # linkfix 以为某个链接"已经解析"（目标在备份/临时目录里）于是不去链，而
+        # Obsidian 报"未解析"，用户点开就生成空白笔记（2026-10-01 实测：252 条
+        # 死链因此漏修，且 linkfix 还自信地报告"无法确定 0 条"）。
+        if any(part.startswith(".") for part in f.relative_to(root).parts[:-1]):
+            continue
         files.append(f)
         stem = f.stem
         idx.by_stem[stem] = stem
@@ -148,6 +155,10 @@ def collect_redirects(root: Path) -> dict[str, str]:
     out: dict[str, str] = {}
     for f in sorted(root.rglob("*.json")):
         if f.name.startswith("_"):
+            continue
+        # 同 `collect_pages()`：隐藏目录里的 json 不是本轮的产物（备份/临时），
+        # 拿它们当重定向来源会把链接指向 Obsidian 看不到的地方。
+        if any(part.startswith(".") for part in f.relative_to(root).parts[:-1]):
             continue
         try:
             d = json.loads(f.read_text(encoding="utf-8"))

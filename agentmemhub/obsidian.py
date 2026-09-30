@@ -115,30 +115,50 @@ def strip_arrow(out: str) -> str:
 
 
 def unresolved(*, cli: str = "", vault: str = "", timeout: int = 120) -> list[dict]:
-    """未解析链接（Obsidian 权威口径）。返回 [{link, count, sources}]。
+    """未解析链接（Obsidian 权威口径）。返回 `[{link, count, sources}]`。
 
-    ⚠️ CLI 的输出**带 UTF-8 BOM**（实测）—— 直接 `json.loads` 会失败，于是静默
-    走到兜底分支、把 `count` 变成非数字。这里显式剥 BOM。
+    ⚠️ **CLI 的 `unresolved` 只支持 `total` / `counts` 两个开关** —— 没有
+    `verbose` / `format=json`（那是我从别的命令抄来的参数）。传错会得到
+    `Error: Command "unresolved" not found. It may require a plugin`，于是**每一次
+    验收都白报"命令不存在"**（2026-10-01 实测踩过，白排查了一轮，还差点去装插件）。
+    `counts` 的输出是 TSV：`目标<TAB>计数`。
+
+    ⚠️ CLI 输出**带 UTF-8 BOM**（实测）—— 不剥会让首行解析带上 `\ufeff`。
+    没有未解析链接时返回的是**一句英文**（不是空数组），当成条目会误报
+    （实测踩过：明明已 0，却报"1 个目标 / 0 条"）。
     """
-    out = run("unresolved", "verbose", "format=json", cli=cli, vault=vault,
-              timeout=timeout)
+    out = run("unresolved", "counts", cli=cli, vault=vault, timeout=timeout)
     out = out.lstrip("\ufeff").strip()
-    # 没有未解析链接时 CLI 返回的是**一句英文**（不是 `[]`）——
-    # 当成失败会误报（实测踩过：明明已 0，却报"1 个目标 / 0 条"）
     if not out or out.lower().startswith("no unresolved"):
         return []
-    try:
-        data = json.loads(out)
-    except json.JSONDecodeError:
-        return [{"link": out[:200], "count": 0, "sources": "", "raw": True}]
-    rows = []
-    for it in data:
+    low = out.lower()
+    # **命令不可用**（插件没加载 / 版本变化）要当"没法验"，绝不能当成"有死链"：
+    # 2026-10-01 实测就因此把验收误报成"不通过"，差点让人去修一批不存在的死链。
+    if low.startswith("error") or "not found" in low or "no such command" in low:
+        raise ObsidianUnavailable("Obsidian CLI 不认 `unresolved` 命令（没法验收）：%s"
+                                  % out[:200])
+    if out.startswith("["):                 # 兼容 JSON 形态（旧版 CLI / 别的实现）
         try:
-            cnt = int(it.get("count") or 0)
+            data = json.loads(out)
+        except json.JSONDecodeError:
+            return [{"link": out[:200], "count": 0, "sources": "", "raw": True}]
+        return [{"link": it.get("link", ""),
+                 "count": int(it.get("count") or 0),
+                 "sources": it.get("sources", "")}
+                for it in data if isinstance(it, dict)]
+    rows: list[dict] = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.rsplit("\t", 1)
+        link = parts[0].strip()
+        try:
+            cnt = int(parts[1]) if len(parts) > 1 else 0
         except (TypeError, ValueError):
             cnt = 0
-        rows.append({"link": it.get("link", ""), "count": cnt,
-                     "sources": it.get("sources", "")})
+        if link:
+            rows.append({"link": link, "count": cnt, "sources": ""})
     return rows
 
 
