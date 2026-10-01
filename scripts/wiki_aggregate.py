@@ -1183,26 +1183,36 @@ def finalize_outputs(out: Path, by_domain_pages: dict[str, list[dict]], *,
     return results
 
 
-def _dir_map_from_disk(out: Path) -> dict[str, str]:
-    """从磁盘上的域目录读出「域名 → 目录名」。
+def _domain_dir_map(out: Path) -> dict[str, str]:
+    """「**权威域名** → 磁盘目录名」。
 
-    域名写在各域 `index.md` 的首行（`# 域名`）。落盘轮靠它**沿用既有目录名**，
-    而不是重新编号 —— 重排会让互链与索引一起乱。
+    域名**只认 `_domains.json`**（产物侧的域表），再用 slug 反查目录名 ——
+    **绝不读各域 `index.md` 的首行**：老产物（09-20/09-21 那批）的首行写的是
+    **目录名**（`# 01-ADBController-与-Android-自动化`），照它定域名会造出一批
+    "假域名"、写进 manifest；下一轮 `domain_map` 会把它当真域，于是又新建一套
+    重复目录（2026-10-01 实测：manifest 从 18 个域涨到 21 个，产物里出现
+    `20-04-AgentMemHub-记忆系统` 这种**双重前缀**目录）。
+
+    对不上域表的目录**直接不收** —— 宁缺勿滥：假域名的危害远大于少认一个目录。
     """
     m: dict[str, str] = {}
     if not out.is_dir():
         return m
+    by_slug: dict[str, str] = {}
+    doms_file = out / "_domains.json"
+    if doms_file.exists():
+        try:
+            for d in (json.loads(doms_file.read_text(encoding="utf-8")) or []):
+                nm = str((d or {}).get("name") or "").strip()
+                if nm:
+                    by_slug.setdefault(_slug(nm), nm)
+        except Exception:                   # noqa: BLE001 —— 域表坏了就当没有
+            pass
     for d in sorted(out.iterdir()):
         if not d.is_dir() or d.name.startswith(".") or not d.name[:1].isdigit():
             continue
-        idx = d / "index.md"
-        if not idx.exists():
-            continue
-        try:
-            first = idx.read_text(encoding="utf-8").splitlines()[0]
-        except Exception:                   # noqa: BLE001
-            continue
-        name = first.lstrip("#").strip()
+        slug = d.name.split("-", 1)[-1] if "-" in d.name else d.name
+        name = by_slug.get(slug)
         if name and name not in m:
             m[name] = d.name
     return m
@@ -1225,24 +1235,15 @@ def write_offline_stage(out: Path, members: dict[str, list[dict]],
     if not by_domain:
         print("\n没有可落盘的页面（编译结果为空）")
         return status
-    dir_of = _dir_map_from_disk(out)
-    # **slug 兜底**：老产物的 `index.md` 首行写的是**目录名**（`# 04-AgentMemHub-记忆系统`）
-    # 而不是域名，靠首行匹配不到 → 会**新建一个重复目录**。实测踩过：域目录从 19 涨到 21，
-    # 同一个域出现 `04-…`（旧）与 `20-…`（新）两份，Obsidian 里看到两个同名域。
-    # `wiki.py::_dir_for()` 早就用 slug 兜底解决过同一个坑（它注释里写着"一度躺着 9 个
-    # 99-* 残留目录"）—— 这里沿用同一策略。
-    by_slug = {dn.split("-", 1)[-1]: dn for dn in dir_of.values() if "-" in dn}
-    # 新域（磁盘上还没有目录）按现有最大编号往后补，沿用 `%02d-<slug>` 形态
+    dir_of = _domain_dir_map(out)
+    # 新域（域表里没有、或磁盘上还没目录）按现有最大编号往后补，沿用 `%02d-<slug>`
+    # 形态。**已存在的域一律复用它的目录名**（`_domain_dir_map` 已经用 slug 反查过，
+    # 所以老产物的"首行是目录名"也不会再骗到我们）。
     next_no = 1 + max([int(n[:2]) for n in dir_of.values() if n[:2].isdigit()] or [0])
     for name in sorted(by_domain):
-        if name in dir_of:
-            continue
-        slug = _slug(name)
-        if slug in by_slug:
-            dir_of[name] = by_slug[slug]
-            continue
-        dir_of[name] = "%02d-%s" % (next_no, slug)
-        next_no += 1
+        if name not in dir_of:
+            dir_of[name] = "%02d-%s" % (next_no, _slug(name))
+            next_no += 1
     written = finalize_outputs(out, by_domain, dir_of=dir_of, partial=partial,
                                fl=fl, status=status)
     status["pages"] = sum(len(p) for _, p in written)

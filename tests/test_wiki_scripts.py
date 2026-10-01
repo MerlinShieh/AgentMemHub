@@ -1317,10 +1317,15 @@ def test_落盘轮_没有页面时什么都不写(tmp_path):
     assert not (out / "index.md").exists()
 
 
-def test_落盘轮_旧目录首行是目录名时按slug兜底(tmp_path):
+def test_落盘轮_域名只认权威域表不认首行(tmp_path):
     """老产物的 `index.md` 首行写的是**目录名**（`# 04-AgentMemHub-记忆系统`）而不是
-    域名 —— 只靠首行匹配不到就会**新建一个重复目录**（2026-10-01 实测：域目录从
-    19 涨到 21，同一个域出现 `04-…` 与 `20-…` 两份）。这里验证 slug 兜底能拦住它。"""
+    域名 —— 域名绝不能照它定：会造出"假域名"写进 manifest，下一轮 `domain_map`
+    把它当真域，于是又新建一套重复目录（2026-10-01 实测：manifest 从 18 个域涨到
+    21 个，产物里出现 `20-04-AgentMemHub-记忆系统` 这种**双重前缀**目录）。
+
+    域名一律取自 `_domains.json`（产物侧权威域表），再用 slug 反查目录。"""
+    import json as _json
+
     from agentmemhub.failures import FailureLog
 
     from wiki_aggregate import write_offline_stage
@@ -1330,6 +1335,9 @@ def test_落盘轮_旧目录首行是目录名时按slug兜底(tmp_path):
     d.mkdir(parents=True)
     (d / "index.md").write_text("# 04-AgentMemHub-记忆系统\n", encoding="utf-8")
     (d / "001-旧页.md").write_text("旧", encoding="utf-8")
+    (out / "_domains.json").write_text(
+        _json.dumps([{"name": "AgentMemHub 记忆系统", "members": [1]}],
+                    ensure_ascii=False), encoding="utf-8")
 
     members = {"AgentMemHub 记忆系统": [
         {"ti": 1, "title": "新页", "needs_llm": False, "dropped": 0,
@@ -1338,11 +1346,33 @@ def test_落盘轮_旧目录首行是目录名时按slug兜底(tmp_path):
 
     status = write_offline_stage(out, members, {}, fl, partial=True)
 
-    assert (out / "04-AgentMemHub-记忆系统" / "001-P1.md").exists(), "应复用既有目录"
+    assert (d / "001-P1.md").exists(), "应复用既有目录（靠 slug 反查）"
     assert status["written_domains"] == ["AgentMemHub 记忆系统"]
     others = [p.name for p in out.iterdir()
               if p.is_dir() and p.name[:1].isdigit()
               and p.name != "04-AgentMemHub-记忆系统"]
     assert others == [], "不该新建重复目录（实测踩过：域目录 19 → 21）"
+
+
+def test_落盘轮_不在权威域表里的目录不收(tmp_path):
+    """域表里没有的目录（历史残留 / 假域名）**不参与**域名映射 —— 宁缺勿滥：
+    假域名的危害（污染 manifest → 下轮又建重复目录）远大于少认一个目录。"""
+    import json as _json
+
+    from agentmemhub.failures import FailureLog
+
+    from wiki_aggregate import _domain_dir_map
+
+    out = tmp_path / "out_l2"
+    (out / "20-04-AgentMemHub-记忆系统").mkdir(parents=True)   # 假域名产物
+    (out / "04-AgentMemHub-记忆系统").mkdir(parents=True)      # 真域名产物
+    (out / "_domains.json").write_text(
+        _json.dumps([{"name": "AgentMemHub 记忆系统", "members": [1]}],
+                    ensure_ascii=False), encoding="utf-8")
+
+    m = _domain_dir_map(out)
+
+    assert m == {"AgentMemHub 记忆系统": "04-AgentMemHub-记忆系统"}, \
+        "只认权威域表能对上的目录，双重前缀目录应被忽略"
 
 

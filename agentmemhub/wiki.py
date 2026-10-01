@@ -509,21 +509,20 @@ def _rebuild_l2_manifest(l2: Path, db: str, *, src_dir: str = "") -> dict[str, A
     与实时路的差别只是"从哪算"：实时路从本轮内存里的编译结果算，这里从磁盘上的
     页面 json 算 —— **口径一致**（都是"这些输入确实编译出来了"）。不刷它的话，
     下轮 `align` 仍认为这批数据是脏的，会重复提交、重复付费。
+
+    ⚠️ **域名必须走 `_domain_dir_map()`（权威域表 + slug 反查）**，绝不能读各域
+    `index.md` 的首行：老产物的首行是**目录名**，照它定域名会造出 18 个"假域名"
+    写进 manifest，下一轮 `domain_map` 会把它当真域 → 又新建一套重复目录
+    （2026-10-01 实测：manifest 从 18 个域涨到 21 个，产物里出现
+    `20-04-AgentMemHub-记忆系统` 这种双重前缀目录）。
     """
+    import wiki_aggregate as wa
+
+    dir_of = wa._domain_dir_map(l2)         # 权威域名 → 磁盘目录名
     dom_out: dict[str, dict[str, Any]] = {}
     n_pages = 0
-    for d in (sorted(l2.iterdir()) if l2.is_dir() else []):
-        if not d.is_dir() or d.name.startswith(".") or not d.name[:1].isdigit():
-            continue
-        idx = d / "index.md"
-        name = ""
-        if idx.exists():
-            try:
-                name = idx.read_text(encoding="utf-8").splitlines()[0].lstrip("#").strip()
-            except Exception:               # noqa: BLE001
-                name = ""
-        if not name:
-            continue
+    for name, dirname in dir_of.items():
+        d = l2 / dirname
         files: set[str] = set()
         mids: set[int] = set()
         cnt = 0
@@ -544,7 +543,7 @@ def _rebuild_l2_manifest(l2: Path, db: str, *, src_dir: str = "") -> dict[str, A
                 if s[:1] == "m" and s[1:].isdigit():
                     mids.add(int(s[1:]))
         if cnt:
-            dom_out[name] = {"dir": d.name, "pages": cnt, "pages_source": "l2",
+            dom_out[name] = {"dir": dirname, "pages": cnt, "pages_source": "l2",
                              "l1_files": sorted(files), "mids": sorted(mids)}
             n_pages += cnt
     mf2 = wm.build_manifest("l2", db, extra={"src_dir": src_dir,
