@@ -398,11 +398,52 @@ def _check_and_run(*, hook: str, force: bool = False) -> dict[str, Any]:
         return _run_locked(hook=hook, force=force)
 
 
+def _harvest_gate(*, l1: Path, l2: Path, db: str) -> dict[str, Any]:
+    """先收割异步任务，并回答"队列里还有在飞的吗"。**旁路，永不抛**。
+
+    这条闸解决一个具体的重复付费：离线批次**正在编译的域**，实时路径会**重新编译
+    一遍**（结果一致，但白花一次实时的钱）。而队列空时（实时模式恒如此）
+    `harvest()` 是**零成本立即返回** —— 所以它对实时**毫无影响**。这就是两条通道
+    互不打架的全部机制，不需要额外的"模式"状态。
+    """
+    try:
+        from agentmemhub import task_queue, wiki_batch
+        r = task_queue.harvest(
+            l2, lambda: wiki_batch.make_harvester(l1=l1, l2=l2, db=db))
+        pend = int(r.get("pending") or 0)
+        # `locked` 时 pending 未知（别的进程正在收割）→ 保守视为"忙"，不提交实时
+        return {"action": r.get("action"), "pending": pend,
+                "busy": pend > 0 or r.get("action") == "locked"}
+    except Exception as e:                  # noqa: BLE001 —— 闸门坏了绝不能挡住实时
+        return {"action": "error",
+                "error": "%s: %s" % (type(e).__name__, str(e)[:160]), "busy": False}
+
+
 def _run_locked(*, hook: str, force: bool = False) -> dict[str, Any]:
     """持锁后的判定与执行（主体）。"""
     from agentmemhub import wiki
     l1, l2, db = _targets()
     cfg = get_effective_config()
+
+    # **先收割异步任务；队列非空就不提交实时更新**（详见 `_harvest_gate`）。
+    # 放在 `align()` 之前还有个小好处：队列非空时省掉一次没用的对齐查询。
+    gate = _harvest_gate(l1=l1, l2=l2, db=db)
+    if gate.get("busy"):
+        state = _load_state()
+        reasons = ["离线批次在飞（%d 个任务）—— 只收割，不提交实时更新"
+                   % gate.get("pending", 0)]
+        # 判定要留痕（与其它"没跑"的路径一致：回答"为什么没触发"）
+        try:
+            from agentmemhub.logs import audit_wiki
+            audit_wiki({"event": "trigger_check", "hook": hook,
+                        "should_run": False, "reasons": reasons, "due_slots": [],
+                        "dirty": 0, "last_update_at": state.get("last_update_at"),
+                        "harvest": gate.get("action")})
+        except Exception:                   # noqa: BLE001
+            pass
+        return {"checked": True, "hook": hook, "should_run": False,
+                "reasons": reasons, "dirty": 0, "harvest": gate,
+                "last_update_at": state.get("last_update_at")}
 
     a = wiki.align(l1, "l1", db)
     s = a.get("stages", {}).get("l1", {})

@@ -173,6 +173,56 @@ def finish(out: "Path | str", job: BatchJob, reason: str = "") -> None:
                             if not j.voided and j.batch_id != job.batch_id])
 
 
+# ---------------------------------------------------------------------------
+# 通用收割基础设施（`agentmemhub/task_queue.py`）的**通道适配器**
+# ---------------------------------------------------------------------------
+
+class _OfflineHarvester:
+    """把离线队列接成 `task_queue.Harvester`（只实现那两个方法）。
+
+    **适配器的存在本身就是解耦的证据**：`task_queue` 只要求 `pending()` /
+    `harvest()`，完全不知道 `batch_id` / `items` / `members` 这些东西。
+    """
+
+    def __init__(self, *, l1: Path, l2: Path, db: str, client, runner):
+        self.l1, self.l2, self.db = Path(l1), Path(l2), db
+        self.client, self.runner = client, runner
+
+    def pending(self) -> list[Any]:
+        """在飞任务（空列表 = 空闲 ⇒ 通用层零成本退出、连厂商都不查）。"""
+        return [j for j in load_state(self.l2 / STATE_NAME) if not j.voided]
+
+    def harvest(self, *, now: float) -> dict[str, Any]:
+        """回读并**推进一段**（复用 `wiki._offline_advance()` 的三段式状态机）。"""
+        from agentmemhub import wiki as _wiki
+        r = _wiki._offline_advance(l1=self.l1, l2=self.l2, db=self.db,
+                                   runner=self.runner, client=self.client,
+                                   deadline_s=0.0)
+        return dict(r) if r else {"step": "idle"}
+
+
+def make_harvester(*, l1: "Path | str", l2: "Path | str", db: str = "",
+                   client=None, runner=None) -> Optional["_OfflineHarvester"]:
+    """装配离线通道的收割器；**没配 `llm_batch.api_key` 时返回 `None`**
+    （通用层据此返回 `no_channel`，连队列都不读）。
+
+    凭据一律从配置读（不硬编码），与 CLI 的 `batch-run` 走同一套装配逻辑。
+    """
+    if client is None:
+        from agentmemhub.config import config
+        from agentmemhub.llm_batch import OfflineRunner
+        cfg = (config().llm_batch or {})
+        if not str(cfg.get("api_key") or "").strip():
+            return None
+        from agentmemhub.batch_client import MiMoBatchClient
+        client = MiMoBatchClient(cfg)
+        runner = runner or OfflineRunner(uploader=client,
+                                         model=str(cfg.get("model") or ""),
+                                         stage="l2plan")
+    return _OfflineHarvester(l1=Path(l1), l2=Path(l2), db=db,
+                             client=client, runner=runner)
+
+
 def import_results(client, out: "Path | str", *, now: Optional[float] = None,
                    deadline_s: float = 0.0,
                    notify_fn: Optional[Notify] = None) -> dict[str, Any]:
