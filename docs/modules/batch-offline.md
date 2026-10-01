@@ -198,6 +198,9 @@ L2 有三个阶段，它们在"离线是否划算"上形状完全不同：
 | `对象不存在（batch_not_found）` | 文件是否超 30 天 | 过期即不可恢复，该批数据回待更新池重新提交 |
 | 任务一直 `validating` / `created` | 先看 `request_counts.total` | 闲时调度，提交后可能长时间不启动（**不是故障**）。⚠️ 但 `total=0` 且**数小时不动**要另判：2026-09-29 实测平台侧未调度时，连"官方文档逐字示例"的单条任务也一直 `validating`/`total=0`。**排除法两步**：① `client.download(input_file_id)` 把输入文件拉回来数行数 —— 与提交条数一致、且文件 `status=active`，即**数据无问题**（`request_counts` 是"开始执行后才填"，不是解析结果）；② 再建一个"官方示例逐字照抄"的单条对照任务，它也不动 → **平台侧问题**（去控制台查**现金余额**／联系平台支持），与我们无关 |
 | 任务 `expired` | `completion_window` 太小 | 调大窗口后重新提交（**不支持续跑**） |
+| 域目录成倍增生 / manifest 出现"假域名" | 域名来源 | 症状：`manifest_l2` 域数虚高（键就是**目录名本身**，如 `01-ADBController-与-Android-自动化`），产物里冒出 `20-04-AgentMemHub-记忆系统` 这种**双重前缀**目录。根因：老产物（渲染器早期版本）的域 `index.md` 首行写的是**目录名**，早年 `_dir_map_from_disk()` 拿它当域名 → 写进 manifest → 下轮 `domain_map` 当真域 → **又建一套目录（自激循环）**。修法：域名只认 `_domains.json`＋slug 反查（`_domain_dir_map()`），**对不上就不收**；`_rebuild_l2_manifest()` 与 `write_offline_stage()` 共用它。2026-10-01 根治 |
+| 验收报"未解析链接"但文件里明明没有 | Obsidian 缓存 | 大范围改名/删目录/批量改写之后，Obsidian 的元数据缓存**不会跟上** —— 直接问它 `unresolved` 仍会报旧路径（实测被 `.bak_`、`20-`、`.tmp_` 的旧路径刷屏）。**重启 Obsidian** 即归 0。判别法：linkfix 自己的报告 `ok` 覆盖全部链接、且 `dropped` 已去链 ⇒ 产物侧干净，问题在缓存 |
+| 链接验收报 `Command "unresolved" not found` | CLI 冷启动 / 参数 | ① **Obsidian 刚启动后第一次调用**常不认命令，第二次起正常（实测）；② 也确认过参数：`unresolved` 只支持 `total`/`counts`，**传 `verbose format=json` 会报"命令不存在"**（那是别的命令的参数）。两者都要按"**没法验**"处理，绝不能当成"有死链" |
 | 想确认某笔提交建成没 | `client.find_batch(name=…)` | 不要重试 `create()` |
 | 日志在哪 | `logs/wiki.log` | 事件：`batch_upload` / `batch_create` / `batch_retrieve` / `batch_list` / `batch_cancel` / `batch_download` |
 

@@ -47,7 +47,7 @@ def test_CLI路径按环境变量解析(monkeypatch):
 
 def test_vault名要名字不要路径():
     """CLI 的 `vault=` 要 **vault 名**；传路径会 "Vault not found."（实测踩过）。"""
-    assert obsidian.as_vault_name(r"D:\data\a\out_l2_mimo") == "out_l2_mimo"
+    assert obsidian.as_vault_name(r"X:\some\where\out_l2_mimo") == "out_l2_mimo"
     assert obsidian.as_vault_name("out_l2_mimo") == "out_l2_mimo"
     assert obsidian.as_vault_name("") == ""
 
