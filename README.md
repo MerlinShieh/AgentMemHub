@@ -335,6 +335,7 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 | `wiki --action failures\|retry --out DIR [--stage l1\|l2] [--src DIR_L1] [--workers N]` | **LLM Wiki 运维**：查看失败清单（按原因分类）/ 定向补跑失败项（只跑失败的，不全量重来）|
 | `wiki --action pending\|ignored\|drop\|restore` | **待更新记忆的查看与删除**：`pending` 列明细；`drop --ids a,b --mode soft`（不进 wiki、仍可召回）/ `--mode hard --confirm`（真删）；`ignored` 列已忽略；`restore` 取消 |
 | `wiki --action triggers\|trigger\|align\|update` | 触发器状态 / 手动触发 / 对齐审计（只读）/ 增量更新 |
+| `wiki --action batch-status\|batch-run\|batch-cancel\|batch-resubmit` | **离线批处理（MiMo Batch API，价格是实时的 50%）**：`batch-status` 查在飞任务（厂商状态 / 进度 / 已等多久 / 建议）；`batch-run` **推进一段**（无在飞→提交、结果到位→交下一段或落盘，状态机自判，**要跑两次：提交 + 落盘**）；`batch-cancel` 取消作废；`batch-resubmit` 平台侧 `validation_failed` 后用**原输入文件**重提。⚠️ **离线只能手动跑，没有自动通道**（实时通路的自动触发当前也关着：`overrides.enabled=false`），详见 [docs/modules/batch-offline.md](docs/modules/batch-offline.md) §3.4 |
 | `memory-log [--event write\|read] [--path mcp\|http\|distill\|cli] [--grep 词] [--json]` | **记忆操作事实流**：什么时候写了/读了什么记忆（含内容全文与来源路径）|
 | `snapshot [--snapshot-action create\|list\|restore]` | 快照与回滚（索引库整库 + wiki 产物目录）|
 | `llm-config [--json]` | **配置自检**：列出各 LLM 使用点（蒸馏/评分/Wiki 一级/二级）**最终生效**的配置，并标出每项是**继承**还是**覆盖** |
@@ -840,7 +841,7 @@ uv run python -m agentmemhub llm-config --json   # 机器读
 | [docs/recall-fusion.md](docs/recall-fusion.md) | 多路召回融合的机制、算法与评测数据 |
 | [docs/memory-distillation.md](docs/memory-distillation.md) | 记忆蒸馏：切片 / 合并 / 去重 / 投影全流程 |
 | [docs/llm-wiki.md](docs/llm-wiki.md) | LLM Wiki 两级编译、增量更新、触发器、失败兜底与格式修复 |
-| [docs/batch-offline-plan.md](docs/batch-offline-plan.md) | **离线批处理（Batch API）接入计划（进行中）**：决策记录、三段式流水线状态机、里程碑追踪与风险清单 |
+| [docs/batch-offline-plan.md](docs/batch-offline-plan.md) | **离线批处理（Batch API）接入计划**：决策记录 D1–D6、三段式流水线状态机、里程碑追踪与风险清单（**M0–M3 已落地并实测两轮端到端；剩 M4 开关 / M5 触发器 / M6 收尾**） |
 | [docs/model-selection.md](docs/model-selection.md) | LLM 模型选型与定价（含免费档与跑批注意事项） |
 | [docs/API.md](docs/API.md) | 对外契约：HTTP / MCP / CLI（含错误语义与长任务约定） |
 | [docs/EXAMPLES.md](docs/EXAMPLES.md) | SQL / CLI / Python 查询示例 |
