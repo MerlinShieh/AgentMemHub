@@ -20,6 +20,7 @@
 | --- | --- |
 | 不做召回排序与融合。wiki 只负责把 L2 页写进召回面（`units` 里 `source='wiki'` / `role='wiki'`），检索、六路通道、价值加权都在别处 | `agentmemhub/rag/`，见 [data-architecture.md](../data-architecture.md) |
 | 不做定时调度。没有后台定时任务、没有 daemon；`update.schedule` 是"写入时补触发已越过的时点档"，一天不写入就一天不触发 | `agentmemhub/wiki_triggers.py` |
+| **不做离线的自动触发**：离线批次（Batch API）**只能手动**跑 `wiki --action batch-run`（一次提交、一次落盘）。实时通路的自动触发是有的（三条规则），但**当前被 `logs/wiki_trigger_state.json` 的 `overrides.enabled=false` 关着**；让离线可自动需要计划里的 M4（`update_mode` 开关）+ M5（触发器改造），**均未开始** | [batch-offline.md](batch-offline.md) §3.4、[batch-offline-plan.md](../batch-offline-plan.md) §13 |
 | 不改蒸馏表内容。对 `distilled_memories` 的写入只有两处：软删除写 `wiki_ignore_at`、`drop(mode="hard")` 真删 | `agentmemhub/wiki_pending.py` |
 | 不读源库。两条编译链路与审计都只读索引库（`sqlite3` `file:...?mode=ro`） | 索引库路径来自 `agentmemhub.rag.config.load_settings().index_db` |
 | 不处理"已进 wiki"记忆的删除（页面里的 `[m<id>]` 会变死引用，需要墓碑 + 引用重映射） | [memory-deletion.md](../memory-deletion.md)；`wiki_pending._filter_pending()` 会直接拒绝这类 id |

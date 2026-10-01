@@ -128,6 +128,40 @@ L2 有三个阶段，它们在"离线是否划算"上形状完全不同：
 要恢复"两段都离线"：`wiki.update(..., offline_plan=True)`（保留该能力）。
 代码落点：`wiki_aggregate.run()` 在 ③ 编译阶段前判 `args.offline_compile_runner`。
 
+### 3.4 当前怎么运行：**离线只能手动，没有自动通道**（2026-10-01 核对）
+
+这是**现状**，不是设计意图 —— 原计划让离线可自动的是 **M4**（`wiki.update_mode:
+realtime|offline` 配置开关）+ **M5**（触发器改造），两者**都未开始**。
+
+| 通道 | 现在能自动跑吗 | 怎么触发 |
+|---|---|---|
+| **实时更新** | ❌ **不会**（自动触发器被关） | 手动：`wiki --action update`，或 `wiki --action trigger --force` |
+| **离线更新** | ❌ **完全没有自动通道** | 手动：`wiki --action batch-run`（**要跑两次**：第一次提交、第二次落盘） |
+
+**为什么离线没有自动通道**：触发器（`wiki_triggers.py:444`）调的是
+`wiki.update(l1_dir=…, l2_dir=…, db=…)` —— **不带任何离线参数**，
+`offline_client` / `offline_runner` 只由 CLI（`wiki --action batch-run`）注入。
+
+**当前自动触发为什么是关的**：`logs/wiki_trigger_state.json` 的
+`overrides.enabled = false`（2026-09-29 为冻结库、避免与离线批次打架而设；
+优先级高于 yaml，改完无需重启）。核对命令：
+
+```bash
+uv run python -m agentmemhub wiki --action triggers   # 看 enabled / last_update_at / in_progress
+```
+
+**手动运维的完整节奏**（每一步都是幂等的，重复跑不会重复付费）：
+
+```bash
+wiki --action batch-run      # 推进一段：无在飞→提交；结果到位→交下一段/落盘
+wiki --action batch-status   # 只读：厂商状态 / 进度 / 已等多久 / 建议动作
+wiki --action batch-resubmit # 平台侧 validation_failed / expired 后，用原输入文件重提
+wiki --action batch-cancel   # 取消并作废所有在飞任务（域回待更新池）
+```
+
+> ⚠️ 在飞期间**别手动跑实时更新**（`--action update` / `trigger --force`）：L2 基线
+> 故意未刷新，实时路径会重新编译同一批域 —— 结果一致但**白花一次实时的钱**。
+
 ---
 
 ## 4. 数据流与不变量
