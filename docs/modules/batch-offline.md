@@ -130,25 +130,28 @@ L2 有三个阶段，它们在"离线是否划算"上形状完全不同：
 
 ### 3.4 当前怎么运行：**离线只能手动，没有自动通道**（2026-10-01 核对）
 
-这是**现状**，不是设计意图 —— 原计划让离线可自动的是 **M4**（`wiki.update_mode:
-realtime|offline` 配置开关）+ **M5**（触发器改造），两者**都未开始**。
+> **2026-10-01 更新：离线已经有自动通道了** —— 但不是定时轮询，而是**事件驱动的
+> 惰性收割**（详见本节末尾）。原计划让离线自动的 M4/M5 因此不必做全。
 
-| 通道 | 现在能自动跑吗 | 怎么触发 |
+| 触发点 | 位置 | 说明 |
 |---|---|---|
-| **实时更新** | ❌ **不会**（自动触发器被关） | 手动：`wiki --action update`，或 `wiki --action trigger --force` |
-| **离线更新** | ❌ **完全没有自动通道** | 手动：`wiki --action batch-run`（**要跑两次**：第一次提交、第二次落盘） |
+| MCP 启动 | `mcp_server.main()` 起 daemon 线程 | 每次开 DSH 都会检查一次 |
+| 写入记忆 / 蒸馏收尾 | `wiki_triggers._run_locked()` → `_harvest_gate()` | 那条路径本来就会走 |
+| **任意 CLI 命令** | `cli.main()` 入口 | 跑 `stats` / `search` 也顺带检查（已实测） |
+| HTTP（可选） | `POST /api/wiki/batch/run` | 面板服务开着时可用 |
 
-**为什么离线没有自动通道**：触发器（`wiki_triggers.py:444`）调的是
-`wiki.update(l1_dir=…, l2_dir=…, db=…)` —— **不带任何离线参数**，
-`offline_client` / `offline_runner` 只由 CLI（`wiki --action batch-run`）注入。
+`harvest()` 的三层短路：**队列空 ⇒ 零成本立即返回**（连厂商都不查）→ 节流（默认
+300 秒，配置位 `wiki.batch.check_interval_s`）→ 跨进程锁。所以"顺手检查"对正常使用
+**没有可感成本**。
+
+**两条通道的唯一交互规则**：**队列非空 ⇒ 不提交实时更新** —— 否则离线正在编译的那批
+域会被实时路径重新编译一遍（结果一致，但白花一次实时的钱）；队列空时实时行为
+**一如既往**。
 
 **当前自动触发为什么是关的**：`logs/wiki_trigger_state.json` 的
-`overrides.enabled = false`（2026-09-29 为冻结库、避免与离线批次打架而设；
-优先级高于 yaml，改完无需重启）。核对命令：
-
-```bash
-uv run python -m agentmemhub wiki --action triggers   # 看 enabled / last_update_at / in_progress
-```
+`overrides.enabled = false`（2026-09-29 为冻结库所设；优先级高于 yaml，改完无需重启）。
+核对：`uv run python -m agentmemhub wiki --action triggers`。⚠️ 它只关**实时**那条自动
+链，**不影响上面的收割**。
 
 **手动运维的完整节奏**（每一步都是幂等的，重复跑不会重复付费）：
 

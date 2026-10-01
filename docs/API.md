@@ -336,7 +336,9 @@ wiki 第二级编译可以走厂商**离线批处理**（价格是实时的 50%�
 | 落盘轮 `scripts/wiki_aggregate.write_offline_stage()`（组装页面 → 写盘） | ✅ 就绪 |
 | 状态机编排（`wiki.update(offline_client=, offline_runner=)` 按在飞任务推进一段） | ✅ 就绪 |
 | **CLI**：`wiki --action batch-status`（查状态）· `batch-run`（推进一段）· `batch-cancel`（取消作废）· `batch-resubmit`（失败后用原输入文件重提） | ✅ 就绪（见 §五） |
-| **HTTP**：`/api/wiki/batch-*`；以及 `wiki.update_mode` 开关 | ⏳ **M4，未实现** |
+| **HTTP**（挂在**面板服务**上，不新增常驻进程）：`GET /api/wiki/batch/status`（只读）· `POST /api/wiki/batch/run`（长任务）· `POST /api/wiki/batch/cancel` · `POST /api/wiki/batch/resubmit` · `GET /api/wiki/batch/checks`（收割流水） | ✅ 就绪（2026-10-01） |
+| **自动收割**（事件驱动，无轮询）：MCP 启动 · 写入记忆 · 蒸馏收尾 · **任意 CLI 命令** → 顺手收割在飞任务 | ✅ 就绪（2026-10-01） |
+| `wiki.update_mode` 偏好开关（显式选实时/离线） | ⏳ **未做** —— 但"队列非空 ⇒ 不提交实时"这条**安全规则已就绪**，两条通道已互不打架 |
 
 > **现在怎么用**（2026-09-29 起 CLI 已就绪；**离线无自动通道**，只能手动）：
 >
