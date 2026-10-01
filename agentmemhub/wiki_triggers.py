@@ -426,6 +426,25 @@ def _check_and_run(*, hook: str, force: bool = False) -> dict[str, Any]:
         return _run_locked(hook=hook, force=force)
 
 
+def harvest_now() -> dict[str, Any]:
+    """**纯收割**一次异步任务（供 MCP 启动 / CLI 入口等顺手调用）。**永不抛**。
+
+    与 `_harvest_gate()` 的分工：那个是"更新前的闸门"（要回答"忙不忙"、据此决定
+    要不要提交实时更新）；这个是"谁都能调的纯收割"，不关心结论。
+
+    `_targets()` 自带**测试沙箱熔断**（`AGENTMEMHUB_TEST_SANDBOX`），所以测试里它
+    会直接抛错并被这里吞掉 —— 不会真去查厂商。
+    """
+    try:
+        from agentmemhub import task_queue, wiki_batch
+        l1, l2, db = _targets()
+        return task_queue.harvest(
+            l2, lambda: wiki_batch.make_harvester(l1=l1, l2=l2, db=db))
+    except Exception as e:                  # noqa: BLE001 —— 收割是旁路，永不抛
+        return {"action": "error",
+                "error": "%s: %s" % (type(e).__name__, str(e)[:160])}
+
+
 def _harvest_gate(*, l1: Path, l2: Path, db: str) -> dict[str, Any]:
     """先收割异步任务，并回答"队列里还有在飞的吗"。**旁路，永不抛**。
 

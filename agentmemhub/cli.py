@@ -1447,9 +1447,26 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _harvest_quietly() -> None:
+    """顺手**收割一次异步任务**（旁路：永不抛、不打印、不改命令行为）。
+
+    为什么挂在 CLI 入口而不是逐个 wiki 动作：离线批次完成时总要有人回读，而项目
+    刻意不做常驻轮询 —— 挂在"用户跑命令"这个天然事件上，**任何一条命令**都会顺带
+    检查。队列空时零成本立即返回（只读一次本地文件，不碰厂商），不影响启动时间。
+
+    放在 `parse_args()` **之后**：`--help` 会 `SystemExit`，不该有副作用。
+    """
+    try:
+        from agentmemhub import wiki_triggers
+        wiki_triggers.harvest_now()
+    except Exception:                       # noqa: BLE001 —— 旁路
+        pass
+
+
 def main() -> None:
     _force_utf8_stdio()
     args = build_parser().parse_args()
+    _harvest_quietly()
     if not args.command:
         # 无参数 = 进入交互式控制台（新用户入口）
         from agentmemhub.console import run_console

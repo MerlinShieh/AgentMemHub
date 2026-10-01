@@ -170,15 +170,26 @@ def test_factory_抛错不影响调用方(tmp_path):
     assert r["action"] == "error" and r["stage"] == "factory"
 
 
-def test_检测流水可读且按序追加(tmp_path):
+def test_检测流水只记有信息量的动作(tmp_path):
+    """**队列空不写流水** —— CLI 每次调用都会走到它，写进去会刷成噪音；
+    "上次查过、当时队列空"由 `harvest_state.json` 的 `last_action` 回答。"""
     h = _FakeHarvester(pend=[])
     tq.harvest(tmp_path, lambda: h)
-    tq.harvest(tmp_path, lambda: h)
+
+    assert tq.read_checks(tmp_path, limit=10) == [], "empty 不该进流水"
+    assert tq.load_state(tmp_path)["last_action"] == "empty", "但状态要记下来"
+
+
+def test_检测流水按序追加(tmp_path):
+    h = _FakeHarvester(pend=["t1"], result={"step": "landed"})
+    now = 1_000_000.0
+
+    tq.harvest(tmp_path, lambda: h, now=now, interval_s=0)
+    tq.harvest(tmp_path, lambda: h, now=now + 1, interval_s=0)
 
     rows = tq.read_checks(tmp_path, limit=10)
 
-    assert len(rows) == 2
-    assert [r["action"] for r in rows] == ["empty", "empty"]
+    assert [r["action"] for r in rows] == ["harvested", "harvested"]
     assert all("ts" in r and "at" in r for r in rows)
 
 

@@ -780,8 +780,29 @@ def run_http(host: str = "127.0.0.1", port: int = 9100) -> None:
     uvicorn.run(build_http_app(), host=host, port=port, log_level="info")
 
 
+def _harvest_probe() -> None:
+    """启动时顺手**收割一次异步任务**（daemon 线程，绝不阻塞 MCP 初始化）。
+
+    离线批次是异步的（等厂商 18 分钟 ~ 24 小时），完成后总要有人回读 + 落盘。项目
+    刻意**不做常驻轮询、没有 daemon**，所以把它挂在"进程启动"这种天然事件上 ——
+    用户每次开 DSH 都会顺带检查一次。队列空时它零成本立即返回（只读一次本地文件）。
+
+    异常一律吞掉：收割是旁路，绝不能影响 MCP 的启动与响应。
+    """
+    try:
+        from agentmemhub import wiki_triggers
+        wiki_triggers.harvest_now()
+    except Exception:                       # noqa: BLE001 —— 旁路
+        pass
+
+
 def main() -> None:
     """stdio 入口（python -m agentmemhub mcp_server / console script）。"""
+    # 用局部导入而不是模块级别名：`mcp_server` 里的 `_th` 只在别的函数内部导入过，
+    # 模块级并没有这个名字 —— 而 `tests/test_console.py` 有一条"包内不得有未定义
+    # 全局名"的静态检查会（正确地）拦下它。
+    import threading
+    threading.Thread(target=_harvest_probe, daemon=True).start()
     run_stdio()
 
 

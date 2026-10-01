@@ -103,3 +103,52 @@ def test_没配凭据时闸门放行(_isolated, monkeypatch):
     gate = wt._harvest_gate(l1=_isolated, l2=_isolated, db=":memory:")
 
     assert gate["action"] == "no_channel" and gate["busy"] is False
+
+
+# ---------------------------------------------------------------------------
+# 接线：MCP 启动 / CLI 入口
+# ---------------------------------------------------------------------------
+
+def test_harvest_now_在测试沙箱里被熔断():
+    """`_targets()` 自带**测试沙箱熔断** ⇒ 测试里绝不会真去查厂商（更不会计费）。"""
+    r = wt.harvest_now()
+
+    assert r["action"] == "error"
+    assert "测试环境" in (r.get("error") or ""), \
+        "应被 `AGENTMEMHUB_TEST_SANDBOX` 熔断拦住（不是真去请求）"
+
+
+def test_MCP启动钩子吞掉一切异常(monkeypatch):
+    """收割是旁路：它炸了也**绝不能**影响 MCP 启动。"""
+    from agentmemhub import mcp_server
+
+    def boom():
+        raise RuntimeError("收割炸了")
+
+    monkeypatch.setattr("agentmemhub.wiki_triggers.harvest_now", boom)
+
+    mcp_server._harvest_probe()             # 不该抛
+
+
+def test_CLI入口会顺手收割(monkeypatch):
+    """挂 CLI 入口的意义：**任何一条命令**都会顺带检查一次在飞任务。"""
+    from agentmemhub import cli
+
+    seen = []
+    monkeypatch.setattr("agentmemhub.wiki_triggers.harvest_now",
+                        lambda: seen.append(1) or {"action": "empty"})
+
+    cli._harvest_quietly()
+
+    assert seen == [1]
+
+
+def test_CLI收割失败不影响命令(monkeypatch):
+    from agentmemhub import cli
+
+    def boom():
+        raise RuntimeError("炸")
+
+    monkeypatch.setattr("agentmemhub.wiki_triggers.harvest_now", boom)
+
+    cli._harvest_quietly()                  # 不该抛

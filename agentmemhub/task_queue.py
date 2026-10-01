@@ -226,7 +226,7 @@ def harvest(out: "Path | str", factory: Callable[[], Optional[Harvester]], *,
         return _log(out, now, "error", error=err, stage="factory")
 
     if h is None:
-        return _log(out, now, "no_channel")
+        return {"action": "no_channel"}
 
     # ② **队列空 ⇒ 立即返回**：零成本、零副作用。
     #    这条是"实时更新不受影响"的全部根据 —— 实时是同步的，队列恒空。
@@ -241,7 +241,10 @@ def harvest(out: "Path | str", factory: Callable[[], Optional[Harvester]], *,
         st["consecutive_errors"] = 0
         st.pop("next_check_at", None)
         save_state(out, st)
-        return _log(out, now, "empty", pending=0)
+        # **不写检测流水**：队列空是最常见的路径（CLI 每次调用都会走到），写进去只
+        # 会把流水刷成噪音 —— 而"上次查过、当时队列空"已经由 `harvest_state.json`
+        # 的 `last_action` 回答了。流水只留**有信息量**的动作。
+        return {"action": "empty", "pending": 0}
 
     # ③ 退避：上一轮出错过 → 到点之前不再戳厂商
     nxt = float(st.get("next_check_at") or 0.0)
