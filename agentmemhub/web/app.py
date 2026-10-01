@@ -1412,6 +1412,77 @@ def create_app(db_path: Path | None = None):
         from agentmemhub import wiki_triggers
         return JSONResponse(wiki_triggers.run_manual(force=force))
 
+    # ---- 离线批处理（MiMo Batch API）----
+    # 装配与动作都在 `agentmemhub/batch_ops.py`（与 CLI 共用），这里只做"HTTP 语义 +
+    # 渲染"。⚠️ `batch-run` 是**长任务**（落盘含页面投影 + linkfix，实测 90 秒级）→
+    # 走后台任务设施，调用方轮询 `/api/admin/job`。
+    @app.get("/api/wiki/batch/status", summary="离线批处理：在飞任务状态（只读）")
+    def api_wiki_batch_status():
+        """在飞任务 + 厂商侧状态 + 进度 + `decide()` 建议。**只读**，不改状态。"""
+        from agentmemhub import batch_ops
+        try:
+            return JSONResponse(batch_ops.status())
+        except batch_ops.BatchOpsError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
+    @app.post("/api/wiki/batch/run", summary="离线批处理：推进一段（长任务）")
+    def api_wiki_batch_run(
+            deadline: float = Query(default=0.0, ge=0,
+                                    description="等待厂商的预算秒数（0=不限时）"),
+            offline_plan: bool = Query(default=False,
+                                       description="细分也走离线（两段式）")):
+        """**推进一段**：无在飞 → 提交轮；结果到位 → 交下一段 / 落盘。
+
+        状态机自己判断该做哪一段，所以本接口可反复调（幂等、不会重复付费）。
+        """
+        from agentmemhub import batch_ops, logs
+        from agentmemhub.web import tasks
+        try:
+            # 前置条件（目录 + 凭据）**在起任务之前**校验：否则只能得到"任务失败"
+            batch_ops.precheck()
+        except batch_ops.BatchOpsError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        name = "离线批处理：推进一段"
+        job = tasks.submit(name, _logged_task(
+            name, lambda: batch_ops.run(deadline_s=deadline,
+                                        offline_plan=offline_plan)))
+        if job is None:
+            raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
+        logs.record("提交任务：%s" % name)
+        return JSONResponse({"job": job})
+
+    @app.post("/api/wiki/batch/cancel", summary="离线批处理：取消并作废所有在飞任务")
+    def api_wiki_batch_cancel():
+        """取消厂商侧任务并作废本地标记；覆盖的域回到待更新池。"""
+        from agentmemhub import batch_ops
+        try:
+            return JSONResponse(batch_ops.cancel())
+        except batch_ops.BatchOpsError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
+    @app.post("/api/wiki/batch/resubmit",
+              summary="离线批处理：用原输入文件重提已终局任务")
+    def api_wiki_batch_resubmit():
+        """平台侧 `validation_failed` / `expired` 后，用**原输入文件**重建任务 ——
+        不重跑 L1 编译与归域（那会白花一次实时的钱）。"""
+        from agentmemhub import batch_ops
+        try:
+            return JSONResponse(batch_ops.resubmit())
+        except batch_ops.BatchOpsError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
+    @app.get("/api/wiki/batch/checks", summary="离线批处理：检测流水（排障）")
+    def api_wiki_batch_checks(limit: int = Query(default=50, ge=1, le=500)):
+        """每次收割的流水（何时、跳过原因、结果、耗时）。
+
+        队列快照只有"现在"、没有"历史" —— "上次什么时候查的、为什么没动"靠它。
+        """
+        from agentmemhub import batch_ops
+        try:
+            return JSONResponse(batch_ops.checks(limit=limit))
+        except batch_ops.BatchOpsError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
     @app.get("/api/snapshots", summary="列出可回滚快照（索引库 + wiki 产物）")
     def api_snapshots_list():
         """当前全部快照（最新在前）：id、时间、原因、包含部件、大小。

@@ -1087,112 +1087,82 @@ def cmd_wiki(args) -> int:
     return 0
 
 
-def _batch_status(client, l2: "Path") -> int:
-    """列出在飞的离线任务（**只读**：查状态、进度、已等多久、建议动作）。"""
-    import time as _t
-    from pathlib import Path as _P
-
-    from agentmemhub.llm_batch import STATE_NAME, decide, load_state
-
-    l2 = _P(l2)
-    jobs = [j for j in load_state(l2 / STATE_NAME) if not j.voided]
-    if not jobs:
-        print("没有在飞的离线任务（%s）" % (l2 / STATE_NAME))
-        print("用 `agentmemhub wiki --action batch-run` 发起一轮离线更新")
-        return 0
-
-    now = _t.time()
-    print("在飞的离线任务（%d 个）：" % len(jobs))
-    for j in jobs:
-        try:
-            b = client.retrieve(j.batch_id) or {}
-        except Exception as e:              # noqa: BLE001 —— 查不到就如实说
-            print("  %s：查状态失败（%s）" % (j.batch_id, str(e)[:140]))
-            continue
-        st = str(b.get("status") or "").lower()
-        j.provider_status = st
-        cnt = b.get("request_counts") or {}
-        done = cnt.get("completed", len(j.results))
-        total = cnt.get("total", len(j.items))
-        print("  %s  stage=%-9s 厂商状态=%-11s 进度=%s/%s  已等 %.0f 分钟  建议=%s"
-              % (j.batch_id, j.stage, st or "?", done, total,
-                 (now - j.submitted_at) / 60.0, decide(j, now=now)))
-        if b.get("output_file_id"):
-            print("     成功文件：%s" % b["output_file_id"])
-        if b.get("error_file_id"):
-            print("     错误文件：%s" % b["error_file_id"])
-    print("\n下一步：`agentmemhub wiki --action batch-run`（状态机会自己判断推进哪一段）")
-    return 0
-
-
 def _cmd_wiki_batch(args) -> int:
-    """离线批处理（MiMo Batch API）：查状态 / 推进一段 / 取消作废。
+    """离线批处理（MiMo Batch API）：查状态 / 推进一段 / 取消作废 / 重提。
 
     与实时路径的关系：请求怎么切分、编号怎么映射、页面怎么组装**全部共用**
     （见 `scripts/wiki_aggregate.py`），差别只在"谁执行、什么时候执行"。
 
     `batch-run` 之所以是一个动作而不是"提交 / 回读"两个：状态机会自己判断该做
-    哪一段 —— 无在飞就提交、细分结果到了就交编译、编译结果到了就落盘。
+    哪一段 —— 无在飞就提交、结果到了就交下一段或落盘。
+
+    **装配与动作都在 `agentmemhub/batch_ops.py`**（CLI 与 HTTP 面板共用），
+    这里只负责取参与渲染。
     """
     import json as _j
-    from pathlib import Path as _P
 
-    from agentmemhub import config as hub_config
-    from agentmemhub import wiki, wiki_batch
-    from agentmemhub.batch_client import MiMoBatchClient
-    from agentmemhub.llm_batch import STATE_NAME, OfflineRunner, load_state
+    from agentmemhub import batch_ops
 
-    conf = hub_config.config()
-    cfg = conf.llm_batch
-    l1 = args.l1 or (conf.wiki.get("out_l1") or "").strip()
-    l2 = args.l2 or (conf.wiki.get("out_l2") or "").strip()
-    if not (l1 and l2):
-        print("需要 --l1 / --l2，或在配置里设 wiki.out_l1 / wiki.out_l2")
-        return 2
-    if not str(cfg.get("api_key") or "").strip():
-        print("未配置 llm_batch.api_key —— 离线通道用不了（见 docs/modules/batch-offline.md）")
-        return 2
-    client = MiMoBatchClient(cfg)
-    l2p = _P(l2)
+    batch_ops.set_paths(args.l1, args.l2)   # CLI 的 --l1/--l2 覆盖（面板走配置）
 
-    if args.action == "batch-resubmit":
-        done = wiki_batch.resubmit_terminal(client, l2p)
-        if not done:
-            print("没有需要重提的已终局任务（还在飞的任务不会被重建）")
+    try:
+        if args.action == "batch-status":
+            r = batch_ops.status()
+            if not r["n"]:
+                print("没有在飞的离线任务 —— 用 `agentmemhub wiki --action batch-run` 发起一轮")
+                return 0
+            print("在飞的离线任务（%d 个）：" % r["n"])
+            for row in r["inflight"]:
+                cnt = row.get("counts") or {}
+                print("  %s  stage=%-9s 厂商状态=%-11s 进度=%s/%s  已等 %.0f 分钟  建议=%s"
+                      % (row["batch_id"], row["stage"], row["provider_status"] or "?",
+                         cnt.get("completed", row["results"]),
+                         cnt.get("total", row["items"]),
+                         row["waited_s"] / 60.0, row["suggestion"]))
+                if row.get("output_file_id"):
+                    print("     成功文件：%s" % row["output_file_id"])
+                if row.get("error_file_id"):
+                    print("     错误文件：%s" % row["error_file_id"])
+                if row.get("error"):
+                    print("     ⚠️ 查状态失败：%s" % row["error"])
+            print("\n下一步：`agentmemhub wiki --action batch-run`"
+                  "（状态机会自己判断推进哪一段）")
             return 0
-        for d in done:
-            print("  重提 %s：%s → %s（%d 条请求，复用输入文件 %s）"
-                  % (d["stage"], d["old"], d["new"], d["n_requests"],
-                     d["input_file_id"]))
-        print("\n用原输入文件重建，**不重跑 L1/归域**（不额外花实时的钱）")
-        _cli_log("wiki batch-resubmit：重建 %d 个任务" % len(done))
-        return 0
 
-    if args.action == "batch-status":
-        return _batch_status(client, l2p)
-
-    if args.action == "batch-cancel":
-        jobs = [j for j in load_state(l2p / STATE_NAME) if not j.voided]
-        if not jobs:
-            print("没有在飞的离线任务")
+        if args.action == "batch-cancel":
+            r = batch_ops.cancel()
+            if not r["cancelled"]:
+                print("没有在飞的离线任务")
+                return 0
+            for d in r["cancelled"]:
+                print("  已取消并作废：%s（%d 个域回到待更新池）"
+                      % (d["batch_id"], d["domains"]))
+            for e in r["errors"]:
+                print("  取消失败（本地标记仍作废）：%s —— %s"
+                      % (e["batch_id"], e["error"]))
+            _cli_log("wiki batch-cancel：作废 %d 个离线任务" % len(r["cancelled"]))
             return 0
-        for j in jobs:
-            try:
-                client.cancel(j.batch_id)
-            except Exception as e:          # noqa: BLE001 —— 取消失败也要作废本地标记
-                print("  取消 %s 失败（仍作废本地标记）：%s" % (j.batch_id, str(e)[:120]))
-            n = len(j.domains())
-            wiki_batch.finish(l2p, j, "手动取消")
-            print("  已取消并作废：%s（%d 个域回到待更新池）" % (j.batch_id, n))
-        _cli_log("wiki batch-cancel：作废 %d 个离线任务" % len(jobs))
-        return 0
 
-    # batch-run：推进一段
-    runner = OfflineRunner(uploader=client, model=str(cfg.get("model") or ""),
-                           stage="l2plan")
-    res = wiki.update(l1_dir=l1, l2_dir=l2, db=args.db, workers=args.workers,
-                      offline_client=client, offline_runner=runner,
-                      offline_deadline_s=float(getattr(args, "deadline", 0) or 0))
+        if args.action == "batch-resubmit":
+            done = batch_ops.resubmit()["resubmitted"]
+            if not done:
+                print("没有需要重提的已终局任务（还在飞的任务不会被重建）")
+                return 0
+            for d in done:
+                print("  重提 %s：%s → %s（%d 条请求，复用输入文件 %s）"
+                      % (d["stage"], d["old"], d["new"], d["n_requests"],
+                         d["input_file_id"]))
+            print("\n用原输入文件重建，**不重跑 L1/归域**（不额外花实时的钱）")
+            _cli_log("wiki batch-resubmit：重建 %d 个任务" % len(done))
+            return 0
+
+        # batch-run：推进一段
+        res = batch_ops.run(deadline_s=float(getattr(args, "deadline", 0) or 0),
+                            db=args.db, workers=args.workers)
+    except batch_ops.BatchOpsError as e:
+        print(str(e))
+        return 2
+
     print(_j.dumps(res, ensure_ascii=False, indent=2, default=str))
     step = res.get("step") or ""
     if not step:
