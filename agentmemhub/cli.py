@@ -1195,8 +1195,12 @@ def _cmd_wiki_batch(args) -> int:
                       offline_deadline_s=float(getattr(args, "deadline", 0) or 0))
     print(_j.dumps(res, ensure_ascii=False, indent=2, default=str))
     step = res.get("step") or ""
-    if not step and (res.get("l2") or {}).get("offline_submitted"):
-        step = "plan_submitted"
+    if not step:
+        # 走的是 `update()` 的正常流程（提交轮），标签要取**厂商那边的 stage**，
+        # 不能写死成 plan —— 默认"只离线编译"时它是 l2compile（2026-10-01 实测：
+        # 写死 plan_submitted 会把"提交了 250 条编译请求"说成细分，误导排查）。
+        sub = (res.get("l2") or {}).get("offline_submitted") or {}
+        step = ("submitted:%s" % sub.get("stage")) if sub.get("stage") else ""
     print("\n本次推进：%s" % (step or "(未推进)"))
     _cli_log("wiki batch-run → %s" % (step or "未推进"))
     return 0
