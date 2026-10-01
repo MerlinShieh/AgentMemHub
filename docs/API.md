@@ -335,16 +335,22 @@ wiki 第二级编译可以走厂商**离线批处理**（价格是实时的 50%�
 | 回读 + 第二段提交（`merge_plan_results()` / `submit_offline_compile()`） | ✅ 就绪 |
 | 落盘轮 `scripts/wiki_aggregate.write_offline_stage()`（组装页面 → 写盘） | ✅ 就绪 |
 | 状态机编排（`wiki.update(offline_client=, offline_runner=)` 按在飞任务推进一段） | ✅ 就绪 |
-| **CLI**：`wiki --action batch-status`（查状态）· `batch-run`（推进一段）· `batch-cancel`（取消作废） | ✅ 就绪（见 §五） |
+| **CLI**：`wiki --action batch-status`（查状态）· `batch-run`（推进一段）· `batch-cancel`（取消作废）· `batch-resubmit`（失败后用原输入文件重提） | ✅ 就绪（见 §五） |
 | **HTTP**：`/api/wiki/batch-*`；以及 `wiki.update_mode` 开关 | ⏳ **M4，未实现** |
 
-> **现在怎么用**（2026-09-29 起 CLI 已就绪）：
+> **现在怎么用**（2026-09-29 起 CLI 已就绪；**离线无自动通道**，只能手动）：
 >
 > ```bash
-> agentmemhub wiki --action batch-status   # 查在飞任务（只读）
-> agentmemhub wiki --action batch-run      # 推进一段（提交 / 交编译段 / 落盘，状态机自判）
-> agentmemhub wiki --action batch-cancel   # 取消并作废所有在飞任务
+> agentmemhub wiki --action batch-status     # 查在飞任务（只读）
+> agentmemhub wiki --action batch-run        # 推进一段（提交 / 交编译段 / 落盘，状态机自判）
+> agentmemhub wiki --action batch-cancel     # 取消并作废所有在飞任务
+> agentmemhub wiki --action batch-resubmit   # 平台侧 validation_failed 后用原输入文件重提
 > ```
+>
+> ⚠️ `batch-run` **要跑两次**（第一次提交、第二次落盘）；自动触发器调的是
+> `wiki.update(l1_dir=, l2_dir=, db=)`，**不带离线参数**，所以离线目前**没有**
+> 自动通道 —— 让离线可自动需要 M4（`update_mode` 开关）+ M5（触发器改造）。
+> 详见 [modules/batch-offline.md](modules/batch-offline.md) §3.4。
 >
 > 直连厂商（OpenAI Batch 兼容，需自备 API Key；`region` 段是 `-cn`）：
 >
