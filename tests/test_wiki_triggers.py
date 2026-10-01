@@ -29,8 +29,8 @@ def _tmp_state(tmp_path, monkeypatch):
     "已有更新在执行"）。这与之前的 `log_dir` / `_targets` 是同一类隔离缺陷。
     """
     f = tmp_path / "trigger_state.json"
-    monkeypatch.setattr(wiki_triggers, "STATE_FILE", f)
-    monkeypatch.setattr(wiki_triggers, "_LOCK_FILE", tmp_path / "update.lock")
+    monkeypatch.setattr(wiki_triggers, "state_path", lambda: f)
+    monkeypatch.setattr(wiki_triggers, "lock_path", lambda: tmp_path / "update.lock")
     yield f
 
 
@@ -279,7 +279,7 @@ def test_钩子_L1部分失败不打标记(_tmp_state, tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_单飞行_同进程内不重复取得(_tmp_state, tmp_path, monkeypatch):
-    monkeypatch.setattr(wiki_triggers, "_LOCK_FILE", tmp_path / "u.lock")
+    monkeypatch.setattr(wiki_triggers, "lock_path", lambda: tmp_path / "u.lock")
     with wiki_triggers._single_flight() as a:
         assert a is True
         with wiki_triggers._single_flight() as b:
@@ -290,8 +290,8 @@ def test_单飞行_同进程内不重复取得(_tmp_state, tmp_path, monkeypatch
 
 def test_单飞行_锁文件打不开时退化为不锁(_tmp_state, tmp_path, monkeypatch):
     """锁文件异常不能炸掉调用方的写入流程，也不能让 wiki 更新整体失效。"""
-    monkeypatch.setattr(wiki_triggers, "_LOCK_FILE",
-                        tmp_path / "不存在的目录" / "x" / "u.lock")
+    monkeypatch.setattr(wiki_triggers, "lock_path",
+                        lambda: tmp_path / "不存在的目录" / "x" / "u.lock")
     monkeypatch.setattr(wiki_triggers.Path, "mkdir",
                         lambda *a, **k: (_ for _ in ()).throw(OSError("磁盘只读")))
     with wiki_triggers._file_lock() as got:
@@ -306,13 +306,13 @@ def test_单飞行_其它进程持锁时取不到(_tmp_state, tmp_path, monkeypa
 
     root = Path(__file__).resolve().parents[1]
     lock = tmp_path / "u.lock"
-    monkeypatch.setattr(wiki_triggers, "_LOCK_FILE", lock)   # 两边必须同一个锁文件
+    monkeypatch.setattr(wiki_triggers, "lock_path", lambda: lock)   # 两边必须同一个锁文件
     code = (
         "import sys, time\n"
         "sys.path.insert(0, r'%s')\n"
         "from pathlib import Path\n"
         "from agentmemhub import wiki_triggers as t\n"
-        "t._LOCK_FILE = Path(r'%s')\n"
+        "t.lock_path = lambda: Path(r'%s')\n"
         "ctx = t._file_lock()\n"
         "assert ctx.__enter__() is True, 'child failed to lock'\n"
         "print('LOCKED', flush=True)\n"

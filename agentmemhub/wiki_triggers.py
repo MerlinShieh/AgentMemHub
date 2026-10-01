@@ -46,18 +46,46 @@ _RUN_LOCK = threading.Lock()
 #:
 #: 用**原子创建锁文件**（`O_CREAT|O_EXCL`）+ 内容写 PID/时间戳做跨进程互斥。
 #:
+#: 用**原子创建锁文件**（`O_CREAT|O_EXCL`）+ 内容写 PID/时间戳做跨进程互斥。
+#:
 #: 为什么不用 `msvcrt.locking` / `fcntl.flock`：实测在"追加模式打开 + 空文件先
 #: 写一字节再锁"这个用法下，**子进程持锁时父进程仍能拿到锁**（跨进程互斥没生效，
 #: 测试直接抓到了）。原子创建 + stale 判定语义明确、跨平台一致，代价是要自己
 #: 处理"进程崩溃留下锁文件"，所以写 PID/时间戳并在失效时抢占。
-_LOCK_FILE = Path("logs") / "wiki_update.lock"
-
+#:
 #: 锁的最大持有时长（秒）：update 跑大会话可能近一小时，给足 3 小时。
 #: 超过即视为失效锁 —— 崩溃残留不能永久挡住 wiki 更新。
 _LOCK_MAX_AGE = 3 * 3600
 
-#: 状态文件默认位置（logs/ 已忽略，状态不必入库）
-STATE_FILE = Path("logs") / "wiki_trigger_state.json"
+
+#: 触发状态文件与单飞锁的**真实路径**：惰性派生自 `logs.log_dir()`。
+#:
+#: 为什么必须惰性、且不能写成 `Path("logs")/…`（D-6，2026-10-01 根治）：
+#: 相对路径**跟随进程 CWD** ——
+#:   · MCP 进程与 CLI 进程的 CWD 可能不同 ⇒ 两边看到**不同的状态文件与锁**
+#:     （单飞行失效、触发额度各算一套）；
+#:   · 测试跑在项目根时更会**直接写进真实的生产状态文件**（实测：跑全量测试把
+#:     `last_update_at` 改成了当天，排查时误以为"有一次更新跑过"，白查一轮产物）。
+#: `logs.log_dir()` 会跟随 `logs` 配置（conftest 已把它指向临时目录，测试自动隔离）。
+def state_path() -> Path:
+    """触发状态文件的路径：**惰性派生自 `logs.log_dir()`**。
+
+    为什么不能写成常量 `Path("logs")/…`（D-6，2026-10-01 根治）：相对路径**跟随进程
+    CWD** —— MCP 与 CLI 的 CWD 可能不同（两边看到**不同的状态文件与锁**：单飞行失效、
+    触发额度各算一套）；测试跑在项目根时更会**写进真实生产状态文件**（实测：跑全量
+    测试把 `last_update_at` 改成当天，害我以为"真有一次更新跑过"，白查一轮产物）。
+
+    ⚠️ 也**不用**模块级 `__getattr__`（PEP 562）取巧：`tests/test_console.py` 有一条
+    "包内不得有未定义全局名"的静态检查，动态属性会让它（正确地）报错。
+    """
+    from agentmemhub.logs import log_dir
+    return Path(log_dir()) / "wiki_trigger_state.json"
+
+
+def lock_path() -> Path:
+    """跨进程单飞锁的路径（与状态文件同源、同样惰性，理由见 `state_path()`）。"""
+    from agentmemhub.logs import log_dir
+    return Path(log_dir()) / "wiki_update.lock"
 
 
 def _pid_alive(pid: int) -> bool:
@@ -97,7 +125,7 @@ def _pid_alive(pid: int) -> bool:
 def _lock_is_stale() -> bool:
     """锁文件是否已失效：持锁进程不在了，或超过最大持有时长。"""
     try:
-        parts = _LOCK_FILE.read_text(encoding="utf-8").split()
+        parts = lock_path().read_text(encoding="utf-8").split()
         pid, ts = int(parts[0]), float(parts[1])
     except Exception:                       # noqa: BLE001 —— 读不出来当失效
         return True
@@ -109,7 +137,7 @@ def _lock_is_stale() -> bool:
 def _take_lock() -> bool:
     """尝试原子创建锁文件；成功返回 True。"""
     try:
-        fd = os.open(_LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        fd = os.open(lock_path(), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         return False
     except OSError:
@@ -129,7 +157,7 @@ def _file_lock():
     也不能让 wiki 更新整体失效，更不能让异常炸掉调用方的写入流程。
     """
     try:
-        _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        lock_path().parent.mkdir(parents=True, exist_ok=True)
     except Exception:                       # noqa: BLE001
         yield True
         return
@@ -137,7 +165,7 @@ def _file_lock():
     if not got and _lock_is_stale():
         # 抢占失效锁：清掉后重试一次
         try:
-            _LOCK_FILE.unlink()
+            lock_path().unlink()
         except OSError:
             pass
         got = _take_lock()
@@ -146,7 +174,7 @@ def _file_lock():
     finally:
         if got:
             try:
-                _LOCK_FILE.unlink()
+                lock_path().unlink()
             except OSError:
                 pass
 
@@ -219,14 +247,14 @@ def _validate_schedule(schedule: Any) -> list[str]:
 
 def _load_state() -> dict[str, Any]:
     try:
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        return json.loads(state_path().read_text(encoding="utf-8"))
     except Exception:
         return {}
 
 
 def _save_state(state: dict[str, Any]) -> None:
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=1),
+    state_path().parent.mkdir(parents=True, exist_ok=True)
+    state_path().write_text(json.dumps(state, ensure_ascii=False, indent=1),
                           encoding="utf-8")
 
 
@@ -573,7 +601,7 @@ def status() -> dict[str, Any]:
             "last_error": state.get("last_error"),
         },
         "in_progress": in_progress,
-        "state_file": str(STATE_FILE),
+        "state_file": str(state_path()),
         "targets": targets,
     }
 
