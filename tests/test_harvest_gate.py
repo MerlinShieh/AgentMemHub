@@ -152,3 +152,109 @@ def test_CLI收割失败不影响命令(monkeypatch):
     monkeypatch.setattr("agentmemhub.wiki_triggers.harvest_now", boom)
 
     cli._harvest_quietly()                  # 不该抛
+
+
+# ---------------------------------------------------------------------------
+# 离线触发器：**离线优先、实时兜底**
+# ---------------------------------------------------------------------------
+
+def _fake_align(*a, **k):
+    """脏数据 5 条（≥ 任意阈值）且需要重编译。"""
+    return {"needs_recompile": True, "stages": {"l1": {"added_total": 5}}}
+
+
+def _batch_cfg(**kw):
+    base = {"enabled": True, "schedule": [], "dirty_memories": 1,
+            "first_write_daily": False}
+    base.update(kw)
+    return base
+
+
+def test_离线启用且命中时走离线(_isolated, monkeypatch):
+    """**离线优先**：两个通道都开时，离线命中就不再走实时。"""
+    monkeypatch.setattr(wt, "get_effective_batch_config", lambda: _batch_cfg())
+    seen = {"offline": 0, "realtime": 0}
+    monkeypatch.setattr(
+        wt, "_submit_offline",
+        lambda **k: seen.__setitem__("offline", seen["offline"] + 1)
+        or {"channel": "offline", "should_run": True})
+    monkeypatch.setattr("agentmemhub.wiki.align", _fake_align)
+    monkeypatch.setattr(
+        "agentmemhub.wiki.update",
+        lambda **k: seen.__setitem__("realtime", seen["realtime"] + 1) or {})
+
+    r = wt._run_locked(hook="write", force=False)
+
+    assert r["channel"] == "offline"
+    assert seen["offline"] == 1 and seen["realtime"] == 0, \
+        "离线命中后**不得**再走实时（否则同一批数据被两条通道各处理一次）"
+
+
+def test_离线不可用时回落到实时(_isolated, monkeypatch):
+    """**实时兜底**：离线开着、但凭据/目录没配好 ⇒ 回落实时，而不是什么都不做。"""
+    monkeypatch.setattr(wt, "get_effective_batch_config", lambda: _batch_cfg())
+    monkeypatch.setattr(wt, "_submit_offline", lambda **k: None)   # 通道不可用
+    monkeypatch.setattr("agentmemhub.wiki.align", _fake_align)
+    seen = []
+    monkeypatch.setattr("agentmemhub.wiki.update",
+                        lambda **k: seen.append(k) or {"l1": {}, "l2": {}})
+
+    r = wt._run_locked(hook="write", force=False)
+
+    assert len(seen) == 1, "离线不可用时必须回落到实时"
+    assert r.get("channel") != "offline"
+
+
+def test_离线未启用时走实时(_isolated, monkeypatch):
+    monkeypatch.setattr(wt, "get_effective_batch_config",
+                        lambda: _batch_cfg(enabled=False))
+    called = []
+    monkeypatch.setattr(wt, "_submit_offline",
+                        lambda **k: called.append("offline") or {})
+    monkeypatch.setattr("agentmemhub.wiki.align", _fake_align)
+    monkeypatch.setattr("agentmemhub.wiki.update", lambda **k: {"l1": {}, "l2": {}})
+
+    wt._run_locked(hook="write", force=True)
+
+    assert called == [], "离线关着就不该走离线"
+
+
+def test_force不会打开关着的离线通道(_isolated, monkeypatch):
+    """`--force` 只在**已启用的通道内**绕过规则 —— 不该把关着的离线通道打开，
+    否则一次手动强制就可能意外花掉离线批量的钱。"""
+    monkeypatch.setattr(wt, "get_effective_batch_config",
+                        lambda: _batch_cfg(enabled=False))
+    called = []
+    monkeypatch.setattr(wt, "_submit_offline",
+                        lambda **k: called.append("offline") or {})
+    monkeypatch.setattr("agentmemhub.wiki.align", _fake_align)
+    monkeypatch.setattr("agentmemhub.wiki.update", lambda **k: {"l1": {}, "l2": {}})
+
+    wt._run_locked(hook="write", force=True)
+
+    assert called == []
+
+
+def test_提交离线成功后打标记(_isolated, monkeypatch):
+    """提交成功要**消耗额度**（与实时共用同一套状态 = 一天一轮 wiki 更新），否则
+    每次写入都会重新提交同一个批次 —— 那是真花钱的。"""
+    import json
+    from datetime import datetime
+
+    from agentmemhub import batch_ops
+
+    monkeypatch.setattr(batch_ops, "run", lambda **k: {
+        "l2": {"offline_submitted": {"batch_id": "b1", "n_requests": 3,
+                                     "stage": "l2compile"}}})
+    sp = _isolated / "state.json"
+    monkeypatch.setattr(wt, "state_path", lambda: sp)
+
+    r = wt._submit_offline(hook="write", dirty=5, now=datetime.now(),
+                           state={}, reasons=["攒够脏记忆"], due_slots=["02:00"])
+
+    assert r["channel"] == "offline"
+    assert r["offline_submitted"]["batch_id"] == "b1"
+    st = json.loads(sp.read_text(encoding="utf-8"))
+    assert st.get("last_update_at"), "提交成功要打标记（否则会重复提交）"
+    assert st.get("fired"), "时点档也要记上（fired_today）"
+    assert "update_started_at" not in st, "收工要清掉'进行中'"

@@ -445,6 +445,77 @@ def harvest_now() -> dict[str, Any]:
                 "error": "%s: %s" % (type(e).__name__, str(e)[:160])}
 
 
+def get_effective_batch_config() -> dict[str, Any]:
+    """**离线触发器**的生效配置（`wiki.batch` 段，与实时的 `wiki.update` 并列）。
+
+    与 `get_effective_config()` 的差别：**不吃状态文件的 overrides** —— 那层覆盖是
+    实时规则的对外接口（`PUT /api/wiki/triggers`）的语义，离线配置改 yaml 即可
+    （它本来就低频，不值得再开一层运行时可改的覆盖）。
+    收割节流 `check_interval_s` 不参与触发判定，这里剔除。
+    """
+    from agentmemhub import config as hub_config
+    seg = dict((hub_config.config().wiki or {}).get("batch") or {})
+    seg.pop("check_interval_s", None)
+    return seg
+
+
+def _submit_offline(*, hook: str, dirty: int, now: datetime,
+                    state: dict[str, Any], reasons: list[str],
+                    due_slots: Optional[list[str]] = None) -> Optional[dict[str, Any]]:
+    """提交一轮**离线批次**。返回结果 dict；**通道不可用/失败时返回 `None`** ——
+    调用方据此回落到实时（这就是"实时兜底"的落地方式）。
+    """
+    t0 = time.time()
+    try:
+        from agentmemhub import batch_ops
+    except Exception as e:                  # noqa: BLE001 —— 装不上就当不可用
+        _audit({"event": "trigger_update_error", "hook": hook, "channel": "offline",
+                "error": "import batch_ops: %s" % str(e)[:200]})
+        return None
+
+    # 判定与开始都要留痕（与实时路径同一套事件，多一个 `channel` 字段）——
+    # 排查时"这次走的是哪条通道"必须一眼可见。
+    _audit({"event": "trigger_check", "hook": hook, "should_run": True,
+            "reasons": reasons, "due_slots": [], "dirty": dirty,
+            "channel": "offline", "last_update_at": state.get("last_update_at")})
+    _audit({"event": "trigger_update_start", "hook": hook, "reasons": reasons,
+            "dirty": dirty, "channel": "offline"})
+    _mark_started(now, hook)
+    try:
+        res = batch_ops.run()
+    except batch_ops.BatchOpsError as e:
+        # **凭据 / 目录没配好 ⇒ 返回 None 让调用方回落到实时**（"兜底"的意义所在）
+        _audit({"event": "trigger_update_error", "hook": hook, "channel": "offline",
+                "error": str(e)[:300], "fallback": "realtime"})
+        return None
+    except Exception as e:                  # noqa: BLE001 —— 其它失败如实返回，不打标记
+        err = "%s: %s" % (type(e).__name__, str(e)[:300])
+        _audit({"event": "trigger_update_error", "hook": hook, "channel": "offline",
+                "error": err, "seconds": round(time.time() - t0, 1)})
+        _mark_failed(err)
+        return {"checked": True, "hook": hook, "should_run": True,
+                "reasons": reasons, "dirty": dirty, "channel": "offline",
+                "updated": False, "error": err,
+                "seconds": round(time.time() - t0, 1)}
+
+    sub = ((res or {}).get("l2") or {}).get("offline_submitted") or {}
+    # 提交成功才打标记 —— 与实时路径**共用同一套状态**。语义是"**一天一轮 wiki
+    # 更新**，走哪条通道由优先级决定"；共用正是"离线优先"要的：离线跑过之后，
+    # 当天实时的时点档与首写档就不再触发。
+    _mark_fired(_load_state(), now, list(due_slots or []), hook)
+    _audit({"event": "trigger_update_end", "hook": hook, "channel": "offline",
+            "reasons": reasons, "dirty": dirty,
+            "seconds": round(time.time() - t0, 1), "updated": False,
+            "batch_id": sub.get("batch_id") or "",
+            "stage": sub.get("stage") or "",
+            "n_requests": sub.get("n_requests") or 0,
+            "n_domains": sub.get("n_domains") or 0,
+            "hints": (res or {}).get("hints") or []})
+    return {"checked": True, "hook": hook, "should_run": True, "reasons": reasons,
+            "dirty": dirty, "channel": "offline", "offline_submitted": sub,
+            "seconds": round(time.time() - t0, 1)}
+
+
 def _harvest_gate(*, l1: Path, l2: Path, db: str) -> dict[str, Any]:
     """先收割异步任务，并回答"队列里还有在飞的吗"。**旁路，永不抛**。
 
@@ -470,7 +541,8 @@ def _run_locked(*, hook: str, force: bool = False) -> dict[str, Any]:
     """持锁后的判定与执行（主体）。"""
     from agentmemhub import wiki
     l1, l2, db = _targets()
-    cfg = get_effective_config()
+    cfg = get_effective_config()            # 实时触发规则
+    bcfg = get_effective_batch_config()     # 离线触发规则（判定时优先）
 
     # **先收割异步任务；队列非空就不提交实时更新**（详见 `_harvest_gate`）。
     # 放在 `align()` 之前还有个小好处：队列非空时省掉一次没用的对齐查询。
@@ -497,6 +569,26 @@ def _run_locked(*, hook: str, force: bool = False) -> dict[str, Any]:
     dirty = (s.get("added_total") or 0) + (s.get("changed_total") or 0)
     state = _load_state()
     now = datetime.now()
+
+    # ① **离线优先**：离线触发器开着就先判它，命中即提交离线批次并返回。
+    #    两个都开 = "**离线优先、实时兜底**"；只开一个 = 纯某通道；都不开 = 全手动。
+    #    注意 `--force` 只在**已启用的通道内**绕过规则 —— 它不会把本来关着的离线
+    #    通道打开（否则一次手动强制就可能意外花掉离线批量的钱）。
+    if bool(bcfg.get("enabled", False)):
+        bverdict = ({"should_run": True, "reasons": ["手动强制"], "due_slots": []}
+                    if force else
+                    evaluate(now=now, dirty=dirty, has_dirty=a["needs_recompile"],
+                             hook=hook, cfg=bcfg, state=state))
+        if bverdict["should_run"]:
+            res = _submit_offline(hook=hook, dirty=dirty, now=now, state=state,
+                                  reasons=bverdict["reasons"],
+                                  due_slots=bverdict.get("due_slots"))
+            if res is not None:
+                return res
+            # 返回 None = 离线通道不可用（没配凭据 / 目录）→ **继续往下走实时**，
+            # 这正是"实时兜底"。
+
+    # ② 实时：离线没开 / 没命中 / 不可用时的路径（原行为，一字未改）
     verdict = ({"should_run": True, "reasons": ["手动强制"],
                 "due_slots": []} if force else
                evaluate(now=now, dirty=dirty, has_dirty=a["needs_recompile"],
