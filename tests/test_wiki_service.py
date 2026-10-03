@@ -211,6 +211,75 @@ def _page(out, rel, mids):
     f.write_text("测试页\n" + " ".join("[m%d]" % m for m in mids), encoding="utf-8")
 
 
+def _l2_page(out, dirname, stem, mids, files=()):
+    """造一个 L2 域页面 —— **json 才 `_rebuild_l2_manifest` 读的那份**。"""
+    d = out / dirname
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "index.md").write_text("# %s\n" % dirname.split("-", 1)[-1], encoding="utf-8")
+    (d / ("%s.md" % stem)).write_text(
+        "页\n" + " ".join("[m%d]" % m for m in mids), encoding="utf-8")
+    (d / ("%s.json" % stem)).write_text(_json.dumps({
+        "title": stem, "body": "正文 " + " ".join("[m%d]" % m for m in mids),
+        "sources": ["m%d" % m for m in mids],
+        "from_files": list(files)}, ensure_ascii=False), encoding="utf-8")
+
+
+def _l2_with_domain(tmp_path, members=(1,)):
+    out = tmp_path / "l2"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "_domains.json").write_text(
+        _json.dumps([{"name": "域A", "members": list(members)}], ensure_ascii=False),
+        encoding="utf-8")
+    return out
+
+
+def test_落盘轮_批次提交后新增的记忆不进基线(tmp_path):
+    """**离线异步的真实风险**（2026-10-03 用户提出）：
+
+    "提交时的快照"与"落盘时的库"之间隔了几小时甚至一天，期间新写入的记忆**没有被
+    这次编译覆盖**。若照"当前库"把它记进基线，它会被**静默掩盖** —— 下次增量更新
+    不再带上它，这条记忆**永远进不了 wiki**。实时通道没有这个问题（提交即落盘，
+    中间没有时间窗）。
+    """
+    # created_at：mid=1 → 1000（批次之前）；mid=2 → 1001（批次之后）
+    db = _mkdb(tmp_path, [(1, "a", "s1", "new", "h1"), (2, "a", "s1", "new", "h2")])
+    out = _l2_with_domain(tmp_path)
+    _l2_page(out, "01-域A", "001-页", [1], files=["a__s1.md"])
+    wiki._ensure_scripts_on_path()          # `_rebuild_l2_manifest` 要 import wiki_aggregate
+
+    mf = wiki._rebuild_l2_manifest(out, str(db), since=1000.5)
+
+    assert "1" in mf["inputs"], "批次前就存在、且被页面引用的输入要留在基线里"
+    assert "2" not in mf["inputs"], \
+        "**批次提交后新增**的输入不能被记成已编译（否则它永远进不了 wiki）"
+    assert mf["dropped_new_inputs"] == 1
+
+
+def test_落盘轮_不传since时保留全部(tmp_path):
+    """兼容旧行为：不传 `since` 就不做剔除（历史调用点/测试依赖这个语义）。"""
+    db = _mkdb(tmp_path, [(1, "a", "s1", "new", "h1"), (2, "a", "s1", "new", "h2")])
+    out = _l2_with_domain(tmp_path)
+    _l2_page(out, "01-域A", "001-页", [1])
+    wiki._ensure_scripts_on_path()
+
+    mf = wiki._rebuild_l2_manifest(out, str(db))
+
+    assert "1" in mf["inputs"] and "2" in mf["inputs"]
+
+
+def test_落盘轮_已被引用的输入即使晚于since也保留(tmp_path):
+    """双保险：`drop_ids` 会减去"磁盘产物确实引用"的集合 —— 已编译的绝不能被剔除，
+    否则基线漏掉它，下一轮会把它当"没编译过"重复提交。"""
+    db = _mkdb(tmp_path, [(1, "a", "s1", "new", "h1")])       # created_at = 1000
+    out = _l2_with_domain(tmp_path)
+    _l2_page(out, "01-域A", "001-页", [1])
+    wiki._ensure_scripts_on_path()
+
+    mf = wiki._rebuild_l2_manifest(out, str(db), since=1.0)   # since 远早于它
+
+    assert "1" in mf["inputs"], "被页面引用过的输入必须留下"
+
+
 def test_对齐_空目录给出明确空结果(tmp_path):
     db = _mkdb(tmp_path, [(1, "a", "s1", "new", "h1")])
     r = wiki.align(tmp_path / "out", db=str(db))

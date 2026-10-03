@@ -503,12 +503,39 @@ def _offline_ready(job, now: float, deadline_s: float) -> bool:
     return deadline_s > 0 and (now - job.submitted_at) >= deadline_s
 
 
-def _rebuild_l2_manifest(l2: Path, db: str, *, src_dir: str = "") -> dict[str, Any]:
+def _inputs_since(db: str, since: float) -> set[int]:
+    """`created_at > since` 的输入 id（**只读**；读不到就返回空集，保守不剔除）。
+
+    只按 `created_at` 判"新增"：`distilled_memories` **没有 `updated_at`**，而"内容
+    变更"不需要靠剔除兜底 —— 基线存的是**内容指纹**，内容一变指纹就变，下次 `diff`
+    自然认它是脏的 ✓。
+    """
+    try:
+        conn = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+        try:
+            return {int(r[0]) for r in conn.execute(
+                "SELECT id FROM distilled_memories WHERE created_at > ?",
+                (float(since),))}
+        finally:
+            conn.close()
+    except Exception:                       # noqa: BLE001 —— 读不到就不剔除
+        return set()
+
+
+def _rebuild_l2_manifest(l2: Path, db: str, *, src_dir: str = "",
+                         since: float = 0.0) -> dict[str, Any]:
     """按**磁盘产物**重建 L2 清单（离线落盘轮用）。
 
     与实时路的差别只是"从哪算"：实时路从本轮内存里的编译结果算，这里从磁盘上的
     页面 json 算 —— **口径一致**（都是"这些输入确实编译出来了"）。不刷它的话，
     下轮 `align` 仍认为这批数据是脏的，会重复提交、重复付费。
+
+    `since` = **批次提交时刻**。晚于它出现的输入（`created_at > since`）**一律不记入
+    基线**。为什么必须这样：离线是异步的 —— "提交时的快照"与"落盘时的库"之间隔了
+    几小时甚至一天（实测 18 分钟 ~ 24 小时），期间新写入的记忆**并没有被这次编译
+    覆盖**；若照"当前库"记进基线，它们会被**静默掩盖**（下次增量更新不再带上它们，
+    这些记忆永远进不了 wiki）。**实时通道没有这个问题** —— 它提交即落盘，中间没有
+    时间窗（用户 2026-10-03 提出的正是这个场景）。
 
     ⚠️ **域名必须走 `_domain_dir_map()`（权威域表 + slug 反查）**，绝不能读各域
     `index.md` 的首行：老产物的首行是**目录名**，照它定域名会造出 18 个"假域名"
@@ -520,6 +547,7 @@ def _rebuild_l2_manifest(l2: Path, db: str, *, src_dir: str = "") -> dict[str, A
 
     dir_of = wa._domain_dir_map(l2)         # 权威域名 → 磁盘目录名
     dom_out: dict[str, dict[str, Any]] = {}
+    keep: set[int] = set()                  # 磁盘产物里**确实被引用**的输入
     n_pages = 0
     for name, dirname in dir_of.items():
         d = l2 / dirname
@@ -545,10 +573,15 @@ def _rebuild_l2_manifest(l2: Path, db: str, *, src_dir: str = "") -> dict[str, A
         if cnt:
             dom_out[name] = {"dir": dirname, "pages": cnt, "pages_source": "l2",
                              "l1_files": sorted(files), "mids": sorted(mids)}
+            keep |= mids
             n_pages += cnt
-    mf2 = wm.build_manifest("l2", db, extra={"src_dir": src_dir,
-                                             "n_pages": n_pages,
-                                             "domains": dom_out})
+    # **批次期间新增的输入不许进基线**（详见 docstring）。已被页面引用的当然保留 ——
+    # 理论上"晚于 since"的不可能出现在产物里，这里做双保险。
+    drop_ids = (_inputs_since(db, since) - keep) if since > 0 else set()
+    mf2 = wm.build_manifest("l2", db, drop_ids=drop_ids or None,
+                            extra={"src_dir": src_dir, "n_pages": n_pages,
+                                   "domains": dom_out,
+                                   "dropped_new_inputs": len(drop_ids)})
     wm.write_manifest(wm.manifest_path(l2, "l2"), mf2)
     return mf2
 
@@ -583,7 +616,10 @@ def _offline_advance(*, l1: Path, l2: Path, db: str, runner, client,
             link_check = _verify_links(l2)
         except Exception as e:              # noqa: BLE001 —— 产物已写，验收失败不该回滚
             fix = {"error": "%s: %s" % (type(e).__name__, str(e)[:160])}
-        mf2 = _rebuild_l2_manifest(l2, db, src_dir=str(l1))
+        # `since=job.submitted_at`：**批次提交时刻** —— 晚于它新增的记忆没有被这次
+        # 编译覆盖，绝不能进基线（否则被静默掩盖，见 `_rebuild_l2_manifest`）。
+        mf2 = _rebuild_l2_manifest(l2, db, src_dir=str(l1),
+                                   since=float(job.submitted_at or 0.0))
         wiki_batch.finish(l2, job, "落盘完成")
         hints = ["离线批次 %s 已落盘：%d 域 / %d 页（降级拼接 %d 页）"
                  % (job.batch_id, len(status.get("written_domains") or []),
