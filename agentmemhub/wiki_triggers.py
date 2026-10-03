@@ -204,25 +204,51 @@ def get_effective_config() -> dict[str, Any]:
     return {**base, **(state.get("overrides") or {})}
 
 
-def set_overrides(patch: dict[str, Any]) -> dict[str, Any]:
-    """编辑触发规则（写状态文件的 overrides 段，优先级最高）。"""
+#: 触发规则的字段（实时与离线**同一套**形状；作用域由所在层级决定）。
+_RULE_FIELDS = {"enabled", "schedule", "dirty_memories", "first_write_daily"}
+
+
+def _validate_rules(patch: dict[str, Any]) -> dict[str, Any]:
+    """校验并规范化一份触发规则补丁（实时 / 离线共用）。"""
     if not isinstance(patch, dict):
-        raise ValueError("overrides 必须是对象")
-    unknown = set(patch) - {"enabled", "schedule", "dirty_memories",
-                            "first_write_daily"}
+        raise ValueError("触发规则必须是对象")
+    unknown = set(patch) - _RULE_FIELDS
     if unknown:
         raise ValueError("未知字段：%s" % ", ".join(sorted(unknown)))
-    if "schedule" in patch:
-        patch["schedule"] = _validate_schedule(patch["schedule"])
-    if "dirty_memories" in patch:
-        if not isinstance(patch["dirty_memories"], int) or patch["dirty_memories"] < 1:
+    out = dict(patch)
+    if "schedule" in out:
+        out["schedule"] = _validate_schedule(out["schedule"])
+    if "dirty_memories" in out:
+        if not isinstance(out["dirty_memories"], int) or out["dirty_memories"] < 1:
             raise ValueError("dirty_memories 必须是正整数")
     for b in ("enabled", "first_write_daily"):
-        if b in patch and not isinstance(patch[b], bool):
+        if b in out and not isinstance(out[b], bool):
             raise ValueError("%s 必须是布尔值" % b)
+    return out
+
+
+def set_overrides(patch: dict[str, Any]) -> dict[str, Any]:
+    """编辑触发规则（写状态文件的 overrides 段，优先级最高）。**热生效，不用重启。**
+
+    **实时与离线各一套、互不干扰**：顶层四个字段作用于实时（`wiki.update`），
+    `batch: {...}` 子段作用于离线（`wiki.batch`）。两套都只覆盖**你写进去的字段**。
+
+    返回值保持"实时配置"（既有契约），离线那份用 `get_effective_batch_config()` 取。
+    """
+    if not isinstance(patch, dict):
+        raise ValueError("overrides 必须是对象")
+    unknown = set(patch) - (_RULE_FIELDS | {"batch"})
+    if unknown:
+        raise ValueError("未知字段：%s" % ", ".join(sorted(unknown)))
     state = _load_state()
     ov = state.get("overrides") or {}
-    ov.update(patch)
+    realtime = {k: v for k, v in patch.items() if k != "batch"}
+    if realtime:
+        ov.update(_validate_rules(realtime))
+    if "batch" in patch:
+        sub = dict(ov.get("batch") or {})
+        sub.update(_validate_rules(patch["batch"]))
+        ov["batch"] = sub
     state["overrides"] = ov
     _save_state(state)
     return get_effective_config()
@@ -448,15 +474,17 @@ def harvest_now() -> dict[str, Any]:
 def get_effective_batch_config() -> dict[str, Any]:
     """**离线触发器**的生效配置（`wiki.batch` 段，与实时的 `wiki.update` 并列）。
 
-    与 `get_effective_config()` 的差别：**不吃状态文件的 overrides** —— 那层覆盖是
-    实时规则的对外接口（`PUT /api/wiki/triggers`）的语义，离线配置改 yaml 即可
-    （它本来就低频，不值得再开一层运行时可改的覆盖）。
+    三层与实时完全同构：**内置默认 < yaml < 状态文件的 `overrides.batch`** ——
+    所以离线开关也能**热改**（不用重启），入口是 `PUT /api/wiki/triggers` 的
+    `batch: {...}` 子段，或 `wiki --action triggers --set-batch on|off`。
     收割节流 `check_interval_s` 不参与触发判定，这里剔除。
     """
     from agentmemhub import config as hub_config
-    seg = dict((hub_config.config().wiki or {}).get("batch") or {})
-    seg.pop("check_interval_s", None)
-    return seg
+    base = dict((hub_config.config().wiki or {}).get("batch") or {})
+    base.pop("check_interval_s", None)
+    state = _load_state()
+    ov = dict((state.get("overrides") or {}).get("batch") or {})
+    return {**base, **ov}
 
 
 def _submit_offline(*, hook: str, dirty: int, now: datetime,
@@ -513,7 +541,8 @@ def _submit_offline(*, hook: str, dirty: int, now: datetime,
             "hints": (res or {}).get("hints") or []})
     return {"checked": True, "hook": hook, "should_run": True, "reasons": reasons,
             "dirty": dirty, "channel": "offline", "offline_submitted": sub,
-            "seconds": round(time.time() - t0, 1)}
+            # `fired: True` 与实时路径**结构一致**（调用方/断言不必分通道分支）
+            "fired": True, "seconds": round(time.time() - t0, 1)}
 
 
 def _harvest_gate(*, l1: Path, l2: Path, db: str) -> dict[str, Any]:

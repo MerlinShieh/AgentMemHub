@@ -1012,6 +1012,15 @@ def cmd_wiki(args) -> int:
     # ---- triggers（触发器查看/手动触发）----
     if args.action == "triggers":
         from agentmemhub import wiki_triggers
+        # `--set-batch on|off`：**热改**离线触发器总闸（写 overrides，不用重启）。
+        # 离线那套配置与实时并列，判定顺序是"离线优先 → 实时兜底"。
+        flip = getattr(args, "set_batch", "") or ""
+        if flip:
+            want = (flip == "on")
+            wiki_triggers.set_overrides({"batch": {"enabled": want}})
+            print("离线触发器已 %s（overrides.batch.enabled = %s）"
+                  % ("打开" if want else "关闭", want))
+            print()
         print(_json.dumps(wiki_triggers.status(), ensure_ascii=False, indent=2, default=str))
         return 0
     if args.action == "trigger":
@@ -1394,6 +1403,9 @@ def build_parser() -> argparse.ArgumentParser:
     pwk.add_argument("--out", default="",
                      help="wiki 产出目录（failures/align/retry 必需；"
                           "其余从配置或 --l1/--l2 读）")
+    pwk.add_argument("--set-batch", default="", choices=["", "on", "off"],
+                     help="triggers 用：热改离线触发器总闸（写 overrides，不用重启）。"
+                          "判定顺序：离线优先 → 实时兜底")
     pwk.add_argument("--stage", default="", choices=["", "l1", "l2"],
                      help="限定阶段：l1=第一级；l2=第二级；留空=全部")
     pwk.add_argument("--src", default="", help="第二级补跑必需：第一级产出目录")

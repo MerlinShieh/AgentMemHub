@@ -253,8 +253,51 @@ def test_提交离线成功后打标记(_isolated, monkeypatch):
                            state={}, reasons=["攒够脏记忆"], due_slots=["02:00"])
 
     assert r["channel"] == "offline"
+    assert r["fired"] is True, "返回结构与实时路径一致（调用方不必分通道）"
     assert r["offline_submitted"]["batch_id"] == "b1"
     st = json.loads(sp.read_text(encoding="utf-8"))
     assert st.get("last_update_at"), "提交成功要打标记（否则会重复提交）"
     assert st.get("fired"), "时点档也要记上（fired_today）"
     assert "update_started_at" not in st, "收工要清掉'进行中'"
+
+
+# ---------------------------------------------------------------------------
+# 离线配置的 overrides（热改，不用重启）
+# ---------------------------------------------------------------------------
+
+def test_离线配置支持overrides热改(tmp_path, monkeypatch):
+    """离线那套配置必须能**热改** —— 否则每次开关都要改 yaml + 重启 DSH。"""
+    monkeypatch.setattr(wt, "state_path", lambda: tmp_path / "state.json")
+
+    wt.set_overrides({"batch": {"enabled": True, "dirty_memories": 5}})
+    b = wt.get_effective_batch_config()
+
+    assert b["enabled"] is True and b["dirty_memories"] == 5
+    assert b["schedule"] == ["02:00"], "没写进去的字段保持 yaml / 默认值"
+
+
+def test_两套overrides互不干扰(tmp_path, monkeypatch):
+    """实时与离线各一套覆盖 —— 改一个不能影响另一个（这是"并列"的底线）。"""
+    monkeypatch.setattr(wt, "state_path", lambda: tmp_path / "state.json")
+
+    wt.set_overrides({"enabled": False})
+    wt.set_overrides({"batch": {"enabled": True}})
+
+    assert wt.get_effective_config()["enabled"] is False
+    assert wt.get_effective_batch_config()["enabled"] is True
+
+
+def test_离线overrides字段要校验(tmp_path, monkeypatch):
+    """离线子段走**同一套校验**（未知字段 / 阈值 / 时点格式都要拦住）。"""
+    import pytest as _pytest
+
+    monkeypatch.setattr(wt, "state_path", lambda: tmp_path / "state.json")
+
+    with _pytest.raises(ValueError):
+        wt.set_overrides({"batch": {"不存在的字段": 1}})
+    with _pytest.raises(ValueError):
+        wt.set_overrides({"batch": {"dirty_memories": 0}})
+    with _pytest.raises(ValueError):
+        wt.set_overrides({"batch": {"schedule": ["25:00"]}})
+    with _pytest.raises(ValueError):
+        wt.set_overrides({"batch": {"enabled": "yes"}})     # 要布尔，不要字符串

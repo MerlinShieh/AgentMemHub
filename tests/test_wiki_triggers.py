@@ -31,6 +31,12 @@ def _tmp_state(tmp_path, monkeypatch):
     f = tmp_path / "trigger_state.json"
     monkeypatch.setattr(wiki_triggers, "state_path", lambda: f)
     monkeypatch.setattr(wiki_triggers, "lock_path", lambda: tmp_path / "update.lock")
+    # **离线触发器在测试里一律关掉**：它是 yaml 里可开的开关，而测试不该依赖用户
+    # 的配置 —— 否则用户一打开离线，这些断言"纯实时路径"的用例就会跑到离线段上
+    # （2026-10-03 实测：打开 `wiki.batch.enabled` 后本文件 5 个用例失败）。
+    # 离线段自己有专门的用例（`tests/test_harvest_gate.py`）。
+    monkeypatch.setattr(wiki_triggers, "get_effective_batch_config",
+                        lambda: {"enabled": False})
     yield f
 
 
