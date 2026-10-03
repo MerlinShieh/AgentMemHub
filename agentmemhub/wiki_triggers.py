@@ -701,6 +701,9 @@ def status() -> dict[str, Any]:
         }
     return {
         "config": get_effective_config(),
+        # **离线触发器**的配置（与实时并列的那套）：排查"为什么没走离线"时要一眼
+        # 看到 —— 它默认 `enabled: false`，而它与实时的组合决定判定顺序。
+        "batch_config": get_effective_batch_config(),
         "state": {
             "last_update_at": state.get("last_update_at"),
             "first_write_date": state.get("first_write_date"),
