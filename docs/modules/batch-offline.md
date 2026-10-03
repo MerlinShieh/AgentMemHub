@@ -206,6 +206,21 @@ wiki:
 > ⚠️ **`--force` 只在已启用的通道内绕过规则** —— 它不会把关着的离线通道打开，否则
 > 一次手动强制就可能意外花掉离线批量的钱。
 
+**改配置不用重启**（三层同构：内置默认 < yaml < `overrides.batch`）：
+
+```bash
+wiki --action triggers --set-batch on|off    # 热改离线总闸（写 overrides，立即生效）
+wiki --action triggers                       # 看生效值（返回里含 batch_config 段）
+```
+
+```bash
+# HTTP 同能力（面板服务开着时）：`batch` 子段作用于离线，顶层四字段作用于实时
+PUT /api/wiki/triggers   {"batch": {"enabled": true, "dirty_memories": 5}}
+```
+
+实时与离线**各一套覆盖、互不干扰**；离线子段走同一套字段校验（未知字段 / 阈值 /
+时点格式都会被拒）。
+
 ---
 
 ## 4. 数据流与不变量
