@@ -23,7 +23,7 @@
 | 不写回主 yaml | 除两个同步脚本（原地改 `llm` 段、保留注释）外，程序不修改 `agentmemhub.yaml` |
 | 不集中托管 `rag` 段 | `rag` 段由 `agentmemhub/rag/config.py` 的 `load_settings()` **自行读同一份 yaml**，不经过 `Config` |
 | 不做跨段语义校验 | `load_settings()` 只校验「`active` 已注册 + 模型文件齐全（`onnx` / `tokenizer.json` / `config.json`）」，不校验档位与阈值是否自相矛盾 |
-| 没有 override 覆盖层 | 见 [§7](#7-预留配置覆盖层override计划中未实现) |
+| 没有**文件级** override 覆盖层（`agentmemhub.override.yaml`） | 见 §7。⚠️ 但**触发规则有一处运行时覆盖**（状态文件 `logs/wiki_trigger_state.json` 的 `overrides` 段）—— 那是**另一种机制**、已经实现，别混为一谈 |
 
 ## 2. 对外入口
 
@@ -65,7 +65,18 @@
 | ③ | **就地覆盖** | 使用段自带一份 `.llm`，分散在各段 | `llm`（顶层）< `wiki.llm`：本项目只写了 `timeout: 900`，`endpoint` / `model` / `api_key` / `headers` **继承顶层**；`llm` < `distillation.llm`：本项目未配 → 蒸馏与批量评分**共用顶层同一份**；`wiki.l2.llm`：写了 `reasoning_effort: low` + `timeout: 900`，继承链是**顶层 llm → wiki.l2.llm，刻意跳过 `wiki.llm`**（级联会让第一级换 provider 牵连第二级） |
 | ④ | **三层** | 内置默认 < 档位表 < yaml 显式项 | `DEFAULT_PAGE_POLICY` < `RECALL_LEVELS[档位]` < `rag.retrieval.page.*`（`Settings.page_policy`）。本项目未显式配 `retrieval.page` → 生效值 = 档位 3（均衡）展开值 |
 
-另有一处**状态文件生效层**（同属三层思路，但第三层不在 yaml）：`wiki_triggers.get_effective_config()` = `wiki.update.*`（含 `DEFAULT_WIKI["update"]`）< `logs/wiki_trigger_state.json` 的 `overrides` 段（由 `set_overrides()` 写入，只接受 `enabled` / `schedule` / `dirty_memories` / `first_write_daily`）。
+另有一处**状态文件生效层**（同属三层思路，但第三层不在 yaml），而且**两套规则各一份**：
+
+- `wiki_triggers.get_effective_config()` = `wiki.update.*`（含 `DEFAULT_WIKI["update"]`）
+  < `logs/wiki_trigger_state.json` 的 `overrides` 段（**顶层四字段**：`enabled` /
+  `schedule` / `dirty_memories` / `first_write_daily`）
+- `wiki_triggers.get_effective_batch_config()` = `wiki.batch.*` < 同一 overrides 的
+  **`batch` 子段**（字段相同）—— 两个通道**各一套、互不干扰**
+
+两套都由 `set_overrides()` 写入，**热生效**（不用重启）：
+`wiki --action triggers --set-batch on|off`，或 `PUT /api/wiki/triggers` 的
+`{"batch": {...}}`。⚠️ `wiki.batch` 里的 `check_interval_s` / `expire_warn_s` /
+`max_repair` **不是触发规则**，不参与这套覆盖（它们各有自己的消费点）。
 
 四种形态的完整对照表与改键检查清单见 [data-architecture.md §13](../data-architecture.md)。
 
@@ -88,6 +99,8 @@
 | `logs.rotate` / `logs.files` | 重启（`rotate_policy(name)` 每次调用读 `config()`，但 `Config` 已缓存文件） |
 | `snapshot.keep` | 下次创建/清理快照时生效（`snapshot.keep_count()`，非法值回退 `DEFAULT_SNAPSHOT["keep"]`） |
 | `wiki.update.*` | 触发器每次判定时读；若被状态文件 `overrides` 覆盖，yaml 改动**看不到效果** |
+| `wiki.batch.*`（触发规则那四个） | 同上，但吃的是 `overrides.batch` 子段 —— 与实时**各一套**。⚠️ `check_interval_s`（收割节流）/ `expire_warn_s`（过期预警）/ `max_repair`（单轮修复上限）不属于触发规则，不受 overrides 影响 |
+| `notify.pushplus.*` / `notify.push_when` / `notify.dedup_window_s` | **例外：每次直接读盘**（不走 `config()` 单例）—— 填个 token 不该要求重启 DSH，见 `notify._notify_cfg()` |
 
 ## 4. 配置项
 
@@ -255,9 +268,21 @@
 - [ ] 单例缓存相关的改动要确认 `Config.reset()` / `configure()` 在测试里可用；
 - [ ] 别并发跑两个 `uv run`（环境锁争用会造成无关测试假失败，见 [AGENTS.md](../../AGENTS.md)）。
 
-## 7. 预留：配置覆盖层（override，计划中未实现）
+## 7. 两种"覆盖"：一处**已实现**（运行时）、一处仍是计划（文件级）
 
-> **计划中，尚未实现**：以下内容出自 [batch-offline-plan.md §9](../batch-offline-plan.md) 的 A2/M4 设计。当前代码里**没有** `agentmemhub.override.yaml` 的加载逻辑，也**没有** `agentmemhub config` 子命令；改配置只能直接编辑 `agentmemhub.yaml` 或设环境变量。
+**已实现的：触发规则的运行时覆盖**（状态文件 `logs/wiki_trigger_state.json` 的
+`overrides` 段）：
+
+- 实时与离线**各一套**（顶层四字段 = 实时；`batch` 子段 = 离线），互不干扰；
+- **热生效、不用重启**：`wiki --action triggers --set-batch on|off`，
+  或 `PUT /api/wiki/triggers` 传 `{"batch": {...}}`；
+- 覆盖范围**只有触发规则那几个键**（见 §4）—— 不是通用配置覆盖。
+
+**仍是计划的：文件级覆盖层 `agentmemhub.override.yaml`** —— 允许 API/CLI 改更多键
+（含 `llm_batch.*` 这类不在触发规则里的），且主 yaml 的中文注释零损失。
+以下出自 [batch-offline-plan.md §9](../batch-offline-plan.md) 的 A2/M4 设计：
+当前代码里**没有** `agentmemhub.override.yaml` 的加载逻辑，也**没有**
+`agentmemhub config` 子命令；改这类配置只能直接编辑 `agentmemhub.yaml` 或设环境变量。
 
 | 设计点 | 计划内容 |
 |---|---|

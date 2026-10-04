@@ -90,11 +90,84 @@ def poll(client, jobs: list[BatchJob]) -> dict[str, dict[str, Any]]:
     return out
 
 
-def fetch_results(client, job: BatchJob) -> dict[str, dict[str, Any]]:
+def _repair_client():
+    """构造一个**实时** LLM client —— 离线用的 `MiMoBatchClient` 没有 `_repair_json`。
+
+    取 `config().wiki_l2.llm`：与**离线编译段同一段配置**，所以 `repair_model` 的
+    配置位置一致（它继承顶层 `llm`，也可在 `wiki.l2.llm` 就地覆盖）。构造失败返回
+    `None`（修复是**尽力而为**的兜底，不能因为它挂掉而影响回读）。
+    """
+    try:
+        from agentmemhub import config as hub_config
+        from agentmemhub.llm import client_from_config
+        return client_from_config(hub_config.config().wiki_l2.get("llm"))
+    except Exception:                       # noqa: BLE001
+        return None
+
+
+def repair_broken_results(results: dict[str, dict[str, Any]], *,
+                          repair_client=None,
+                          max_repair: int = 50) -> dict[str, int]:
+    """把"**有内容但 JSON 坏**"的条目交给 `repair_model` 转成规范 JSON（**就地修改**）。
+
+    为什么需要它：离线回读只做 `extract_json()`，而**实时路有本地模型修复** —— 同一条
+    输出，实时能救回、离线会白白退化成"成员各自成页"（内容不丢，但页面质量差）。
+    这是"两条路产物应当一致"的一个真实缺口（2026-10-04 补上）。
+
+    - `repair_client` 为空 ⇒ 自己构造一个实时 client（`_repair_client()`）；
+    - **没配 `repair_model` 时什么都不做** —— 与 `LLMClient` 的既有语义一致
+      （没配修复模型时，"失败就是失败"）；
+    - `max_repair`：单轮最多修几条。**修复是实时调用、要花钱**，坏 500 条不能
+      悄无声息地打 500 次；超出的留给下轮（它们仍带 `content`，不会丢）。
+
+    返回 `{"tried", "repaired"}`（供审计与调用方判断）。
+    """
+    stats = {"tried": 0, "repaired": 0}
+    if max_repair <= 0:
+        return stats
+    targets = [cid for cid, r in results.items()
+               if not r.get("ok") and r.get("content")][:max_repair]
+    if not targets:
+        return stats
+    if repair_client is None:
+        repair_client = _repair_client()
+    repair = getattr(repair_client, "_repair_json", None)
+    if not callable(repair):
+        return stats
+    # `_repair_json(system, user, raw)`：离线结果里**没有原 prompt**，而修复器要做的
+    # 只是"把非规范 JSON 转成规范" —— 不需要完整任务上下文，给通用要求即可。
+    system = "把下面这段模型原始输出转换成任务要求的 JSON 对象，只输出 JSON。"
+    for cid in targets:
+        r = results[cid]
+        stats["tried"] += 1
+        try:
+            fixed = repair(system, "", str(r.get("content") or ""))
+        except Exception as e:              # noqa: BLE001 —— 修复失败就保持原样
+            _audit("batch_repair", ok=False, custom_id=cid,
+                   error="%s: %s" % (type(e).__name__, str(e)[:160]))
+            continue
+        if isinstance(fixed, dict) and fixed:
+            r.pop("error", None)
+            r["ok"] = True
+            r["data"] = fixed
+            r["repaired"] = True
+            stats["repaired"] += 1
+            _audit("batch_repair", ok=True, custom_id=cid)
+    if stats["tried"]:
+        _audit("batch_repair_done", tried=stats["tried"],
+               repaired=stats["repaired"], max_repair=max_repair)
+    return stats
+
+
+def fetch_results(client, job: BatchJob, *,
+                  repair_client=None) -> dict[str, dict[str, Any]]:
     """下载一个任务的结果文件并解析成 `{custom_id: {ok, data|error}}`。
 
     成功文件与错误文件是**两份**：前者是成功请求的结果，后者是每条失败的**原因**。
     两份都要读 —— 只读成功文件的话，"哪些请求没算出来"就无从知道，只能整体重跑。
+
+    解析后**坏 JSON 走 `repair_model` 兜底**（见 `repair_broken_results`）——
+    实时路一直有这一步，离线路此前缺，会导致同一条输出在两条路上质量不同。
     """
     results: dict[str, dict[str, Any]] = {}
     for fid, kind in ((job.output_file_id, "output"), (job.error_file_id, "error")):
@@ -108,6 +181,12 @@ def fetch_results(client, job: BatchJob) -> dict[str, dict[str, Any]]:
                    error="%s: %s" % (type(e).__name__, str(e)[:160]))
             continue
         parsed = load_batch_results(text)
+        # **修复兜底**：只对"有正文但 JSON 坏"的条目动手（成功的不碰、没正文的没法修）。
+        try:
+            repair_broken_results(parsed, repair_client=repair_client,
+                                  max_repair=batch_max_repair())
+        except Exception:                   # noqa: BLE001 —— 兜底失败就当没修
+            pass
         for cid, r in parsed.items():
             if cid:
                 results[cid] = r
@@ -239,6 +318,26 @@ def expire_warn_s(cfg: Optional[dict] = None) -> float:
     except (TypeError, ValueError):
         v = 6.0 * 3600
     return max(0.0, v)
+
+
+def batch_max_repair(cfg: Optional[dict] = None) -> int:
+    """单轮回读**最多修几条坏 JSON**。配置位 `wiki.batch.max_repair`，默认 50。
+
+    为什么要有上限：修复走的是**实时**调用（要花钱），而坏 JSON 可能成片出现
+    （比如某轮上游不稳）—— 不能悄无声息地打几百次。超出的留给下轮，
+    它们的 `content` 还在，不会丢。`0` = 完全不修。
+    """
+    if cfg is None:
+        try:
+            from agentmemhub.config import config
+            cfg = ((config().wiki or {}).get("batch") or {})
+        except Exception:                   # noqa: BLE001
+            cfg = {}
+    try:
+        v = int((cfg or {}).get("max_repair", 50))
+    except (TypeError, ValueError):
+        v = 50
+    return max(0, v)
 
 
 def _warn_expiring(jobs: list[BatchJob], *, now: float, note: Notify) -> list[str]:

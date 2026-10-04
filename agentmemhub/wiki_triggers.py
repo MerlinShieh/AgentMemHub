@@ -481,10 +481,11 @@ def get_effective_batch_config() -> dict[str, Any]:
     """
     from agentmemhub import config as hub_config
     base = dict((hub_config.config().wiki or {}).get("batch") or {})
-    # 这两个不是**触发规则**，不该混进判定配置：`check_interval_s` 是收割节流、
-    # `expire_warn_s` 是过期预警阈值，各有自己的消费点。
+    # 这三个不是**触发规则**，各有自己的消费点（收割节流 / 过期预警 / 单轮修复上限），
+    # 混进判定配置只会让人误以为它们参与"该不该触发"。
     base.pop("check_interval_s", None)
     base.pop("expire_warn_s", None)
+    base.pop("max_repair", None)
     state = _load_state()
     ov = dict((state.get("overrides") or {}).get("batch") or {})
     return {**base, **ov}

@@ -362,3 +362,104 @@ def test_预警阈值可配且0关闭(monkeypatch):
     assert wiki_batch._warn_expiring(
         [_warn_job()], now=100000.0 - 60, note=lambda *a, **k: called.append(a)) == []
     assert called == [], "阈值 0 时不该预警"
+
+
+# ---------------------------------------------------------------------------
+# 坏 JSON 的 repair_model 兜底
+# ---------------------------------------------------------------------------
+
+class _RepairClient:
+    """只有 `_repair_json` 的假 client（模拟实时 LLM client 的修复能力）。"""
+
+    def __init__(self, out=None, raises=None):
+        self.out = out if out is not None else {"pages": [{"title": "修好了"}]}
+        self.raises = raises
+        self.calls: list = []
+
+    def _repair_json(self, system, user, raw, max_tokens=None):
+        self.calls.append(raw)
+        if self.raises:
+            raise self.raises
+        return self.out
+
+
+def test_坏JSON走修复模型():
+    """**实时路一直有这一步，离线路此前缺** —— 同一条输出在两条路上质量不同。
+
+    `load_batch_results()` 早就为它留了路（保留原文 `content`，注释写着"坏 JSON 有
+    两条出路：重试 / 交给修复模型"），这里把缺的那一步接上。
+    """
+    from agentmemhub.wiki_batch import repair_broken_results
+
+    results = {
+        "ok1": {"ok": True, "data": {"a": 1}},                 # 成功的不该被碰
+        "bad1": {"ok": False, "content": "```json\n{坏的", "error": "不是 JSON"},
+        "nobody": {"ok": False, "error": "没有正文"},            # 没正文没法修
+    }
+    c = _RepairClient()
+
+    stats = repair_broken_results(results, repair_client=c)
+
+    assert stats == {"tried": 1, "repaired": 1}
+    assert c.calls == ["```json\n{坏的"], "只把坏 JSON 的**原文**交给修复器"
+    assert results["bad1"]["ok"] is True
+    assert results["bad1"]["data"] == {"pages": [{"title": "修好了"}]}
+    assert results["bad1"]["repaired"] is True
+    assert "error" not in results["bad1"], "修好了就该清掉 error"
+    assert results["ok1"] == {"ok": True, "data": {"a": 1}}, "成功的不动"
+    assert results["nobody"]["ok"] is False, "没正文的没法修"
+
+
+def test_修复失败保持原样():
+    """修复是**尽力而为**：失败就保持"坏 JSON"的原状（原文还在，下轮还能再修/重试）。"""
+    from agentmemhub.wiki_batch import repair_broken_results
+
+    results = {"bad": {"ok": False, "content": "坏的", "error": "原错误"}}
+    c = _RepairClient(raises=RuntimeError("模型不可用"))
+
+    stats = repair_broken_results(results, repair_client=c)
+
+    assert stats == {"tried": 1, "repaired": 0}
+    assert results["bad"]["ok"] is False and results["bad"]["error"] == "原错误"
+
+
+def test_修复有单轮上限():
+    """修复走**实时**调用（要花钱）—— 坏 500 条不能悄无声息打 500 次。"""
+    from agentmemhub.wiki_batch import repair_broken_results
+
+    results = {"b%d" % i: {"ok": False, "content": "x"} for i in range(10)}
+    c = _RepairClient()
+
+    stats = repair_broken_results(results, repair_client=c, max_repair=3)
+
+    assert stats == {"tried": 3, "repaired": 3}
+    assert len(c.calls) == 3
+    left = [k for k, v in results.items() if not v.get("ok")]
+    assert len(left) == 7, "超出的留到下轮（它们的 content 还在，不会丢）"
+
+
+def test_没配修复模型时行为不变(monkeypatch):
+    """与 `LLMClient` 的既有语义一致：**没配 `repair_model` 就什么都不做**。"""
+    from agentmemhub import wiki_batch
+
+    class _NoRepair:
+        pass                                     # 没有 _repair_json
+
+    monkeypatch.setattr(wiki_batch, "_repair_client", lambda: _NoRepair())
+    results = {"bad": {"ok": False, "content": "坏的"}}
+
+    assert wiki_batch.repair_broken_results(results) == {"tried": 0, "repaired": 0}
+    assert results["bad"]["ok"] is False, "原样返回"
+
+
+def test_上限0时不修(monkeypatch):
+    from agentmemhub import wiki_batch
+
+    called: list = []
+    monkeypatch.setattr(wiki_batch, "_repair_client",
+                        lambda: called.append(1) or _RepairClient())
+    results = {"bad": {"ok": False, "content": "坏的"}}
+
+    assert wiki_batch.repair_broken_results(results, max_repair=0) == {
+        "tried": 0, "repaired": 0}
+    assert called == [], "上限 0 时连 client 都不必构造"

@@ -174,6 +174,9 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 | `batch_voided` | wiki.log | `batch_id`、`stage`、`status`、`n_domains` | 任务被**作废**（终局：失败/过期/取消）→ 它覆盖的域回到待更新池 | 这是"这批要重跑"的依据；配合通知一起看（人会收到 `warning`） |
 | `batch_expired` | wiki.log | `batch_id`、`stage`、`expire_at` | 任务**过期**（厂商侧 `expired`，等于没在窗口内跑完） | 反复出现说明 `completion_window` 太小或厂商资源紧张；调大窗口后重新提交 |
 | `offline_written` | wiki.log | `domains`、`pages`、`degraded` | 离线**落盘轮**完成：编译结果已组装成页面并写盘 | 三段式的终点；`degraded > 0` 说明有页面走了 fail-open 拼接（结果缺失/失败）—— 不丢内容，但质量不如正常编译 |
+| `batch_expire_warn` | wiki.log | `batch_id`、`stage`、`hours_left`、`expire_at`、`n_requests` | 任务**即将过期**（距 `completion_window` 不足阈值，默认 6 小时）→ 已发一条 `warning` 通知 | 提前几小时知道，才能决定"调大窗口重提"还是"先忙别的"。**每批只记一次**（靠 `BatchJob.warned_expire` 持久化去重，因为收割是高频事件） |
+| `batch_repair` | wiki.log | `ok`、`custom_id`、`error` | 一条坏 JSON 走了 **`repair_model` 兜底**（离线回读时才做） | `ok=False` 说明修复也失败（原文仍保留，下轮可再修或重试）。为什么需要它：实时路一直有这一步，离线路此前缺，同一条输出会在两条路上质量不同 |
+| `batch_repair_done` | wiki.log | `tried`、`repaired`、`max_repair` | 一次回读的**修复汇总**（只在本轮真有坏 JSON 时记） | `tried < repaired` 说明部分没救回来；`tried == max_repair` 说明**撞了单轮上限**（`wiki.batch.max_repair`），其余留给下轮 |
 
 ### 5.2 `logs/memory.log`（2 个事件）
 
