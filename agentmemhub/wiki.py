@@ -624,6 +624,22 @@ def _offline_advance(*, l1: Path, l2: Path, db: str, runner, client,
         hints = ["离线批次 %s 已落盘：%d 域 / %d 页（降级拼接 %d 页）"
                  % (job.batch_id, len(status.get("written_domains") or []),
                     int(status.get("pages") or 0), int(status.get("degraded") or 0))]
+        # **落盘完成要主动通知人**：离线是异步的（实测等 18 分钟 ~ 24 小时），
+        # 用户不会盯着看 —— "跑完了"这件事只能靠通知。开启了 Pushplus 就顺手推微信
+        # （推送是旁路：`notify()` 本身永不抛，这里再兜一层只是保险）。
+        try:
+            from agentmemhub.notify import notify as _notify
+            _notify("info", "batch", "离线批次已落盘",
+                    "批次 %s：%d 域 / %d 页（降级拼接 %d 页）"
+                    % (job.batch_id, len(status.get("written_domains") or []),
+                       int(status.get("pages") or 0),
+                       int(status.get("degraded") or 0)),
+                    meta={"batch_id": job.batch_id, "stage": job.stage,
+                          "pages": status.get("pages"),
+                          "degraded": status.get("degraded"),
+                          "domains": len(status.get("written_domains") or [])})
+        except Exception:                   # noqa: BLE001 —— 旁路
+            pass
         if link_check.get("available") and not link_check.get("ok"):
             hints.append("**产物链接验收未通过**：Obsidian 报 %d 个未解析目标"
                          % link_check.get("total_targets", 0))

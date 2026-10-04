@@ -201,6 +201,23 @@ DEFAULT_LOGS = {
 }
 
 
+#: 通知配置（`notify` 段）。**落库始终启用**（面板可查、带未读状态）；
+#: 这里是可选的**推送通道** —— 目前支持 Pushplus（微信）。
+#: 推送是**旁路**：失败只落日志，绝不影响落库与调用方（与 `notify.py` 同一哲学）。
+DEFAULT_NOTIFY = {
+    "pushplus": {
+        "enabled": False,     # 默认关：推送是"对外发消息"，不该默认发生
+        "token": "",          # pushplus.plus 的 token（用户自己的；只写本地 yaml）
+        "topic": "",          # 群组编码（可选；留空 = 自己收）
+        "timeout": 5,         # 单次推送超时（秒）—— 短超时，别拖慢调用方
+    },
+    #: 去重窗口（秒）：同一 `(category, title)` 在此窗口内只留一条。
+    #: 为什么需要：失败重试与重复触发会刷屏，而 Pushplus 是**推微信** ——
+    #: 刷屏的代价远大于"少一条通知"。0 = 不去重。
+    "dedup_window_s": 300,
+}
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     """深合并（嵌套 dict 递归合并，其余类型直接覆盖）。"""
     out = dict(base)
@@ -494,6 +511,17 @@ class Config:
         （那里才知道日志名与文件路径的对应关系）。
         """
         return _deep_merge(DEFAULT_LOGS, self._get("logs", {}) or {})
+
+    # -- 通知 -------------------------------------------------------------
+
+    @property
+    def notify(self) -> dict[str, Any]:
+        """通知配置（已合并默认值）：推送通道 + 去重窗口。
+
+        落库（面板可查、带未读状态）**始终启用**；这里的 `pushplus` 只是可选的
+        外部推送，`dedup_window_s` 防止失败重试把微信刷屏。
+        """
+        return _deep_merge(DEFAULT_NOTIFY, self._get("notify", {}) or {})
 
     # -- 内部 -------------------------------------------------------------
 

@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Optional
@@ -115,19 +116,142 @@ def _audit(row: dict, ok: bool) -> None:
         pass
 
 
+# ---------------------------------------------------------------------------
+# 推送通道（可选的外部投递；落库始终启用）
+# ---------------------------------------------------------------------------
+
+#: Pushplus 的发送端点（微信推送服务，用户自己的 token）。
+PUSHPLUS_URL = "https://www.pushplus.plus/send"
+
+
+def _notify_cfg() -> dict[str, Any]:
+    """`notify` 段配置（读不到就用内置默认）。"""
+    try:
+        from agentmemhub.config import config
+        return dict(config().notify or {})
+    except Exception:                       # noqa: BLE001 —— 配置读不到就当没开
+        return {}
+
+
+def dedup_window_s() -> float:
+    """去重窗口（秒）：同一 `(category, title)` 在此窗口内只留一条。0 = 不去重。"""
+    try:
+        return max(0.0, float(_notify_cfg().get("dedup_window_s") or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def pushplus_send(*, token: str, title: str, content: str, topic: str = "",
+                  template: str = "markdown",
+                  timeout: float = 5.0) -> dict[str, Any]:
+    """推一条到 Pushplus（微信）。**永不抛** —— 推送是旁路。
+
+    只用标准库 `urllib`（不引入新依赖）；返回 `{"ok", "code", "msg"}`，
+    失败时带 `error`。Pushplus 的成功判定是响应体里的 `code == 200`。
+    """
+    payload: dict[str, Any] = {"token": token, "title": title[:100],
+                               "content": content, "template": template}
+    if topic:
+        payload["topic"] = topic
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        PUSHPLUS_URL, data=body,
+        headers={"Content-Type": "application/json; charset=utf-8"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            txt = r.read().decode("utf-8", "replace")
+    except Exception as e:                  # noqa: BLE001 —— 网络/超时都算旁路失败
+        return {"ok": False, "code": None,
+                "error": "%s: %s" % (type(e).__name__, str(e)[:160])}
+    try:
+        d = json.loads(txt or "{}")
+    except Exception:                       # noqa: BLE001
+        return {"ok": False, "code": None, "error": "非 JSON 响应：%s" % txt[:120]}
+    try:
+        code = int(d.get("code") or 0)
+    except (TypeError, ValueError):
+        code = 0
+    return {"ok": code == 200, "code": code, "msg": str(d.get("msg") or "")[:200]}
+
+
+def push(level: str, category: str, title: str, body: str = "", *,
+         meta: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """把一条通知**推到微信**（Pushplus）。返回 `{"ok", ...}`，**永不抛**。
+
+    未开启 / 没配 token → `{"ok": False, "skipped": "disabled"|"no_token"}`。
+    **去重不在这里**：它统一放在 `notify()` 那一层（见 `dedup_window_s()`），
+    否则"落库被去重、推送却漏网"会在两处各算一套。
+    """
+    cfg = _notify_cfg().get("pushplus") or {}
+    if not cfg.get("enabled"):
+        return {"ok": False, "skipped": "disabled"}
+    token = str(cfg.get("token") or "").strip()
+    if not token:
+        return {"ok": False, "skipped": "no_token"}
+    emoji = {"info": "ℹ️", "warn": "⚠️", "error": "❌"}.get(level, "ℹ️")
+    md = "**%s %s**\n\n%s" % (emoji, title, body or "")
+    if meta:
+        md += "\n\n---\n" + "\n".join("- %s：%s" % (k, v) for k, v in meta.items())
+    try:
+        timeout = float(cfg.get("timeout") or 5)
+    except (TypeError, ValueError):
+        timeout = 5.0
+    res = pushplus_send(token=token, title="%s %s" % (emoji, title), content=md,
+                        topic=str(cfg.get("topic") or ""), timeout=timeout)
+    try:
+        from agentmemhub.logs import audit_notify
+        audit_notify({"event": "notify_push", "ok": bool(res.get("ok")),
+                      "channel": "pushplus", "level": level,
+                      "category": category, "title": title,
+                      "error": res.get("error") or res.get("msg") or ""})
+    except Exception:                       # noqa: BLE001
+        pass
+    return res
+
+
+def _deduped(category: str, title: str, ts: float,
+             db: Optional[str]) -> bool:
+    """窗口内是否已有同名通知（**只读**；库/表不存在 ⇒ 必然不是重复）。"""
+    win = dedup_window_s()
+    if win <= 0:
+        return False
+    try:
+        with _db(db) as conn:
+            row = conn.execute(
+                "SELECT ts FROM notifications WHERE category = ? AND title = ?"
+                " ORDER BY ts DESC LIMIT 1", (category, title)).fetchone()
+        return bool(row) and (ts - float(row[0])) < win
+    except Exception:                       # noqa: BLE001
+        return False
+
+
 def notify(level: str, category: str, title: str, body: str = "", *,
            meta: Optional[dict[str, Any]] = None, db: Optional[str] = None,
-           ts: Optional[float] = None) -> bool:
-    """写一条通知，返回是否**落库成功**（失败已降级，绝不抛）。"""
+           ts: Optional[float] = None, push_too: bool = True) -> bool:
+    """写一条通知（并在开启时推到微信）。返回是否**被接受**，**绝不抛**。
+
+    · **去重**：同一 `(category, title)` 在 `dedup_window_s` 内只留一条 ——
+      命中时返回 `True`（"这条已被代表"）并记 `deduped` 审计，**不是失败**；
+    · **推送**：落库成功后才推（`push_too=False` 可只落库）；
+      推送失败**不影响**返回值 —— 它的结果在 `notify_push` 审计与 `NOTIFY_PUSH` 里。
+    """
     lv = str(level or "info").strip().lower()
     if lv not in LEVELS:
         lv = "info"
-    row = {"ts": float(ts if ts is not None else time.time()),
-           "level": lv,
-           "category": str(category or "general").strip().lower(),
-           "title": str(title or "")[:200],
+    cat = str(category or "general").strip().lower()
+    ttl = str(title or "")[:200]
+    _ts = float(ts if ts is not None else time.time())
+    row = {"ts": _ts, "level": lv, "category": cat, "title": ttl,
            "body": str(body or "")[:4000],
            "meta": dict(meta or {})}
+    if _deduped(cat, ttl, _ts, db):
+        try:
+            from agentmemhub.logs import audit_notify
+            audit_notify({"event": "notify_write", "ok": True, "deduped": True,
+                          "level": lv, "category": cat, "title": ttl})
+        except Exception:                   # noqa: BLE001
+            pass
+        return True
     ok = False
     try:
         with _db(db) as conn:
@@ -140,6 +264,8 @@ def notify(level: str, category: str, title: str, body: str = "", *,
     except Exception as e:               # noqa: BLE001 —— 旁路，永不抛
         _fallback(row, e)
     _audit(row, ok)
+    if ok and push_too:
+        push(lv, cat, ttl, str(body or ""), meta=meta)
     return ok
 
 

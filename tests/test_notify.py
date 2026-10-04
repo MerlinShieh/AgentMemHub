@@ -154,3 +154,122 @@ def test_通知事件的warning在日志流里写成warn(tmp_path, monkeypatch):
     assert rec["level"] == "warn"
     assert rec["event"] == "notify_write"
     assert "余额不足" in rec["msg"], "标准头里的 msg 要能直接读"
+
+
+# ---------------------------------------------------------------------------
+# 推送通道：Pushplus（微信）
+# ---------------------------------------------------------------------------
+
+class _Resp:
+    """假的 urlopen 响应。"""
+
+    def __init__(self, body: str):
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body.encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _fake_open(body: str):
+    def _open(req, timeout=None):
+        _fake_open.sent = json.loads(req.data.decode("utf-8"))
+        return _Resp(body)
+    return _open
+
+
+def test_推送默认关_不发任何请求(monkeypatch):
+    """**默认 `enabled: false`**：没配就不该往外发消息。"""
+    monkeypatch.setattr(N, "_notify_cfg", lambda: {"pushplus": {"enabled": False}})
+    assert N.push("info", "batch", "标题", "正文") == {"ok": False,
+                                                      "skipped": "disabled"}
+
+
+def test_推送开了但没token也不发(monkeypatch):
+    monkeypatch.setattr(N, "_notify_cfg",
+                        lambda: {"pushplus": {"enabled": True, "token": "  "}})
+    assert N.push("info", "batch", "标题")["skipped"] == "no_token"
+
+
+def test_推送成功与业务失败(monkeypatch):
+    """成功判定是响应体的 `code == 200`；业务失败返回 ok=False 但**不抛**。"""
+    monkeypatch.setattr(N, "_notify_cfg",
+                        lambda: {"pushplus": {"enabled": True, "token": "tk"}})
+
+    monkeypatch.setattr(N.urllib.request, "urlopen",
+                        _fake_open('{"code":200,"msg":"请求成功"}'))
+    r = N.push("warning", "batch", "离线批次失败", "厂商返回 401")
+
+    assert r["ok"] is True
+    assert _fake_open.sent["token"] == "tk"
+    assert "离线批次失败" in _fake_open.sent["title"]
+    assert "厂商返回 401" in _fake_open.sent["content"]
+
+    monkeypatch.setattr(N.urllib.request, "urlopen",
+                        _fake_open('{"code":500,"msg":"token 无效"}'))
+    r2 = N.push("info", "batch", "x")
+    assert r2["ok"] is False and r2["code"] == 500
+
+
+def test_推送网络异常永不抛(monkeypatch):
+    """推送是旁路：超时/连不上只如实返回，绝不影响调用方。"""
+    def _boom(req, timeout=None):
+        raise TimeoutError("连接超时")
+
+    monkeypatch.setattr(N, "_notify_cfg",
+                        lambda: {"pushplus": {"enabled": True, "token": "tk"}})
+    monkeypatch.setattr(N.urllib.request, "urlopen", _boom)
+
+    r = N.push("info", "batch", "x")
+
+    assert r["ok"] is False and "TimeoutError" in r["error"]
+
+
+# ---------------------------------------------------------------------------
+# 去重窗口
+# ---------------------------------------------------------------------------
+
+def test_去重窗口内同名只留一条(db, monkeypatch):
+    """失败重试与重复触发会刷屏，而 Pushplus 是**推微信** —— 去重是必须的。"""
+    monkeypatch.setattr(N, "dedup_window_s", lambda: 300.0)
+
+    assert N.notify("info", "batch", "同一标题", db=db, ts=1000.0) is True
+    assert N.notify("info", "batch", "同一标题", db=db, ts=1100.0) is True, \
+        "去重命中也要返回 True（'这条已被代表'），不能当成失败"
+    assert len(N.list_notifications(db=db, limit=10)) == 1
+
+    assert N.notify("info", "batch", "同一标题", db=db, ts=2000.0) is True
+    assert len(N.list_notifications(db=db, limit=10)) == 2, "出窗口后可再落一条"
+
+    # 标题不同不受影响
+    assert N.notify("info", "batch", "另一个标题", db=db, ts=2010.0) is True
+    assert len(N.list_notifications(db=db, limit=10)) == 3
+
+
+def test_落库失败时不推送(tmp_path, monkeypatch):
+    """落库降级（写 fallback）时不推 —— 否则同一条会既进 fallback 又发微信。"""
+    sent = []
+    monkeypatch.setattr(N, "push", lambda *a, **k: sent.append(a) or {"ok": True})
+
+    def _boom(db=None):
+        raise RuntimeError("库坏了")
+
+    monkeypatch.setattr(N, "_db", _boom)
+
+    N.notify("info", "batch", "标题", db=str(tmp_path / "x.db"))
+
+    assert sent == [], "落库没成功就不该推"
+
+
+def test_落库成功才推送(db, monkeypatch):
+    sent = []
+    monkeypatch.setattr(N, "push", lambda *a, **k: sent.append(a) or {"ok": True})
+
+    N.notify("warning", "batch", "余额不足", "请充值", db=db, ts=1000.0)
+
+    assert len(sent) == 1 and sent[0][0] == "warning"

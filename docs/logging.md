@@ -232,6 +232,8 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 | event | 所属流 | 关键字段 | 含义 | 排查用途 |
 |---|---|---|---|---|
 | `notify_write` | notify.log | `ok`（落库成功否）、`level`、`category`、`title` | 发了一条通知。**通知本身**落 SQLite `database/notify.db`（有已读态、可筛选）；这条是"谁在何时发了什么、落库成没成功"的**事实流水** | `ok=False` 说明走的是**降级路径**（落库失败，正文在 `logs/notify_fallback.jsonl`）——此时通知查不到，只能从降级文件里捞 |
+| `notify_write`（`deduped: true`） | notify.log | 同上 + `deduped` | **去重命中**：同一 `(category, title)` 在 `notify.dedup_window_s`（默认 300 秒）内已发过 → 不再落库、不再推送 | 排查"为什么少了一条通知"时看它；返回 `True` 表示"这条已被代表"，**不是失败** |
+| `notify_push` | notify.log | `ok`（推成功否）、`channel`（目前恒为 `pushplus`）、`level`、`category`、`title`、`error` | 把通知**推到微信**（Pushplus）的结果 | `ok=False` 时看 `error`：`disabled`/`no_token` 是没配，其余是网络或 token 问题。⚠️ **推送失败不影响落库** —— 通知仍在 `database/notify.db` 里查得到 |
 
 ⚠️ **等级写法两条流不同**：通知 API 用 `warning`（更标准），写进本流时由
 `logs.audit_notify()` 映射成日志流的 `warn`。**映射必须在进 `standardize` 之前做** ——
