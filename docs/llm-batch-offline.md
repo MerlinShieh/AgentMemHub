@@ -1,11 +1,19 @@
-# 离线批处理（Batch API）接入设计
+# 离线批处理（Batch API）：接缝设计 → 实施记录
 
-> 状态：**接缝已就位，上传/轮询/下载未实现**
-> 2026-09-27 起接通小米 MiMo Batch API：计划、决策记录（D1–D6）与里程碑追踪见
-> [`batch-offline-plan.md`](batch-offline-plan.md)，本文档是其接缝前置。
-> 代码：`agentmemhub/llm_batch.py`（编解码 + 运行器协议）、
-> `scripts/wiki_aggregate.py` 的 `stage_plan(..., runner=...)`
-> 日期：2026-09-25
+> 状态：**✅ 已落地并实测四轮**（2026-10-04）。本文档记录**从接缝到落地**的全过程：
+> §1–§7 是 2026-09-25 写的**接缝设计**（原样保留，便于回看当初的判断），
+> 每节末尾补了「**后来怎样了**」；**§8 是实施记录**（最终形态、实测数据、决策变更、踩坑）。
+>
+> **现在该看哪份**：
+> · **怎么用 / 怎么排查** → [`modules/batch-offline.md`](modules/batch-offline.md)（模块文档，权威）
+> · **为什么这么设计 / 里程碑与风险** → [`batch-offline-plan.md`](batch-offline-plan.md)
+> · **当初为什么先做接缝、后来怎么长成现在这样** → 本文档
+>
+> 代码：`agentmemhub/llm_batch.py`（编解码 + 运行器）、`agentmemhub/batch_client.py`（厂商客户端）、
+> `agentmemhub/wiki_batch.py`（回读 + 状态机）、`agentmemhub/task_queue.py`（通用惰性收割）、
+> `agentmemhub/batch_ops.py`（CLI/HTTP 共用动作层）、`scripts/wiki_aggregate.py` 的
+> `stage_plan(..., runner=)` 与离线提交/落盘分支
+> 日期：接缝 2026-09-25 · 落地 2026-09-29 ~ 2026-10-04
 
 ---
 
@@ -106,7 +114,12 @@ l2plan|<domain_key>|<batch_no>      例：l2plan|DSH-Hermes|3
 
 ---
 
-## 4. 未完成（接通厂商时要做的）
+## 4. 当时列出的待办（**现已全部完成**，保留原文便于对照）
+
+> **后来怎样了（2026-10-04 补）**：这一节当初列的"接通厂商时要做的"**全部做完了**，
+> 而实现形态与当初设想**有几处不同**（详见 §8）：`BatchUploader` 的
+> `poll/download` 合并成了 `retrieve/download` 六个动作、`PendingError` 换成了
+> `OfflineRunner` 的"落盘后抛 `PendingError`"…下面每小节末尾都标了现状。
 
 ### 4.1 三个 HTTP 动作
 
@@ -157,22 +170,38 @@ BatchJob
 于是「这批数据已经加入离线任务」这件事**跨进程可查**：`load_state()` 读出所有
 在飞的 `BatchJob`，`job.domains()` 就是"已被离线任务覆盖、暂不该重复提交"的域。
 
-### 4.3 接入清单
+### 4.3 接入清单（**逐项现状**）
 
-1. 实现 `BatchUploader`（上传/轮询/下载），放 `agentmemhub/llm_batch.py`
-2. 实现 `OfflineRunner`：build 请求 → 建 `BatchJob` → `save_state()` → upload
-   → 抛 `PendingError`（标记已落盘，现场不会丢）
-3. 加 CLI 入口：`agentmemhub wiki --action batch-status | batch-export | batch-import`
-   - `batch-status`：读 `batch_state.json` + 问厂商状态，按 `decide()` 报告
-     `CONSUME` / `WAIT` / `PARTIAL` / `FALLBACK`（**含"哪些域还在等、等了多久"**）
-   - `batch-import`：回读结果 → 按 `decide()` 决定"消费 / 剩余走实时"
-4. **此时才加配置键** `wiki.l2.plan_mode: online | offline`（以及可选的
-   `plan_wait_deadline_s`）
-5. 测试：用**假 uploader** 打通 `export → ingest` 闭环（不需要真厂商）
+1. ~~实现 `BatchUploader`（上传/轮询/下载）~~ ✅ **`agentmemhub/batch_client.py`**
+   —— 实际做成 `MiMoBatchClient` **六动作**（`upload` / `create` / `retrieve` /
+   `list_batches` / `cancel` / `download`）+ `find_batch()` 对账，而不是三个方法：
+   厂商是 OpenAI Batch 兼容语义（"建任务"与"传文件"分开，且**建任务不幂等**、
+   超时后只能靠列表接口对账）✓
+2. ✅ **`OfflineRunner`**（`llm_batch.py`）：build 请求 → 建 `BatchJob` →
+   `save_state()` → `upload` → `create` → `on_submitted(info)` → 抛 `PendingError`
+3. ✅ **CLI**：动作名与当初设想**不同** —— 原想的
+   `batch-status | batch-export | batch-import` 落地为
+   **`batch-status` / `batch-run` / `batch-cancel` / `batch-resubmit`**：
+   状态机已能自判"该提交还是该回读"，拆成 export/import 只会让调用方多记一套规则
+   （见 §8 决策变更）
+4. ✅ **配置键加了，但位置不同**：不是 `wiki.l2.plan_mode`，而是
+   `wiki.batch.*`（离线触发器）+ `wiki.full.mode`（全量重跑通道）——
+   因为后来发现"离线 vs 实时"该按**触发场景**分，而不是按 L2 阶段分
+5. ⚠️ **假 uploader 打通闭环还没固化成 e2e 测试** —— 目前三段式由单测覆盖
+   （`test_llm_batch.py` / `test_wiki_batch.py` / `test_wiki_scripts.py`），
+   端到端假通道**仍是 M6 待办**
 
 ---
 
-## 5. ⚠️ 为什么现在**不加**配置开关
+## 5. ⚠️ 为什么当初**不加**配置开关（以及后来加了什么）
+
+> **后来怎样了（2026-10-04 补）**：这个判断**在方法上是对的、在粒度上被修正了** ——
+> 现在是"**先有真实消费点，再加键**"地逐个加的，而不是一次性上一组开关：
+> · `wiki.batch.enabled/schedule/dirty_memories/first_write_daily` —— **离线触发器**，
+>   `_run_locked()` 真有消费点（判定顺序"离线优先 → 实时兜底"）；
+> · `wiki.batch.check_interval_s` —— 收割节流，`task_queue.harvest()` 真读；
+> · `wiki.full.mode` —— 全量重跑通道，`batch_ops.full_mode()` 真读。
+> 每个都过了 `scripts/check_config_keys.py`（僵尸键 0）✓ 
 
 本项目已经**三次**踩过「假开关」：配置项没有任何读取点、默认值恰好等于代码里
 硬编码的值 —— 于是既不报错、也不让测试变红，能潜伏数月
@@ -194,6 +223,14 @@ BatchJob
   大域离线）；
 - 两条路的产物**完全一致** —— 因为编号映射与合并逻辑是同一份代码。
 
+> **后来怎样了（2026-10-04 补）**：落地形态比这里设想的更细 ——
+> ① **切分点变了**：不再"按域切换"，而是"**按阶段**"——归域与细分走实时（条数少、
+>    且细分结果要在本地算才能生成编译请求），**只有编译段走离线**（实测 258 条）；
+> ② **两条通道不会同时开工**：唯一交互规则是"**队列非空 ⇒ 不提交实时**"
+>    （否则离线正在编译的域会被实时重编一遍、白花一次实时的钱）；
+> ③ **自动触发**（若开启）的判定顺序是"**离线优先 → 实时兜底**"，
+>    两个开关都开时优先走离线，离线不可用才回落到实时 ✓
+
 ---
 
 ## 7. 顺带修掉的根因（本次一并做了）
@@ -207,3 +244,64 @@ BatchJob
 
 再叠加写盘侧的三道闸（域级原子写 / 页数崩塌拒写 / 整轮降级中止），
 「降级」的破坏力被限制在**质量**层面，不再触及**数据完整性**。
+
+---
+
+## 8. 实施记录（2026-09-29 ~ 2026-10-04）
+
+### 8.1 最终形态：三段式 + 惰性收割
+
+```
+① 提交轮  归域（实时）→ 细分（实时，条数少）→ 编译请求**一次交出去**（离线）
+              ↓ 落盘现场 batch_state.json（含每个域的成员快照，回读时还原全局编号）
+② 等厂商   18 分钟 ~ 24 小时（实测：最快 18 分钟，最慢一轮排队 24 小时）
+              ↓
+③ 落盘轮  回读 → 组装页面 → 写盘 → linkfix → 刷基线（`partial=True`，不清目录）
+```
+
+**"什么时候跑第 ③ 步"—— 不做轮询、不引入常驻进程**：挂在**已有事件**上
+（`agentmemhub/task_queue.py`）：开 DSH（MCP 启动）· 写入记忆 · 蒸馏收尾 ·
+**跑任意 CLI 命令**（实测跑 `stats` 也会顺手检查）。三层短路保证零成本：
+**队列空 ⇒ 立即返回**（连厂商都不查）→ 节流 300 秒 → 跨进程锁。
+
+### 8.2 实测四轮（全部真凭据）
+
+| 轮次 | 提交 | 结果 |
+|---|---|---|
+| ① 首次真实发起（09-29） | 细分 11 条（**纯排队 24 小时**，且遇到平台侧 `validation_failed`） | 见 §8.4 踩坑 |
+| ② 细分 + 编译（09-30~10-01） | 11 条 → 交编译 113 条 | 落盘 **3 域 / 182 页** |
+| ③ 只离线编译（10-01） | 250 条，50 分钟跑完 | 落盘 **5 域 / 398 页** |
+| ④ 只离线编译（10-03~10-04） | 258 条，约 13.5 小时 | 落盘 **8 域 / 378 页**，**链接验收 0 未解析** |
+
+**第 ④ 轮还验证了一个修复**：落盘后 `l2_inputs 1833 = l1_inputs 1833`（上一轮是
+1826 vs 1827，L2 基线多算了一条）—— 见 §8.3 的"静默掩盖"。
+
+### 8.3 落地时改掉的四个设计判断
+
+| 当初的设计 | 落地后 | 为什么改 |
+|---|---|---|
+| 细分与编译**都**离线（两段式） | **只离线编译，细分走实时** | 细分只有"域数×批数"条（实测 11 条），实时跑分钟级；两段都离线意味着**付两轮排队延迟**（实测细分段单独排了 24 小时） |
+| `PendingError` 标记"已落盘" | `OfflineRunner` 落盘现场后抛 `PendingError` | 同上，只是名字与职责更清楚 |
+| 按 `wiki.l2.plan_mode` 切通道 | **按触发场景**：`wiki.batch.*`（离线触发器）+ `wiki.full.mode`（全量） | "离线还是实时"与"L2 的哪个阶段"不是一回事 —— 用户可能"日常实时、全量离线" |
+| 离线终局失败 → 作废回池 | 作废回池**但保留现场**，可用 `batch-resubmit` **复用原输入文件**重提 | 平台侧 `validation_failed` 时（它自己的错误文案就是"请尝试重新创建任务"），重跑 L1/归域纯属白花钱 |
+
+### 8.4 踩坑清单（都是实测撞出来的）
+
+| 坑 | 症状 | 根因 / 修法 |
+|---|---|---|
+| `request_counts.total == 0` 被当成"数据有问题" | 怀疑上传的 JSONL 有问题 | 那是**执行进度**、不是解析结果。排除法：下载回输入文件数行数 + 建一个"官方示例逐字照抄"的对照任务（它也一样卡 → 平台侧问题） |
+| 平台侧批量调度异常 | 连官方示例都 `validation_failed` | 平台问题，**与我们数据无关**；处置=复用原输入文件重提（`batch-resubmit`） |
+| 终局作废**把现场一起删了** | 12 条请求的成员快照丢失，只能重新生成 | `import_results()` 改为**只标记 `voided`、保留在 state**（"不在飞"与"是否留着"是两件事） |
+| 域名被写成目录名（**自激循环**） | `manifest_l2` 从 18 个域涨到 21 个，产物出现 `20-04-…` 双重前缀目录 | 老产物 `index.md` 首行是**目录名** → 被当域名写进 manifest → 下轮当真域。修法：域名只认 `_domains.json` + slug 反查（`_domain_dir_map()`） |
+| 离线落盘**静默掩盖**批次期间新写入的记忆 | L2 基线多算了 1 条（1826 vs 1827） | 异步时间窗：基线照"当前库"建 → 把没编译的记忆记成已编译。修法：`_rebuild_l2_manifest(since=job.submitted_at)` 剔除"晚于提交时刻"的输入 |
+| linkfix `'list' object has no attribute 'get'` | 链接修复与 Obsidian 验收**一起没跑**（产物却已写盘） | `collect_redirects` 遇到数组型 JSON 没做类型容错 |
+| linkfix 扫描**隐藏目录** | 漏修 252 条死链 | `.bak_*` / `.tmp_*` 里的旧同名页面让它误判"链接能解析"，而 Obsidian 忽略这些目录 → 口径不一致。修法：跳过 `.` 开头的目录分量 |
+| `os.kill(pid, 0)` 判进程存活 | **跑测试时 pytest 把自己杀了**（整条命令无输出、exit 1） | Windows 上那是 `TerminateProcess`（杀掉对方，不是探测）。修法：只按时间戳判锁陈旧 |
+
+### 8.5 还没做的（M6 待办）
+
+- **假 uploader 的端到端测试**（原计划要求"e2e 全用 fake uploader"）——
+  目前三段式由单测覆盖，缺一条端到端假通道；
+- **`repair_model` 兜底**：离线回读只做 `extract_json()`，而实时路有本地模型修复
+  ——实时能救回的 ` ```json ` 围栏，离线会退化成"成员各自成页"；
+- 其余见 [`batch-offline-plan.md`](batch-offline-plan.md) §17.5 与里程碑 M6。

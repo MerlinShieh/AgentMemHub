@@ -116,12 +116,13 @@
 - `ARCHITECTURE.md` — 架构说明
 - `docs/memory-distillation.md` — 记忆蒸馏的设计与实施记录
 - `docs/llm-wiki.md` — LLM Wiki 两级编译、失败兜底与格式修复的实测记录
-- `docs/llm-batch-offline.md` — 离线批处理（Batch API）接入设计：**接缝已就位、
-  上传/轮询/下载未实现**；接缝是 `stage_plan(..., runner=)`，编解码在
-  `agentmemhub/llm_batch.py`。⚠️ 配置键随实现里程碑落地（M4），不提前埋（假开关）
+- `docs/llm-batch-offline.md` — 离线批处理（Batch API）**接缝设计 → 实施记录**：
+  §1–§7 是当初的接缝设计（每节末尾补了"后来怎样了"），**§8 是实施记录**
+  （最终形态、四轮实测数据、落地时改掉的四个判断、踩坑清单）。要**怎么用/怎么排查**
+  看 `docs/modules/batch-offline.md`；要**为什么这么设计**看 `batch-offline-plan.md`
 - `docs/batch-offline-plan.md` — 离线批处理接入计划（A2 · MiMo Batch API）：
   决策记录 D1–D6、三段式流水线状态机、里程碑 M0–M6 追踪表与风险清单
-  （**动工前先读它**；llm-batch-offline.md 是它的接缝前置）
+  （**动工前先读它**；M0–M3 已落地，M4/M5 的核心也已做，剩 M6 收尾）
 - `docs/modules/*.md` — **按职责域的模块文档**（改代码前先读对应那份）：
   `wiki.md`（两级编译/触发器/链接验收）、`config.md`（配置继承与僵尸键）、
   `batch-offline.md`（随 A2 落地）。根 README「模块地图」是索引
