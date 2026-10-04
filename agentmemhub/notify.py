@@ -125,11 +125,17 @@ PUSHPLUS_URL = "https://www.pushplus.plus/send"
 
 
 def _notify_cfg() -> dict[str, Any]:
-    """`notify` 段配置（读不到就用内置默认）。"""
+    """`notify` 段配置（**每次直接读盘**，不走 `config()` 的进程级单例）。
+
+    为什么破例：推送 token 属于"用户改完就想立刻生效"的配置，而 `config()` 是
+    **进程级单例**（yaml 只在 `Config.__init__` 读一次）—— 长驻的 MCP 进程改了 yaml
+    看不到，为填个 token 重启 DSH 不值当。通知本身是低频操作（每轮几次），
+    读一个小 yaml 的成本可以忽略。
+    """
     try:
-        from agentmemhub.config import config
-        return dict(config().notify or {})
-    except Exception:                       # noqa: BLE001 —— 配置读不到就当没开
+        from agentmemhub.config import Config
+        return dict(Config().notify or {})
+    except Exception:                       # noqa: BLE001 —— 读不到就当没开
         return {}
 
 

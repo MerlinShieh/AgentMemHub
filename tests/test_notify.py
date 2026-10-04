@@ -273,3 +273,19 @@ def test_落库成功才推送(db, monkeypatch):
     N.notify("warning", "batch", "余额不足", "请充值", db=db, ts=1000.0)
 
     assert len(sent) == 1 and sent[0][0] == "warning"
+
+
+def test_通知配置每次读盘_不依赖进程单例(monkeypatch):
+    """配完 token 不该为了生效去重启 DSH —— 而 `config()` 是进程级单例
+    （yaml 只在构造时读一次），长驻的 MCP 进程会看不到新值。所以这里破例直接读盘。"""
+    import agentmemhub.config as C
+
+    def _boom():
+        raise RuntimeError("单例不可用")
+
+    monkeypatch.setattr(C, "config", _boom)
+
+    cfg = N._notify_cfg()
+
+    assert "pushplus" in cfg, "`_notify_cfg()` 不该依赖 config() 单例"
+    assert "dedup_window_s" in cfg
