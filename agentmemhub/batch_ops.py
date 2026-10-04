@@ -151,6 +151,37 @@ def resubmit() -> dict[str, Any]:
     return {"resubmitted": wiki_batch.resubmit_terminal(client, Path(l2))}
 
 
+def full_mode() -> str:
+    """全量重跑走哪条通道（配置位 `wiki.full.mode`，默认 `realtime`）。
+
+    ⚠️ **刻意只做开关、不做判断**：官方批量是实时的 5 折，但某些**订阅套餐**给出的
+    实时额度折算下来可能更便宜 —— 哪个划算取决于用户的凭据，代码不该替它决定。
+    """
+    from agentmemhub.config import config
+    seg = (config().wiki or {}).get("full") or {}
+    m = str(seg.get("mode") or "realtime").strip().lower()
+    return m if m in ("realtime", "offline") else "realtime"
+
+
+def full_run(*, mode: str = "", db: str = "", workers: int = 0) -> dict[str, Any]:
+    """**全量重跑**：重新归域 + 全部域重编 + 覆盖写盘（清掉多余域目录）。
+
+    与增量的区别见 `wiki.update(full=True)` 的 docstring。`mode` 空则读
+    `wiki.full.mode`；`offline` 时归域与细分走实时、**编译段（几百条）走离线批次**。
+    """
+    from agentmemhub import wiki
+
+    l1, l2, cfg_db = paths()
+    m = (mode or full_mode()).strip().lower()
+    if m == "offline":
+        client, cfg = make_client()
+        return wiki.update(l1_dir=l1, l2_dir=l2, db=db or cfg_db, workers=workers,
+                           offline_client=client,
+                           offline_runner=make_runner(client, cfg), full=True)
+    return wiki.update(l1_dir=l1, l2_dir=l2, db=db or cfg_db, workers=workers,
+                       full=True)
+
+
 def checks(limit: int = 50) -> dict[str, Any]:
     """**检测流水**（排障用：上次什么时候查的、为什么没动、结果如何）。"""
     from agentmemhub import task_queue

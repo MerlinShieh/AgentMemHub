@@ -1073,7 +1073,20 @@ def cmd_wiki(args) -> int:
         print(_j.dumps(res, ensure_ascii=False, indent=2, default=str))
         return 0
 
-    # ---- 离线批处理（Batch API）----
+    # ---- full-run（全量重跑：重新归域 + 全部域重编 + 覆盖写盘）----
+    if args.action == "full-run":
+        from agentmemhub import batch_ops
+        mode = "offline" if args.offline else batch_ops.full_mode()
+        try:
+            res = batch_ops.full_run(mode=mode, db=args.db, workers=args.workers)
+        except batch_ops.BatchOpsError as e:
+            print(str(e))                       # 未配产出目录 / 未配凭据
+            return 2
+        print(_json.dumps(res, ensure_ascii=False, indent=2, default=str))
+        print("\n通道：%s（配置位 wiki.full.mode，可用 --offline 覆盖）" % mode)
+        return 0
+
+    # ---- batch-*（离线批处理的运维动作）----
     if args.action in ("batch-status", "batch-run", "batch-cancel",
                        "batch-resubmit"):
         return _cmd_wiki_batch(args)
@@ -1385,7 +1398,7 @@ def build_parser() -> argparse.ArgumentParser:
                               "index-pages", "pending", "drop", "ignored",
                               "restore",
                               "batch-status", "batch-run", "batch-cancel",
-                              "batch-resubmit"],
+                              "batch-resubmit", "full-run"],
                      help="failures=查看失败清单（默认）；retry=只重跑失败项；"
                           "align=审计 wiki 产物与索引库的差距（只读）；"
                           "update=增量更新（只重编脏会话 L1 与受影响 L2 域）；"
@@ -1417,6 +1430,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="trigger 用：绕过规则强制执行一次增量更新")
     pwk.add_argument("--deadline", type=float, default=0.0,
                      help="batch-run 用：等待厂商的预算秒数（0=不限时，默认）")
+    pwk.add_argument("--offline", action="store_true",
+                     help="full-run 用：强制走离线通道（覆盖 wiki.full.mode）")
     pwk.add_argument("--ids", default="",
                      help="drop/restore 用：记忆 id 列表，逗号分隔（如 4388,4392）")
     pwk.add_argument("--mode", default="soft", choices=["soft", "hard"],

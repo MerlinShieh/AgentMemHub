@@ -683,8 +683,8 @@ def _offline_advance(*, l1: Path, l2: Path, db: str, runner, client,
 def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
            workers: int = 0, on_progress: Callable[[str], None] | None = None,
            offline_runner=None, offline_client=None,
-           offline_deadline_s: float = 0.0, offline_plan: bool = False
-           ) -> dict[str, Any]:
+           offline_deadline_s: float = 0.0, offline_plan: bool = False,
+           full: bool = False) -> dict[str, Any]:
     """增量更新：RAG 库变了，只重编受影响的 L1 页与 L2 域（**不全量重来**）。
 
     **离线模式**（`offline_client` 非空时启用）：L2 的细分与编译不再当场调 LLM，
@@ -733,11 +733,14 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
     # ---- 1. 对齐审计 ----
     a1 = align(l1, "l1", db)
     a2 = align(l2, "l2", db)
-    if not (a1["stages"].get("l1", {}).get("manifest")
-            and a2["stages"].get("l2", {}).get("manifest")):
+    # **全量重跑（`full=True`）要跳过这两道早退**：它本来就是"显式要求重来一遍"，
+    # 与"库有没有变化""有没有现成基线"无关 —— 尤其是"缺 manifest"时，全量重跑
+    # 恰恰是**建立锚点**的手段，被它挡住就自相矛盾了。
+    if not full and not (a1["stages"].get("l1", {}).get("manifest")
+                         and a2["stages"].get("l2", {}).get("manifest")):
         return {"updated": False,
                 "message": "缺少编译清单（manifest_*.json）—— 先全量编译一次建立锚点"}
-    if not (a1["needs_recompile"] or a2["needs_recompile"]):
+    if not full and not (a1["needs_recompile"] or a2["needs_recompile"]):
         return {"updated": False, "message": "库未变化，无需更新"}
 
     # 回滚锚：增量更新会覆盖产物与 manifest——动手前先快照（实测教训：
@@ -801,6 +804,12 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
     touched |= new_files
     touched |= {f.rsplit(".", 1)[0] + ".md" for f in removed_files}
     dirty_domains = sorted(n for n, fs in domain_map.items() if set(fs) & touched)
+    # **全量重跑：不预设任何域** —— 交给聚合层重新归域（`partial=False` 会覆盖写盘
+    # 并清掉多余域目录、`no_resume` 会忽略既有 `_domains.json` 的域结构）。
+    # 这正是"全量"存在的理由：增量归类**撑不住**时（hint 会提示"『待整理』域已有
+    # N 页"），该重新归纳的是**域结构本身**，而不是再多塞几个域进去。
+    if full:
+        dirty_domains = []
 
     # ---- 4. 只重编脏域（partial 模式）----
     from types import SimpleNamespace
@@ -838,8 +847,8 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
     args = SimpleNamespace(
         src=str(l1), out=str(l2), db=db, stage="all", workers=workers or 0,
         limit=0, domain="", dmin=20, dmax=60, batch=120, min_pages=2,
-        recompile_single=False, thinking="", no_resume=False, resume=True,
-        retry_failed=False, partial=True, preset_domains=preset,
+        recompile_single=False, thinking="", no_resume=full, resume=not full,
+        retry_failed=False, partial=not full, preset_domains=preset,
         domain_map=domain_map,
         # **细分离线**（默认关）：细分只有「域数 × 批数」条（实测 3 个域 = 11 条），
         # 实时跑是分钟级；离线省下的绝对值很小，却要多付**一整轮排队延迟**
