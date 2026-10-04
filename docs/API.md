@@ -267,7 +267,7 @@ GET  /api/admin/job  →  轮询进度
 ```bash
 python -m agentmemhub wiki --action failures --out DIR          # 查 wiki 失败清单
 python -m agentmemhub wiki --action retry --out DIR --stage l2   # 定向补跑
-python -m agentmemhub health_check                              # 记忆库一致性巡检
+python scripts/health_check.py                                   # 记忆库一致性巡检
 python -m agentmemhub memory-log                                # 记忆操作事实流（写了/读了什么）
   [--event write|read] [--path mcp|http|distill|cli] [--grep 关键词] [--limit N] [--json]
 python -m agentmemhub llm-config [--json]                       # 各 LLM 使用点**最终生效**的配置
@@ -322,7 +322,7 @@ python -m agentmemhub llm-config [--json]                       # 各 LLM 使用
 > 本次就误报过一次"feedback 没被调用"——**关键接口必须交叉验证**
 > （用关键字 grep 确认），不能只信脚本结论。
 
-### 6.6 **离线批处理（Batch API）** —— 底层已就绪，**对外接口未实现**
+### 6.6 **离线批处理（Batch API）** —— 底层、HTTP、自动收割与自动发起**均已就绪**
 
 wiki 第二级编译可以走厂商**离线批处理**（价格是实时的 50%，闲时调度）。
 截至 2026-09-29 的进度（详见 [batch-offline-plan.md](batch-offline-plan.md)）：

@@ -58,6 +58,19 @@ AgentMemHub/
 │   ├── rag_bridge.py           # ★ 引擎接缝：MCP/面板/CLI 的统一调用入口
 │   ├── health.py               # 记忆库一致性巡检（面板健康卡片/CLI/测试共用判据）
 │   ├── failures.py             # ★ 长任务失败清单（分类/汇总/单独重跑；wiki 两级共用）
+│   ├── snapshot.py             # 快照与回滚（索引库整库 + wiki 产物目录）
+│   ├── notify.py               # ★ 通知：落库（SQLite）/ 推送策略（五个开关）/ **可插拔通道注册表**
+│   ├── obsidian.py             # Obsidian 官方 CLI 封装 —— 产物链接的**权威验收**（验收前先重载索引）
+│   ├── wiki.py                 # ★ Wiki 更新流程编排（增量/全量、两级衔接、基线刷新、投影）
+│   ├── wiki_triggers.py        # 自动更新触发器（规则判定 + 事件驱动惰性收割 + 离线优先 dispatch）
+│   ├── wiki_manifest.py        # 两级编译清单（manifest_l1/l2：记"实际编译成了什么"）
+│   ├── wiki_pending.py         # 待更新记忆的查看/软删除/硬删除/恢复
+│   ├── wiki_index.py           # 页面层投影：L2 知识页 → 召回面（units）
+│   ├── batch_client.py         # MiMo Batch API 客户端（上传/建任务/查状态/对账/取消/下载）
+│   ├── llm_batch.py            # 离线运行器接缝（OfflineRunner + 任务现场 + 终局判定）
+│   ├── wiki_batch.py           # 离线编排（查状态 → 决策 → 取结果 → 作废回池 + 通知）
+│   ├── batch_ops.py            # CLI / HTTP 共用的批处理操作层（precheck/status/run/cancel/…）
+│   ├── task_queue.py           # 通用异步任务收割（节流 + 跨进程锁 + 检测流水，**无常驻进程**）
 │   ├── rag/                    # ★ 内置记忆引擎（自有代码，可改可测）
 │   │   ├── config.py           #   引擎配置（模型注册/分桶/召回/写入策略）
 │   │   ├── ingest.py           #   摄取：unites 落库 + 向量 + FTS（含 schema/索引自愈）
@@ -205,6 +218,52 @@ fail-open（失败不登记哈希，重跑自动补）；`PROMPT_VER` 升版自�
 **长任务可运维性**：两级都可能跑几十分钟、数百次 LLM 调用，因此
 每次调用落 `logs/wiki.log`、每次失败落 `failures.jsonl`（可 `--retry-failed` 定向补跑）。
 详见 [docs/llm-wiki.md](docs/llm-wiki.md)。
+
+### 9. 离线批处理（Batch API，A2）
+
+wiki 第二级的**编译段**可以走厂商离线批处理（MiMo Batch API，官方价是实时的 50%、
+闲时调度）。形态是**三段式**：
+
+```
+① 提交轮（实时跑完 L1 + 归域 + 细分）→ 把"逐最终页编译"交出去
+② 等待（实测 18 分钟 ~ 24 小时）
+③ 落盘轮（回读 → 组装页面 → 写盘 → linkfix → 刷基线）
+```
+
+设计要点（**为什么这么切**）：
+
+- **只有编译段离线**：细分段实测只有 3~11 条请求（实时 1 分钟级），为省那点钱多付
+  一整轮排队延迟（实测排过 24 小时）不划算；编译段是"每个最终页一条"（实测
+  113~258 条），正是离线划算的地方。
+- **自动收割，无常驻进程**：`task_queue.harvest()` 挂在 MCP 启动 / 写入记忆 /
+  蒸馏收尾 / **任意 CLI 命令**上，三层短路（队列空 ⇒ 零成本返回 → 节流 300s →
+  跨进程锁），所以"顺手检查"没有可感成本。
+- **发起也能自动**：`wiki.batch.enabled` + 规则命中 ⇒ 提交离线批次，判定顺序
+  **离线优先 → 实时兜底**；两条通道共用 `fired` / `last_update_at`，所以无论走哪条，
+  一天只更新一次。
+- **真凭据操作**：建任务即可能计费，所以测试一律用 fake uploader
+  （`tests/test_offline_e2e.py`，全程不发真请求）+ 沙箱熔断。
+
+要**怎么用/怎么排查**看 [docs/modules/batch-offline.md](docs/modules/batch-offline.md)；
+要**为什么这么设计**看 [docs/batch-offline-plan.md](docs/batch-offline-plan.md)（M0–M6 追踪）。
+
+### 10. 通知系统（落库 / 策略 / 通道 三层解耦）
+
+三个概念**必须分开**，否则"要不要提醒我"会散落进几十个调用点：
+
+| 层 | 做什么 | 落点 |
+|---|---|---|
+| **落库** | 一条通知**总是**先写进 SQLite（有未读态、可查询） | `database/notify.db` |
+| **策略** | `notify.push_when`：**要不要往外推**。两族开关取**或** —— 按类别（`memory_write` / `wiki_trigger`）或按等级（`info` / `warning` / `error`） | `agentmemhub.yaml` |
+| **通道** | **推到哪**：可插拔注册表 `register_channel(name, fn)`，内置 `pushplus` | `agentmemhub/notify.py` |
+
+- **落库永不受策略影响**（策略只管"外发"）—— 否则静默期会把事实一起丢掉。
+- **加一个渠道只要三步**（写函数 → `register_channel` → 配置开开关），
+  详见 [docs/modules/notify.md](docs/modules/notify.md)。
+- `notify()` 先做**去重窗口**（`dedup_window_s`，默认 300）再落库、再按策略推送；
+  某个通道抛异常**不影响其他通道**。
+- 另有事实流 `logs/notify.log`（谁在什么时候发了什么、成功与否）—— 与 SQLite
+  职责不同：那边记**状态**，这边记**流水**。
 
 ## 使用
 

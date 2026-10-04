@@ -327,14 +327,15 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 | `folders [--source] [--limit]` | 按文件夹统计各 Agent 会话数 |
 | `sync [--source] [--full]` | **采集 + 向量化写入记忆索引**（增量；小模型先跑完即可检索，大模型后台并发补齐）|
 | `mcp [--http] [--bind H] [--port P]` | MCP 记忆网关：默认 stdio（Agent 拉起）；`--http` 常驻为 Streamable HTTP 供团队共享 |
-| `rebuild [--mode repair\|rebuild]` | 补齐缺失向量（repair）/ 全量重算 |
 | `memos [--source] [--out]` | 回退路径：生成 MemOS bundle（backend=memos 时用）|
 | `clean [--source x] [--apply]` | 记忆清洗：删除系统注入事件（默认预览，`--apply` 才执行并重建 FTS/计数；sync 会自动只清变更会话）|
 | `score [--pending] [--limit N] [--dry-run] [--workers N] [--ids id1,id2] [--unscored-count] [--sync-episodes]` | ⚠️ **当前不生效**（入口已从控制台/面板隐藏；实测评为 neutral 居多且跑批全跳过，质量把关由蒸馏置信度 + 面板 👍/👎 承担）——命令保留备查。原功能：LLM 批量自动评分历史记忆（**增量优先**：pending_score 队列非空只评队列·定点读零全量枚举，队列空则先筛未评 id 再读正文；`--pending` 仅评队列，`--ids` 只评指定条（写后即评），`--unscored-count` 统计未评条数（只读 id），`--sync-episodes` 回填 episode.r_task；**三档 verdict 均记入跳过清单**——positive/negative 写 value、neutral 不写值但仍标记「已评」避免下次重评（dry-run 一律不记录）；网关**内容审核拒评（如智谱 1301）自动归 neutral 并记账**，不再每次卡该条报错；LLM 调用**强制直连**、不受系统代理影响，确需代理设 `AGENTMEMHUB_LLM_PROXY`）|
-| `rebuild [--mode repair\|rebuild]` | 补向量：触发引擎 embedding rebuild（导入记忆后修复语义检索）|
+| `rebuild [--mode repair\|rebuild]` | 补向量：给缺向量的记忆补嵌（repair）/ 全量重算（导入记忆后修复语义检索）|
+| `weight --ids id1,id2 [--value V]` | 记忆手动加权：锁定价值分（优先于自动聚合、不衰减）|
 | `wiki --action failures\|retry --out DIR [--stage l1\|l2] [--src DIR_L1] [--workers N]` | **LLM Wiki 运维**：查看失败清单（按原因分类）/ 定向补跑失败项（只跑失败的，不全量重来）|
 | `wiki --action pending\|ignored\|drop\|restore` | **待更新记忆的查看与删除**：`pending` 列明细；`drop --ids a,b --mode soft`（不进 wiki、仍可召回）/ `--mode hard --confirm`（真删）；`ignored` 列已忽略；`restore` 取消 |
 | `wiki --action triggers\|trigger\|align\|update` | 触发器状态 / 手动触发 / 对齐审计（只读）/ 增量更新；`triggers --set-batch on\|off` **热改离线触发器总闸**（写 overrides，不用重启） |
+| `wiki --action backfill-manual\|index-pages` | `backfill-manual`：历史 Agent 直写记忆回填蒸馏表（幂等）；`index-pages`：把 L2 知识页投影进召回面（页级召回）|
 | `wiki --action full-run [--offline]` | **全量重跑**：重新归域 + 全部域重编 + 覆盖写盘（域编号会重排）。什么时候用：增量归类"撑不住"时（`align` 提示"『待整理』域已有 N 页"）—— 该重新归纳的是**域结构本身**。通道由 `wiki.full.mode`（`realtime`/`offline`）决定，`--offline` 可临时覆盖；⚠️ 编译段约 300+ 条请求，动手前自动留快照 |
 | `wiki --action batch-status\|batch-run\|batch-cancel\|batch-resubmit` | **离线批处理（MiMo Batch API，官方价是实时的 50%）**：`batch-status` 查在飞任务（厂商状态 / 进度 / 已等多久 / 建议）；`batch-run` **推进一段**（无在飞→提交、结果到位→交下一段或落盘，状态机自判）；`batch-cancel` 取消作废；`batch-resubmit` 平台侧 `validation_failed` 后用**原输入文件**重提。**收割是自动的**（开 DSH / 写记忆 / 跑任意 CLI 命令都会顺手推进一次），**发起**由离线触发器 `wiki.batch.enabled` 或手动 `batch-run` 决定，详见 [docs/modules/batch-offline.md](docs/modules/batch-offline.md) §3.4/§3.5 |
 | `memory-log [--event write\|read] [--path mcp\|http\|distill\|cli] [--grep 词] [--json]` | **记忆操作事实流**：什么时候写了/读了什么记忆（含内容全文与来源路径）|
