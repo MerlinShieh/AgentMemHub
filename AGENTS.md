@@ -45,7 +45,8 @@
   **加/改配置键后必跑** `uv run python scripts/check_config_keys.py` —— 它查
   "定义了却没有任何读取点"的**僵尸键**。本项目踩过三次同一个坑
   （`wiki.single_shot_max`、`wiki.workers`、`wiki.l2.*`，以及没有任何消费点的
-  假开关 `wiki.enabled`），**共同特征是配置里的值恰好等于代码里硬编码的默认值**
+  假开关 `wiki.enabled` —— 它已在 `wiki_triggers._configured()` 里接成真开关），
+  **共同特征是配置里的值恰好等于代码里硬编码的默认值**
   —— 所以既不报错、也不让测试变红，能潜伏数月。`tests/test_config_audit.py`
   里有一条守护测试会在提交前拦住它。**注意该脚本是启发式**（按"键名在代码里
   出现过"判定）——像 `rag.retrieval.candidate_k` 这种"代码里有同名字段但 yaml
@@ -67,7 +68,10 @@
   （环境变量会被子进程继承），`wiki_triggers._targets()` 见它即抛。
   **新加"会起线程/子进程的旁路"时，务必确认它也被这道熔断覆盖。**
 - **日志纪律**：统一 `logs/` 按程序分文件；测试必须隔离日志与数据目录
-  （`conftest` 的 autouse 夹具已强制把 `logs.log_dir` 指向临时目录）。
+  —— 隔离靠**两道**：`conftest` 的 autouse 夹具把 `logs.log_dir` 指向 tmp
+  （只对当前测试生效），以及**进程级**环境变量 `AGENTMEMHUB_TEST_LOG_DIR`
+  （`logs.log_dir()` 认它，逃逸线程/子进程也躲不开）。
+  只有前者时实测漏过：生产 `logs/wiki.log` 里混进了 **140 条**测试错误。
   **标准头五项**：**时间 / 等级 / 模块 / 行号 / 内容** —— 所有日志都必须有，
   **调用方只写业务字段，标准头由写入口统一补齐**（`logs.standardize()`；
   不要要求 60+ 个调用点各自写全，实测必然漂移）。三种形态的落法：

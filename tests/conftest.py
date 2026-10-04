@@ -65,7 +65,18 @@ def _sandbox_data_dir(tmp_path_factory):
     # 执行到 `wiki_triggers._targets()`，也绝不可能解析到真实产物目录。
     # （2026-09-26 实测：一次测试越界用 tmp 库"全量更新"了真实 out_l1。）
     os.environ["AGENTMEMHUB_TEST_SANDBOX"] = "1"
+    # 光有产物熔断还不够：**日志目录**也要跟着沙箱走。上面那道 monkeypatch
+    # （`audit_dir`）只对当前测试生效，逃逸的线程/子进程反而在 patch 撤销后
+    # 拿到真实的 `PROJECT_ROOT/logs` —— 实测生产 `logs/wiki.log` 里混进了
+    # 140 条 `测试环境禁止解析真实 wiki 产出目录`（正是被熔断拦下后回头留痕的）。
+    # 环境变量是进程级的，`logs.log_dir()` 认它。
+    oldl = os.environ.get("AGENTMEMHUB_TEST_LOG_DIR")
+    os.environ["AGENTMEMHUB_TEST_LOG_DIR"] = str(d / "logs")
     yield
+    if oldl is None:
+        os.environ.pop("AGENTMEMHUB_TEST_LOG_DIR", None)
+    else:
+        os.environ["AGENTMEMHUB_TEST_LOG_DIR"] = oldl
     if old is None:
         os.environ.pop("AGENTMEM_HUB_DATA_DIR", None)
     else:

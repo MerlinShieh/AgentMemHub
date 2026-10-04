@@ -76,12 +76,13 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 `mcp.log` / `memory.log` 没有额外错误事件表，只有第 2 条（`ok=False` / `error`）生效。
 
 **`msg` 的截断**（`_clip()`）：换行替换为空格、去首尾空白；超过 `MSG_MAX = 200` 时截断并追加 `…`。
-但 `_clip` 只在**作为 `msg` 参数传入** `standardize` 时才生效 —— 也就是 `audit_mcp` / `audit_memory` / `audit_wiki`
-（它们都算好摘要再传参）。`record()` 是直接把 `msg` 放进 entry 的，**既不截断也不去换行**：
-实盘 `web.log` 里有带 `\n` 且超过 200 字（末尾接 600 字终态文本）的条目。
+它在 `standardize()` 里对**所有**入口统一生效 —— `audit_mcp` / `audit_memory` / `audit_wiki`
+与 `record()` 都要把摘要**经 `msg=` 参数传进去**（调用方可以自己算摘要，但别自己塞进 entry：
+`standardize` 见 entry 里已有 `msg` 就认为"给过了"，会跳过 `_clip`）。
 
-（待核实：`AGENTS.md` 的纪律把 `web.log` / `cli.log` 与三条 JSONL 流并列，并说 `msg` ≤ 200 字；
-`record()` 的实现绕开了 `_clip`，两处口径不一致 —— 需要确认是有意为之还是遗漏。）
+> **2026-10-04 体检修正**：`record()` 此前正是"自己塞进 entry"，于是绕开了 `_clip`
+> —— 实盘 `web.log` 里躺着带 `\n`、超 200 字（末尾还接 600 字终态文本）的条目。
+> 现已统一口径，`test_record的摘要同样截断不换行` 守着它。
 
 ### 文本与 JSONL 两种形态的差异
 
@@ -145,7 +146,7 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 | `page_done` | wiki.log | `domain`、`title`、`merged`、`truncated` | 一个最终页编译完成 | 页面级进度；`merged` = 合并了几个源页 |
 | `page_fail` | wiki.log | `domain`、`title`、`error` | 单个最终页编译失败（`level=error`，属错误事件表） | 哪些页没出来；同时进 `failures.jsonl` 的 `stage='l2-compile'` |
 | `domain_write_skipped` | wiki.log | `domain`、`reason`（`page_collapse` / `swap_failed`）、`old_pages`+`new_pages`（崩塌时）、`error`（换入失败时） | 该域**跳过写盘、保留旧产物**（`level=error`，属错误事件表）：`page_collapse` = 页数崩塌保护；`swap_failed` = 整域换入失败（如该域文件被 Obsidian 占着，`rename` 报 WinError 5） | 两类都是**保护生效**而非产物损坏；该域不进新基线 → 下轮自动重试；同时进 `failures.jsonl` 的 `stage='l2-write'` |
-| `run_aborted` | wiki.log | `script="wiki_aggregate"`、`stage="l2"`、`reason="degrade_ratio"`、`degraded`、`tasks` | 降级页占比超阈值 → **本轮完全不写盘**（`level=error`，属错误事件表） | 上游 LLM 大面积故障的判据；旧产物与旧基线都保留，下次写入自动重试 |
+| `run_aborted` | wiki.log | `script="wiki_aggregate"`、`stage="l2"`、`reason`、`degraded`、`tasks`、`missing`、`domains` | 写盘前的中止闸触发 → **本轮完全不写盘**（`level=error`，属错误事件表）。`reason` 两个取值：`degrade_ratio`（降级页占比超阈值）/ `domain_missing`（全量重建时**有域整域没产出**，见 `_domain_missing_abort`） | 上游 LLM 故障或不完整的判据；旧产物与旧基线都保留，下次写入自动重试 |
 | `run_end` | wiki.log | `script`、`ok` / `failed`（L1）或 `domains`（L2）、`pages`、`skipped`、`seconds`、`call_seconds`、`usage` | 一轮结束汇总 | 花了多少 token / 钱；`seconds` 是**墙钟**（机器休眠会撑大）、`call_seconds` 是**累计调用耗时**（真实在等 LLM 的时间），两者并列防误判 |
 | `manifest` | wiki.log | `script`、`stage`（`l1` / `l2`）、`n_inputs`、`domains`（L2） | 编译清单（`manifest_l1.json` / `manifest_l2.json`）已写 | 与 `align` 的 diff 锚点；没有它，"库改了什么"无从得知 |
 | `link_check` | wiki.log | `ok`、`available`、`unresolved_targets`、`unresolved_links`、`error` | Obsidian 权威口径的产物链接验收 | `[[…]]` 是否点得开；`available=False` 表示**没法验**（不是失败），`ok=True` 才是唯一通过标准 |

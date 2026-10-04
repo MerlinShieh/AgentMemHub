@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextvars
 import gzip
 import json
+import os
 import shutil
 import sys
 import threading
@@ -54,6 +55,15 @@ LEVELS = ("debug", "info", "warn", "error")
 
 #: `msg` 的长度上限：它是给人看的**单行摘要**，不是正文（正文在业务字段里）。
 MSG_MAX = 200
+
+#: 测试沙箱标记（进程级环境变量，会被子进程继承）。
+#: 与 `wiki_triggers.SANDBOX_ENV` 同源同值 —— 那边拿它拦"解析真实产物目录"，
+#: 这边拿它拦"往真实 logs/ 写日志"。两处都不依赖 monkeypatch，因为
+#: **monkeypatch 挡不住活过测试的线程**（详见 `tests/conftest.py`）。
+SANDBOX_ENV = "AGENTMEMHUB_TEST_SANDBOX"
+
+#: 沙箱下日志目录的落点（由 `tests/conftest.py` 的 session 夹具置位）。
+SANDBOX_LOG_DIR_ENV = "AGENTMEMHUB_TEST_LOG_DIR"
 
 
 def caller_site(depth: int = 2) -> tuple[str, int]:
@@ -108,8 +118,32 @@ def _level_of(entry: dict, *, error_events: tuple[str, ...] = ()) -> str:
 
 
 
+def sandbox_log_dir() -> Path | None:
+    """测试沙箱下日志目录的落点；不在沙箱（或没配）时返回 `None`。
+
+    抽成独立函数是为了**可测**：`conftest` 的 `audit_dir` 夹具会把
+    `logs.log_dir` 整个 monkeypatch 掉，测试里根本调不到原函数 —— 而要验的
+    恰恰是"**没有 monkeypatch 时**（= 活过测试的线程/子进程）会不会落到生产目录"。
+    """
+    if os.environ.get(SANDBOX_ENV) == "1":
+        override = os.environ.get(SANDBOX_LOG_DIR_ENV) or ""
+        if override:
+            return Path(override)
+    return None
+
+
 def log_dir() -> Path:
-    """统一日志根目录：<程序根>/logs（跟随程序所在目录，不占系统盘数据目录）。"""
+    """统一日志根目录：<程序根>/logs（跟随程序所在目录，不占系统盘数据目录）。
+
+    **测试沙箱**下改走 `AGENTMEMHUB_TEST_LOG_DIR`：`conftest` 的 `audit_dir`
+    夹具只对**当前测试**生效（monkeypatch），而活过测试的线程/子进程拿不到它
+    —— 实测生产 `logs/wiki.log` 里混进了 140 条测试错误，它们正是被沙箱熔断
+    （`wiki_triggers` 的产物闸）拦下后、回头写日志留痕的那批。
+    环境变量是**进程级**的、会被子进程继承，与那道熔断同源，逃逸路径也躲不开。
+    """
+    override = sandbox_log_dir()
+    if override is not None:
+        return override
     from agentmemhub.config import PROJECT_ROOT
     return PROJECT_ROOT / "logs"
 
@@ -330,8 +364,11 @@ def record(msg: str, level: str = "info", actor: str = "web",
     返回条目（含标准头 ts/level/module/line/msg，调用点由栈自动取）。
     """
     # depth=3 与 audit_* 同口径：caller_site(0) ← standardize(1) ← 本函数(2) ← 业务(3)
-    entry = standardize({"ts": time.time(), "level": level, "actor": actor,
-                         "msg": msg}, depth=3)
+    # `msg` 必须经 `msg=` 参数传：直接塞进 entry 会让 `standardize` 以为"摘要已经
+    # 给过了"从而**跳过 `_clip`** —— 超长、多行文本原样落盘（实测 `web.log` 里
+    # 躺着 180 字且带换行的任务消息）。所有事实流的摘要口径必须一致：单行、≤ MSG_MAX。
+    entry = standardize({"ts": time.time(), "level": level, "actor": actor},
+                        msg=msg, depth=3)
     if dest == "web":
         with _LOCK:
             _RING.append(entry)

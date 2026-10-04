@@ -210,6 +210,7 @@ rag 六路通道召回（kind=page；两阶段召回的第二阶段按 wiki_path
    - **页数崩塌拒写**：`_is_page_collapse(old_n, new_n)` 判据是 `old_n >= COLLAPSE_MIN_OLD(4)` 且 `new_n < old_n * COLLAPSE_RATIO(0.5)`；命中则该域**跳过写盘、保留旧产物**，进 `skipped_domains` 与失败清单（`stage='l2-write'`），日志 `event="domain_write_skipped"`。
    - **换入失败也只跳过该域**（2026-09-29 修，缺陷 D-1）：`_write_domain_outputs()` 是逐域写盘的唯一出口，内部用 `_write_domain()` 收口 `_swap_domain_dir()` 抛出的任何异常，返回可读原因并记 `reason="swap_failed"`。**单个域换不进去绝不中止整轮** —— 此前异常一路穿透到整轮中止闸（2026-09-28 实测：Obsidian 打开着 `04-AgentMemHub-记忆系统` 的两个笔记 → `ddir.rename(bak)` 报 `WinError 5` → 88 分钟一轮里 L1 编完、**L2 一个域都没写**）。两类跳过都进 `skipped_domains` → `_l2_skip_ids()` 剔出新基线 → 下轮自动重试；失败路径也不再残留 `.tmp_<域>`。
    - **整轮降级中止**：`_is_degraded_run(n_degraded, n_tasks)` 判据是降级页占比 `>= ABORT_DEGRADE_RATIO(0.5)`；命中则 `run()` 立即返回 `{"aborted": "degrade_ratio", ...}`，日志 `event="run_aborted"`。**这道闸必须在 `_prune_stale_domain_dirs()` 之前**——先删旧域目录再中止，等于"声称中止了、磁盘却已经动了"。
+    - **整域失败中止**：`_domain_missing_abort(planned, produced, out)` —— **全量模式**（`partial=False`）下，“计划里有的域”却“一页都没产出”（页任务在**外层**异常、走 `page_fail` 被 `continue` 掉，不是 fail-open 降级），且磁盘上已有旧产物时，`run()` 立即返回 `{"aborted": "domain_missing"}`。**为什么不能“跳过那个域、把其余域写了”**：全量模式的目录名按**成功域**重新编号，少一个域后面整体前移 —— `01-旧域` 与 `01-新域` 并存，索引与互链全乱；而 `_prune_stale_domain_dirs()` 还会把没产出域的旧目录当成“上一轮残留”删掉，本轮却没有替代产物 ⇒ **净损失一整域**。**首次构建例外**（磁盘上还没有任何域目录）：无物可毁，能写多少写多少。（2026-10-04 体检发现：`keep` 为空那道闸只覆盖了“**全失败**”，“**整域失败**”漏在外面；它与第 3 条的 `_l2_skip_ids` 互补 —— 那条管“新基线别记成已编译”，这条管“磁盘上的旧产物别被清掉”。）
 2. **manifest 的语义是「实际编译成了什么」，不是「库里现在有什么」。**`build_manifest(..., drop_sessions=, drop_ids=)` 两个剔除参数分别对应会话级失败与组级失败（L1 逐组编译是 fail-open 的，会话整体成功但失败那几组的记忆没进任何页面）。漏剔除 = 下轮 align 认为已编译 = **永久掩盖**，这是 2026-09-21 静默丢失事故的根因。
 3. **`_l2_skip_ids(dom_out, dirty_domains, written, skipped)`：没真正写出来的脏域，其覆盖的记忆 id 必须从 L2 新基线里剔除。**三类都算：页数崩塌跳过的域、逐最终页编译整域失败的域、聚合什么都没写的路径（dry-run、异常提前返回）。原则是"宁可多剔除、下轮重试，也不漏剔除"。
 4. **L2 中止时不刷新 L2 manifest、也不跑 linkfix。**中止时 `mf2` 读回旧清单（脏数据保持脏，下次写入自动重试）；linkfix 按"新标题"去改旧页面，等于绕过中止闸动了磁盘。
@@ -265,7 +266,7 @@ rag 六路通道召回（kind=page；两阶段召回的第二阶段按 wiki_path
 | `manifest` | 两级收尾 | `stage`、`n_inputs`、`domains` |
 | `call` | L2 | `tag`（域表/归类/细分/编译）、`ok`、`attempt`、`seconds`、`error`、`usage` |
 | `domain_planned` / `page_done` / `page_fail` | L2 | `name` / `domain`、`title`、`pages` / `merged` / `truncated` / `error` |
-| `run_aborted` | L2 | `reason="degrade_ratio"`、`degraded`、`tasks` |
+| `run_aborted` | L2 | `reason`（`degrade_ratio` / `domain_missing`）、`degraded`、`tasks`、`missing`、`domains` |
 | `domain_write_skipped` | L2 | `domain`、`reason="page_collapse"`、`old_pages`、`new_pages` |
 | `trigger_check` | 触发器 | `hook`（`write` / `manual`）、`should_run`、`reasons`、`due_slots`、`dirty`、`last_update_at` |
 | `trigger_skip` | 触发器 | 已有更新在跑（进程内或其它进程） |

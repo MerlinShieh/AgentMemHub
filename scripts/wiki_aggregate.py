@@ -1030,6 +1030,42 @@ def _is_degraded_run(n_degraded: int, n_tasks: int) -> bool:
     return n_tasks > 0 and n_degraded / n_tasks >= ABORT_DEGRADE_RATIO
 
 
+def _existing_domain_dirs(out: Path) -> list[str]:
+    """磁盘上已有的域目录名（`%02d-…` 形态）。
+
+    判据与 `_prune_stale_domain_dirs` 保持一致：跳过隐藏目录（用户的
+    `.obsidian/`）与非数字前缀目录（用户自建），否则会把"用户的东西"当成
+    "上一轮产物"。
+    """
+    if not out.is_dir():
+        return []
+    return sorted(d.name for d in out.iterdir()
+                  if d.is_dir() and not d.name.startswith(".") and d.name[:1].isdigit())
+
+
+def _domain_missing_abort(planned: set[str], produced: set[str], out: Path) -> bool:
+    """全量写盘前问一句：本轮该不该因为"整域没产出"而整个中止？
+
+    成立条件（三者同时）：本轮**计划里有的域**、**一页都没产出**、且磁盘上
+    **已有旧产物**。
+
+    为什么不能"跳过那个域、把其余域写了"：全量模式的目录名按**成功域**重新编号
+    （`sorted(by_domain_pages)` 带序号），少一个域后面整体前移 —— 旧目录
+    （`01-旧域`）与新目录（`01-新域`）并存，索引与互链全乱；而且
+    `_prune_stale_domain_dirs` 会把没产出域的旧目录当"上一轮残留"删掉，
+    本轮却没有替代产物 ⇒ **净损失一整域**。
+
+    为什么"磁盘上没有旧产物"时放行：首次构建本就无物可毁，能写多少写多少，
+    为了一个失败的域让整轮白跑没有意义。
+
+    与降级闸同源：**宁可本轮什么都不做，也不要写出一个半成品知识库。**
+    （2026-10-04 体检发现：`keep` 为空那道闸只覆盖了"全失败"，整域失败漏在外面。）
+    """
+    if not (planned - produced):
+        return False
+    return bool(_existing_domain_dirs(out))
+
+
 def _is_page_collapse(old_n: int, new_n: int) -> bool:
     """页数是否"崩塌"到不该写的程度（判据见 COLLAPSE_* 的说明）。
 
@@ -1728,6 +1764,21 @@ def run(args) -> None:
         _wlog(event="run_aborted", script="wiki_aggregate", stage="l2",
               reason="degrade_ratio", degraded=len(degraded), tasks=len(tasks))
         status["aborted"] = "degrade_ratio"
+        return status
+
+    # ---- 整域失败闸：同样是写盘前的破坏性动作，必须排在 `finalize_outputs` 之前 ----
+    # 判据与缘由见 `_domain_missing_abort()`：全量重建少一个域 ⇒ 目录编号整体
+    # 错位 + 没产出域的旧产物被当残留清掉，而本轮无替代品。宁可整轮不写。
+    planned_domains = {name for name, _i, _pl in tasks}
+    if not partial and _domain_missing_abort(planned_domains, set(by_domain_pages), out):
+        missing = sorted(planned_domains - set(by_domain_pages))
+        print("\n⚠️ 有 %d 个域整域没产出（%s）—— **本轮不写盘**，保留上一轮产物；"
+              "请等 LLM 恢复后重跑。"
+              % (len(missing), "、".join(missing[:3])), flush=True)
+        _wlog(event="run_aborted", script="wiki_aggregate", stage="l2",
+              reason="domain_missing", missing=len(missing),
+              domains="、".join(missing[:5]))
+        status["aborted"] = "domain_missing"
         return status
 
     # ---- 写盘 ----

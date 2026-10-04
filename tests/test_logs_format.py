@@ -213,3 +213,81 @@ def test_兜底handler_幂等且随目录重建(tmp_path, monkeypatch):
           if getattr(h, "_app_handler", False)]
     assert len(hs) == 1
     assert getattr(hs[0], "_app_dir", "").startswith(str(d2))
+
+
+# ---------------------------------------------------------------------------
+# 摘要裁剪必须覆盖**所有**入口（含 record）
+# ---------------------------------------------------------------------------
+
+def test_record的摘要同样截断不换行():
+    """⚠️ 回归（2026-10-04 体检）：`record()` 曾把 `msg` **直接塞进 entry**，
+    `standardize` 见"摘要已经给过了"就跳过 `_clip` —— 超长、多行文本原样落盘
+    （实测 `web.log` 里躺着 180 字且带换行的任务消息）。
+
+    四条事实流的摘要口径必须一致：单行、≤ `MSG_MAX`。
+    """
+    logs.record("长" * 500 + "\n第二行", dest="cli")
+
+    msg = _last("cli.log")["msg"]
+
+    assert len(msg) <= logs.MSG_MAX + 1, "record 的摘要也要截断"
+    assert "\n" not in msg, "摘要必须是单行，换行会撑坏一行一条的 JSONL 观感"
+
+
+def test_record_web也带标准头():
+    """`dest="web"` 与 `dest="cli"` 同口径（此前只测了 cli，web 那条漏网）。"""
+    line = inspect.currentframe().f_lineno + 1
+    logs.record("面板操作", actor="web", dest="web")
+
+    rec = _last("web.log")
+
+    assert rec["module"] == __name__ and rec["line"] == line
+    assert rec["actor"] == "web"
+
+
+# ---------------------------------------------------------------------------
+# 测试沙箱：日志目录同样不能落到生产
+# ---------------------------------------------------------------------------
+
+def test_沙箱下日志目录改道且不回落到生产(monkeypatch, tmp_path):
+    """⚠️ 逃逸路径的兜底。`conftest` 的 `audit_dir` 夹具是 **monkeypatch**，
+    只对当前测试生效：活过测试的线程/子进程在 patch 撤销后拿到的是真实
+    `PROJECT_ROOT/logs` —— 实测生产 `logs/wiki.log` 里混进 **140 条**
+    `测试环境禁止解析真实 wiki 产出目录`，正是那批旁路被产物熔断拦下后
+    回头写日志留的痕。
+
+    所以判定必须落在**进程级环境变量**上（monkeypatch 撤不掉它）。
+    """
+    monkeypatch.setenv(logs.SANDBOX_ENV, "1")
+    monkeypatch.setenv(logs.SANDBOX_LOG_DIR_ENV, str(tmp_path / "logs"))
+    assert logs.sandbox_log_dir() == tmp_path / "logs"
+
+    monkeypatch.delenv(logs.SANDBOX_LOG_DIR_ENV)
+    assert logs.sandbox_log_dir() is None, "沙箱里没配落点时也不能回落到生产目录"
+
+    monkeypatch.setenv(logs.SANDBOX_LOG_DIR_ENV, str(tmp_path / "logs"))
+    monkeypatch.setenv(logs.SANDBOX_ENV, "0")
+    assert logs.sandbox_log_dir() is None, "不在沙箱时不该改道"
+
+
+def test_子进程也继承沙箱日志目录():
+    """子进程是最典型的"逃逸"形态：它一个 monkeypatch 都拿不到。
+
+    这里真起一个子进程问它 `log_dir()` 落在哪 —— 答案只要还是
+    `PROJECT_ROOT/logs`，生产日志就仍会被测试污染。
+    """
+    import os
+    import subprocess
+    import sys
+
+    from agentmemhub.config import PROJECT_ROOT
+
+    out = subprocess.run(
+        [sys.executable, "-c", "from agentmemhub import logs; print(logs.log_dir())"],
+        capture_output=True, text=True, timeout=180, cwd=str(PROJECT_ROOT))
+
+    assert out.returncode == 0, out.stderr[-800:]
+    got = out.stdout.strip().splitlines()[-1]
+
+    assert got != str(PROJECT_ROOT / "logs"), "子进程仍会写生产日志：%s" % got
+    assert got == os.environ[logs.SANDBOX_LOG_DIR_ENV], "子进程应继承沙箱日志目录"

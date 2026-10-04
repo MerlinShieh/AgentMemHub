@@ -675,6 +675,51 @@ def test_增量模式绝不清目录(tmp_path):
     assert (tmp_path / "01-旧域").exists()
 
 
+def test_已有域目录只认数字前缀(tmp_path):
+    """`_existing_domain_dirs` 与 `_prune_stale_domain_dirs` 同判据：
+    隐藏目录（用户的 `.obsidian/`）与用户自建目录都不是"上一轮产物"。"""
+    from wiki_aggregate import _existing_domain_dirs
+
+    (tmp_path / "01-域甲").mkdir()
+    (tmp_path / "02-域乙").mkdir()
+    (tmp_path / ".obsidian").mkdir()
+    (tmp_path / "用户自建目录").mkdir()
+
+    assert _existing_domain_dirs(tmp_path) == ["01-域甲", "02-域乙"]
+
+
+def test_全量整域失败时必须中止写盘(tmp_path):
+    """⚠️ 回归（2026-10-04 体检）：`keep` 为空那道闸只覆盖"**全失败**"，
+    "**整域失败**"漏在外面。
+
+    场景：全量重建时域甲的所有页都在**外层**异常（不是 fail-open，是彻底没产出，
+    页任务走 `page_fail` 分支被 `continue` 掉）⇒ `by_domain_pages` 里没有甲
+    ⇒ 甲不在 `keep` ⇒ `_prune_stale_domain_dirs` 把 `01-域甲` 当"上一轮残留"
+    删掉，而本轮并没有替代产物 —— **净损失一整域**。同时其余域按成功域重新编号，
+    `01-新域` 与 `01-旧域` 并存，索引与互链全乱。
+
+    正确做法是本轮**整个不写盘**（与降级闸同源）：宁可什么都不做，
+    也不要写出一个半成品知识库。首次构建（磁盘上没有旧产物）例外——无物可毁。
+    """
+    from wiki_aggregate import _domain_missing_abort
+
+    for name in ("01-域甲", "02-域乙"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "001-页.md").write_text("# 页", encoding="utf-8")
+
+    planned = {"域甲", "域乙", "域丙"}
+    produced = {"域乙"}                          # 甲、丙整域没产出
+
+    assert _domain_missing_abort(planned, produced, tmp_path) is True, \
+        "有域整域没产出且磁盘上已有旧产物 ⇒ 必须中止，否则旧域产物被当残留清掉"
+
+    assert _domain_missing_abort(planned, planned, tmp_path) is False, \
+        "全部域都产出了 → 正常写盘"
+
+    assert _domain_missing_abort(planned, produced, tmp_path / "还没有产物") is False, \
+        "首次构建无物可毁 → 能写多少写多少，不为一两个失败的域让整轮白跑"
+
+
 # ---------------------------------------------------------------------------
 # frontmatter aliases：让 Obsidian 的 [[标题]] 能解析
 # ---------------------------------------------------------------------------
