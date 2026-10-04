@@ -289,3 +289,59 @@ def test_通知配置每次读盘_不依赖进程单例(monkeypatch):
 
     assert "pushplus" in cfg, "`_notify_cfg()` 不该依赖 config() 单例"
     assert "dedup_window_s" in cfg
+
+
+# ---------------------------------------------------------------------------
+# 推送策略（push_when）
+# ---------------------------------------------------------------------------
+
+def _policy(monkeypatch, **kw):
+    base = {"memory_write": False, "wiki_trigger": True,
+            "info": False, "warning": True, "error": True}
+    base.update(kw)
+    monkeypatch.setattr(N, "_notify_cfg", lambda: {"push_when": base})
+
+
+def test_推送策略_按类别与等级是OR(monkeypatch):
+    """两类开关是 OR："只看警告以上"与"wiki 的动作我都要知道"能并存。"""
+    _policy(monkeypatch)
+
+    assert N.should_push("info", "batch") is True       # 类别命中（wiki_trigger）
+    assert N.should_push("info", "trigger") is True
+    assert N.should_push("info", "wiki") is True
+    assert N.should_push("warning", "general") is True  # 等级命中
+    assert N.should_push("error", "memory") is True     # 等级命中（哪怕 memory_write 关着）
+    assert N.should_push("debug", "batch") is True      # 类别命中（debug 不是等级开关）
+    assert N.should_push("info", "memory") is False     # 都不命中
+    assert N.should_push("info", "general") is False
+
+
+def test_推送策略_全关时一条都不推(monkeypatch):
+    _policy(monkeypatch, memory_write=False, wiki_trigger=False,
+            info=False, warning=False, error=False)
+
+    for lv in ("info", "warning", "error"):
+        assert N.should_push(lv, "batch") is False
+    assert N.should_push("warning", "memory") is False
+
+
+def test_只看警告以上(monkeypatch):
+    """把 ② 关掉、只留 ④⑤ ⇒ 只有 warning/error 推，wiki 的 info 不推。"""
+    _policy(monkeypatch, wiki_trigger=False, info=False,
+            warning=True, error=True)
+
+    assert N.should_push("info", "batch") is False
+    assert N.should_push("warning", "batch") is True
+    assert N.should_push("error", "wiki") is True
+
+
+def test_落库不受策略影响(db, monkeypatch):
+    """策略只决定"推不推微信" —— 落库始终全留（面板要查得到）。"""
+    _policy(monkeypatch, memory_write=False, wiki_trigger=False,
+            info=False, warning=False, error=False)
+    monkeypatch.setattr(N, "push", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("策略全关时不该调用 push")))
+
+    N.notify("error", "batch", "严重错误", "细节", db=db, ts=1000.0)
+
+    assert len(N.list_notifications(db=db, limit=10)) == 1

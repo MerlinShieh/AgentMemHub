@@ -481,7 +481,10 @@ def get_effective_batch_config() -> dict[str, Any]:
     """
     from agentmemhub import config as hub_config
     base = dict((hub_config.config().wiki or {}).get("batch") or {})
+    # 这两个不是**触发规则**，不该混进判定配置：`check_interval_s` 是收割节流、
+    # `expire_warn_s` 是过期预警阈值，各有自己的消费点。
     base.pop("check_interval_s", None)
+    base.pop("expire_warn_s", None)
     state = _load_state()
     ov = dict((state.get("overrides") or {}).get("batch") or {})
     return {**base, **ov}
@@ -509,6 +512,17 @@ def _submit_offline(*, hook: str, dirty: int, now: datetime,
     _audit({"event": "trigger_update_start", "hook": hook, "reasons": reasons,
             "dirty": dirty, "channel": "offline"})
     _mark_started(now, hook)
+    # **开始更新就告知**：一轮 wiki 更新可能跑几十分钟（L1 编译 + 归域 + 细分），
+    # 而它是被自动触发的 —— 不说一声，用户只会看到"电脑在忙"。
+    try:
+        from agentmemhub.notify import notify as _notify
+        _notify("info", "trigger", "开始更新 Wiki",
+                "触发原因：%s（脏数据 %d 条），通道=离线。"
+                % ("；".join(reasons) or "手动强制", dirty),
+                meta={"hook": hook, "channel": "offline", "dirty": dirty,
+                      "reasons": reasons})
+    except Exception:                       # noqa: BLE001 —— 旁路
+        pass
     try:
         res = batch_ops.run()
     except batch_ops.BatchOpsError as e:
@@ -648,6 +662,16 @@ def _run_locked(*, hook: str, force: bool = False) -> dict[str, Any]:
     _audit({"event": "trigger_update_start", "hook": hook,
             "reasons": verdict["reasons"], "dirty": dirty})
     _mark_started(now, hook)
+    # 与离线段同理：自动触发的更新可能跑几十分钟，开始时要告知一声。
+    try:
+        from agentmemhub.notify import notify as _notify
+        _notify("info", "trigger", "开始更新 Wiki",
+                "触发原因：%s（脏数据 %d 条），通道=实时。"
+                % ("；".join(verdict["reasons"]) or "手动强制", dirty),
+                meta={"hook": hook, "channel": "realtime", "dirty": dirty,
+                      "reasons": verdict["reasons"]})
+    except Exception:                       # noqa: BLE001 —— 旁路
+        pass
     t0 = time.time()
     try:
         upd = wiki.update(l1_dir=l1, l2_dir=l2, db=db)

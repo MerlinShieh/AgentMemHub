@@ -354,6 +354,9 @@ class BatchJob:
     #: 已作废（取消 / 模式切换 / 终局失败）→ 它覆盖的域**回到待更新池**
     voided: bool = False
     voided_reason: str = ""
+    #: 是否已经发过"即将过期"预警。**必须持久化**：收割是高频事件（每 10 分钟 /
+    #: 每次写入都会走到），不记这个标记就会把同一条预警反复推给用户。
+    warned_expire: bool = False
 
     def pending_ids(self) -> list[str]:
         """已提交但还没拿到结果的 custom_id。"""
@@ -400,7 +403,8 @@ class BatchJob:
                 "error_file_id": self.error_file_id,
                 "provider_status": self.provider_status,
                 "expire_at": self.expire_at,
-                "voided": self.voided, "voided_reason": self.voided_reason}
+                "voided": self.voided, "voided_reason": self.voided_reason,
+                "warned_expire": self.warned_expire}
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "BatchJob":
@@ -418,7 +422,8 @@ class BatchJob:
                    provider_status=str(d.get("provider_status", "")).lower(),
                    expire_at=float(d.get("expire_at") or 0.0),
                    voided=bool(d.get("voided")),
-                   voided_reason=str(d.get("voided_reason", "")))
+                   voided_reason=str(d.get("voided_reason", "")),
+                   warned_expire=bool(d.get("warned_expire")))
 
 
 def decide(job: BatchJob, *, now: float, deadline_s: float = 0.0) -> str:

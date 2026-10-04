@@ -1326,6 +1326,19 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
         # 满足规则（时点档/定量阈值/每日首次）才同步跑 update；全程旁路，
         # 任何异常都不影响蒸馏结果。
         if not dry_run and stats.get("memories_new"):
+            # **记忆写入通知**（`notify.push_when.memory_write`，**默认关着**）：
+            # 这里发的是**本轮汇总**而不是"每条记忆一条" —— 后者一旦打开就是刷屏，
+            # 而 Pushplus 是推微信，刷屏的代价远大于"少知道一条"。
+            try:
+                from agentmemhub.notify import notify as _notify
+                _notify("info", "memory", "蒸馏写入记忆",
+                        "本轮写入 %d 条新记忆（来源：%s）。"
+                        % (stats.get("memories_new"), source or "全部"),
+                        meta={"memories_new": stats.get("memories_new"),
+                              "source": source or "",
+                              "seconds": stats.get("seconds")})
+            except Exception:               # noqa: BLE001 —— 旁路
+                pass
             from agentmemhub import wiki_triggers
             tr = wiki_triggers.on_memories_written()
             if tr.get("checked") and tr.get("should_run"):

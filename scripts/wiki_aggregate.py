@@ -1380,6 +1380,19 @@ def _submit_stage(out: Path, runner, reqs: list[BatchRequest],
               seconds=round(time.time() - t0, 1))
         print("  离线任务已提交（结果未回）：batch=%s，%d 个域等待回读"
               % (sub["batch_id"] or "(未知)", n_domains))
+        # **提交成功要通知人**：离线是异步的（实测等 18 分钟 ~ 24 小时），提交完就该
+        # 知道"活交出去了、接下来是等"。推不推微信由 `notify.push_when` 决定
+        # （`wiki_trigger` 默认开 ⇒ 默认会推）。
+        try:
+            from agentmemhub.notify import notify as _notify
+            _notify("info", "batch", "已提交离线批次",
+                    "批次 %s（%s）：%d 个域 / %d 条请求，等厂商跑完后会自动回读落盘。"
+                    % (sub["batch_id"] or "(未知)", stage, n_domains, len(reqs)),
+                    meta={"batch_id": sub["batch_id"], "stage": stage,
+                          "n_requests": len(reqs), "n_domains": n_domains,
+                          "domains": sorted(members)})
+        except Exception:                   # noqa: BLE001 —— 旁路
+            pass
         return status
 
     # 运行器正常返回 = 它没把"结果未回"表达出来（实现有问题）。

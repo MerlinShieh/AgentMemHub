@@ -287,3 +287,78 @@ def test_重提_没有输入文件凭据的任务会被跳过(tmp_path):
             raise AssertionError("没有输入文件就没法重建")
 
     assert resubmit_terminal(_C(), tmp_path) == []
+
+
+# ---------------------------------------------------------------------------
+# 即将过期预警
+# ---------------------------------------------------------------------------
+
+def _warn_job(**kw):
+    """在飞（未终局）且带过期时刻的任务。"""
+    base = dict(batch_id="b1", stage="l2compile", submitted_at=1000.0,
+                items={"a": {"domain": "域A", "batch_no": 0}},
+                provider_status="in_progress", expire_at=100000.0)
+    base.update(kw)
+    return BatchJob(**base)
+
+
+def test_接近过期时预警一次():
+    """到期未完成会**整批作废**、数据回池 —— 提前几小时告知，且**只告知一次**。
+
+    去重靠 `job.warned_expire` 持久化标记而不是通知的去重窗口：收割是高频事件
+    （每 10 分钟一次、每次写入记忆也会走到），300 秒窗口挡不住反复推。
+    """
+    from agentmemhub.wiki_batch import _warn_expiring
+
+    job = _warn_job()
+    seen: list = []
+
+    def _note(level, category, title, body="", meta=None):
+        seen.append((level, category, title, meta))
+        return True
+
+    # 距过期还有 2 小时（< 默认 6 小时阈值）⇒ 预警
+    hit = _warn_expiring([job], now=100000.0 - 2 * 3600, note=_note)
+
+    assert hit == ["b1"] and job.warned_expire is True
+    assert seen and seen[0][0] == "warning" and seen[0][1] == "batch"
+    assert "即将过期" in seen[0][2]
+    assert seen[0][3]["hours_left"] == 2.0
+
+    # 再收割一次 ⇒ **不重复推**（这是高频路径，重复推就是刷屏）
+    seen.clear()
+    assert _warn_expiring([job], now=100000.0 - 3600, note=_note) == []
+    assert seen == []
+
+
+def test_离过期还早或已终局都不预警():
+    from agentmemhub.wiki_batch import _warn_expiring
+
+    seen: list = []
+
+    def _note(*a, **k):
+        seen.append(a)
+        return True
+
+    far = _warn_job(batch_id="far")                       # 还有 20 小时
+    assert _warn_expiring([far], now=100000.0 - 20 * 3600, note=_note) == []
+
+    done = _warn_job(batch_id="done", provider_status="completed")
+    assert _warn_expiring([done], now=99999.0, note=_note) == []
+
+    finite = _warn_job(batch_id="no-expire", expire_at=0.0)
+    assert _warn_expiring([finite], now=99999.0, note=_note) == []
+
+    assert seen == []
+
+
+def test_预警阈值可配且0关闭(monkeypatch):
+    """`wiki.batch.expire_warn_s`：0 = 关闭预警。"""
+    from agentmemhub import wiki_batch
+
+    monkeypatch.setattr(wiki_batch, "expire_warn_s", lambda cfg=None: 0.0)
+    called: list = []
+
+    assert wiki_batch._warn_expiring(
+        [_warn_job()], now=100000.0 - 60, note=lambda *a, **k: called.append(a)) == []
+    assert called == [], "阈值 0 时不该预警"

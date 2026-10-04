@@ -223,6 +223,68 @@ def make_harvester(*, l1: "Path | str", l2: "Path | str", db: str = "",
                              client=client, runner=runner)
 
 
+def expire_warn_s(cfg: Optional[dict] = None) -> float:
+    """「即将过期」的预警阈值（秒）。配置位 `wiki.batch.expire_warn_s`，默认 6 小时。
+
+    0 = 关闭预警。
+    """
+    if cfg is None:
+        try:
+            from agentmemhub.config import config
+            cfg = ((config().wiki or {}).get("batch") or {})
+        except Exception:                   # noqa: BLE001
+            cfg = {}
+    try:
+        v = float((cfg or {}).get("expire_warn_s", 6 * 3600))
+    except (TypeError, ValueError):
+        v = 6.0 * 3600
+    return max(0.0, v)
+
+
+def _warn_expiring(jobs: list[BatchJob], *, now: float, note: Notify) -> list[str]:
+    """对"接近过期"的任务发**一次**预警（返回被预警的 batch_id 列表）。
+
+    为什么要它：批量任务在 `completion_window`（默认 24h）内没被厂商调度完成就会变
+    `expired` —— 该批数据**整批作废、回待更新池**，前面的等待全部白费。提前几小时
+    知道，人可以做两个决定：调大 `llm_batch.completion_window` 重提，或者等下次再跑。
+
+    **去重靠 `job.warned_expire` 这个持久化标记**，不是靠通知的去重窗口 —— 收割是
+    高频事件（每 10 分钟一次、每次写入记忆也会走到），300 秒的窗口挡不住反复推。
+    """
+    warn_s = expire_warn_s()
+    if warn_s <= 0:
+        return []
+    hit: list[str] = []
+    for job in jobs:
+        # `completed` **不算 `is_terminal()`**（它还没被消费，`decide()` 会立刻
+        # CONSUME），但对"已经跑完、就等回读"的任务发"快过期"预警毫无意义 ——
+        # 所以这里单独排除一次。
+        if (job.voided or job.warned_expire or job.is_terminal()
+                or job.provider_status == "completed" or not job.expire_at):
+            continue
+        left = float(job.expire_at) - now
+        if not (0 < left < warn_s):
+            continue
+        job.warned_expire = True            # 先记下；`save_state` 由调用方收尾时做
+        hit.append(job.batch_id)
+        hours = left / 3600.0
+        _audit("batch_expire_warn", batch_id=job.batch_id, stage=job.stage,
+               hours_left=round(hours, 1), expire_at=job.expire_at,
+               n_requests=len(job.items))
+        try:
+            note("warning", "batch", "离线批次即将过期",
+                 "批次 %s（%s，%d 条请求）还有约 %.1f 小时到 completion_window；"
+                 "到期仍未完成会**整批作废**、数据回待更新池 —— 要留它就把 "
+                 "`llm_batch.completion_window` 调大后重提。"
+                 % (job.batch_id, job.stage, len(job.items), hours),
+                 meta={"batch_id": job.batch_id, "stage": job.stage,
+                       "hours_left": round(hours, 1), "expire_at": job.expire_at,
+                       "n_requests": len(job.items)})
+        except Exception:                   # noqa: BLE001 —— 通知是旁路
+            pass
+    return hit
+
+
 def import_results(client, out: "Path | str", *, now: Optional[float] = None,
                    deadline_s: float = 0.0,
                    notify_fn: Optional[Notify] = None) -> dict[str, Any]:
@@ -256,6 +318,8 @@ def import_results(client, out: "Path | str", *, now: Optional[float] = None,
                 "consumed": [], "voided": [], "waited": []}
 
     poll(client, jobs)
+    # **先看有没有快过期的**：它比"继续等"更该让人知道（见 `_warn_expiring`）。
+    warned = _warn_expiring(jobs, now=now, note=note)
     for job in jobs:
         d = decide(job, now=now, deadline_s=deadline_s)
         decisions[job.batch_id] = d

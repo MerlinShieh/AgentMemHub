@@ -180,6 +180,32 @@ def pushplus_send(*, token: str, title: str, content: str, topic: str = "",
     return {"ok": code == 200, "code": code, "msg": str(d.get("msg") or "")[:200]}
 
 
+#: `wiki_trigger` 这个开关覆盖的类别 —— 它们都算"wiki 更新相关的事件"。
+WIKI_CATEGORIES = ("wiki", "batch", "trigger")
+
+
+def should_push(level: str, category: str) -> bool:
+    """按**推送策略**判断这条通知要不要推到微信。**落库不受它影响**（始终全留）。
+
+    两类开关是 **OR**（任一命中即推）：
+      · 按**类别**：`memory_write`（category = `memory`）/ `wiki_trigger`
+        （category ∈ `WIKI_CATEGORIES`）
+      · 按**等级**：`info` / `warning` / `error`
+
+    为什么用 OR 而不是"类别 AND 等级"：两者的关注点不同 —— "我只想看警告以上"
+    与"wiki 的动作我都要知道"应当能并存，用 OR 表达最自然，也不必去枚举
+    "等级 × 类别"的组合。
+    """
+    pol = dict(_notify_cfg().get("push_when") or {})
+    lv = str(level or "info").strip().lower()
+    cat = str(category or "general").strip().lower()
+    if cat == "memory" and pol.get("memory_write"):
+        return True
+    if cat in WIKI_CATEGORIES and pol.get("wiki_trigger"):
+        return True
+    return bool(lv in ("info", "warning", "error") and pol.get(lv))
+
+
 def push(level: str, category: str, title: str, body: str = "", *,
          meta: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """把一条通知**推到微信**（Pushplus）。返回 `{"ok", ...}`，**永不抛**。
@@ -270,7 +296,9 @@ def notify(level: str, category: str, title: str, body: str = "", *,
     except Exception as e:               # noqa: BLE001 —— 旁路，永不抛
         _fallback(row, e)
     _audit(row, ok)
-    if ok and push_too:
+    # 推送要过**策略**（哪些事件值得推微信，见 `should_push`）—— 落库不受影响：
+    # 策略关了只是"不推微信"，面板里照样查得到。
+    if ok and push_too and should_push(lv, cat):
         push(lv, cat, ttl, str(body or ""), meta=meta)
     return ok
 
