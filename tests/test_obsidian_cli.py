@@ -11,6 +11,14 @@ import pytest
 from agentmemhub import obsidian
 
 
+@pytest.fixture(autouse=True)
+def _no_reload_wait(monkeypatch):
+    """`verify()` 默认会先请求 Obsidian 重载、再等它重建索引（20 秒）——
+    测试里不能真等。顺序本身由 `test_验收前必须先重载再查` 单独守。"""
+    monkeypatch.setattr(obsidian, "reload_app", lambda **k: None)
+    monkeypatch.setattr(obsidian.time, "sleep", lambda s: None)
+
+
 def _no_config(monkeypatch, value: str = ""):
     """把配置里的 `wiki.obsidian_cli` 钉成给定值（否则它会先命中，测不到后面的分支）。"""
     class _C:
@@ -118,3 +126,29 @@ def test_不自动启动Obsidian(monkeypatch):
     monkeypatch.setattr(obsidian, "run", lambda *a, **k: called.append(a) or "")
     obsidian.verify()
     assert called == [], "Obsidian 没运行就不该调 CLI"
+
+
+def test_验收前必须先重载再查(monkeypatch):
+    """⚠️ 回归（2026-10-04 实测）：**不重载就验收 = 拿旧索引比新产物**。
+
+    wiki 更新是**整域替换** —— 域一重构，几百个文件名同时变。而某个 `[[…]]`
+    能不能解析由 Obsidian 的**内存索引**说了算，于是不重载就会报出一大批
+    **并不存在**的死链：实测全量重写 21 个域后报 **499 个未解析目标**，
+    `reload` 之后**立刻归零**。当时差点据此去改 `wiki_linkfix` 的判据，
+    而它报告"1197 处全部正确"其实一直是对的。
+    """
+    calls: list[str] = []
+    monkeypatch.setattr(obsidian, "app_running", lambda *a, **k: True)
+    monkeypatch.setattr(obsidian, "reload_app", lambda **k: calls.append("reload"))
+    monkeypatch.setattr(obsidian.time, "sleep", lambda s: calls.append("sleep"))
+    monkeypatch.setattr(obsidian, "unresolved",
+                        lambda **k: calls.append("unresolved") or [])
+
+    r = obsidian.verify()
+
+    assert calls == ["reload", "sleep", "unresolved"], "顺序必须是：重载 → 等索引 → 查"
+    assert r["ok"] is True and r["available"] is True
+
+    calls.clear()
+    obsidian.verify(reload_first=False)
+    assert calls == ["unresolved"], "排查时可以只看重载前的状态，但验收不许关"

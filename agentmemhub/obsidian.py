@@ -16,6 +16,13 @@ wiki 产物最终是**给人看的**（Obsidian 视图），而 `[[…]]` 到底
 任何一步不满足都会抛 `ObsidianUnavailable` —— 调用方**必须旁路处理**
 （验收是旁路，绝不能因为它把编译结果搞挂）。
 
+⚠️ **验收前必须先让它重载**（`verify()` 默认会做，见其 docstring）：某个 `[[…]]`
+能否解析由 Obsidian 的**内存索引**决定，而 wiki 更新是**整域替换** —— 域一重构，
+几百个文件名同时变。不重载就等于"拿旧文件名比新产物"，会报出一批**并不存在**的
+死链（2026-10-04 实测：全量重写 21 个域后报 **499 个未解析目标**，`reload` 之后
+立刻归零；当时差点据此去改 `wiki_linkfix` 的判据，而它报告"1197 处全部正确"
+其实一直是对的）。
+
 CLI 路径解析顺序：显式参数 → `OBSIDIAN_CLI` 环境变量 → `PATH`。
 """
 from __future__ import annotations
@@ -24,10 +31,15 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 #: 解析 CLI 可执行文件时的候选名（Windows 上官方用 .com 终端重定向器）
 _CLI_NAMES = ("obsidian", "Obsidian.com", "obsidian.exe")
+
+#: 重载后等 Obsidian 重建索引的秒数。产物是**整域替换**，几百个文件名会同时变；
+#: 太小会拿到半旧的索引，报出并不存在的死链（2026-10-04 实测）。
+RELOAD_SETTLE_S = 20
 
 
 class ObsidianUnavailable(RuntimeError):
@@ -196,17 +208,31 @@ def app_running(timeout: int = 20) -> bool:
 
 
 def verify(*, cli: str = "", vault: str = "", timeout: int = 180,
-           require_running: bool = True) -> dict:
+           require_running: bool = True, reload_first: bool = True,
+           settle_s: float = RELOAD_SETTLE_S) -> dict:
     """产物链接验收（给流程调用的**不抛异常**版本）。
 
     返回 `{ok, available, total_targets, total_links, items, error}`：
       · `available=False` → Obsidian/CLI 不可用（调用方应记为"未验收"，不是失败）
       · `ok=True`         → 未解析为 0（**这是唯一的通过标准**）
+
+    ⚠️ **必须先重载再验收**（`reload_first=True`，默认）：某个 `[[…]]` 能不能解析，
+    由 Obsidian 的**内存索引**说了算，而 wiki 更新是**整域替换** —— 域一重构，
+    几百个文件名同时变。不重载就等于"拿旧文件名去比新产物"，报出一大批**并不
+    存在**的死链：2026-10-04 实测全量重写 21 个域后报 **499 个未解析目标**，
+    `reload` 之后**立刻归零**，白排查了一轮（还差点去改 linkfix 的判据，
+    而它报告"1197 处全部正确"其实一直是对的）。
+
+    排查时可以传 `reload_first=False` 看重载前的状态，但**验收不许关**。
     """
     if require_running and not app_running():
         return {"ok": False, "available": False, "total_targets": 0,
                 "total_links": 0, "items": [],
                 "error": "Obsidian 未在运行（不自动启动它）"}
+    if reload_first:
+        reload_app(cli=cli, vault=vault)
+        if settle_s > 0:
+            time.sleep(settle_s)
     try:
         bad = unresolved(cli=cli, vault=vault, timeout=timeout)
     except ObsidianUnavailable as e:
