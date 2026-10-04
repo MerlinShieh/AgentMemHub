@@ -628,8 +628,8 @@ def _offline_advance(*, l1: Path, l2: Path, db: str, runner, client,
         # 用户不会盯着看 —— "跑完了"这件事只能靠通知。开启了 Pushplus 就顺手推微信
         # （推送是旁路：`notify()` 本身永不抛，这里再兜一层只是保险）。
         try:
-            from agentmemhub.notify import notify as _notify
-            _notify("info", "batch", "离线批次已落盘",
+            from agentmemhub import notify as _notify
+            _notify.info("batch", "离线批次已落盘",
                     "批次 %s：%d 域 / %d 页（降级拼接 %d 页）"
                     % (job.batch_id, len(status.get("written_domains") or []),
                        int(status.get("pages") or 0),

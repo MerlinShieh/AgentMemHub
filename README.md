@@ -861,7 +861,8 @@ uv run python -m agentmemhub llm-config --json   # 机器读
 | LLM Wiki 编译链 | `wiki.py`、`wiki_index.py`、`wiki_manifest.py`、`wiki_pending.py`、`wiki_triggers.py`、`scripts/wiki_*.py`、`obsidian.py` | [docs/modules/wiki.md](docs/modules/wiki.md) | 已写 |
 | 配置体系 | `config.py`、`scripts/check_config_keys.py`、`scripts/sync_llm_*.py` | [docs/modules/config.md](docs/modules/config.md) | 已写 |
 | 日志与可观测性 | `logs.py`、`failures.py`、`snapshot.py`、`notify.py` | [docs/logging.md](docs/logging.md)（**事件字典 + 排查剧本**） | 已写 |
-| 离线批处理（Batch API） | `llm_batch.py`、`batch_client.py`、`wiki_batch.py`、`notify.py` | [docs/modules/batch-offline.md](docs/modules/batch-offline.md) | 已写（M0–M2b-2；见 [计划](docs/batch-offline-plan.md)） |
+| 离线批处理（Batch API） | `llm_batch.py`、`batch_client.py`、`wiki_batch.py`、`task_queue.py`（通用惰性收割）、`batch_ops.py`（CLI/HTTP 共用动作层） | [docs/modules/batch-offline.md](docs/modules/batch-offline.md) | 已落地（M0–M3 + M4/M5 核心；剩 M6 收尾，见 [计划](docs/batch-offline-plan.md)） |
+| 通知与推送 | `notify.py`（**通道可插拔**）、`logs.py`（`audit_notify`） | [docs/modules/notify.md](docs/modules/notify.md) | 已写（2026-10-04） |
 | 记忆引擎（内置 rag） | `agentmemhub/rag/**` | `docs/modules/memory-engine.md` | 计划中 |
 | 面板后端网关 | `agentmemhub/web/**` | `docs/modules/panel.md` | 计划中 |
 | 采集与适配 | `agentmemhub/adapters/**`、`store.py`、`models.py`、`watermarks.py` | `docs/modules/ingest-adapters.md` | 计划中 |

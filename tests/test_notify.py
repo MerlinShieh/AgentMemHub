@@ -184,16 +184,20 @@ def _fake_open(body: str):
 
 
 def test_推送默认关_不发任何请求(monkeypatch):
-    """**默认 `enabled: false`**：没配就不该往外发消息。"""
+    """**默认 `enabled: false`**：没配就不该往外发消息。
+
+    ⚠️ `push()` 返回的是 `{通道名: 结果}` —— 多通道之后契约变了（原先只有
+    Pushplus 时是单个 `{"ok", ...}`）。
+    """
     monkeypatch.setattr(N, "_notify_cfg", lambda: {"pushplus": {"enabled": False}})
-    assert N.push("info", "batch", "标题", "正文") == {"ok": False,
-                                                      "skipped": "disabled"}
+    assert N.push("info", "batch", "标题", "正文")["pushplus"] == {
+        "ok": False, "skipped": "disabled"}
 
 
 def test_推送开了但没token也不发(monkeypatch):
     monkeypatch.setattr(N, "_notify_cfg",
                         lambda: {"pushplus": {"enabled": True, "token": "  "}})
-    assert N.push("info", "batch", "标题")["skipped"] == "no_token"
+    assert N.push("info", "batch", "标题")["pushplus"]["skipped"] == "no_token"
 
 
 def test_推送成功与业务失败(monkeypatch):
@@ -203,7 +207,7 @@ def test_推送成功与业务失败(monkeypatch):
 
     monkeypatch.setattr(N.urllib.request, "urlopen",
                         _fake_open('{"code":200,"msg":"请求成功"}'))
-    r = N.push("warning", "batch", "离线批次失败", "厂商返回 401")
+    r = N.push("warning", "batch", "离线批次失败", "厂商返回 401")["pushplus"]
 
     assert r["ok"] is True
     assert _fake_open.sent["token"] == "tk"
@@ -212,7 +216,7 @@ def test_推送成功与业务失败(monkeypatch):
 
     monkeypatch.setattr(N.urllib.request, "urlopen",
                         _fake_open('{"code":500,"msg":"token 无效"}'))
-    r2 = N.push("info", "batch", "x")
+    r2 = N.push("info", "batch", "x")["pushplus"]
     assert r2["ok"] is False and r2["code"] == 500
 
 
@@ -225,9 +229,119 @@ def test_推送网络异常永不抛(monkeypatch):
                         lambda: {"pushplus": {"enabled": True, "token": "tk"}})
     monkeypatch.setattr(N.urllib.request, "urlopen", _boom)
 
-    r = N.push("info", "batch", "x")
+    r = N.push("info", "batch", "x")["pushplus"]
 
     assert r["ok"] is False and "TimeoutError" in r["error"]
+
+
+# ---------------------------------------------------------------------------
+# 通道可插拔（"后续手动添加其他渠道"的入口）
+# ---------------------------------------------------------------------------
+
+def test_可以注册新通道(monkeypatch):
+    """**这就是加渠道的全部成本**：写一个函数 + `register_channel()` —— 落库、
+    推送策略、去重、审计全都自动复用，核心逻辑一行都不用改。"""
+    got: list = []
+
+    def _fake_channel(*, level, category, title, body, meta, cfg):
+        got.append((level, category, title, cfg))
+        return {"ok": True, "via": "fake"}
+
+    monkeypatch.setattr(N, "_notify_cfg", lambda: {
+        "fake": {"enabled": True, "whatever": 1}})
+    N.register_channel("fake", _fake_channel)
+    try:
+        assert "fake" in N.channels()
+        out = N.push("warning", "batch", "标题", "正文")
+        assert out["fake"] == {"ok": True, "via": "fake"}
+        assert "pushplus" in out, "**多通道**：已有通道不受影响、照旧各发各的"
+        # 通道拿到的是**它自己那段配置**（渠道自定义配置键，核心不必认识）
+        assert got and got[0][0] == "warning" and got[0][3] == {"enabled": True,
+                                                                "whatever": 1}
+    finally:
+        N._CHANNELS.pop("fake", None)
+
+
+def test_指定通道只推那一个(monkeypatch):
+    """联调单个渠道时用 `channel=`。"""
+    calls: list = []
+
+    def _ch(name):
+        def _fn(*, level, category, title, body, meta, cfg):
+            calls.append(name)
+            return {"ok": True}
+        return _fn
+
+    monkeypatch.setattr(N, "_notify_cfg", lambda: {})
+    N.register_channel("c1", _ch("c1"))
+    N.register_channel("c2", _ch("c2"))
+    try:
+        out = N.push("info", "batch", "标题", channel="c2")
+        assert list(out) == ["c2"] and calls == ["c2"]
+    finally:
+        N._CHANNELS.pop("c1", None)
+        N._CHANNELS.pop("c2", None)
+
+
+def test_一个通道炸了不牵连别的(monkeypatch):
+    """渠道是**互不牵连**的：一个抛异常，其它照发。"""
+    def _boom(*, level, category, title, body, meta, cfg):
+        raise RuntimeError("这个渠道坏了")
+
+    good: list = []
+    monkeypatch.setattr(N, "_notify_cfg", lambda: {})
+    N.register_channel("bad", _boom)
+    N.register_channel("good", lambda **k: good.append(k) or {"ok": True})
+    try:
+        out = N.push("info", "batch", "标题")
+        assert out["bad"]["ok"] is False and "这个渠道坏了" in out["bad"]["error"]
+        assert out["good"]["ok"] is True and len(good) == 1
+    finally:
+        N._CHANNELS.pop("bad", None)
+        N._CHANNELS.pop("good", None)
+
+
+def test_未知通道如实报(monkeypatch):
+    monkeypatch.setattr(N, "_notify_cfg", lambda: {})
+    assert N.push("info", "batch", "x", channel="不存在")["不存在"]["skipped"] \
+        == "unknown_channel"
+
+
+# ---------------------------------------------------------------------------
+# 语义化快捷函数
+# ---------------------------------------------------------------------------
+
+def test_快捷函数写进库并带上meta(tmp_path, monkeypatch):
+    """`**meta` 直接变成结构化 meta —— 面板/排查时能按字段查。"""
+    db = str(tmp_path / "n.db")
+    monkeypatch.setattr(N, "push", lambda *a, **k: {})
+
+    # 快捷函数固定用默认库；为隔离，这里用它的等价 `notify(..., db=...)`
+    N.notify("warning", "batch", "快过期", "还有 2 小时", db=db,
+             meta={"batch_id": "b1", "hours": 2})
+
+    row = N.list_notifications(db=db, limit=1)[0]
+    assert row["level"] == "warning" and row["meta"]["batch_id"] == "b1"
+
+
+def test_快捷函数签名一致(monkeypatch):
+    """四个快捷函数都能被同样地调用，且**两种 meta 写法都支持**：
+    关键字直接展开（`batch_id="b1"`）与显式 `meta={...}`（便于从 `notify(...)` 迁移）。"""
+    seen: list = []
+    monkeypatch.setattr(N, "notify",
+                        lambda lv, cat, ttl, body="", **k:
+                        seen.append((lv, cat, ttl, k.get("meta"))) or True)
+
+    N.info("c", "t", "b", k1=1)
+    N.warn("c", "t", "b", meta={"k2": 2})
+    N.error("c", "t", "b", meta={"k3": 3}, extra="x")
+    N.debug("c", "t", "b")
+
+    assert [s[0] for s in seen] == ["info", "warning", "error", "debug"]
+    assert seen[0][3] == {"k1": 1}
+    assert seen[1][3] == {"k2": 2}
+    assert seen[2][3] == {"k3": 3, "extra": "x"}, "显式 meta 与散装关键字要合并"
+    assert seen[3][3] is None, "都没有 meta 时传 None（不写空 dict）"
 
 
 # ---------------------------------------------------------------------------

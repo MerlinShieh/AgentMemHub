@@ -1330,8 +1330,8 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
             # 这里发的是**本轮汇总**而不是"每条记忆一条" —— 后者一旦打开就是刷屏，
             # 而 Pushplus 是推微信，刷屏的代价远大于"少知道一条"。
             try:
-                from agentmemhub.notify import notify as _notify
-                _notify("info", "memory", "蒸馏写入记忆",
+                from agentmemhub import notify as _notify
+                _notify.info("memory", "蒸馏写入记忆",
                         "本轮写入 %d 条新记忆（来源：%s）。"
                         % (stats.get("memories_new"), source or "全部"),
                         meta={"memories_new": stats.get("memories_new"),

@@ -1384,8 +1384,8 @@ def _submit_stage(out: Path, runner, reqs: list[BatchRequest],
         # 知道"活交出去了、接下来是等"。推不推微信由 `notify.push_when` 决定
         # （`wiki_trigger` 默认开 ⇒ 默认会推）。
         try:
-            from agentmemhub.notify import notify as _notify
-            _notify("info", "batch", "已提交离线批次",
+            from agentmemhub import notify as _notify
+            _notify.info("batch", "已提交离线批次",
                     "批次 %s（%s）：%d 个域 / %d 条请求，等厂商跑完后会自动回读落盘。"
                     % (sub["batch_id"] or "(未知)", stage, n_domains, len(reqs)),
                     meta={"batch_id": sub["batch_id"], "stage": stage,

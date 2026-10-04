@@ -33,7 +33,7 @@ import time
 import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 
 #: 通知等级（用户语义；日志流用 `warn`，映射在 `logs.audit_notify`）
 LEVELS = ("debug", "info", "warning", "error")
@@ -183,6 +183,55 @@ def pushplus_send(*, token: str, title: str, content: str, topic: str = "",
 #: `wiki_trigger` 这个开关覆盖的类别 —— 它们都算"wiki 更新相关的事件"。
 WIKI_CATEGORIES = ("wiki", "batch", "trigger")
 
+#: 各等级的 emoji（渲染用；也让"这条有多要紧"在微信里一眼可见）。
+_LEVEL_EMOJI = {"debug": "·", "info": "ℹ️", "warning": "⚠️", "error": "❌"}
+
+
+# ---------------------------------------------------------------------------
+# 推送通道：**可插拔**
+#
+# 一个通道就是一个函数：吃"一条通知 + 它自己那段配置"，返回 `{"ok": bool, ...}`。
+# 加渠道 = 写一个这样的函数 + `register_channel()` —— **不动核心逻辑**：
+# 落库、推送策略（`push_when`）、去重、审计全都是共用的。
+# ---------------------------------------------------------------------------
+
+#: 通道函数签名（一律**关键字调用**）：
+#:     fn(*, level, category, title, body, meta, cfg) -> dict
+#: `cfg` 是 `notify.<通道名>` 那一段配置（缺省传空 dict）—— 所以**渠道自己决定
+#: 要哪些配置键**，核心不必认识它们（加渠道不需要改 `config.py` 的白名单）。
+PushChannel = Callable[..., dict[str, Any]]
+
+#: 已注册的通道（`name → 函数`）。**这就是"可插拔"的全部机制。**
+_CHANNELS: dict[str, PushChannel] = {}
+
+
+def register_channel(name: str, fn: PushChannel) -> None:
+    """注册 / 替换一个推送通道。**加新渠道的唯一入口**（同名覆盖，便于测试替换）。
+
+    见 `_channel_pushplus()` —— 它就是"怎么写一个渠道"的参照实现。
+    """
+    _CHANNELS[str(name or "").strip().lower()] = fn
+
+
+def channels() -> list[str]:
+    """已注册的通道名（排查"消息为什么没出去"时先看这个）。"""
+    return sorted(_CHANNELS)
+
+
+def render_markdown(level: str, title: str, body: str = "",
+                    meta: Optional[dict[str, Any]] = None) -> str:
+    """把一条通知渲染成 markdown 正文（**通道可复用**，也可自行渲染）。"""
+    md = "**%s %s**\n\n%s" % (_LEVEL_EMOJI.get(str(level or "info").lower(), "ℹ️"),
+                              title, body or "")
+    if meta:
+        md += "\n\n---\n" + "\n".join("- %s：%s" % (k, v) for k, v in meta.items())
+    return md
+
+
+def render_title(level: str, title: str) -> str:
+    """带等级 emoji 的标题（通道可复用）。"""
+    return "%s %s" % (_LEVEL_EMOJI.get(str(level or "info").lower(), "ℹ️"), title)
+
 
 def should_push(level: str, category: str) -> bool:
     """按**推送策略**判断这条通知要不要推到微信。**落库不受它影响**（始终全留）。
@@ -206,39 +255,69 @@ def should_push(level: str, category: str) -> bool:
     return bool(lv in ("info", "warning", "error") and pol.get(lv))
 
 
-def push(level: str, category: str, title: str, body: str = "", *,
-         meta: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-    """把一条通知**推到微信**（Pushplus）。返回 `{"ok", ...}`，**永不抛**。
+def _channel_pushplus(*, level: str, category: str, title: str, body: str,
+                      meta: dict, cfg: dict) -> dict[str, Any]:
+    """**Pushplus 通道**（微信推送）。配置段：`notify.pushplus`。
 
-    未开启 / 没配 token → `{"ok": False, "skipped": "disabled"|"no_token"}`。
-    **去重不在这里**：它统一放在 `notify()` 那一层（见 `dedup_window_s()`），
-    否则"落库被去重、推送却漏网"会在两处各算一套。
+    它是"怎么加一个渠道"的**参照实现**，只做三件事：
+      ① 自己判断配置够不够（不够就 `{"skipped": …}` —— 这**不是失败**，只是本轮不发）；
+      ② 把通知渲染成渠道要的形状（这里复用 `render_markdown`）；
+      ③ 发出去、如实返回结果（`ok` / `code` / `error`）。
     """
-    cfg = _notify_cfg().get("pushplus") or {}
     if not cfg.get("enabled"):
         return {"ok": False, "skipped": "disabled"}
     token = str(cfg.get("token") or "").strip()
     if not token:
         return {"ok": False, "skipped": "no_token"}
-    emoji = {"info": "ℹ️", "warn": "⚠️", "error": "❌"}.get(level, "ℹ️")
-    md = "**%s %s**\n\n%s" % (emoji, title, body or "")
-    if meta:
-        md += "\n\n---\n" + "\n".join("- %s：%s" % (k, v) for k, v in meta.items())
     try:
         timeout = float(cfg.get("timeout") or 5)
     except (TypeError, ValueError):
         timeout = 5.0
-    res = pushplus_send(token=token, title="%s %s" % (emoji, title), content=md,
-                        topic=str(cfg.get("topic") or ""), timeout=timeout)
-    try:
-        from agentmemhub.logs import audit_notify
-        audit_notify({"event": "notify_push", "ok": bool(res.get("ok")),
-                      "channel": "pushplus", "level": level,
-                      "category": category, "title": title,
-                      "error": res.get("error") or res.get("msg") or ""})
-    except Exception:                       # noqa: BLE001
-        pass
-    return res
+    return pushplus_send(token=token, title=render_title(level, title),
+                         content=render_markdown(level, title, body, meta),
+                         topic=str(cfg.get("topic") or ""), timeout=timeout)
+
+
+register_channel("pushplus", _channel_pushplus)
+
+
+def push(level: str, category: str, title: str, body: str = "", *,
+         meta: Optional[dict[str, Any]] = None,
+         channel: str = "") -> dict[str, dict[str, Any]]:
+    """把一条通知推到**所有已注册的通道**。返回 `{通道名: 结果}`，**永不抛**。
+
+    `channel` 指定则只推那一个（联调单个渠道时用）。每个通道的配置取自
+    `notify.<通道名>` 段；通道返回的 `{"ok": False, "skipped": …}`（没开 / 没配）
+    **不算失败**，只是"这个渠道本轮没发"。
+
+    **去重不在这里**：统一放在 `notify()` 那层（见 `dedup_window_s()`），
+    否则"落库被去重、推送却漏网"会在两处各算一套。
+    """
+    cfg_all = _notify_cfg()
+    names = [str(channel).strip().lower()] if channel else channels()
+    out: dict[str, dict[str, Any]] = {}
+    for name in names:
+        fn = _CHANNELS.get(name)
+        if fn is None:
+            out[name] = {"ok": False, "skipped": "unknown_channel"}
+            continue
+        try:
+            res = fn(level=level, category=category, title=title, body=body,
+                     meta=dict(meta or {}), cfg=dict(cfg_all.get(name) or {})) or {}
+        except Exception as e:              # noqa: BLE001 —— 一个通道炸了不能牵连其它
+            res = {"ok": False, "error": "%s: %s" % (type(e).__name__, str(e)[:160])}
+        out[name] = dict(res)
+        # **一个通道一条审计**：排查"哪个渠道没出去、为什么"必须分得开。
+        try:
+            from agentmemhub.logs import audit_notify
+            audit_notify({"event": "notify_push", "ok": bool(res.get("ok")),
+                          "channel": name, "level": level, "category": category,
+                          "title": title,
+                          "error": (res.get("error") or res.get("skipped")
+                                    or res.get("msg") or "")})
+        except Exception:                   # noqa: BLE001
+            pass
+    return out
 
 
 def _deduped(category: str, title: str, ts: float,
@@ -301,6 +380,49 @@ def notify(level: str, category: str, title: str, body: str = "", *,
     if ok and push_too and should_push(lv, cat):
         push(lv, cat, ttl, str(body or ""), meta=meta)
     return ok
+
+
+# ---------------------------------------------------------------------------
+# 语义化快捷函数：**加一条通知 = 一行**（推荐用它，不必记 `notify()` 的参数顺序）
+#
+# 两种 meta 写法都支持，便于从 `notify(...)` 无痛迁移：
+#     warn("batch", "快过期", "还有 2 小时", batch_id="b1")     # 关键字直接展开
+#     warn("batch", "快过期", "还有 2 小时", meta={"batch_id": "b1"})
+# ---------------------------------------------------------------------------
+
+def _merge_meta(meta: Optional[dict[str, Any]],
+                extra: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """合并 `meta=` 与散装关键字（后者优先）；都空则返回 None。"""
+    out: dict[str, Any] = dict(meta or {})
+    out.update(extra or {})
+    return out or None
+
+
+def info(category: str, title: str, body: str = "", *,
+         meta: Optional[dict[str, Any]] = None, **extra: Any) -> bool:
+    """一般消息（`level=info`）。推不推微信由 `push_when` 决定，落库始终全留。
+
+    用法：`info("batch", "已提交离线批次", "258 条请求", batch_id="b1")`
+    """
+    return notify("info", category, title, body, meta=_merge_meta(meta, extra))
+
+
+def warn(category: str, title: str, body: str = "", *,
+         meta: Optional[dict[str, Any]] = None, **extra: Any) -> bool:
+    """警告（`level=warning`）。默认策略（`push_when.warning`）会推微信。"""
+    return notify("warning", category, title, body, meta=_merge_meta(meta, extra))
+
+
+def error(category: str, title: str, body: str = "", *,
+          meta: Optional[dict[str, Any]] = None, **extra: Any) -> bool:
+    """严重错误（`level=error`）。默认策略（`push_when.error`）会推微信。"""
+    return notify("error", category, title, body, meta=_merge_meta(meta, extra))
+
+
+def debug(category: str, title: str, body: str = "", *,
+          meta: Optional[dict[str, Any]] = None, **extra: Any) -> bool:
+    """调试（`level=debug`）。三个等级开关都不含它 —— 除非**按类别**命中。"""
+    return notify("debug", category, title, body, meta=_merge_meta(meta, extra))
 
 
 def list_notifications(*, level: str = "", category: str = "",

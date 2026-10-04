@@ -515,8 +515,8 @@ def _submit_offline(*, hook: str, dirty: int, now: datetime,
     # **开始更新就告知**：一轮 wiki 更新可能跑几十分钟（L1 编译 + 归域 + 细分），
     # 而它是被自动触发的 —— 不说一声，用户只会看到"电脑在忙"。
     try:
-        from agentmemhub.notify import notify as _notify
-        _notify("info", "trigger", "开始更新 Wiki",
+        from agentmemhub import notify as _notify
+        _notify.info("trigger", "开始更新 Wiki",
                 "触发原因：%s（脏数据 %d 条），通道=离线。"
                 % ("；".join(reasons) or "手动强制", dirty),
                 meta={"hook": hook, "channel": "offline", "dirty": dirty,
@@ -664,8 +664,8 @@ def _run_locked(*, hook: str, force: bool = False) -> dict[str, Any]:
     _mark_started(now, hook)
     # 与离线段同理：自动触发的更新可能跑几十分钟，开始时要告知一声。
     try:
-        from agentmemhub.notify import notify as _notify
-        _notify("info", "trigger", "开始更新 Wiki",
+        from agentmemhub import notify as _notify
+        _notify.info("trigger", "开始更新 Wiki",
                 "触发原因：%s（脏数据 %d 条），通道=实时。"
                 % ("；".join(verdict["reasons"]) or "手动强制", dirty),
                 meta={"hook": hook, "channel": "realtime", "dirty": dirty,
