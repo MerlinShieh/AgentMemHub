@@ -640,6 +640,30 @@ def test_清理旧域目录时不动隐藏目录(tmp_path):
     assert (tmp_path / "用户自建目录").exists(), "非域目录（用户自建）不能被删"
 
 
+def test_全量模式keep为空时绝不删任何目录(tmp_path):
+    """⚠️ **最危险的一条**：`keep` 为空 = 本轮一个域都没写出来（归域/编译整体失败，
+    比如 LLM 挂了、网络断了）。
+
+    这时"清掉不属于本轮的目录"在字面上等于**清空整个知识库** —— 而且降级闸
+    （`_is_degraded_run`）**拦不住**：它判的是"降级页占比"，而 `n_tasks == 0` 时
+    那个比例无从计算，函数直接返回 False。
+
+    产物虽然可由快照恢复，但"可恢复"不等于"该发生"。（2026-10-04 体检发现）
+    """
+    from wiki_aggregate import _prune_stale_domain_dirs
+
+    for name in ("01-域甲", "02-域乙", "03-域丙"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "001-页.md").write_text("# 页", encoding="utf-8")
+
+    removed = _prune_stale_domain_dirs(tmp_path, set(), partial=False)
+
+    assert removed == 0, "keep 为空时必须**一个都不删**"
+    assert sorted(d.name for d in tmp_path.iterdir()) == ["01-域甲", "02-域乙", "03-域丙"], \
+        "整个知识库必须原样保留（否则一次 LLM 全线故障就会清空产物）"
+    assert (tmp_path / "02-域乙" / "001-页.md").exists()
+
+
 def test_增量模式绝不清目录(tmp_path):
     """增量只编了少数域，其它域产物都在磁盘上 —— 清了等于删掉整个知识库。"""
     from wiki_aggregate import _prune_stale_domain_dirs

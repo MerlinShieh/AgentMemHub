@@ -463,3 +463,32 @@ def test_上限0时不修(monkeypatch):
     assert wiki_batch.repair_broken_results(results, max_repair=0) == {
         "tried": 0, "repaired": 0}
     assert called == [], "上限 0 时连 client 都不必构造"
+
+
+def test_重提后取新窗口并重置预警(tmp_path):
+    """重提出的新任务要带**新窗口**、并且能**重新预警**。
+
+    2026-10-04 体检发现漏了两处：
+      · 不更新 `expire_at` → 新任务带着**旧窗口**（可能早已过期）→ 预警要么立刻误报、
+        要么永不触发；
+      · 不重置 `warned_expire` → 新任务**再也不会预警**（那个标记是为旧任务打的）。
+    """
+    from agentmemhub.wiki_batch import resubmit_terminal
+
+    job = _job(batch_id="old", provider_status="failed", input_file_id="f1")
+    job.expire_at = 1000.0
+    job.warned_expire = True
+    save_state(tmp_path / STATE_NAME, [job])
+
+    class _C:
+        def create(self, fid, *, name="", n_requests=0):
+            assert fid == "f1", "要用**原输入文件**重建（不重跑 L1/归域）"
+            return {"id": "new", "status": "created", "expires_at": 9999.0}
+
+    resubmit_terminal(_C(), tmp_path)
+
+    after = load_state(tmp_path / STATE_NAME)[0]
+    assert after.batch_id == "new"
+    assert after.expire_at == 9999.0, "新任务必须用**新窗口**"
+    assert after.warned_expire is False, "新任务必须能**重新预警**"
+    assert after.results == {} and after.provider_status == "created"

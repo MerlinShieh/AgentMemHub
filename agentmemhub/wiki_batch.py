@@ -225,6 +225,11 @@ def resubmit_terminal(client, out: "Path | str") -> list[dict[str, Any]]:
         job.submitted_at = time.time()
         job.results = {}                    # 新任务的结果要从头收
         job.output_file_id = ""
+        # ⚠️ **过期时刻与预警标记都要跟着新任务走**（2026-10-04 体检发现漏了）：
+        # 不更新 `expire_at` 的话，新任务带着**旧窗口**（可能早已过期）→ 预警要么
+        # 立刻误报、要么永不触发；不重置 `warned_expire` 的话，新任务**再也不会预警**。
+        job.expire_at = float(b.get("expires_at") or 0.0)
+        job.warned_expire = False
         job.error_file_id = ""
         job.expire_at = float(b.get("expires_at") or 0.0)
         done.append({"stage": job.stage, "old": old, "new": job.batch_id,

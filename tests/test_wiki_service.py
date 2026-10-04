@@ -1046,3 +1046,37 @@ def test_对齐_不给目录时按配置解析(tmp_path, monkeypatch):
     assert set(r["dirs"]) == {"l1", "l2"}
     assert r["consistency"]["comparable"] is True
 
+
+def test_离线推进自己保证scripts在path(tmp_path, monkeypatch):
+    """⚠️ **收割路径不经过 `update()`** —— 而 `update()` 才是原本调
+    `_ensure_scripts_on_path()` 的地方。
+
+    实测后果（2026-10-04 体检在 `harvest_state.json` 的 `last_error` 里发现）：
+    MCP 进程里写记忆触发的收割会 `ModuleNotFoundError: No module named
+    'wiki_aggregate'` —— 而收割是**旁路**（不抛），于是**静默失败**：
+    用户以为"自动收割生效了"，其实一次都没跑成。
+
+    这条测试守住"**函数自己保证依赖**"，而不是指望每个调用方都记得先补 path。
+    """
+    import sys
+    from pathlib import Path as _P
+
+    scripts = str(_P(wiki.__file__).resolve().parents[1] / "scripts")
+    # 模拟 MCP 进程：`scripts/` 不在 path 上，且模块缓存里也没有
+    monkeypatch.setattr(sys, "path", [p for p in sys.path if p != scripts])
+    monkeypatch.delitem(sys.modules, "wiki_aggregate", raising=False)
+    assert scripts not in sys.path and "wiki_aggregate" not in sys.modules
+
+    l1, l2 = tmp_path / "l1", tmp_path / "l2"
+    l1.mkdir()
+    l2.mkdir()
+
+    # 没有在飞任务 ⇒ 提前返回 None（调用方据此走提交轮），但**必须已经 import 成功**
+    r = wiki._offline_advance(l1=l1, l2=l2, db="", runner=None, client=None,
+                              deadline_s=0.0)
+
+    assert r is None, "没有在飞任务时应返回 None"
+    assert "wiki_aggregate" in sys.modules, \
+        "`_offline_advance()` 必须自己把 scripts 加进 path（不能依赖调用方）"
+    assert scripts in sys.path
+

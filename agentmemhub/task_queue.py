@@ -102,6 +102,25 @@ def save_state(out: Path, st: dict[str, Any]) -> None:
         pass
 
 
+#: 检测流水的体积上限（字节）。超过就**只保留后半**，防止长期运行把它撑成
+#: 一个谁都不敢读的大文件 —— 而 `read_checks()` 是**整份读进内存**的。
+CHECKS_MAX_BYTES = 512 * 1024
+
+
+def _trim_checks(p: Path) -> None:
+    """流水超限时截断到**后半**（保留最近的记录，旁路、不抛）。"""
+    try:
+        if p.stat().st_size <= CHECKS_MAX_BYTES:
+            return
+        lines = p.read_text(encoding="utf-8").splitlines()
+        keep = lines[-max(1, len(lines) // 2):]
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text("\n".join(keep) + "\n", encoding="utf-8")
+        tmp.replace(p)
+    except Exception:                       # noqa: BLE001 —— 截断失败不影响追加
+        pass
+
+
 def append_check(out: Path, entry: dict[str, Any]) -> None:
     """追加一行检测流水（append-only，旁路，永不抛）。"""
     try:
@@ -110,6 +129,7 @@ def append_check(out: Path, entry: dict[str, Any]) -> None:
         row = {"ts": round(time.time(), 3), **entry}
         with p.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+        _trim_checks(p)
     except Exception:                       # noqa: BLE001
         pass
 
@@ -240,6 +260,12 @@ def harvest(out: "Path | str", factory: Callable[[], Optional[Harvester]], *,
         st["last_action"] = "empty"
         st["consecutive_errors"] = 0
         st.pop("next_check_at", None)
+        # **队列空 = 一切正常**，历史错误要清掉：否则它一直挂在状态文件里，
+        # 排查时会被误导成"收割在失败"（2026-10-04 体检时我自己就被它骗了一次 ——
+        # 实际是几小时前 MCP 路径的 ModuleNotFoundError 残留，而当时早已恢复正常）。
+        st.pop("last_error", None)
+        st.pop("last_seconds", None)
+        st.pop("last_result", None)
         save_state(out, st)
         # **不写检测流水**：队列空是最常见的路径（CLI 每次调用都会走到），写进去只
         # 会把流水刷成噪音 —— 而"上次查过、当时队列空"已经由 `harvest_state.json`

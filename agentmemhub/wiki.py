@@ -511,7 +511,11 @@ def _inputs_since(db: str, since: float) -> set[int]:
     自然认它是脏的 ✓。
     """
     try:
-        conn = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+        # ⚠️ 必须用 `as_posix()`：Windows 反斜杠、以及路径里的 `?` / `#` / 空格都会
+        # 让 URI 解析出错 —— 而本函数**失败是静默的**（返回空集 = 保守不剔除），
+        # 等于把"批次期间新写入的记忆被算进基线"那个缺陷又放回来（2026-10-04 体检
+        # 发现它与 `_l2_inputs` / `_l1_inputs` 两处的写法不一致）。
+        conn = sqlite3.connect("file:%s?mode=ro" % Path(db).as_posix(), uri=True)
         try:
             return {int(r[0]) for r in conn.execute(
                 "SELECT id FROM distilled_memories WHERE created_at > ?",
@@ -601,6 +605,13 @@ def _offline_advance(*, l1: Path, l2: Path, db: str, runner, client,
     """
     import time
 
+    # ⚠️ **必须自己保证 path，不能依赖调用方**：收割路径
+    # （`wiki_batch._OfflineHarvester.harvest()`）是直接调本函数的，**不经过
+    # `update()`** —— 而 `update()` 才是原本调 `_ensure_scripts_on_path()` 的地方。
+    # 实测后果：MCP 进程里写记忆触发的收割会 `ModuleNotFoundError: wiki_aggregate`，
+    # 而收割是旁路（不抛），于是**静默失败**：用户以为自动收割生效了，其实没有
+    # （2026-10-04 体检时在 `harvest_state.json` 的 `last_error` 里发现）。
+    _ensure_scripts_on_path()
     import wiki_aggregate as wa
     from agentmemhub import wiki_batch
 

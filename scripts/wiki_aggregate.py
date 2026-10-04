@@ -1002,6 +1002,15 @@ def _prune_stale_domain_dirs(out: Path, keep: set[str], *, partial: bool) -> int
     """
     if partial:
         return 0
+    if not keep:
+        # ⚠️ **`keep` 为空 = 本轮一个域都没写出来**（归域/编译整体失败，比如 LLM 挂了、
+        # 网络断了）。这时"清掉不属于本轮的目录"在字面上等于**清空整个知识库** ——
+        # 绝不是任何调用方想要的。
+        # 而且降级闸拦不住这种情况：`_is_degraded_run(0, 0)` 因为 `n_tasks > 0` 不成立
+        # 而返回 False（它判的是"降级页占比"，一页都没有时无从计算）。
+        # 产物虽然可由快照恢复，但"可恢复"不等于"该发生"。宁可留着旧产物、
+        # 如实报"本轮没写出任何域"。（2026-10-04 体检发现）
+        return 0
     removed = 0
     for d in list(out.iterdir()):
         if not d.is_dir() or d.name.startswith(".") or d.name in keep:

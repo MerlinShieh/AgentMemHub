@@ -198,3 +198,51 @@ def test_配置节流间隔():
     assert tq.check_interval_s({}) == tq.DEFAULT_INTERVAL_S
     assert tq.check_interval_s({"check_interval_s": "abc"}) == tq.DEFAULT_INTERVAL_S
     assert tq.check_interval_s({"check_interval_s": -5}) == 0.0
+
+
+def test_队列空时清掉历史错误(tmp_path):
+    """**队列空 = 一切正常**，历史错误必须清掉。
+
+    否则它一直挂在 `harvest_state.json` 里，排查时会被误导成"收割在失败"。
+    2026-10-04 体检时我就被骗了一次：看到 `last_error` 是
+    `ModuleNotFoundError: No module named 'wiki_aggregate'`，以为收割坏了 ——
+    实际是几小时前 MCP 路径的残留，而当时早已恢复正常（那条真缺陷已单独修掉）。
+    """
+    tq.save_state(tmp_path, {
+        "last_error": "ModuleNotFoundError: No module named 'wiki_aggregate'",
+        "last_seconds": 3.2, "last_result": {"x": 1},
+        "last_checked_at": 0.0})
+
+    r = tq.harvest(tmp_path, lambda: _FakeHarvester(), force=True)
+
+    assert r["action"] == "empty"
+    saved = tq.load_state(tmp_path)
+    assert "last_error" not in saved, "队列空时必须清掉历史错误"
+    assert "last_seconds" not in saved and "last_result" not in saved
+
+
+def test_检测流水超限时截断且保留最近(tmp_path, monkeypatch):
+    """append-only 也要有上限 —— `read_checks()` 是**整份读进内存**的，
+    长期运行（每天几十次收割）会把它撑成一个谁都不敢读的文件。"""
+    monkeypatch.setattr(tq, "CHECKS_MAX_BYTES", 400)      # 压低阈值便于触发
+
+    for i in range(60):
+        tq.append_check(tmp_path, {"action": "harvested", "n": i})
+
+    rows = tq.read_checks(tmp_path, limit=1000)
+
+    assert 0 < len(rows) < 60, "超限后应被截断"
+    assert rows[-1]["n"] == 59, "必须保留**最近**的（截掉的是前半）"
+    assert rows[0]["n"] > 0, "最早那批应已被截掉"
+
+
+def test_截断不会破坏追加与读取(tmp_path, monkeypatch):
+    """截断是旁路：它出问题不能影响正常的追加/读取。"""
+    monkeypatch.setattr(tq, "CHECKS_MAX_BYTES", 200)
+    for i in range(20):
+        tq.append_check(tmp_path, {"action": "harvested", "n": i})
+    tq.append_check(tmp_path, {"action": "landed", "n": 999})
+
+    rows = tq.read_checks(tmp_path, limit=1000)
+
+    assert rows[-1]["action"] == "landed" and rows[-1]["n"] == 999
