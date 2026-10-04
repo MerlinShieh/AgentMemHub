@@ -603,14 +603,18 @@ def _wiki_msg(e: dict) -> str:
 _WIKI_ERROR_EVENTS = ("page_fail", "run_aborted", "domain_write_skipped")
 
 
-def audit_wiki(entry: dict) -> None:
+def audit_wiki(entry: dict, *, depth: int = 3) -> None:
     """追加一条 wiki 编译事件（JSONL，带标准头 ts/level/module/line/msg）。
 
     写失败一律静默：审计是旁路，绝不能因为它让编译本身失败。
+
+    `depth=3` 对应"业务代码**直接**调 `audit_wiki(...)`"；若中间还隔了一层包装
+    （如 `wiki_triggers._audit()`），调用方必须**自己 +1** —— 否则 `line` 记的是
+    包装函数内部那一行，该流所有事件的行号恒等，字段等于作废（2026-10-04 实测）。
     """
     e = standardize(entry, msg=entry.get("msg") or _wiki_msg(entry),
                     level=_level_of(entry, error_events=_WIKI_ERROR_EVENTS),
-                    depth=3)
+                    depth=depth)
     _append_line(wiki_log_file,
                  json.dumps(e, ensure_ascii=False) + "\n", name="wiki")
 

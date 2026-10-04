@@ -84,6 +84,14 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 > —— 实盘 `web.log` 里躺着带 `\n`、超 200 字（末尾还接 600 字终态文本）的条目。
 > 现已统一口径，`test_record的摘要同样截断不换行` 守着它。
 
+**`module` / `line` 的取法**：由调用栈取**业务调用点**（`standardize(depth=3)`）。
+`depth` 的语义是 **`caller_site` ← `standardize` ← `audit_xxx` ← 业务代码**；所以
+**中间多包一层就必须自己 +1** —— `wiki_triggers._audit()` 没 +1 时，触发器流
+（`trigger_check` / `trigger_skip` / `trigger_update_*`）的 `line` 恒为
+`wiki_triggers.py:334`，标准头里的"行号"等于作废（2026-10-04 体检修正，
+`test_包装层审计不吞调用点行号` 守着它）。`audit_wiki(entry, depth=N)` 因此留了
+`depth` 形参给包装层用。
+
 ### 文本与 JSONL 两种形态的差异
 
 | | JSONL 事实流（`mcp|memory|wiki|web|cli`.log） | 文本日志（`agentmemhub.log` / `asrag*.log`） | 任务日志（`logs/tasks/<id>.log`） |

@@ -328,10 +328,15 @@ def evaluate(*, now: datetime, dirty: int, has_dirty: bool, hook: str,
 
 
 def _audit(entry: dict) -> None:
-    """写一条触发器日志（**全程旁路**：日志失败绝不影响触发流程）。"""
+    """写一条触发器日志（**全程旁路**：日志失败绝不影响触发流程）。
+
+    `depth=4` 而非默认的 3：这里比业务代码多包了一层，不 +1 的话 `line` 会全部
+    记成下面这一行 —— 实测 2026-10-04 发现触发器流（`trigger_check` /
+    `trigger_skip` / `trigger_update_*`）的行号恒为 334，`line` 字段形同作废。
+    """
     try:
         from agentmemhub.logs import audit_wiki
-        audit_wiki(entry)
+        audit_wiki(entry, depth=4)
     except Exception:                       # noqa: BLE001
         pass
 

@@ -245,6 +245,27 @@ def test_record_web也带标准头():
     assert rec["actor"] == "web"
 
 
+def test_包装层审计不吞调用点行号():
+    """⚠️ 回归（2026-10-04 体检）：**中间多包一层**会让 `line` 落到包装函数内部。
+
+    `standardize(depth=3)` 的语义是"`caller_site` ← `standardize` ← `audit_wiki`
+    ← 业务代码"；`wiki_triggers._audit()` 又包了一层却不 +1，于是触发器流的
+    `line` 全部恒等于 `wiki_triggers.py:334` —— 标准头五项里的"**行号**"等于作废，
+    排查时根本定位不到是哪个业务分支写的这条日志。
+    """
+    from agentmemhub import wiki_triggers as wt
+
+    line1 = inspect.currentframe().f_lineno + 1
+    logs.audit_wiki({"event": "note"})          # 无包装：depth=3 正确
+    assert _last("wiki.log")["line"] == line1
+
+    line2 = inspect.currentframe().f_lineno + 1
+    wt._audit({"event": "note"})                # 有包装：包装层负责 +1
+    rec = _last("wiki.log")
+    assert rec["line"] == line2, "包装层的 line 不能落在包装函数自己那一行"
+    assert rec["module"] == __name__
+
+
 # ---------------------------------------------------------------------------
 # 测试沙箱：日志目录同样不能落到生产
 # ---------------------------------------------------------------------------
