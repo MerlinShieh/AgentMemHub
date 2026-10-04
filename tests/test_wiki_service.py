@@ -280,6 +280,47 @@ def test_落盘轮_已被引用的输入即使晚于since也保留(tmp_path):
     assert "1" in mf["inputs"], "被页面引用过的输入必须留下"
 
 
+def test_全量模式不被缺manifest挡住(tmp_path, monkeypatch):
+    """**全量重跑正是"建立锚点"的手段**，所以不该被"缺少编译清单"那道早退挡住 ——
+    否则第一次全量永远跑不起来（自相矛盾）。同时验证它确实**重新归域**：
+    `partial=False`（覆盖写盘、清多余目录）+ `no_resume=True`（忽略既有域结构）
+    + 不预设任何域。
+    """
+    db = _mkdb(tmp_path, [(1, "a", "s1", "new", "h1")])
+    l1, l2 = tmp_path / "l1", tmp_path / "l2"
+    l1.mkdir()
+    l2.mkdir()                              # 两个目录里都**没有** manifest
+
+    # 先确认既有行为还在：增量模式被"缺 manifest"早退
+    r_inc = wiki.update(l1_dir=l1, l2_dir=l2, db=str(db))
+    assert r_inc.get("updated") is False
+    assert "缺少编译清单" in (r_inc.get("message") or "")
+
+    wiki._ensure_scripts_on_path()
+    seen: dict = {}
+
+    def _fake_run(args):
+        seen["called"] = True
+        seen["partial"] = args.partial
+        seen["no_resume"] = args.no_resume
+        seen["preset"] = list(args.preset_domains or [])
+        return {"aborted": "测试中止（不继续跑收尾）", "written_domains": [],
+                "skipped_domains": [], "pages": 0, "pages_by_domain": {}}
+
+    import wiki_aggregate as _wa
+    monkeypatch.setattr(_wa, "run", _fake_run)
+    # 快照与投影是旁路且很慢，测试里挡掉（它们的行为另有测试覆盖）
+    from agentmemhub import snapshot as _snap
+    monkeypatch.setattr(_snap, "create", lambda **k: {})
+
+    wiki.update(l1_dir=l1, l2_dir=l2, db=str(db), full=True)
+
+    assert seen.get("called"), "全量模式**不该**被'缺 manifest'早退挡住"
+    assert seen["partial"] is False, "全量要覆盖写盘（清掉多余域目录）"
+    assert seen["no_resume"] is True, "全量不沿用既有 _domains.json 的域结构"
+    assert seen["preset"] == [], "全量不预设域 —— 交给聚合层重新归域"
+
+
 def test_对齐_空目录给出明确空结果(tmp_path):
     db = _mkdb(tmp_path, [(1, "a", "s1", "new", "h1")])
     r = wiki.align(tmp_path / "out", db=str(db))

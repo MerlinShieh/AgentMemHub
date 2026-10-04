@@ -757,7 +757,10 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
         s, _, c = sess.partition("/")
         if s and c:
             dirty_sessions.add((s, c))
-    if not dirty_sessions:
+    if not dirty_sessions and not full:
+        # ⚠️ `full=True` 时必须放过这一道：全量**不依赖脏会话** —— 它要重来的是
+        # "域结构"（这正是"『待整理』域撑不住"时该做的事）。若在这里早退，全量
+        # 就永远跑不起来（实测：2026-10-04 写测试时正是被这道挡住）。
         return {"updated": False, "message": "没有可定位的脏会话"}
 
     import wiki_aggregate
