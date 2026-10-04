@@ -334,8 +334,9 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 | `rebuild [--mode repair\|rebuild]` | 补向量：触发引擎 embedding rebuild（导入记忆后修复语义检索）|
 | `wiki --action failures\|retry --out DIR [--stage l1\|l2] [--src DIR_L1] [--workers N]` | **LLM Wiki 运维**：查看失败清单（按原因分类）/ 定向补跑失败项（只跑失败的，不全量重来）|
 | `wiki --action pending\|ignored\|drop\|restore` | **待更新记忆的查看与删除**：`pending` 列明细；`drop --ids a,b --mode soft`（不进 wiki、仍可召回）/ `--mode hard --confirm`（真删）；`ignored` 列已忽略；`restore` 取消 |
-| `wiki --action triggers\|trigger\|align\|update` | 触发器状态 / 手动触发 / 对齐审计（只读）/ 增量更新 |
-| `wiki --action batch-status\|batch-run\|batch-cancel\|batch-resubmit` | **离线批处理（MiMo Batch API，价格是实时的 50%）**：`batch-status` 查在飞任务（厂商状态 / 进度 / 已等多久 / 建议）；`batch-run` **推进一段**（无在飞→提交、结果到位→交下一段或落盘，状态机自判，**要跑两次：提交 + 落盘**）；`batch-cancel` 取消作废；`batch-resubmit` 平台侧 `validation_failed` 后用**原输入文件**重提。⚠️ **离线只能手动跑，没有自动通道**（实时通路的自动触发当前也关着：`overrides.enabled=false`），详见 [docs/modules/batch-offline.md](docs/modules/batch-offline.md) §3.4 |
+| `wiki --action triggers\|trigger\|align\|update` | 触发器状态 / 手动触发 / 对齐审计（只读）/ 增量更新；`triggers --set-batch on\|off` **热改离线触发器总闸**（写 overrides，不用重启） |
+| `wiki --action full-run [--offline]` | **全量重跑**：重新归域 + 全部域重编 + 覆盖写盘（域编号会重排）。什么时候用：增量归类"撑不住"时（`align` 提示"『待整理』域已有 N 页"）—— 该重新归纳的是**域结构本身**。通道由 `wiki.full.mode`（`realtime`/`offline`）决定，`--offline` 可临时覆盖；⚠️ 编译段约 300+ 条请求，动手前自动留快照 |
+| `wiki --action batch-status\|batch-run\|batch-cancel\|batch-resubmit` | **离线批处理（MiMo Batch API，官方价是实时的 50%）**：`batch-status` 查在飞任务（厂商状态 / 进度 / 已等多久 / 建议）；`batch-run` **推进一段**（无在飞→提交、结果到位→交下一段或落盘，状态机自判）；`batch-cancel` 取消作废；`batch-resubmit` 平台侧 `validation_failed` 后用**原输入文件**重提。**收割是自动的**（开 DSH / 写记忆 / 跑任意 CLI 命令都会顺手推进一次），**发起**由离线触发器 `wiki.batch.enabled` 或手动 `batch-run` 决定，详见 [docs/modules/batch-offline.md](docs/modules/batch-offline.md) §3.4/§3.5 |
 | `memory-log [--event write\|read] [--path mcp\|http\|distill\|cli] [--grep 词] [--json]` | **记忆操作事实流**：什么时候写了/读了什么记忆（含内容全文与来源路径）|
 | `snapshot [--snapshot-action create\|list\|restore]` | 快照与回滚（索引库整库 + wiki 产物目录）|
 | `llm-config [--json]` | **配置自检**：列出各 LLM 使用点（蒸馏/评分/Wiki 一级/二级）**最终生效**的配置，并标出每项是**继承**还是**覆盖** |
