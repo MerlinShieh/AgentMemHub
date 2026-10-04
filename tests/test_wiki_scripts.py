@@ -720,6 +720,58 @@ def test_全量整域失败时必须中止写盘(tmp_path):
         "首次构建无物可毁 → 能写多少写多少，不为一两个失败的域让整轮白跑"
 
 
+def test_全量重跑的页数崩塌改判整轮覆盖(tmp_path):
+    """⚠️ 回归（2026-10-04 实测）：全量重跑会**重新划分域**，某个域从 61 页变 5 页
+    是正常的域重构（内容被并到别的域去了），但逐域页数判据会：
+
+      · **误拦** → 域结构永远收敛不了（实测产出 17 新域 + 4 旧域的混合体）；
+      · **不自愈** → 下轮比较基准仍是那批旧产物，同样"崩塌"，死循环。
+
+    所以全量模式下不再按页数判，改看**整轮内容覆盖**（见 `_run_coverage`）。
+    """
+    from wiki_aggregate import _is_page_collapse
+
+    # 增量（默认 strict）仍按页数判：域结构稳定时页数骤降就是降级
+    assert _is_page_collapse(61, 5) is True
+    assert _is_page_collapse(61, 40) is False
+    assert _is_page_collapse(2, 1) is False, "小域（旧页数 < COLLAPSE_MIN_OLD）不判"
+
+    # 全量（strict=False）不按页数判 —— 交给整轮覆盖闸
+    assert _is_page_collapse(61, 5, strict=False) is False
+    assert _is_page_collapse(109, 28, strict=False) is False
+
+
+def test_整轮覆盖闸_覆盖够高放行_覆盖崩了拒写(tmp_path):
+    """整轮覆盖闸的两个方向：正常域重构（内容并到别处）要放行，
+    上游 LLM 大面积故障（内容大面积缺失）要拦住。"""
+    import json
+
+    from wiki_aggregate import _run_coverage
+
+    # 旧产物：01-旧域 下 10 页，分别引用 m1..m10
+    d = tmp_path / "01-旧域"
+    d.mkdir()
+    for i in range(1, 11):
+        (d / ("p%02d.json" % i)).write_text(
+            json.dumps({"title": "页%d" % i, "body": "内容 [m%d]" % i}),
+            encoding="utf-8")
+
+    # 本轮：内容被并进新域，页数少了但 10 条全覆盖
+    full = [{"title": "新页", "body": " ".join("[m%d]" % i for i in range(1, 11))}]
+    ok = _run_coverage(tmp_path, {"新域": full}, {"新域": "01-旧域"})
+    assert (ok["old"], ok["new"]) == (10, 10) and ok["cover"] == 1.0
+    assert ok["degraded"] is False, "覆盖满 —— 这是域重构，必须放行"
+
+    # 本轮只剩 2 条 → 判降级
+    thin = [{"title": "残页", "body": "[m1] [m2]"}]
+    bad = _run_coverage(tmp_path, {"新域": thin}, {"新域": "01-旧域"})
+    assert bad["cover"] == 0.2 and bad["degraded"] is True, "覆盖崩了必须拒写"
+
+    # 磁盘上还没有任何旧产物（首次构建）→ 不该拦
+    first = _run_coverage(tmp_path / "空目录", {"新域": thin}, {"新域": "01-旧域"})
+    assert first["old"] == 0 and first["degraded"] is False, "首次构建无物可毁"
+
+
 # ---------------------------------------------------------------------------
 # frontmatter aliases：让 Obsidian 的 [[标题]] 能解析
 # ---------------------------------------------------------------------------

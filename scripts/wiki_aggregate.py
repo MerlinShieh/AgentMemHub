@@ -89,6 +89,13 @@ COLLAPSE_MIN_OLD = 4
 COLLAPSE_RATIO = 0.5
 ABORT_DEGRADE_RATIO = 0.5
 
+#: **全量重跑**的整轮内容覆盖底线：本轮要写进去的记忆里，盖住了上一轮产物的多少。
+#: 低于它说明整轮都在降级（上游 LLM 大面积故障），宁可整轮不写盘。
+#: 为什么全量要用"整轮覆盖"而不是逐域页数：全量会**重新划分域**，某个域变小往往
+#: 只是内容被并到别的域去了（2026-10-04 实测：4 个域 61→5 / 109→28 / 98→16 /
+#: 31→11，但整轮覆盖仍有约 97%）。逐域判会把正常的域重构误判成降级。
+COVER_MIN_RATIO = 0.85
+
 
 def _l2_cfg(key: str, default: int) -> int:
     """读 `wiki.l2.<key>`；读不到（脚本独立运行 / 键缺失 / 非法）回落常量。
@@ -1066,12 +1073,70 @@ def _domain_missing_abort(planned: set[str], produced: set[str], out: Path) -> b
     return bool(_existing_domain_dirs(out))
 
 
-def _is_page_collapse(old_n: int, new_n: int) -> bool:
+def _is_page_collapse(old_n: int, new_n: int, *, strict: bool = True) -> bool:
     """页数是否"崩塌"到不该写的程度（判据见 COLLAPSE_* 的说明）。
 
     抽成函数是为了可测：这个判据是**防止降级产物覆盖好产物**的最后一道闸。
+
+    `strict=False`（**全量重跑**）时**不按页数判** —— 全量会重新划分域，某个域
+    变小往往只是内容被并到别的域去了，逐域看页数必然"崩塌"。那种情况改由
+    `_run_coverage()` 的**整轮内容覆盖**闸把关（见 `finalize_outputs`）。
     """
+    if not strict:
+        return False
     return old_n >= COLLAPSE_MIN_OLD and new_n < old_n * COLLAPSE_RATIO
+
+
+def _mids_of_pages(pages: list[dict]) -> set[int]:
+    """一组**内存页**引用的记忆 id（`body` 里的 `[mNNN]` 加上 `sources`）。"""
+    out: set[int] = set()
+    for p in pages:
+        out |= {int(x) for x in SRC_RE.findall(p.get("body") or "")}
+        for t in (p.get("sources") or []):
+            s = str(t)
+            if s[:1] == "m" and s[1:].isdigit():
+                out.add(int(s[1:]))
+    return out
+
+
+def _mids_of_dir(d: Path) -> set[int]:
+    """某域目录**现有产物**引用的记忆 id（读页面 json；坏 json 跳过）。"""
+    out: set[int] = set()
+    if not d.is_dir():
+        return out
+    for j in d.glob("*.json"):
+        if j.name == "index.json":
+            continue
+        try:
+            p = json.loads(j.read_text(encoding="utf-8"))
+        except Exception:                   # noqa: BLE001 —— 坏 json 不该绊住整轮
+            continue
+        if isinstance(p, dict):
+            out |= _mids_of_pages([p])
+    return out
+
+
+def _run_coverage(out: Path, by_domain_pages: dict[str, list[dict]],
+                  dir_of: dict[str, str]) -> dict[str, Any]:
+    """**整轮内容覆盖**：本轮要写的内容，盖住了上一轮产物的多少。
+
+    为什么必须用整轮口径：全量重跑会**重新划分域**，某个域变小往往只是内容被并到
+    别的域去了 —— 逐域看页数必然"崩塌"（2026-10-04 实测：4 个域 61→5 / 109→28 /
+    98→16 / 31→11，但整轮覆盖仍有约 97%）。逐域判不但把正常的域重构误判成降级，
+    还会让这些域**永久卡住**：下轮比较基准仍是那批旧产物，同样"崩塌"，死循环。
+
+    为什么不能干脆在全量模式下删掉这道闸：全量同样是"整域替换"，上游 LLM 大面积
+    故障时写下去就不可逆。整轮口径两者兼顾 —— 放行正常的域重构，拦住真降级。
+    """
+    old: set[int] = set()
+    for dirname in set(dir_of.values()):
+        old |= _mids_of_dir(out / dirname)
+    new: set[int] = set()
+    for pages in by_domain_pages.values():
+        new |= _mids_of_pages(pages)
+    cover = (len(old & new) / len(old)) if old else 1.0
+    return {"old": len(old), "new": len(new), "cover": cover,
+            "degraded": bool(old) and cover < COVER_MIN_RATIO}
 
 
 def _count_domain_pages(ddir: Path) -> int:
@@ -1132,7 +1197,8 @@ def _write_domain(out: Path, ddir: Path, files: dict[str, str]) -> str:
 
 
 def _write_domain_outputs(out: Path, by_domain_pages: dict[str, list[dict]],
-                          dir_of: dict[str, str], fl: FailureLog
+                          dir_of: dict[str, str], fl: FailureLog, *,
+                          strict_collapse: bool = True
                           ) -> tuple[list[tuple[str, list[dict]]], list[str],
                                      list[str]]:
     """逐域写盘（整域原子换入），返回 `(成功域, 被跳过的域, 跳过原因)`。
@@ -1156,7 +1222,7 @@ def _write_domain_outputs(out: Path, by_domain_pages: dict[str, list[dict]],
         # 页数崩塌保护：写盘是**整域替换**，降级结果一旦写下就不可逆。
         # 实测 2026-09-25：LLM 上游全程 524 → 域内细分退化成"一域一页"，
         # 33 页的域被写成 1 页，整轮丢 73 页、334 处链接悬空。
-        if _is_page_collapse(old_n, new_n):
+        if _is_page_collapse(old_n, new_n, strict=strict_collapse):
             skipped.append(name)
             details.append("%s %d→%d 页（疑似降级）" % (name, old_n, new_n))
             print("  ⚠️ 跳过写盘：%-24s %d → %d 页（疑似降级，保留旧产物）"
@@ -1203,12 +1269,28 @@ def finalize_outputs(out: Path, by_domain_pages: dict[str, list[dict]], *,
     `dir_of` 由调用方给：实时路按本轮域集合重新编号，落盘轮必须**沿用提交轮当时
     的目录名**，否则域目录会重排（互链与索引跟着乱）。
     """
+    # ---- 整轮内容覆盖闸（**仅全量**）----
+    # 全量会重新划分域，逐域页数必然"崩塌"且判据不自愈（见 `_run_coverage`）；
+    # 所以全量改看整轮覆盖，逐域页数闸只留给增量（域结构稳定时才成立）。
+    if not partial:
+        cov = _run_coverage(out, by_domain_pages, dir_of)
+        if cov["degraded"]:
+            print("\n⚠️ 整轮内容覆盖仅 %.1f%%（上轮 %d 条 / 本轮 %d 条）—— **本轮不写盘**，"
+                  "保留上一轮产物；请等 LLM 恢复后重跑。"
+                  % (cov["cover"] * 100, cov["old"], cov["new"]), flush=True)
+            _wlog(event="run_aborted", script="wiki_aggregate", stage="l2",
+                  reason="run_coverage", old_inputs=cov["old"],
+                  new_inputs=cov["new"], cover=round(cov["cover"], 4))
+            if status is not None:
+                status["aborted"] = "run_coverage"
+                status["coverage"] = cov
+            return []
     keep = set(dir_of.values())
     removed = _prune_stale_domain_dirs(out, keep, partial=partial)
     if removed:
         print("  清理上一轮的 %d 个旧域目录（避免两轮产出混在一起）" % removed)
     results, skipped_names, _details = _write_domain_outputs(
-        out, by_domain_pages, dir_of, fl)
+        out, by_domain_pages, dir_of, fl, strict_collapse=partial)
     if status is not None:
         status["written_domains"] = [n for n, _ in results]
         status["pages_by_domain"] = {n: len(ps) for n, ps in results}
