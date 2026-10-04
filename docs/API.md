@@ -335,24 +335,30 @@ wiki 第二级编译可以走厂商**离线批处理**（价格是实时的 50%�
 | 回读 + 第二段提交（`merge_plan_results()` / `submit_offline_compile()`） | ✅ 就绪 |
 | 落盘轮 `scripts/wiki_aggregate.write_offline_stage()`（组装页面 → 写盘） | ✅ 就绪 |
 | 状态机编排（`wiki.update(offline_client=, offline_runner=)` 按在飞任务推进一段） | ✅ 就绪 |
-| **CLI**：`wiki --action batch-status`（查状态）· `batch-run`（推进一段）· `batch-cancel`（取消作废）· `batch-resubmit`（失败后用原输入文件重提） | ✅ 就绪（见 §五） |
+| **CLI**：`wiki --action batch-status`（查状态）· `batch-run`（推进一段）· `batch-cancel`（取消作废）· `batch-resubmit`（失败后用原输入文件重提）· **`full-run [--offline]`**（全量重跑，见下） | ✅ 就绪（见 §五） |
 | **HTTP**（挂在**面板服务**上，不新增常驻进程）：`GET /api/wiki/batch/status`（只读）· `POST /api/wiki/batch/run`（长任务）· `POST /api/wiki/batch/cancel` · `POST /api/wiki/batch/resubmit` · `GET /api/wiki/batch/checks`（收割流水） | ✅ 就绪（2026-10-01） |
 | **自动收割**（事件驱动，无轮询）：MCP 启动 · 写入记忆 · 蒸馏收尾 · **任意 CLI 命令** → 顺手收割在飞任务 | ✅ 就绪（2026-10-01） |
+| **自动发起**（离线触发器）：`wiki.batch.enabled` + 规则命中 → 提交离线批次；判定顺序 **离线优先 → 实时兜底** | ✅ 就绪（2026-10-04，见 [modules/batch-offline.md](modules/batch-offline.md) §3.5） |
+| **全量重跑**：`wiki --action full-run [--offline]`（重新归域 + 全部域重编 + 覆盖写盘；通道由 `wiki.full.mode` 决定） | ✅ 就绪（2026-10-04） |
 | `wiki.update_mode` 偏好开关（显式选实时/离线） | ⏳ **未做** —— 但"队列非空 ⇒ 不提交实时"这条**安全规则已就绪**，两条通道已互不打架 |
 
-> **现在怎么用**（2026-09-29 起 CLI 已就绪；**离线无自动通道**，只能手动）：
+> **现在怎么用**（2026-10-04 起**离线可自动**，也可手动）：
 >
 > ```bash
 > agentmemhub wiki --action batch-status     # 查在飞任务（只读）
 > agentmemhub wiki --action batch-run        # 推进一段（提交 / 交编译段 / 落盘，状态机自判）
 > agentmemhub wiki --action batch-cancel     # 取消并作废所有在飞任务
 > agentmemhub wiki --action batch-resubmit   # 平台侧 validation_failed 后用原输入文件重提
+> agentmemhub wiki --action full-run         # 全量重跑（重新归域 + 全部域重编 + 覆盖写盘）
+> agentmemhub wiki --action full-run --offline   # 同上，但编译段走离线批次
+> agentmemhub wiki --action triggers --set-batch on|off   # 热改离线触发器总闸（不用重启）
 > ```
 >
-> ⚠️ `batch-run` **要跑两次**（第一次提交、第二次落盘）；自动触发器调的是
-> `wiki.update(l1_dir=, l2_dir=, db=)`，**不带离线参数**，所以离线目前**没有**
-> 自动通道 —— 让离线可自动需要 M4（`update_mode` 开关）+ M5（触发器改造）。
-> 详见 [modules/batch-offline.md](modules/batch-offline.md) §3.4。
+> ⚠️ `batch-run` **要跑两次**（第一次提交、第二次落盘）；不过**收割已经自动**
+> （开 DSH / 写记忆 / 跑任意命令都会顺手推进一次），所以通常只需要等。
+> **发起**也可以自动：`wiki.batch.enabled` 打开后，规则命中即提交离线批次
+> （判定顺序"**离线优先 → 实时兜底**"）；通道由 `wiki.full.mode` 决定全量走哪条。
+> 详见 [modules/batch-offline.md](modules/batch-offline.md) §3.4 / §3.5。
 >
 > 直连厂商（OpenAI Batch 兼容，需自备 API Key；`region` 段是 `-cn`）：
 >

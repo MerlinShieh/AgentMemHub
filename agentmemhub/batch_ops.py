@@ -19,6 +19,10 @@ class BatchOpsError(RuntimeError):
 
 
 #: CLI 的 `--l1/--l2` 覆盖（HTTP 面板不设它，一律走配置）。
+#:
+#: ⚠️ **这是进程级全局**：`set_paths()` 只在 CLI 的 `_cmd_wiki_batch()` 里调一次
+#: （一次进程一条命令，天然安全）；**HTTP 路由绝不能调它** —— 那是长驻服务，
+#: 并发的后台任务会互相踩。HTTP 一律走 `paths()` 从配置读。
 _OVERRIDE: tuple[str, str] = ("", "")
 
 

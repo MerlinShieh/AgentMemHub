@@ -869,7 +869,11 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
     # （`a2.needs_recompile` 为真）却没有可定位的脏域 —— 典型场景正是"离线批次被
     # 平台判失败、已作废回池，但 L1 之后没有新变化"（2026-09-30 实测踩到）。
     # 正确动作是**重提**（`batch-resubmit` 复用原输入文件），而不是悄悄重编整库。
-    if offline_runner is not None and not preset:
+    # ⚠️ `and not full` —— **全量模式下 `preset` 恒为空是预期的**（它就是"重新归域，
+    # 不预设任何域"），不是上面说的那种异常。漏了这一个条件，`full-run --offline`
+    # 会直接返回 "nothing"、**什么都不做**，提示还把人往 `batch-resubmit` 上引
+    # （2026-10-04 体检发现）。
+    if offline_runner is not None and not preset and not full:
         return {"updated": False, "mode": "offline", "step": "nothing",
                 "hints": ["没有可提交的脏域（L2 基线落后，但 L1 没有新变化可定位到域）"
                           "—— 请用 `agentmemhub wiki --action batch-resubmit` 重提"

@@ -1080,3 +1080,37 @@ def test_离线推进自己保证scripts在path(tmp_path, monkeypatch):
         "`_offline_advance()` 必须自己把 scripts 加进 path（不能依赖调用方）"
     assert scripts in sys.path
 
+
+def test_全量离线不该被没有脏域挡住(tmp_path, monkeypatch):
+    """`full=True` 时 `preset` **恒为空**（全量就是"重新归域，不预设任何域"），
+    所以不能命中"没有可提交的脏域"那道保护 —— 否则 `full-run --offline`
+    **什么都不做**、还把人往 `batch-resubmit` 上引（2026-10-04 体检发现）。
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+    l1 = tmp_path / "l1"
+    l1.mkdir()
+    db = _mkdb(tmp_path, [(1, "a", "s1", "new", "h1")])
+
+    wiki._ensure_scripts_on_path()
+    seen: dict = {}
+
+    import wiki_aggregate as wa
+
+    def _fake_run(args):
+        seen["called"] = True
+        return {"aborted": "测试中止", "written_domains": [], "skipped_domains": [],
+                "pages": 0, "pages_by_domain": {}}
+
+    monkeypatch.setattr(wa, "run", _fake_run)
+    from agentmemhub import snapshot as _snap
+    monkeypatch.setattr(_snap, "create", lambda **k: {})
+
+    class _Runner:                                  # 假装是离线运行器
+        pass
+
+    wiki.update(l1_dir=l1, l2_dir=out, db=str(db), full=True, offline_runner=_Runner())
+
+    assert seen.get("called"), \
+        "全量 + 离线必须走到聚合层（不能被'没有脏域'挡住）"
+
