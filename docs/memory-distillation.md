@@ -408,6 +408,8 @@ distillation:
     per_message_cap: 2000          # 单条消息入 prompt 时的截断
   merge:
     enabled: true                  # 同会话多片合并沉淀
+    max_chars: 8000                # 层级合并的单批字符预算
+    max_rounds: 6                  # 层级合并的最大轮数（不收敛就升级重试）
   dedup:
     cosine_duplicate: 0.92         # ≥ 此值判重复（丢弃+指向）
     cosine_similar: 0.80           # ≥ 此值判相似（入库+打标互链）
@@ -420,7 +422,9 @@ distillation:
 ```
 
 **配套基础设施（D2）**：`config.py` 解析顶层 `llm` 段与 `distillation` 段；
-`agentmemhub.yaml.example` 同步补两段（现状 example 缺 llm 段）。
+`agentmemhub.yaml.example` **已补齐两段**（2026-10-04 核对：example 现含
+`data_dir` / `agents` / `web` / `memos` / `rag` / `llm` / `llm_batch` / `wiki` /
+`distillation` / `snapshot` / `notify` / `logs` 共 12 段，密钥一律留空）。
 
 ---
 

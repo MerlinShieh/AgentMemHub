@@ -25,7 +25,7 @@ uv run python -m agentmemhub serve --port 8087 --db /tmp/e2e.db --no-open
 cd scripts/e2e && node e2e.js
 ```
 
-全部通过输出 `9 通过, 0 失败`；失败时打印具体断言与页面控制台错误。
+全部通过输出 `N 通过, 0 失败`（N = 当前断言数，现为 **23** 条）；失败时打印具体断言与页面控制台错误。
 
 ## 说明
 
