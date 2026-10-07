@@ -589,6 +589,17 @@ def _harvest_gate(*, l1: Path, l2: Path, db: str) -> dict[str, Any]:
 def _run_locked(*, hook: str, force: bool = False) -> dict[str, Any]:
     """持锁后的判定与执行（主体）。"""
     from agentmemhub import wiki
+    # ---- `wiki.enabled` **总开关**（缺陷 D-2 的真修复，2026-10-07）----
+    # 此前它**没有任何消费点**：`_configured()` 只被 `status()` 调用，而触发链
+    # 必经的 `_targets()` 从不检查它 ⇒ 置 false 照样自动更新（"假开关"）。
+    # 放在这里而不是 `_targets()`：后者也被 `harvest_now()` 用，而**收割异步任务
+    # 与 wiki 开关无关**（离线批次该推进还是要推进，不该被这个开关连坐）。
+    # `force=True`（`wiki --action trigger --force`）仍可手动补跑。
+    from agentmemhub import config as _hub_config
+    if not force and not _hub_config.config().wiki.get("enabled", True):
+        return {"checked": True, "should_run": False, "enabled": False,
+                "message": "wiki.enabled=false（总开关关闭），跳过更新；"
+                           "手动补跑请加 --force"}
     l1, l2, db = _targets()
     cfg = get_effective_config()            # 实时触发规则
     bcfg = get_effective_batch_config()     # 离线触发规则（判定时优先）
@@ -780,11 +791,15 @@ def status() -> dict[str, Any]:
 
 
 def _configured() -> bool:
-    """wiki 是否可用：**总开关打开** + 两级产出目录都配了。
+    """wiki 是否**可用**：总开关打开 + 两级产出目录都配了（供 `status()` 报"目标就绪"）。
 
-    `wiki.enabled` 此前**没有任何消费点** —— 关掉它照样触发（2026-09-22 配置
-    审计发现的假开关）。现在它是真正的总开关：置 false 后触发器不再跑，
-    `status()` 也会如实报告目标未就绪。
+    ⚠️ **这不是拦截点**（2026-10-07 复核澄清）。历史经过：`wiki.enabled` 曾被记为
+    "假开关"，后来这里的注释改成"现在它是真正的总开关：置 false 后触发器不再跑"
+    —— **那句话是错的，而且只改了注释没改代码**：本函数只被 `status()` 调用，而触发链
+    必经的 `_targets()` 从不检查它 ⇒ 置 false 时**自动更新照样跑**。
+    （2026-10-04 体检时我**读了这句注释就采信**、没去查调用点，因此误判"D-2 已修"。）
+
+    真正的拦截在 `_run_locked()` 开头。这里只管"报状态"，不要指望它拦住任何东西。
     """
     from agentmemhub import config as hub_config
     w = hub_config.config().wiki

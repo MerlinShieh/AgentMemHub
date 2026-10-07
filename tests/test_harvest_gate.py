@@ -14,10 +14,20 @@ from agentmemhub import wiki_triggers as wt
 
 @pytest.fixture()
 def _isolated(monkeypatch, tmp_path):
-    """把目标目录、锁、状态文件都隔离掉（不碰真实 wiki 产物）。"""
+    """把目标目录、锁、状态文件都隔离掉（不碰真实 wiki 产物）。
+
+    **实时规则也自带**（不依赖用户 yaml）：`wiki.update.*` 是用户可配的开关，
+    而本文件断言的是"离线优先 / 实时兜底"这套**流程**，与具体阈值无关 ——
+    2026-10-07 实测：用户把 `dirty_memories` 从 10 改成 30 后，
+    `test_离线不可用时回落到实时` 就因 `_fake_align` 只报 5 条脏数据而失败
+    （实时规则不命中 ⇒ `update` 不被调用）。离线那份由各用例自行 patch。
+    """
     monkeypatch.setattr(wt, "_targets", lambda: (tmp_path, tmp_path, ":memory:"))
     monkeypatch.setattr(wt, "_take_lock", lambda: True)
     monkeypatch.setattr(wt, "_single_flight", lambda: _null_cm())
+    monkeypatch.setattr(wt, "get_effective_config",
+                        lambda: {"enabled": True, "schedule": [],
+                                 "dirty_memories": 1, "first_write_daily": False})
     return tmp_path
 
 

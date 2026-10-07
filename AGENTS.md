@@ -45,7 +45,11 @@
   **加/改配置键后必跑** `uv run python scripts/check_config_keys.py` —— 它查
   "定义了却没有任何读取点"的**僵尸键**。本项目踩过三次同一个坑
   （`wiki.single_shot_max`、`wiki.workers`、`wiki.l2.*`，以及没有任何消费点的
-  假开关 `wiki.enabled` —— 它已在 `wiki_triggers._configured()` 里接成真开关），
+  假开关 `wiki.enabled` —— 它直到 **2026-10-07** 才真修：此前只把
+  `_configured()` 的注释改成了"现在是真开关"，代码里却**没有任何触发链检查它**
+  （`_configured()` 只被 `status()` 调用）；真正的拦截点现补在
+  `wiki_triggers._run_locked()` 开头。**教训：注释不等于实现 ——
+  判定"某个键到底有没有消费点"必须去查调用点，别读注释**），
   **共同特征是配置里的值恰好等于代码里硬编码的默认值**
   —— 所以既不报错、也不让测试变红，能潜伏数月。`tests/test_config_audit.py`
   里有一条守护测试会在提交前拦住它。**注意该脚本是启发式**（按"键名在代码里

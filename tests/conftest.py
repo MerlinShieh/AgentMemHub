@@ -52,6 +52,30 @@ def _no_wiki_side_effects(monkeypatch):
     # 实测事故：2026-09-26 一次测试越界把真实 out_l1 删剩 25 页。
 
 
+@pytest.fixture(autouse=True)
+def _no_obsidian_side_effects(monkeypatch):
+    """**旁路模块不得真去驱动外部程序**：测试里一律不让 Obsidian 验收真的跑。
+
+    为什么必须**全局**兜底：`wiki.update()` 收尾会调 `obsidian.verify()`
+    （见 `agentmemhub/wiki.py`），而 `verify()` 默认"**先让 Obsidian 重载、
+    再等 `RELOAD_SETTLE_S`(20 秒) 重建索引**"（2026-10-04 加的重载逻辑）。
+
+    实测后果（2026-10-07）：全量测试从 ~3 分钟涨到 **16.6 分钟**，而且因为它会
+    真的去驱动**桌面端 Obsidian**（用户开着时 `app_running()` 为真 ⇒ 真调 CLI），
+    还会出现"进程 CPU 静止、长时间无输出"的卡顿（实测 5 分钟无进展）。
+
+    `test_obsidian_cli.py` 自己有一份夹具，但**只覆盖本文件** —— 其他文件里任何
+    真跑到 update 收尾的用例都会白等，所以这里做全局兜底。
+    把 `RELOAD_SETTLE_S` 钉成 0（而不是 patch `time.sleep`）：后者改的是**全局
+    time 模块**，会连累一切依赖 sleep 的测试。`verify()` 特意把 `settle_s`
+    做成可选参数就是为了这个（默认参数在定义时求值，改模块常量无效）。
+    """
+    from agentmemhub import obsidian
+
+    monkeypatch.setattr(obsidian, "reload_app", lambda **k: None)
+    monkeypatch.setattr(obsidian, "RELOAD_SETTLE_S", 0)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _sandbox_data_dir(tmp_path_factory):
     d = tmp_path_factory.mktemp("agentmemhub-data")

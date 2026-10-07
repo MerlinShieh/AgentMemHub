@@ -25,6 +25,7 @@
 """
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -96,7 +97,21 @@ def _repair_client():
     取 `config().wiki_l2.llm`：与**离线编译段同一段配置**，所以 `repair_model` 的
     配置位置一致（它继承顶层 `llm`，也可在 `wiki.l2.llm` 就地覆盖）。构造失败返回
     `None`（修复是**尽力而为**的兜底，不能因为它挂掉而影响回读）。
+
+    ⚠️ **测试沙箱下直接返回 `None`**（`logs.SANDBOX_ENV`，与 `wiki_triggers._targets()`
+    的产物熔断同源）。
+
+    为什么必须有这道熔断：修复是**真实付费调用**，而"有内容但 JSON 坏"的用例天然会
+    命中它。**2026-10-07 实测**：`tests/test_offline_e2e.py` 的坏 JSON 用例**真去调了
+    `repair_model`**，上游慢时**卡满 900 秒超时** —— 全量测试从 ~3 分钟涨到
+    **16.6 分钟**，而且是**真的花了钱**。这条路径格外隐蔽：测试的日志目录被隔离到
+    tmp，所以真实 `logs/agentmemhub.log` 里**一条记录都没有**，光看日志会误判成
+    "没有网络调用"。
+    **凡是"会自动发起真实付费调用"的兜底，都得有这道进程级熔断。**
     """
+    from agentmemhub import logs as _logs
+    if os.environ.get(_logs.SANDBOX_ENV):
+        return None
     try:
         from agentmemhub import config as hub_config
         from agentmemhub.llm import client_from_config
@@ -391,8 +406,14 @@ def _warn_expiring(jobs: list[BatchJob], *, now: float, note: Notify) -> list[st
 
 def import_results(client, out: "Path | str", *, now: Optional[float] = None,
                    deadline_s: float = 0.0,
-                   notify_fn: Optional[Notify] = None) -> dict[str, Any]:
+                   notify_fn: Optional[Notify] = None,
+                   repair_client=None) -> dict[str, Any]:
     """回读所有在飞任务：查状态 → 决策 → 取结果 → 落盘现场。
+
+    `repair_client` 透传给 `fetch_results()`：**"有内容但 JSON 坏"的条目**会交给它
+    修复（`repair_model`）。留空则自建一个实时 client —— 而测试沙箱下 `_repair_client()`
+    返回 `None`（真实付费调用必须被熔断，见其 docstring）。测试要测"修复兜底"就显式
+    注入一个假 client，别依赖自动构造。
 
     返回值给上层（`wiki.py` / CLI）：
 
@@ -452,7 +473,7 @@ def import_results(client, out: "Path | str", *, now: Optional[float] = None,
             continue
 
         # CONSUME / PARTIAL：把已经能取的结果读回来（已到的不重复花钱）
-        got = fetch_results(client, job)
+        got = fetch_results(client, job, repair_client=repair_client)
         if got:
             job.results.update(got)
             consumed.append(job.batch_id)

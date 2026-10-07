@@ -209,7 +209,7 @@ def app_running(timeout: int = 20) -> bool:
 
 def verify(*, cli: str = "", vault: str = "", timeout: int = 180,
            require_running: bool = True, reload_first: bool = True,
-           settle_s: float = RELOAD_SETTLE_S) -> dict:
+           settle_s: "float | None" = None) -> dict:
     """产物链接验收（给流程调用的**不抛异常**版本）。
 
     返回 `{ok, available, total_targets, total_links, items, error}`：
@@ -224,6 +224,10 @@ def verify(*, cli: str = "", vault: str = "", timeout: int = 180,
     而它报告"1197 处全部正确"其实一直是对的）。
 
     排查时可以传 `reload_first=False` 看重载前的状态，但**验收不许关**。
+
+    `settle_s=None`（默认）取模块常量 `RELOAD_SETTLE_S`；**写成可选参数而不是
+    直接当默认值**，是为了让测试能覆盖它 —— Python 的默认参数在**函数定义时**
+    求值，改模块常量对已绑定的默认值无效（2026-10-07 实测踩到）。
     """
     if require_running and not app_running():
         return {"ok": False, "available": False, "total_targets": 0,
@@ -231,8 +235,9 @@ def verify(*, cli: str = "", vault: str = "", timeout: int = 180,
                 "error": "Obsidian 未在运行（不自动启动它）"}
     if reload_first:
         reload_app(cli=cli, vault=vault)
-        if settle_s > 0:
-            time.sleep(settle_s)
+        wait = RELOAD_SETTLE_S if settle_s is None else settle_s
+        if wait > 0:
+            time.sleep(wait)
     try:
         bad = unresolved(cli=cli, vault=vault, timeout=timeout)
     except ObsidianUnavailable as e:

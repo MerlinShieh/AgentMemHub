@@ -159,8 +159,18 @@ def test_三段式端到端_提交到落盘(off):
     assert (out / "index.md").exists(), "落盘要一并产出索引"
 
 
-def test_三段式端到端_坏JSON会走修复兜底(off):
-    """回读阶段：JSON 坏的条目**不丢**（保留原文），配了修复模型就救回来。"""
+def test_三段式端到端_坏JSON保留原文不丢(off):
+    """回读阶段：JSON 坏的条目**不丢**（保留原文），且**不会真去调修复模型**。
+
+    ⚠️ 2026-10-07 实测事故：这条用例此前**真的调了 `repair_model`** —— 不传
+    `repair_client` 时 `_repair_client()` 会自动构造真实 client，于是它变成一次
+    **付费 + 走网络**的调用：上游慢时卡满 900 秒超时，全量测试从 ~3 分钟涨到
+    **16.6 分钟**。现在测试沙箱下 `_repair_client()` 返回 `None`（进程级熔断，
+    与 `wiki_triggers._targets()` 的产物熔断同源）。
+
+    这里断言"不修复 + 原文保留"；"配了修复模型能救回来"由下一条显式注入假
+    client 的用例覆盖。
+    """
     out, wa = off
     reqs, items, members = wa.compile_requests(_plan(), [])
     up = _FakeUploader(batch_id="b-bad")
@@ -177,8 +187,43 @@ def test_三段式端到端_坏JSON会走修复兜底(off):
     st = wiki_batch.import_results(client, out)
 
     r = st["results"]["b-bad"][reqs[0].custom_id]
-    assert r["ok"] is False, "坏 JSON 就是坏 JSON（没有修复模型时）"
+    assert r["ok"] is False, "沙箱下不修复：坏 JSON 就是坏 JSON"
     assert r.get("content"), "**原文必须留着** —— 重试与修复两条路都要它"
+    assert "repaired" not in r, "没修就不许标 repaired"
+
+
+def test_坏JSON配了修复模型时能救回(off):
+    """显式注入假 `repair_client` → 真的走一遍修复兜底（**仍然不碰网络**）。
+
+    这条才是"坏 JSON 会走修复兜底"的正面用例：证明 `repair_broken_results()`
+    的接线是通的（把 `data` 填上、把 `ok` 翻成 True、标记 `repaired`）。
+    """
+    out, wa = off
+    reqs, items, members = wa.compile_requests(_plan(), [])
+    up = _FakeUploader(batch_id="b-fix")
+    runner = OfflineRunner(uploader=up, model="fake-model", stage="l2compile")
+    wa._submit_stage(out, runner, reqs, items, members, stage="l2compile")
+
+    client = _FakeClient(output=json.dumps({
+        "custom_id": reqs[0].custom_id,
+        "response": {"status_code": 200, "body": {"choices": [
+            {"message": {"content": "```json\n{还是坏的"}}]}},
+    }, ensure_ascii=False) + "\n")
+
+    calls: list[str] = []
+
+    class _Repair:
+        def _repair_json(self, system, user, raw):
+            calls.append(raw)
+            return {"title": "修好的页", "type": "concept",
+                    "summary": "s", "body": "b"}
+
+    st = wiki_batch.import_results(client, out, repair_client=_Repair())
+
+    r = st["results"]["b-fix"][reqs[0].custom_id]
+    assert calls, "修复器应被调用一次"
+    assert r["ok"] is True and r.get("repaired") is True, "救回来了"
+    assert r["data"]["title"] == "修好的页"
 
 
 def test_三段式端到端_终局失败会作废回池(off):

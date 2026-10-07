@@ -144,7 +144,9 @@ def test_验收前必须先重载再查(monkeypatch):
     monkeypatch.setattr(obsidian, "unresolved",
                         lambda **k: calls.append("unresolved") or [])
 
-    r = obsidian.verify()
+    # 显式给 settle_s：`conftest` 为全局兜底把 `RELOAD_SETTLE_S` 钉成了 0
+    # （否则每个真跑到 update 收尾的用例都要白等 20 秒），这里要验"等索引"这一步。
+    r = obsidian.verify(settle_s=20)
 
     assert calls == ["reload", "sleep", "unresolved"], "顺序必须是：重载 → 等索引 → 查"
     assert r["ok"] is True and r["available"] is True

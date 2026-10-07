@@ -159,7 +159,12 @@ def _mk_trigger_env(tmp_path, monkeypatch):
     conn.execute("INSERT INTO distilled_memories VALUES (4,'a','s1','concept','high','t','new','新内容','h4',2000)")
     conn.commit(); conn.close()
     monkeypatch.setattr(wiki_triggers, "_targets", lambda: (l1, l2, str(db)))
-    wiki_triggers.set_overrides({"schedule": []})
+    # 规则**写全**，不依赖 yaml：`wiki.update.*` 是用户可配的开关，只覆盖 schedule
+    # 会让"首写档/阈值档"的断言随用户配置漂移 —— 2026-10-07 实测：用户把
+    # `first_write_daily` 改成 false（改成纯阈值触发）后，本文件 7 个用例全挂。
+    # 这与 `_tmp_state` 里为"离线开关"记下的坑是同一类。
+    wiki_triggers.set_overrides({"enabled": True, "schedule": [],
+                                 "dirty_memories": 10, "first_write_daily": True})
     calls = []
 
     def fake_update(**kw):
@@ -503,3 +508,42 @@ def test_沙箱熔断_进程级拦截真实产出目录():
     r = wiki_triggers.on_memories_written()
     assert r.get("checked") is False
     assert "测试环境禁止" in (r.get("error") or "")
+
+
+def test_wiki总开关能真正拦住自动更新(monkeypatch):
+    """⚠️ 回归（缺陷 D-2，2026-10-07 复核发现**此前并未真修**）。
+
+    `wiki.enabled` 曾被记为"假开关"，后来 `_configured()` 的注释被改成
+    "现在它是真正的总开关：置 false 后触发器不再跑" —— 但**只改了注释、没改代码**：
+    `_configured()` 只被 `status()` 调用，而触发链必经的 `_targets()` 从不检查它，
+    于是置 false 时自动更新**照样跑**（那句注释在撒谎）。
+
+    我 2026-10-04 体检时就是**读了那句注释就采信**、没去查调用点，因此误判
+    "D-2 已修"。这条用例守的就是"总开关真的拦得住"。
+
+    修法：拦在 `_run_locked()` 开头 —— **不放 `_targets()`**，因为那个也被
+    `harvest_now()` 用，而"收割异步批次"不该被 wiki 总开关连坐。
+    """
+    import agentmemhub.config as cfg
+
+    class _C:
+        wiki = {"enabled": False}
+
+    monkeypatch.setattr(cfg, "config", lambda: _C())
+
+    called: list[int] = []
+    monkeypatch.setattr(wiki_triggers, "_targets",
+                        lambda: (called.append(1), (None, None, None))[1])
+
+    r = wiki_triggers._run_locked(hook="write")
+
+    assert r["should_run"] is False and r["enabled"] is False
+    assert called == [], "总开关关闭时，连产物目录都不该去解析"
+
+    # `--force` 仍应绕过总开关（手动补跑）。后续流程会因假路径出错，这里只验拦截点。
+    called.clear()
+    try:
+        wiki_triggers._run_locked(hook="manual", force=True)
+    except Exception:                       # noqa: BLE001
+        pass
+    assert called == [1], "--force 是手动补跑通道，必须绕过总开关"

@@ -175,11 +175,25 @@ llm_batch:
 # **计入输出计费**（实测第一级思维链占其输出的 66%）。
 # ---------------------------------------------------------------------------
 wiki:
-  # enabled: ⚠️ **目前是假开关**（2026-09-29 复核仍如此 —— 缺陷 D-2）：唯一消费点
-  #   `wiki_triggers._configured()` 只被 `status()` 调用，`_targets()` 并不检查它
-  #   ⇒ 置 false **拦不住**自动触发链。要停自动触发请改用 `wiki.update.enabled: false`
-  #   （手动补跑需加 `--force`）。处置方案见 docs/batch-offline-plan.md §18 D-2
+  # enabled: **wiki 总开关**。置 false ⇒ 自动更新不再跑（手动补跑加 `--force`）。
+  #   历史（缺陷 D-2）：它曾长期是**假开关** —— `_configured()` 只被 `status()` 调用，
+  #   而触发链必经的 `_targets()` 从不检查它，所以置 false **照样自动更新**。
+  #   **2026-10-07 已真修**：拦截点放在 `wiki_triggers._run_locked()` 开头
+  #   （不放 `_targets()` —— 那个也被 `harvest_now()` 用，收割异步批次不该被连坐）。
+  #   守护测试：`tests/test_wiki_triggers.py::test_wiki总开关能真正拦住自动更新`。
   enabled: true
+
+  # ---- 实时触发器（2026-10-07 补录：此前只有内置默认值，没有配置段）----
+  # 与下面的 `batch`（离线触发器）**并列**，判定顺序 **离线优先 → 实时兜底**；
+  # 两条通道共用"一天一轮 wiki 更新"的额度，不会重复提交。
+  # 只想"攒够阈值被动触发 + 手动主动触发"，照下面这样配即可。
+  update:
+    enabled: true             # 实时触发器总闸
+    schedule: []              # 时点档（[] = 关闭；内置默认 ["09:00","12:00","18:00"]）
+    dirty_memories: 30        # 脏记忆阈值（内置默认 10）
+    first_write_daily: false  # 首写档（内置默认 true）—— ⚠️ 开着它会让**任意一条**
+                              #   新记忆就无条件触发一轮，把阈值架空（实测 dirty=1
+                              #   也 should_run=True）。想"只靠阈值"就必须关掉它。
   # Obsidian CLI 可执行文件（**产物链接验收**用，见 `agentmemhub/obsidian.py`）。
   #   为什么要有这个配置位：进程环境是**启动时捕获**的 —— 实测把 Obsidian 目录
   #   加进用户 PATH 后重启，35 条用户 PATH 里 34 条都继承了、**只有最后加的那条没**，
