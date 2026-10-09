@@ -409,10 +409,25 @@ wiki:
 
 - [x] `docs/modules/batch-offline.md` —— ✅ **M0 已写**（实测契约表 + 六动作 + 对账 + 排障 + 测试清单）
 - [x] `docs/logging.md` **7 个事件已转正**：6 个批量事件（M0；`batch_list` 是探测发现列表接口后补的第 6 个）+ `notify_write`（M1）；待 M2 / M4 再补 5 个（`offline_submitted` / `batch_consumed` / `batch_voided` / `batch_expired` / `config_change`）
-- [ ] `docs/API.md`：新端点表格行 + Swagger `summary` / Query `description`；§六 现状表更新（M3 / M4）
-- [ ] `docs/modules/config.md` override 小节由"计划中"改为已实现（M4）
-- [ ] `llm-batch-offline.md` 升级为实施记录（M6）
-- [ ] 提交前跑 `scripts/sensitive_scan.py`（新文档含真实 base_url 与路径，需确认无密钥）
+      —— **2026-10-08 复查**：其中 `offline_submitted`（M2b-1）与 `batch_consumed` / `batch_voided` /
+      `batch_expired`（M2b-2）**均已转正**；**只剩 `config_change` 未实现**，
+      它也是 `logging.md` §8 现在唯一列着的事件（该节内容已核实准确，无需改动）。
+      `config_change` 属于面板 `PUT /api/config` 白名单的能力，**待面板重做时一并补**。
+> **2026-10-08 复查（Merlin 核准）**：本节原列 4 条 `- [ ]`，逐条对照代码与实盘后：
+> **3 条已完成，1 条撤销**。撤销那条是**反向错误**（差点把"未实现的"写成"已实现"）。
+
+- [x] `docs/API.md`：新端点表格行 + Swagger `summary` / Query `description`；§六 现状表更新（M3 / M4）
+      —— ✅ **已完成**（M6，2026-10-04）：§六 现状表 17 行 + CLI 六动作 + HTTP 五端点
+      + `batch_*` 事实流索引，均在 `API.md` §六
+- [x] ~~`docs/modules/config.md` override 小节由"计划中"改为已实现（M4）~~ —— ❌ **本条撤销（不做）**
+      复查结论：**文件级 override 层（`agentmemhub.override.yaml`）至今没有加载代码**，
+      `config.md` §7 标注"仍是计划"是**正确表述**；照原条目改反而会造出
+      "文档说已实现、实际没有"的假象。**将来真做了这个功能，再改这条**，
+      并同步 `data-architecture.md` §13 的四种继承形态对照表。
+- [x] `llm-batch-offline.md` 升级为实施记录（M6）
+      —— ✅ **已完成**：标题即「接缝设计 → 实施记录」，§8 为实施记录（2026-09-29 ~ 10-04）
+- [x] 提交前跑 `scripts/sensitive_scan.py`（新文档含真实 base_url 与路径，需确认无密钥）
+      —— ✅ **已完成**（M6 验收项，此后多轮运行均零命中）
 
 ---
 
