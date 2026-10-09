@@ -1076,6 +1076,27 @@ def _existing_domain_dirs(out: Path) -> list[str]:
                   if d.is_dir() and not d.name.startswith(".") and d.name[:1].isdigit())
 
 
+def _stale_domain_names(out: Path, keep: set[str], *, partial: bool) -> list[str]:
+    """本轮**将被剪掉**的旧域**域名**（判据与 `_prune_stale_domain_dirs()` 完全一致）。
+
+    为什么单独一个函数：`_prune_stale_domain_dirs()` 只回报"删了几个"，而
+    "给消失的域销账"需要知道**删掉的是哪个域**。改它的返回值会波及既有调用点与
+    测试，所以这里共用判据来源 `_existing_domain_dirs()` —— 两处各写一份必然漂移。
+
+    为什么要反查域名：失败清单里的 `target` 是**域名**，不是目录名。反查靠
+    `_domain_dir_map()`，而它对"对不上 `_domains.json` 的目录**直接不收**" ——
+    那类孤儿目录被剪时**故意漏销**（宁可留一条待办让人看见，也不能因为
+    "认不出它是谁"就误销一条真问题）。
+
+    ⚠️ 必须在 `_prune_stale_domain_dirs()` **之前**调用：剪完目录名就反查不出来了。
+    """
+    if partial or not keep:
+        return []
+    dir_to_name = {d: n for n, d in _domain_dir_map(out).items()}
+    return [dir_to_name[d] for d in _existing_domain_dirs(out)
+            if d not in keep and d in dir_to_name]
+
+
 def _domain_missing_abort(planned: set[str], produced: set[str], out: Path) -> bool:
     """全量写盘前问一句：本轮该不该因为"整域没产出"而整个中止？
 
@@ -1236,6 +1257,13 @@ def _write_domain_outputs(out: Path, by_domain_pages: dict[str, list[dict]],
 
     上层（`wiki.py`）靠 `skipped_domains` 把"**没真正写出来**"的域剔出新基线，
     它们因此保持"脏"、下轮自然重试 —— **跳过一次绝不等于永久不更新**。
+
+    **成功也要销账**（与两条跳过路径配对的第三条出口）：某域本轮真写进去了，
+    就 `fl.resolve("l2-write", name)` 销掉它的历史失败。失败清单是**待办**，
+    磁盘上既然已是最新一轮产物，待办就该消 —— 否则攒出"幽灵失败"。
+    2026-10-08 实测：10-04 14:32 增量轮跳过的 4 个域，在当晚 17:14 全量轮
+    **完整写入 396 页、零跳过**之后仍然一条都没销，一直挂到 4 天后人工清账，
+    根因就是销账只发生在 `--retry-failed` 路径。
     """
     results: list[tuple[str, list[dict]]] = []
     skipped: list[str] = []
@@ -1277,6 +1305,11 @@ def _write_domain_outputs(out: Path, by_domain_pages: dict[str, list[dict]],
             fl.record(stage="l2-write", target=name,
                       error="域目录换入失败：%s" % err)
             continue
+        # 本轮真写进去了 → 销掉该域的历史失败。这是"跳过"的**反面出口**：
+        # 两条跳过路径记 / 留失败，这条成功路径清失败，三者必须配对，否则清单只进不出。
+        # `resolve()` 是追加 tombstone（不改历史行），跨进程并发安全；只影响
+        # (stage="l2-write", target=name) 这一个域，别的域不受牵连。
+        fl.resolve("l2-write", name)
         results.append((name, pages_out))
     return results, skipped, details
 
@@ -1312,9 +1345,18 @@ def finalize_outputs(out: Path, by_domain_pages: dict[str, list[dict]], *,
                 status["coverage"] = cov
             return []
     keep = set(dir_of.values())
+    # 必须在剪之前算：剪完目录名就反查不出域名了
+    stale_names = _stale_domain_names(out, keep, partial=partial)
     removed = _prune_stale_domain_dirs(out, keep, partial=partial)
     if removed:
         print("  清理上一轮的 %d 个旧域目录（避免两轮产出混在一起）" % removed)
+    # 域在重划中消失（产物侧已无此域）⇒ 针对它的 `l2-write` 待办失效，销账。
+    # 不销就成了**无人能销**的幽灵失败：下一轮的 `by_domain_pages` 里连它的名字
+    # 都不会出现，`_write_domain_outputs()` 那条成功销账路径永远够不着它。
+    resolved = [n for n in stale_names if fl.resolve("l2-write", n)]
+    if resolved:
+        print("  销账 %d 条随域消失而失效的失败记录：%s"
+              % (len(resolved), "、".join(resolved[:5])))
     results, skipped_names, _details = _write_domain_outputs(
         out, by_domain_pages, dir_of, fl, strict_collapse=partial)
     if status is not None:

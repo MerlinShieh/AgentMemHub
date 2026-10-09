@@ -1098,6 +1098,180 @@ def test_换入失败不留下tmp与bak垃圾(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# 换入成功要**销账**历史失败（否则累积"幽灵失败"）
+#
+# 2026-10-08 实测：2026-10-04 14:32 增量轮因页数崩塌跳过 4 个域（保护性，
+# 保留旧产物）→ 进失败清单；同一晚 17:14 全量轮按设计**重新划分域**
+# （17 域 → 21 域）、完整写入 396 页、**零跳过** —— 那 4 个域的失败却一条都没销账，
+# 一直挂到 10-08 人工清账。根因：销账只发生在 `--retry-failed` 路径，
+# `_write_domain_outputs()` 换入成功时没有 `resolve()`。
+# 判据：**失败清单是"待办"，磁盘上已经是最新一轮产物了，待办就该消。**
+# ---------------------------------------------------------------------------
+
+def test_换入成功即销账该域的历史失败(tmp_path):
+    """本轮真写出来了 → 该域历史失败必须销账（否则幽灵条目会一直攒）。"""
+    from agentmemhub.failures import FailureLog
+
+    import wiki_aggregate as wa
+
+    d = tmp_path / "01-域A"
+    d.mkdir()
+    (d / "001-旧页.md").write_text("旧", encoding="utf-8")
+
+    fl = FailureLog(tmp_path / "failures.jsonl")
+    fl.record(stage="l2-write", target="域A", error="页数崩塌 4→1，已保留旧产物")
+    assert fl.targets("l2-write") == ["域A"], "前置：清单里先有一条历史失败"
+
+    results, skipped, _ = wa._write_domain_outputs(
+        tmp_path, {"域A": [_write_test_page("新页", "001-新.md")]},
+        {"域A": "01-域A"}, fl)
+
+    assert [n for n, _ in results] == ["域A"] and skipped == []
+    assert fl.targets("l2-write") == [], "本轮已真写盘，历史失败就该销账"
+
+
+def test_本轮仍被跳过时历史失败必须保留(tmp_path):
+    """反向保护：本轮**没**写出来的域，历史失败一条都不能销。"""
+    from agentmemhub.failures import FailureLog
+
+    import wiki_aggregate as wa
+
+    d = tmp_path / "01-域A"
+    d.mkdir()
+    for i in range(1, 5):                    # 旧 4 页 → 新 1 页 = 崩塌，仍被跳过
+        (d / ("%03d-旧.md" % i)).write_text("旧", encoding="utf-8")
+
+    fl = FailureLog(tmp_path / "failures.jsonl")
+    fl.record(stage="l2-write", target="域A", error="域目录换入失败：PermissionError")
+
+    wa._write_domain_outputs(
+        tmp_path, {"域A": [_write_test_page("新页", "001-新.md")]},
+        {"域A": "01-域A"}, fl)
+
+    assert "域A" in set(fl.targets("l2-write")), \
+        "本轮没写出来，历史失败不能被销掉（否则再也无从补跑）"
+
+
+def test_销账只影响本域(tmp_path):
+    """A 域写成功不能把 B 域的失败一起销掉（销账粒度是 stage+target）。"""
+    from agentmemhub.failures import FailureLog
+
+    import wiki_aggregate as wa
+
+    for name in ("01-域A", "02-域B"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "001-旧页.md").write_text("旧", encoding="utf-8")
+
+    fl = FailureLog(tmp_path / "failures.jsonl")
+    fl.record(stage="l2-write", target="域A", error="页数崩塌 4→1，已保留旧产物")
+    fl.record(stage="l2-write", target="域B", error="页数崩塌 9→2，已保留旧产物")
+
+    real_swap = wa._swap_domain_dir
+
+    def flaky(out, ddir, files):
+        if ddir.name == "02-域B":            # B 域换入失败 → 只有它该留着
+            raise PermissionError("[WinError 5] 拒绝访问。")
+        return real_swap(out, ddir, files)
+
+    import pytest as _pytest
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(wa, "_swap_domain_dir", flaky)
+        wa._write_domain_outputs(
+            tmp_path,
+            {"域A": [_write_test_page("A 页", "001-A.md")],
+             "域B": [_write_test_page("B 页", "001-B.md")]},
+            {"域A": "01-域A", "域B": "02-域B"}, fl)
+
+    assert fl.targets("l2-write") == ["域B"], "只销写成功那个域的账"
+
+
+# ---------------------------------------------------------------------------
+# 幽灵失败的第二个来源：**域在重划中消失**
+#
+# `_write_domain_outputs()` 只遍历"本轮域集合"，所以"上一轮有、这一轮没有"的域
+# （全量重划域时很常见：17 域 → 21 域那轮就消失了几个）身上的失败**永远没人销**
+# —— 下一轮连它的名字都不会出现在 `by_domain_pages` 里。
+# 判据：域目录都被剪了（产物侧已无此域）⇒ 针对它的写盘待办失效。
+# ---------------------------------------------------------------------------
+
+def _write_domains_file(out, names: list[str]) -> None:
+    """写 `_domains.json` —— `_domain_dir_map()` 只认它来定"权威域名"。"""
+    (out / "_domains.json").write_text(
+        json.dumps([{"name": n} for n in names], ensure_ascii=False),
+        encoding="utf-8")
+
+
+def test_域被剪掉后针对它的历史失败要销账(tmp_path):
+    """全量重划域让一个域消失 ⇒ 它目录被剪 ⇒ 针对它的 l2-write 待办必须销账。"""
+    from agentmemhub.failures import FailureLog
+
+    import wiki_aggregate as wa
+
+    (tmp_path / "01-旧域").mkdir()
+    (tmp_path / "01-旧域" / "001-旧页.md").write_text("旧", encoding="utf-8")
+    _write_domains_file(tmp_path, ["旧域", "新域"])
+
+    fl = FailureLog(tmp_path / "failures.jsonl")
+    fl.record(stage="l2-write", target="旧域", error="页数崩塌 9→2，已保留旧产物")
+
+    wa.finalize_outputs(
+        tmp_path,
+        {"新域": [_write_test_page("新页", "001-新.md")]},
+        dir_of={"新域": "01-新域"}, partial=False, fl=fl)
+
+    assert not (tmp_path / "01-旧域").exists(), "不属于本轮的旧域目录要被剪掉"
+    assert fl.targets("l2-write") == [], "域都没了，针对它的待办必须销账"
+
+
+def test_域表里认不出的孤儿目录被剪时保守不销账(tmp_path):
+    """反向保护：`_domain_dir_map()` 对不上 `_domains.json` 的目录**直接不收**。
+
+    那类目录被剪时我们**故意不销账** —— 宁可留一条待办让人看见，
+    也不能因为"认不出它是谁"就误销一条真问题。
+    """
+    from agentmemhub.failures import FailureLog
+
+    import wiki_aggregate as wa
+
+    (tmp_path / "07-孤儿域").mkdir()
+    (tmp_path / "07-孤儿域" / "001-旧页.md").write_text("旧", encoding="utf-8")
+    _write_domains_file(tmp_path, [])            # 域表里没有它 ⇒ 反查不到域名
+
+    fl = FailureLog(tmp_path / "failures.jsonl")
+    fl.record(stage="l2-write", target="孤儿域", error="域目录换入失败：PermissionError")
+
+    wa.finalize_outputs(
+        tmp_path,
+        {"新域": [_write_test_page("新页", "001-新.md")]},
+        dir_of={"新域": "01-新域"}, partial=False, fl=fl)
+
+    assert not (tmp_path / "07-孤儿域").exists(), "判据一致：孤儿目录照样被剪"
+    assert fl.targets("l2-write") == ["孤儿域"], "认不出是谁，就不销账（宁缺勿滥）"
+
+
+def test_增量模式绝不动别人的账(tmp_path):
+    """增量轮只编少数域，**绝不清目录、也绝不给未参与的域销账**。"""
+    from agentmemhub.failures import FailureLog
+
+    import wiki_aggregate as wa
+
+    (tmp_path / "01-域A").mkdir()
+    (tmp_path / "01-域A" / "001-旧页.md").write_text("旧", encoding="utf-8")
+    _write_domains_file(tmp_path, ["域A", "域B"])
+
+    fl = FailureLog(tmp_path / "failures.jsonl")
+    fl.record(stage="l2-write", target="域B", error="页数崩塌 9→2，已保留旧产物")
+
+    wa.finalize_outputs(
+        tmp_path,
+        {"域A": [_write_test_page("A 页", "001-A.md")]},
+        dir_of={"域A": "01-域A"}, partial=True, fl=fl)
+
+    assert (tmp_path / "01-域A").exists(), "增量不动目录"
+    assert fl.targets("l2-write") == ["域B"], "本轮没碰域B，它的账不能动"
+
+
+# ---------------------------------------------------------------------------
 # M2b-1：离线提交轮 —— 整个域集合**一次**交出去，现场落盘
 # ---------------------------------------------------------------------------
 
