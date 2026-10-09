@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -347,6 +348,31 @@ _PAGE_RULES = """规则：
 # ---------------------------------------------------------------------------
 
 def make_client(thinking: str = ""):
+    """构造 L2 的 LLM 客户端（第二级配置：顶层 `llm` + `wiki.l2.llm`）。
+
+    ⚠️ **测试沙箱下一律抛异常**（`AGENTMEMHUB_TEST_SANDBOX=1`）。
+
+    为什么熔断要加在**构造点**而不是"靠测试记得 mock"：这是本项目最后一条
+    "缺省会自动构造真实外呼客户端"的路径。2026-10-08 实测教训 ——
+    `tests/test_offline_e2e.py` 的「坏 JSON」用例没注入假 client，
+    `wiki_batch._repair_client()` 就默认造了**真**客户端，于是真的发了 HTTPS 请求、
+    卡了 900 秒超时才被 `faulthandler` 抓到；而测试把日志重定向到 tmp，
+    **生产 `logs/agentmemhub.log` 里一行痕迹都没有**，从日志完全看不出发生过。
+    "漏一个 mock 就真花钱"这种事靠自觉守不住（`test_wiki_service.py` 就有 3 处
+    直接调 `wiki.update()`），所以必须在**唯一构造点**兜死。
+
+    与 `wiki_triggers._targets()`（抛）、`batch_client`（抛 `BatchError`）同源同值。
+    这里选**抛**而不是像 `wiki_batch._repair_client()` 那样返回 `None`：
+    `make_client()` 没有"跳过"语义，返回 `None` 只会让调用方崩在更远的地方
+    （`call_json(None, …)`），错误信息反而更难定位。
+
+    测试里请 mock 本函数，或给 `assign_new_pages(client=…)` 注入假 client。
+    """
+    from agentmemhub.logs import SANDBOX_ENV
+    if os.environ.get(SANDBOX_ENV):
+        raise RuntimeError(
+            "测试沙箱拒绝构造真实 LLM 客户端（%s 已置）：它会发真请求、真花钱。"
+            "请 mock `wiki_aggregate.make_client` 或注入假 client。" % SANDBOX_ENV)
     from agentmemhub import config as hub_config
     from agentmemhub.llm import client_from_config
     c = client_from_config(hub_config.config().wiki_l2.get("llm"))
