@@ -38,6 +38,7 @@
 | `logs/memory.log` | `distill._audit_memory_write()` → `logs.audit_memory()`，挂在**落表处**（`save_memories` / `save_direct_memory` / 回填） | 数据层：哪条记忆被写/读、**内容全文**、`source`/`type`/`result`，来源路径由 `logs.memory_path()` contextvar 标记 | 查"某条记忆的来龙去脉"；`python -m agentmemhub memory-log` |
 | `logs/wiki.log` | `logs.audit_wiki()`：两个 wiki 脚本的 `_wlog()`、`wiki._audit()`、`wiki_triggers._audit()`、`batch_client._audit()` | 流水线层：阶段 / 目标 / 每次 LLM 调用 / token 用量 / 成败 / 触发器判定 / **批量动作** | 长任务"跑到哪、花多少、断在哪" |
 | `logs/notify.log` | `logs.audit_notify()`，由 `notify.notify()` 的写入点调用 | 通知事实流：`level` / `category` / `title`（通知**本身**落 SQLite `database/notify.db`，这里留的是"谁在何时发了什么"） | 查"发过哪些通知、落库成没成功"；⚠️ 通知的等级写 `warning`，进本流时映射成 `warn` |
+| `logs/feed.log` | `logs.audit_feed()`，由 `feed.service._audit()` 调用（**`depth=4`**：隔了一层包装必须 +1） | 投喂流水线：原件落盘 / 转译 / 发布 / 失败 / 幂等跳过（素材**当前状态**落 SQLite `database/materials.db`，这里留的是"过程"） | 查"这次投喂跑到哪一步、为什么失败、能不能重试"；见 `docs/modules/feed.md` §5 |
 | `logs/web.log` | `logs.record(dest="web")`（`web/app.py` 各处） | 看板操作：任务提交 / 开始 / 完成 / 失败、记忆打分、记忆加权、索引清理失败 | 面板留痕；`GET /api/logs` 与内存环形缓冲（`_MAX_RING = 500`） |
 | `logs/cli.log` | `logs.record(dest="cli")`：`cli._cli_log()`、`console._action_log()`，以及 `mcp_server` 的两条 `memory_save` 失败提示 | 终端 / 控制台操作的结果摘要 | 查"命令行侧干了什么" |
 | `logs/agentmemhub.log` | 命名空间根 logger `agentmemhub` 的兜底 handler（`logs.setup_app_logging()`，由 `_append_line` 顺带挂上） | 应用内 `logging.getLogger("agentmemhub.*")` 的文本日志：LLM 瞬态重试 / 格式修复、蒸馏失败与判重、`store` 提示 | 看应用内部发生了什么；标准库 `RotatingFileHandler`，**5 MB × 3 份** |
@@ -251,6 +252,24 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 `logs.audit_notify()` 映射成日志流的 `warn`。**映射必须在进 `standardize` 之前做** ——
 它的规则是"`entry["level"]` 优先于传参的 `level`"，而 `warning` 不在日志流的
 `LEVELS`（`debug/info/warn/error`）里，不先改写就会被静默回落成 `info`（实测踩过）。
+
+### 5.7 `logs/feed.log`（5 个事件，2026-10-12 随 M1 落地）
+
+投喂是**长流程**（原件落盘 → 转译 → 发布），每一步都可能失败；`database/materials.db`
+记的是**当前状态**，本流记的是**过程** —— 排障要过程、查询要状态，两者互补。
+
+| event | 关键字段 | 含义 | 排查要点 |
+|---|---|---|---|
+| `feed_received` | `doc_id` `ref` `raw_path` `bytes` `sha256` | 原件已入 `raw/`（内容寻址） | **这一步之后原件就保住了** —— 即使后续全败，也能换转换器重转 |
+| `feed_converted` | `converter`（`名字@版本`）`title` `chars` `quality` `warnings` | 转译完成 | `converter` 是**重转判据**；`warnings` 非空说明质量存疑（别只看 `quality`） |
+| `feed_published` | `kb_path` `quality` `low_quality` | 最终 md 已写进 kb 目录 | `low_quality=true` ⇒ 建议人工复核（`feed list --low-quality`） |
+| `feed_failed` | `error` `error_kind` `retryable`（`level=error`） | 任一步失败 | **`error_kind` 决定处置**：`unsupported` 换格式（重试无用）、`convert` 可重试、`registry`/`crash` 是代码 bug |
+| `feed_skipped` | `reason="duplicate"` | 同字节已投喂过（幂等命中） | **不是失败** —— 内容没变就复用既有产物 |
+
+⚠️ **`depth` 必须算对**：`feed.service._audit()` 是包装层，所以传 `depth=4`。
+不 +1 会让本流**所有事件的 `line` 恒等**、字段作废 —— 同一坑 2026-10-04 在 wiki 流
+踩过（commit `78a6e02`），2026-10-12 在 feed 流又犯一次，已补守护测试
+（`tests/test_feed_text.py::test_日志_事件行号不是恒等值`）。
 
 ## 6. 排查剧本
 
