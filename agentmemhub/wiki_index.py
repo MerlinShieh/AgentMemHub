@@ -97,6 +97,10 @@ def parse_page(path: Path) -> dict[str, Any] | None:
         "path": rel,
         # 数据来源维度：native=自有记忆沉淀 / external=外部投喂
         "origin": "external" if is_external else "native",
+        # 投喂页面的**原件锚**（materials.doc_id）：供召回命中后反查"这是哪份外部
+        # 素材"。此前 `_DOC_RE` 解析了它却只用来判 is_external，id 被丢掉 ⇒
+        # 溯源链在页面层断掉（M0 地基，2026-10-10）。非投喂页面为 None。
+        "doc": (doc_m.group(1).strip() if doc_m else None),
     }
 
 
@@ -190,19 +194,20 @@ def project_pages(idx: sqlite3.Connection, l2_dir: Path | str,
                 idx.execute(
                     "UPDATE units SET source='wiki', conversation_id=?,"
                     " role='wiki', title=?, text=?, chars=?, wiki_path=?,"
-                    " origin=?, updated_at=? WHERE id=?",
+                    " origin=?, doc_id=?, updated_at=? WHERE id=?",
                     (p["domain"], p["title"], body_text,
-                     len(body_text), p["path"], p["origin"], t_now, uid))
+                     len(body_text), p["path"], p["origin"], p["doc"],
+                     t_now, uid))
                 updated += 1
             else:
                 uid = int(idx.execute(
                     "INSERT INTO units(source, conversation_id, seq, role,"
                     " turn_key, src_id, time, title, text, chars, wiki_path,"
-                    " origin, updated_at)"
-                    " VALUES('wiki',?,?,'wiki',NULL,?,?,?,?,?,?,?,?)",
+                    " origin, doc_id, updated_at)"
+                    " VALUES('wiki',?,?,'wiki',NULL,?,?,?,?,?,?,?,?,?)",
                     (p["domain"], p["seq"], p["src_id"], t_now, p["title"],
                      body_text, len(body_text), p["path"], p["origin"],
-                     t_now)).lastrowid)
+                     p["doc"], t_now)).lastrowid)
                 inserted += 1
             for s, vecs in multi:
                 # vec0 虚拟表**不支持 INSERT OR REPLACE 的主键替换语义**

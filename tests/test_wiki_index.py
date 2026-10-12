@@ -220,6 +220,63 @@ def test_来源_字段与层级正交(env):
 
 
 # ---------------------------------------------------------------------------
+# 溯源：投喂页面的 doc 锚（M0 地基）
+#
+# `doc:` 是投喂页面**回指原件**的锚。2026-10-10 实测：`_DOC_RE` 解析了它、也用它
+# 判定了 `is_external`，但**返回的字典里没有 doc 字段**，投影写 units 的列清单里
+# 也没有它 ⇒ 召回命中一个投喂页后**无法反查是哪份外部素材**（只能靠 wiki_path
+# 去读文件再抠 frontmatter，页面一重编或删除溯源就断）。
+# ---------------------------------------------------------------------------
+
+def _ext_page(tmp_path, name="002-投喂.md", *, doc="web_abc123"):
+    d = tmp_path / "l2" / "01-域A"
+    d.mkdir(parents=True, exist_ok=True)
+    doc_line = f"doc: {doc}\n" if doc else ""
+    (d / name).write_text(
+        "---\ntitle: 投喂页\ndomain: 01-域A\norigin: external\n"
+        f"{doc_line}---\n\n# 投喂页\n\n**摘要**：外部素材\n\n正文\n",
+        encoding="utf-8")
+    return d / name
+
+
+def test_溯源_doc被解析且落库(env, monkeypatch):
+    conn, tmp_path = env
+    p = wiki_index.parse_page(_ext_page(tmp_path))
+    assert p["doc"] == "web_abc123", "parse_page 必须带回 doc id"
+
+    _patch_vectors(monkeypatch)
+    _project(conn, tmp_path / "l2")
+    assert conn.execute("SELECT doc_id FROM units WHERE title='投喂页'"
+                        ).fetchone()[0] == "web_abc123"
+
+
+def test_溯源_自有页面doc_id为NULL(env, monkeypatch):
+    """自有 wiki 页面没有 doc 锚 ⇒ 落 NULL（而非空字符串，便于查询区分）。"""
+    conn, tmp_path = env
+    _page(tmp_path / "l2", "01-域A", "001-自有.md", "自有页", "摘要", "正文")
+    _patch_vectors(monkeypatch)
+    _project(conn, tmp_path / "l2")
+    assert conn.execute("SELECT doc_id FROM units WHERE title='自有页'"
+                        ).fetchone()[0] is None
+
+
+def test_溯源_doc变化时更新既有行(env, monkeypatch):
+    """doc 是 **UPDATE 路径也要写**的列——只测 INSERT 会漏掉幂等更新分支。"""
+    conn, tmp_path = env
+    _ext_page(tmp_path, doc="web_old")
+    _patch_vectors(monkeypatch)
+    _project(conn, tmp_path / "l2")
+    assert conn.execute("SELECT COUNT(*) FROM units WHERE source='wiki'"
+                        ).fetchone()[0] == 1
+
+    _ext_page(tmp_path, doc="web_new")      # 同一路径换了 doc（重投喂同一文件的新版）
+    r = _project(conn, tmp_path / "l2")
+    assert r["inserted"] == 0 and r["updated"] == 1, "同路径应更新而非新增"
+    assert conn.execute("SELECT doc_id FROM units WHERE title='投喂页'"
+                        ).fetchone()[0] == "web_new"
+
+
+# ---------------------------------------------------------------------------
 # 页面 FTS 回路（多回路召回）
 # ---------------------------------------------------------------------------
 

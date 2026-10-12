@@ -59,6 +59,18 @@ CREATE TABLE IF NOT EXISTS conv_scores(
 """
 
 
+def origin_of(source: str | None) -> str:
+    """按 `source` 判定**数据来源维度**：`feed` → `external`，其余 → `native`。
+
+    为什么要有这一个函数（而不是两处各写一遍）：同一条投喂数据会在**两个层**落
+    units —— 采集层的原始段落（本模块）与蒸馏层的记忆（`distill._project_one`）。
+    两处口径必须一致，否则"原始段落标 native、蒸馏记忆标 external"，
+    投喂的原文会被当成自有沉淀（2026-10-10 实测缺口，M0 地基）。
+    抽成单点后，改口径只改这里；`distill` 与本模块共用它。
+    """
+    return "external" if (source or "") == "feed" else "native"
+
+
 def ensure_bridge_schema(conn: sqlite3.Connection) -> None:
     """units.legacy_id / units.tags 幂等补列 + 桥接元表（rag_bridge 启动时调用）。"""
     cols = [r[1] for r in conn.execute("PRAGMA table_info(units)")]
@@ -88,6 +100,13 @@ def ensure_bridge_schema(conn: sqlite3.Connection) -> None:
     # 召回时带上它，Agent 与用户都能分辨知识出处。
     if "origin" not in cols:
         conn.execute("ALTER TABLE units ADD COLUMN origin TEXT")
+    # doc_id：**投喂页面回指原件**的锚（materials.doc_id，见 feed 转译层设计）。
+    # 页面层解析 frontmatter 的 `doc:` 得到，投影时写入。为什么必须持久化：
+    # 召回命中一个投喂页后要能反查"这是哪份外部素材"；此前只能靠 wiki_path
+    # 去读页面文件再抠 frontmatter —— 页面一重编或删除，溯源链就断。
+    # 非投喂页面保持 NULL（而非空串，便于 `WHERE doc_id IS NOT NULL` 查询）。
+    if "doc_id" not in cols:
+        conn.execute("ALTER TABLE units ADD COLUMN doc_id TEXT")
     # 自愈式回填（幂等，每次调用都兜一次）：覆盖两类 NULL —— 补列时的存量行，
     # 以及任何绕过写入路径产生的行（例如仍在跑**旧代码的常驻 MCP 进程**写入
     # 的记忆——实测真实发生过）。用发现时刻填充，不用 units.time（那是事件
@@ -292,6 +311,11 @@ def run_ingest(
             idx.execute("DELETE FROM ingest_meta WHERE key='watermark'")
             idx.commit()
         ensure_vec_table(idx, spec)
+        # 本函数要写**桥接列**（`origin`），所以必须自己保证列在 —— 不能指望
+        # 别的调用点（rag_bridge / wiki_index）已经迁移过这张库。
+        # 实测：全新索引库上只跑 ingest 会直接报
+        # `sqlite3.OperationalError: table units has no column named origin`。
+        ensure_bridge_schema(idx)
 
         src = open_source_ro(src_path)
         try:
@@ -333,10 +357,12 @@ def run_ingest(
                                 uid = idx.execute(
                                     "INSERT INTO units(source, conversation_id, seq,"
                                     " role, turn_key, src_id, time, title, text,"
-                                    " chars, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                                    " chars, origin, updated_at)"
+                                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                                     (r["source"], r["conversation_id"], r["seq"],
                                      r["role"], r["turn_key"], r["src_id"],
-                                     r["time"], r["title"], t, len(t), now),
+                                     r["time"], r["title"], t, len(t),
+                                     origin_of(r["source"]), now),
                                 ).lastrowid
                             idx.execute(
                                 f"INSERT OR REPLACE INTO {spec.vec_table}"

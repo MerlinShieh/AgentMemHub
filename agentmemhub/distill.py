@@ -1566,8 +1566,12 @@ def _project_one(idx: sqlite3.Connection, m: dict, vec: np.ndarray,
     # 时间衰减与"新记忆 vs 整理记忆"的区分全部失效。
     origin_time = _origin_time(idx, m)
     # 数据来源维度（与 role 的层级维度正交）：投喂素材的记忆标 external，
-    # 其余（会话蒸馏、Agent 直写）是自有沉淀 native
-    origin = "external" if m["source"] == "feed" else "native"
+    # 其余（会话蒸馏、Agent 直写）是自有沉淀 native。
+    # ⚠️ 口径与**采集层共用同一个函数**（`rag.ingest.origin_of`）——两处各写一份
+    # 必然漂移，而漂移的后果就是"同一条投喂数据在原始段落层标 native、
+    # 在蒸馏层标 external"（2026-10-10 实测缺口，M0 地基）。
+    from agentmemhub.rag.ingest import origin_of
+    origin = origin_of(m["source"])
     existing = idx.execute("SELECT id FROM units WHERE src_id=?", (src_id,)).fetchone()
     if existing:
         uid = int(existing[0])

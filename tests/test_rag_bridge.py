@@ -269,6 +269,26 @@ def test_import_bundle_stores_tags(rag_env):
     assert rows["mcp_tags_b"] is None, "未传 tags 应保持 NULL，而不是空字符串"
 
 
+def test_import_bundle_可声明外部来源(rag_env):
+    """Agent 直写外部知识时能声明 origin='external'；缺省仍是 native（行为不变）。
+
+    为什么需要它：Agent 用 Read 工具读完 PDF/图片后把结论写回时，走的是**直写通路**
+    （`import_bundle`）——而那条路原先硬编码 source='memory' 且**不写 origin**，
+    于是外部知识会被标成"自有沉淀"（M0 地基的第三处缺口）。
+    """
+    rag_bridge.import_bundle([
+        {"id": "mcp_ext_1", "userText": "外部投喂进来的一条结论", "ts": 1,
+         "origin": "external"},
+        {"id": "mcp_nat_1", "userText": "自有沉淀的一条结论", "ts": 2},
+    ])
+    conn = rag_bridge._conn()
+    rows = dict(conn.execute(
+        "SELECT legacy_id, origin FROM units"
+        " WHERE legacy_id IN ('mcp_ext_1','mcp_nat_1')").fetchall())
+    assert rows["mcp_ext_1"] == "external"
+    assert rows["mcp_nat_1"] == "native", "缺省必须仍是 native（不破坏既有行为）"
+
+
 def test_safe_cutoff_hits_rules():
     hits = [{"score": s} for s in (1.0, 0.9, 0.71, 0.69, 0.5, 0.4)]
     kept = rag_bridge.safe_cutoff_hits(hits, max_keep=5)

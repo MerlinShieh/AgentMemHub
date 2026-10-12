@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import sqlite3
 
 import pytest
 
@@ -276,3 +277,60 @@ def test_ensure_bridge_schema_adds_updated_at_and_backfills(tmp_path):
     assert conn.execute(
         "SELECT updated_at FROM units WHERE seq=2").fetchone()[0] is not None
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# 采集层写 origin（M0 地基 · 外部投喂通道的前置）
+#
+# 2026-10-10 实测缺口：`INSERT INTO units` 的列清单里**没有 origin**，于是
+# source='feed' 的**原始段落**落库为 NULL，而召回侧是 `or "native"` 兜底
+# ⇒ 投喂进来的原文被当成"自有沉淀"。同一条数据在原始事件层与蒸馏记忆层
+# 来源标记不一致（蒸馏层由 `distill._project_one` 正确标 external）。
+# ---------------------------------------------------------------------------
+
+def _add_feed_conversation(src_db, *, content="投喂进来的一段外部资料"):
+    """往 fixture 源库里加一个 source='feed' 的会话（投喂文档的会话容器形态）。"""
+    conn = sqlite3.connect(str(src_db))
+    conn.execute("INSERT INTO conversations(source, id, title)"
+                 " VALUES('feed','doc-001','投喂文档')")
+    conn.execute(
+        "INSERT INTO events(source, conversation_id, seq, role, content,"
+        " turn_key, src_id, time) VALUES('feed','doc-001',1,'user',?,?,?,?)",
+        (content, "1", "doc:doc-001#1", 1786000200))
+    conn.commit()
+    conn.close()
+
+
+def test_ingest_投喂会话的段落标external(project_settings, embedder,
+                                   fixture_source_db, tmp_path):
+    """口径与 `distill._project_one` 一致：source='feed' → origin='external'。"""
+    _add_feed_conversation(fixture_source_db)
+    idx = tmp_path / "rag.db"
+    _ingest(project_settings, embedder, fixture_source_db, idx)
+
+    conn = open_index(idx)
+    try:
+        feed = [r[0] for r in conn.execute(
+            "SELECT origin FROM units WHERE source='feed'")]
+        assert feed, "feed 会话的段落应已入库"
+        assert set(feed) == {"external"}, \
+            "投喂的原始段落必须标 external，否则会被当成自有沉淀"
+    finally:
+        conn.close()
+
+
+def test_ingest_自有来源仍标native(project_settings, embedder,
+                              fixture_source_db, tmp_path):
+    """回归保护：加 origin 不能把自有来源（zcode/hermes/…）标错。"""
+    _add_feed_conversation(fixture_source_db)
+    idx = tmp_path / "rag.db"
+    _ingest(project_settings, embedder, fixture_source_db, idx)
+
+    conn = open_index(idx)
+    try:
+        native = {r[0] for r in conn.execute(
+            "SELECT origin FROM units WHERE source!='feed'")}
+        assert native == {"native"}, "非 feed 来源一律 native"
+    finally:
+        conn.close()
+

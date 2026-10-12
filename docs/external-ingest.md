@@ -167,11 +167,11 @@ Related **必须**包含其 source 摘要页的反向链接；新建页后要**�
 | 环节 | 位置 | 状态 |
 |---|---|---|
 | 索引库列 | `units.origin`、`distilled_memories.origin` | ✅ `ensure_bridge_schema` 幂等补列 |
-| **判定点** | `distill._project_one`：`origin = "external" if m["source"] == "feed" else "native"` | ✅ |
-| 页面层判定 | `wiki_index.py` 解析 frontmatter `origin: external\|feed` | ✅（**但无生产者**） |
-| 召回过滤 | `search` / `mcp_server` / `web/app` 的 `origin` 参数（`native`\|`external`） | ✅ |
-| Agent 可见 | MCP `memory_search` 的 `origin` 入参 + 每条结果的 `origin` 字段 | ✅ |
-| 面板展示 | 记忆报表的**来源筛选**与 `[自有]/[投喂]` 标签 | ✅ |
+| **判定点** | `distill._project_one`：`origin = "external" if m["source"] == "feed" else "native"` | ✅ **现已抽成单点函数 `rag.ingest.origin_of()`，与采集层共用**（2026-10-10 M0） |
+| 页面层判定 | `wiki_index.py` 解析 frontmatter `origin: external\|feed` | ✅ 且**已能持久化 `doc:` 锚**到 `units.doc_id`（M0 补） |
+| 召回过滤 | `rag/search.py:711` 的 `origin` 入参（`""`\|`native`\|`external`）—— 作用于 RRF **融合后**候选集，**页面层通道同样受约束** | ✅ |
+| Agent 可见 | MCP `memory_search` 的 `origin` 入参 + 每条结果的 `origin` 字段 + `[自有]/[投喂]` 标签 | ✅ `mcp_server.py:101,139,153-154` |
+| ~~面板展示：记忆报表的来源筛选~~ | ⚠️ **更正（2026-10-10 实测）**：面板**没有** origin 筛选 —— `web/app.py:947,956` 里那个 `origin` 是 UNION 的**列别名**（`'distilled'` / `'manual'`，区分记忆的类型来源），与 `native/external` 这个维度**无关**。`[自有]/[投喂]` 标签只存在于 **MCP 输出** | ❌ **未做**（面板 origin 筛选归"面板 UI 统一重做"时一并） |
 
 ### 2.3 缺口（上游没有入口）+ ⚠️ 实测发现的真缺口
 

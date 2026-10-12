@@ -411,6 +411,12 @@ def import_bundle(traces: list[dict], *, embedder=None) -> dict:
 
     处理的是「记忆型 trace DTO」（userText/agentText/summary + value 预置）；
     会话轨迹在 rag 后端下由 run_ingest 直采源库，不经此路径。
+
+    `origin`（**逐条可选**）：数据来源维度，`external`=外部投喂 / 缺省 `native`=自有沉淀。
+    为什么需要它：Agent 用 Read 工具读完 PDF/图片后把结论写回时走的正是**这条直写通路**，
+    而它原先硬编码 `source='memory'` 且**不写 origin** ⇒ 外部知识会被标成"自有沉淀"
+    （2026-10-10 实测缺口，M0 地基）。取值非法时回落 `native`，不写脏数据
+    （与 `tags` 只接受序列同一原则）。
     """
     st = settings()
     conn = _conn()
@@ -460,14 +466,18 @@ def import_bundle(traces: list[dict], *, embedder=None) -> dict:
                     if isinstance(raw_tags, (list, tuple)) and raw_tags:
                         tags_json = json.dumps([str(x) for x in raw_tags],
                                                ensure_ascii=False)
+                    # 来源维度：逐条可声明（Agent 直写外部知识时用）；
+                    # 非法/缺省一律 native —— 不写脏值
+                    _origin = d.get("origin")
+                    _origin = _origin if _origin in ("native", "external") else "native"
                     cur = conn.execute(
                         "INSERT INTO units(source, conversation_id, seq, role,"
                         " turn_key, src_id, time, title, text, chars, legacy_id,"
-                        " tags, updated_at)"
-                        " VALUES('memory','mcp',?,'user','mcp',?,?,?,?,?,?,?,?)",
+                        " tags, origin, updated_at)"
+                        " VALUES('memory','mcp',?,'user','mcp',?,?,?,?,?,?,?,?,?)",
                         (seq, content_anchor(d["_text"]), ts,
                          "记忆", d["_text"], len(d["_text"]), d["id"], tags_json,
-                         int(time.time())))
+                         _origin, int(time.time())))
                     for s, vecs in multi:
                         conn.execute(
                             f"INSERT OR REPLACE INTO {s.vec_table}"
