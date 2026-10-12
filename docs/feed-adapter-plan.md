@@ -3,7 +3,7 @@
 > 起草 2026-10-10｜**v2.1 修订（用户拍板 Q1–Q7 + 解析复杂度重理 + 四项交付纪律）**｜
 > **v2.2 修订（深读参考实现 `second-brain-skill` → 改判 T2c + 新增脚本的第三角色"验证器" + 回收站教训）**｜
 > 性质：**需求分析 + 计划**
-> 进度：**M0 ✅ 已实施（2026-10-10，commit `c3836ee`）**；M1–M5 未动工
+> 进度：**M0 ✅（2026-10-10，`c3836ee`）、M1 ✅（2026-10-12，`7b18fb8`）已实施**；M2–M5 未动工
 > 上游文档：[`external-ingest.md`](external-ingest.md)（09-22 调研，结论仍有效）、
 > [`external-ingest-plan.md`](external-ingest-plan.md)（09-24 可行性分析，**本文按 10-10 用户决策更新其路线**）
 > 本文与旧计划的关系：**继承**其硬约束盘点（§3）、素材库存放决策（§1.2）、风险清单骨架；
@@ -603,14 +603,26 @@ FeedDocument.warnings: list[str]     # 人可读的具体问题（不达标原�
 - ⏭ **遗留（非 bug）**：`units.doc_id` 走**懒迁移** —— 需任一次记忆操作或
   M2 的投影调用才会补上该列（`ensure_bridge_schema` 只在被调用时 ALTER）
 
-### M1 · 素材库 + T1 直通（1.5 天）——第一个端到端价值点
-- `materials.db` schema（独立库，不进快照）+ `feed/store.py`（内容寻址 raw、hash 查重）
-- `FeedDocument` 契约 + `Converter` 注册表（照 `adapters/` 模式）+ `text.py`
-- CLI `agentmemhub feed add/list/show/retry` + `--dry-run`（list/show 只读）
-- **本里程碑 DoD**：`logs/feed.log` 建立 + `feed_received/converted/published/failed` 四事件登记进
-  `logging.md`；`feed.convert.llm` 等开关**先建消费点再接真功能**；`docs/modules/feed.md` 起稿
-- **验收**：`feed add 某.md` → 原件入 raw、登记 published → `feed list` 可见 → 重复投喂报"已存在"；
-  日志能复盘这次投喂的全过程
+### M1 · 素材库 + T1 直通 ✅ **已完成（2026-10-12，commit `7b18fb8`）**——第一个端到端价值点
+- ✅ `materials.db` schema（独立库，不进快照）+ `feed/store.py`（内容寻址 raw、hash 查重）
+- ✅ `FeedDocument` 契约 + `Converter` 注册表（照 `adapters/` 模式）+ `text.py`
+- ✅ CLI `agentmemhub feed add/list/show/retry` + `--dry-run` / `--force` / `--low-quality`
+- ✅ DoD 四件套：`logs/feed.log` + 5 事件登记进 `logging.md` §5.7（**含行号守护测试**）；
+  `feed` 配置段与 `feed_paths()`（僵尸键审计 0）；`docs/modules/feed.md` 已写；
+  README 模块地图已加行
+- **验收已过**（用真实文件实测）：`feed add 测试笔记.md` → 原件入 raw、登记 `published`、
+  交付物 frontmatter 完整、重复投喂报幂等、`--force` 可重转、日志能复盘全过程
+- 测试 `tests/test_feed_text.py` **30 条**；全量 **1062 passed / 1 skipped**
+
+**实施中发现的 4 件事（不在原计划里，但都值得记）**：
+① **Protocol 的默认实现不会被子类继承** —— `stamp` 写在 `Converter` Protocol 里，
+   `TextConverter` 直接 `AttributeError`；公共实现必须放**真基类**；
+② **标题提取必须排除围栏代码块** —— 一份含 Python 片段的笔记，标题被取成首个
+   `# 打开百度首页`（那是**代码注释**不是 H1）；
+③ **日志 `depth` 隔包装层必须 +1 —— 本项目第二次犯**（wiki 流 2026-10-04、
+   feed 流 2026-10-12），已补"事件行号不恒等"守护测试；
+④ **认领失败也要先落原件**（实测投喂 .pdf 会保留原件 + 登记 `failed(unsupported)`）——
+   否则将来补上转换器也无法 `retry`。
 
 ### M2 · 发布 + 投影 + 并列锁（2 天）——R4/R5 的核心
 - `out_feed/` 发布（frontmatter 模板：`origin: external` / `doc:` / `source_url` / `doc_time`）
