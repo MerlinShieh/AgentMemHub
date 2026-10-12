@@ -253,7 +253,7 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 它的规则是"`entry["level"]` 优先于传参的 `level`"，而 `warning` 不在日志流的
 `LEVELS`（`debug/info/warn/error`）里，不先改写就会被静默回落成 `info`（实测踩过）。
 
-### 5.7 `logs/feed.log`（5 个事件，2026-10-12 随 M1 落地）
+### 5.7 `logs/feed.log`（7 个事件，2026-10-12 随 M1/M2 落地）
 
 投喂是**长流程**（原件落盘 → 转译 → 发布），每一步都可能失败；`database/materials.db`
 记的是**当前状态**，本流记的是**过程** —— 排障要过程、查询要状态，两者互补。
@@ -265,6 +265,8 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 | `feed_published` | `kb_path` `quality` `low_quality` | 最终 md 已写进 kb 目录 | `low_quality=true` ⇒ 建议人工复核（`feed list --low-quality`） |
 | `feed_failed` | `error` `error_kind` `retryable`（`level=error`） | 任一步失败 | **`error_kind` 决定处置**：`unsupported` 换格式（重试无用）、`convert` 可重试、`registry`/`crash` 是代码 bug |
 | `feed_skipped` | `reason="duplicate"` | 同字节已投喂过（幂等命中） | **不是失败** —— 内容没变就复用既有产物 |
+| `feed_retracted` | `doc_id` `kb_removed` `raw_kept=true` | 撤下投喂内容（可恢复） | 交付物删了、**原件仍在** ⇒ `feed retry` 能把同一份重新发布出来 |
+| `feed_forgot` | `doc_id` `kb_removed` `raw_removed` | 彻底清除登记 | ⚠️ `raw_removed=true` 表示**原件已被删**（不可恢复）—— 只有显式 `--purge` 才会 |
 
 ⚠️ **`depth` 必须算对**：`feed.service._audit()` 是包装层，所以传 `depth=4`。
 不 +1 会让本流**所有事件的 `line` 恒等**、字段作废 —— 同一坑 2026-10-04 在 wiki 流

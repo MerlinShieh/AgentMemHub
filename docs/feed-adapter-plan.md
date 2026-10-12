@@ -4,8 +4,8 @@
 > **v2.2 修订（深读参考实现 `second-brain-skill` → 改判 T2c + 新增脚本的第三角色"验证器" + 回收站教训）**｜
 > 性质：**需求分析 + 计划**
 > 进度：**M0 ✅（2026-10-10，`c3836ee`）、M1 ✅（2026-10-12，`7b18fb8`）、
-> M2 核心 ✅（2026-10-12，`4adc6eb`：多根投影 + 投喂交付物已可召回）**；
-> M2 剩余（`feed retract` / `feed lint`）与 M3–M5 未做
+> M2 ✅ 完成（`4adc6eb` 多根投影 + `40c85e5` 撤下/清除/体检）**；
+> M3–M5 未动工（下一步：M3 网页 + 公众号）
 > 上游文档：[`external-ingest.md`](external-ingest.md)（09-22 调研，结论仍有效）、
 > [`external-ingest-plan.md`](external-ingest-plan.md)（09-24 可行性分析，**本文按 10-10 用户决策更新其路线**）
 > 本文与旧计划的关系：**继承**其硬约束盘点（§3）、素材库存放决策（§1.2）、风险清单骨架；
@@ -634,15 +634,21 @@ FeedDocument.warnings: list[str]     # 人可读的具体问题（不达标原�
 - ✅ 召回接通：`memory_search` 命中知识库页、带 `[投喂]` 标签与 `doc_id`、**来源可过滤**
 - **四条并列测试锁**：①✅全量 wiki 聚合后 `out_feed` 一个字节不变
   ②✅wiki manifest 输入不含 feed（结构性：投喂根不在 L1/L2 目录内，有测试锁）
-  ③⏳retract 只删投影不删原件 ④✅origin 三态（native/external/all）各自正确，
+  ③✅retract 只删投影不删原件 ④✅origin 三态（native/external/all）各自正确，
   **且页面层通道也受 origin 约束**（真机实测三态）
-- ⏳ **第五条锁**：retract 之后，指向它的链接必须被报为断链
-- ⏳ **`feed lint`**：确定性产物检查，P0/P1 分级 + P0 非零退出码
+- ✅ **第五条锁**：撤下之后投影必须收敛（真机实测 `removed=1`、`units` 行数归 0），
+  且"投影残留"由 `feed lint` 报 P0（`projection_orphan`）—— 不漏报也不静默
+- ✅ **`feed lint`**：确定性体检（`agentmemhub/feed/lint.py`），P0/P1 分级 +
+  P0 非零退出码；含**页面根互相嵌套**这类配置级风险
+- ✅ 另补 **`feed retract` / `feed forget [--purge]`**（单列的删除入口；派生物直接删、
+  原件默认保留）
 - **验收已过（真机）**：396+1 页投影、**L2 既有页面零重键**（新增 1/消失 0）、
   默认混排命中投喂页、`origin=external` 只剩投喂页、`origin=native` 不含投喂页、
-  `wikiPath` 绝对路径且文件存在、`doc` 锚闭合
-- **本里程碑 DoD**：⏳日志补 `feed_retracted`（随 retract）；✅CLI 已可用；
-  ⏳`data-architecture.md` 新章
+  `wikiPath` 绝对路径且文件存在、`doc` 锚闭合；
+  撤下→**投影收敛**（行数 1→0）→`lint` P0=0→`forget --purge`（原件已删）
+- **本里程碑 DoD**：✅日志补 `feed_retracted`/`feed_forgot`（已登记 `logging.md` §5.7）；
+  ✅CLI 已可用；✅`docs/modules/feed.md` 全面更新（含体检章节与不变量）
+  —— ⏳`data-architecture.md` 新章留到 M5 文档收口一并做
 
 **M2 实施中发现并处理的三件事**：
 ① **主根不能加根标签** —— 否则库里 396 个页面 unit 整体重键，价值分/反馈变孤儿
