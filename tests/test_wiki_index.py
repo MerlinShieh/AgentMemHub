@@ -276,6 +276,24 @@ def test_溯源_doc变化时更新既有行(env, monkeypatch):
                         ).fetchone()[0] == "web_new"
 
 
+def test_溯源_带引号的frontmatter值也能解析(env):
+    """frontmatter 的值**允许带引号**（投喂链路用 `json.dumps` 写，因为标题里可能有
+    `:` `#` 引号）。不 strip 外层引号会把引号当成 id 的一部分 ⇒ `units.doc_id`
+    与 `materials.db` 对不上、**溯源链静默断掉**（2026-10-12 实测修）。
+    """
+    conn, tmp_path = env
+    d = tmp_path / "l2" / "01-域A"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / "001-投喂.md"
+    p.write_text('---\ntitle: "被引号包住的标题"\norigin: "external"\n'
+                 'doc: "abc123"\n---\n\n# 页\n\n**摘要**：s\n\n正文\n',
+                 encoding="utf-8")
+    parsed = wiki_index.parse_page(p)
+    assert parsed["doc"] == "abc123", "引号必须被剥掉，否则反查不到原件"
+    assert parsed["origin"] == "external", "带引号的 origin 也要认"
+    assert parsed["title"] == "被引号包住的标题"
+
+
 # ---------------------------------------------------------------------------
 # 页面 FTS 回路（多回路召回）
 # ---------------------------------------------------------------------------

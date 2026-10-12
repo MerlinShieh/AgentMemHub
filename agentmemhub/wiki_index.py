@@ -47,6 +47,24 @@ _DOC_RE = re.compile(r"^doc:\s*(\S+)$", re.M)
 WIKI_SRC_PREFIX = "wiki_"
 
 
+def _unquote(s: str) -> str:
+    """去掉 YAML/JSON 风格的外层引号。
+
+    为什么必须做：frontmatter 的值**允许带引号** —— 投喂链路用 `json.dumps` 写出
+    （因为标题里可能有 `:` `#` 引号，裸写会把 frontmatter 写坏）。而这里的正则捕获是
+    `\\S+` / `(.+)`，**会连同引号一起吃进去**：实测 `doc: "abc123"` 被解析成 `"abc123"`
+    （含引号），与 `materials.db` 的 `doc_id` 对不上 ⇒ **溯源链静默断掉**
+    （不报错、不失败，只是查不到）。
+
+    ⚠️ 三处都要（`title` / `origin` / `doc`）—— 我原先以为 `title` 早就 strip 过，
+    实测**并没有**（`_TITLE_RE` 的捕获直接 `.strip()` 而已），2026-10-12 一并修。
+    """
+    s = str(s or "").strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+        return s[1:-1]
+    return s
+
+
 def parse_page(path: Path) -> dict[str, Any] | None:
     """解析一个 L2 页面（frontmatter + 摘要 + 正文 + 溯源引用）。
 
@@ -64,7 +82,7 @@ def parse_page(path: Path) -> dict[str, Any] | None:
     t = _TITLE_RE.search(front)
     d = _DOMAIN_RE.search(front)
     s = _SUM_RE.search(body[:2000])
-    title = (t.group(1).strip() if t else path.stem)
+    title = (_unquote(t.group(1)) if t else path.stem)
     summary = (s.group(1).strip() if s else "")
     # 去掉正文里的 **来源**/**相关** 行与 details 块（它们是元数据，不是知识内容；
     # 留着会让向量被一串编号稀释）
@@ -83,14 +101,17 @@ def parse_page(path: Path) -> dict[str, Any] | None:
     crc = zlib.crc32(rel.encode("utf-8"))
     o = _ORIGIN_RE.search(front)
     doc_m = _DOC_RE.search(front)
-    is_external = bool(o and o.group(1).strip().lower() in ("external", "feed")) \
-        or bool(doc_m)
+    # 值可能带引号（见 `_unquote`）—— 不 strip 会把引号当成 id 的一部分
+    origin_val = _unquote(o.group(1)) if o else ""
+    doc_val = _unquote(doc_m.group(1)) if doc_m else ""
+    is_external = origin_val.strip().lower() in ("external", "feed") \
+        or bool(doc_val)
     return {
         "src_id": f"{WIKI_SRC_PREFIX}{crc:08x}",
         "hash": h,
         "seq": -(1_000_000 + (crc % 900_000_000)),
         "title": title,
-        "domain": (d.group(1).strip() if d else path.parent.name),
+        "domain": (_unquote(d.group(1)) if d else path.parent.name),
         "summary": summary,
         "body": clean,
         "refs": refs,
@@ -100,7 +121,7 @@ def parse_page(path: Path) -> dict[str, Any] | None:
         # 投喂页面的**原件锚**（materials.doc_id）：供召回命中后反查"这是哪份外部
         # 素材"。此前 `_DOC_RE` 解析了它却只用来判 is_external，id 被丢掉 ⇒
         # 溯源链在页面层断掉（M0 地基，2026-10-10）。非投喂页面为 None。
-        "doc": (doc_m.group(1).strip() if doc_m else None),
+        "doc": (doc_val or None),
     }
 
 
