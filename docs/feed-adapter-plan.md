@@ -3,7 +3,9 @@
 > 起草 2026-10-10｜**v2.1 修订（用户拍板 Q1–Q7 + 解析复杂度重理 + 四项交付纪律）**｜
 > **v2.2 修订（深读参考实现 `second-brain-skill` → 改判 T2c + 新增脚本的第三角色"验证器" + 回收站教训）**｜
 > 性质：**需求分析 + 计划**
-> 进度：**M0 ✅（2026-10-10，`c3836ee`）、M1 ✅（2026-10-12，`7b18fb8`）已实施**；M2–M5 未动工
+> 进度：**M0 ✅（2026-10-10，`c3836ee`）、M1 ✅（2026-10-12，`7b18fb8`）、
+> M2 核心 ✅（2026-10-12，`4adc6eb`：多根投影 + 投喂交付物已可召回）**；
+> M2 剩余（`feed retract` / `feed lint`）与 M3–M5 未做
 > 上游文档：[`external-ingest.md`](external-ingest.md)（09-22 调研，结论仍有效）、
 > [`external-ingest-plan.md`](external-ingest-plan.md)（09-24 可行性分析，**本文按 10-10 用户决策更新其路线**）
 > 本文与旧计划的关系：**继承**其硬约束盘点（§3）、素材库存放决策（§1.2）、风险清单骨架；
@@ -625,17 +627,28 @@ FeedDocument.warnings: list[str]     # 人可读的具体问题（不达标原�
    否则将来补上转换器也无法 `retry`。
 
 ### M2 · 发布 + 投影 + 并列锁（2 天）——R4/R5 的核心
-- `out_feed/` 发布（frontmatter 模板：`origin: external` / `doc:` / `source_url` / `doc_time`）
-- `project_pages` **多根改造**（根标签防撞、`src_id`/`seq` 派生加根前缀、清扫覆盖多根）
-- 召回接通：`memory_search` 命中知识库页、带 `[投喂]` 标签与 `doc_id`、**来源可过滤**
-- **四条并列测试锁**：①全量 wiki 聚合后 `out_feed` 一个字节不变 ②wiki manifest 输入不含 feed
-  ③retract 只删投影不删原件 ④origin 三态（native/external/all）各自正确，**且页面层通道也受 origin 约束**
-- **第五条锁（v2.2，§11.4）**：retract 之后，**指向它的链接必须被报为断链**（而不是因残留而静默有效）
-- **`feed lint`（v2.2，§11.3）**：确定性产物检查，P0/P1 分级 + P0 时非零退出码
-  （照 `lint.py` 的 7 项：断链 / 跨根链接误用 / frontmatter 完整性 / **index 与实际文件一致** /
-  双向链接 / 孤岛页 / 溯源字段缺失）—— **纯脚本、零 LLM、零外部依赖**
-- **本里程碑 DoD**：日志补 `feed_retracted`；CLI 与 MCP 接口同步可用；`data-architecture.md` 新章
-- **验收**：投喂一个 md → **能被召回** → 从命中结果反查到 `raw/` 原件字节；`feed lint` 在干净产物上 0 P0
+- ✅ `out_feed/` 发布（frontmatter 模板：`origin: external` / `doc:` / `source_url` / `doc_time`）
+  —— M1 已做
+- ✅ `project_pages` **多根改造**（`page_roots()` 单点定义；身份加根标签防撞、
+  清扫覆盖多根且**只清本轮真扫过的根**）—— `4adc6eb`
+- ✅ 召回接通：`memory_search` 命中知识库页、带 `[投喂]` 标签与 `doc_id`、**来源可过滤**
+- **四条并列测试锁**：①✅全量 wiki 聚合后 `out_feed` 一个字节不变
+  ②✅wiki manifest 输入不含 feed（结构性：投喂根不在 L1/L2 目录内，有测试锁）
+  ③⏳retract 只删投影不删原件 ④✅origin 三态（native/external/all）各自正确，
+  **且页面层通道也受 origin 约束**（真机实测三态）
+- ⏳ **第五条锁**：retract 之后，指向它的链接必须被报为断链
+- ⏳ **`feed lint`**：确定性产物检查，P0/P1 分级 + P0 非零退出码
+- **验收已过（真机）**：396+1 页投影、**L2 既有页面零重键**（新增 1/消失 0）、
+  默认混排命中投喂页、`origin=external` 只剩投喂页、`origin=native` 不含投喂页、
+  `wikiPath` 绝对路径且文件存在、`doc` 锚闭合
+- **本里程碑 DoD**：⏳日志补 `feed_retracted`（随 retract）；✅CLI 已可用；
+  ⏳`data-architecture.md` 新章
+
+**M2 实施中发现并处理的三件事**：
+① **主根不能加根标签** —— 否则库里 396 个页面 unit 整体重键，价值分/反馈变孤儿
+  （已在真机验证"新增 1/消失 0"）；
+② **标签必须按配置位置定**，不能按"已存在的根" —— 否则某根缺席时另一根身份漂移；
+③ **`wiki_path` 从相对改绝对** —— 原形态消费者拿到也打不开，"两阶段召回"是空谈。
 
 ### M3 · T2 网页 + 公众号（2 天）
 - 抓取层：`httpx`（代理）+ 响应字节落 `raw/` + 落地页 HTML 落 `mirror/`
