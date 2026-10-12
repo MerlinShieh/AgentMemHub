@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 import urllib.request
@@ -123,6 +124,23 @@ def _audit(row: dict, ok: bool) -> None:
 #: Pushplus 的发送端点（微信推送服务，用户自己的 token）。
 PUSHPLUS_URL = "https://www.pushplus.plus/send"
 
+#: **测试沙箱熔断**（与 `logs.SANDBOX_ENV` / `wiki_triggers.SANDBOX_ENV` 同源同值，
+#: 由 `tests/conftest.py` 在 session 级置位）。置位时 `pushplus_send()` **一个字节都不出网**。
+#:
+#: 为什么必须有这道闸（2026-10-12 实测事故）：推送是**真实副作用** —— 会往用户微信发消息。
+#: 而 `notify()` 默认 `push_too=True`，`_notify_cfg()` 又**刻意绕过 config 单例直读真实 yaml**
+#: （为了"填完 token 立刻生效"）。两者相加 ⇒ **任何"只测落库"的 `notify("warning"/"error", …)`
+#: 都会用真实 token 真发微信**。实测 `tests/test_notify.py` 有 7 处这样的调用，
+#: **跑一次测试就刷一串微信消息**（且 `dedup_window_s` 只按 (类别,标题) 去重，
+#: 测试用的是各自 tmp 库，完全挡不住跨轮重复）。
+#: 教训与"测试真调付费 LLM"同源：**真实副作用不能靠"测试记得 mock"守**，
+#: 必须在**唯一的网络出口**兜死。
+SANDBOX_ENV = "AGENTMEMHUB_TEST_SANDBOX"
+
+#: **逃生门**：仅在"网络出口已被换成替身"时才允许置它，用来测 `pushplus_send()` 本体
+#: （报文拼装 + 响应解析）。名字故意写得刺眼 —— 置错它就是**真的发微信**。
+ALLOW_REAL_PUSH_ENV = "AGENTMEMHUB_ALLOW_REAL_PUSH"
+
 
 def _notify_cfg() -> dict[str, Any]:
     """`notify` 段配置（**每次直接读盘**，不走 `config()` 的进程级单例）。
@@ -154,7 +172,14 @@ def pushplus_send(*, token: str, title: str, content: str, topic: str = "",
 
     只用标准库 `urllib`（不引入新依赖）；返回 `{"ok", "code", "msg"}`，
     失败时带 `error`。Pushplus 的成功判定是响应体里的 `code == 200`。
+
+    **测试沙箱下直接短路**（`AGENTMEMHUB_TEST_SANDBOX` 置位）：
+    返回 `{"ok": False, "skipped": "test_sandbox"}`，**一个字节都不出网**。
+    要测本函数本体请**先把 `urlopen` 换成替身**，再置
+    `AGENTMEMHUB_ALLOW_REAL_PUSH=1` —— 两道条件缺一不可（见模块内 `SANDBOX_ENV` 的说明）。
     """
+    if os.environ.get(SANDBOX_ENV) and not os.environ.get(ALLOW_REAL_PUSH_ENV):
+        return {"ok": False, "skipped": "test_sandbox"}
     payload: dict[str, Any] = {"token": token, "title": title[:100],
                                "content": content, "template": template}
     if topic:

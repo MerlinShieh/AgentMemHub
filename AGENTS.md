@@ -59,7 +59,7 @@
   （记忆排除 UI 已下线，后端能力保留）；记忆页承载筛选/溯源/⭐加权/👍👎/蒸馏入口。
   会话与记忆通过 `session_uid`（全局递增）双向绑定跳转。
 - **测试纪律**：每次改动带测试；bug 修复先写复现测试（红→绿）；
-  `uv run pytest` 全绿是提交门槛（数量以实测为准，当前 820 passed / 1 skipped）。
+  `uv run pytest` 全绿是提交门槛（数量以实测为准，当前 1031 passed / 1 skipped）。
   ⚠️ **别并发跑两个 `uv run`**（例如后台跑全量测试、前台又跑脚本）—— uv 会争用环境锁，
   实测导致 10 个毫不相干的测试假失败（snapshot / wiki_triggers），干净重跑即全绿。
   ⚠️ **`monkeypatch` 挡不住「活过测试的线程/子进程」**：MCP 的写入钩子会起 daemon
@@ -71,6 +71,20 @@
   `conftest._sandbox_data_dir`（session 级 autouse）置位 **`AGENTMEMHUB_TEST_SANDBOX=1`**
   （环境变量会被子进程继承），`wiki_triggers._targets()` 见它即抛。
   **新加"会起线程/子进程的旁路"时，务必确认它也被这道熔断覆盖。**
+  ⚠️ **范围要放宽一档：凡"真实副作用"的出口都必须有熔断**，不限于线程/子进程。
+  已被同一道闸（`AGENTMEMHUB_TEST_SANDBOX`）覆盖的出口：
+  `wiki_triggers._targets()`（抛）、`wiki_batch._repair_client()`（返回 `None`）、
+  `wiki_aggregate.make_client()`（抛）、`batch_client`（抛 `BatchError`）、
+  **`notify.pushplus_send()`（返回 `{"skipped": "test_sandbox"}`）**。
+  **2026-10-12 实测事故（第三例）**：`notify()` 默认 `push_too=True`，而
+  `_notify_cfg()` 刻意绕过 config 单例**直读真实 yaml**（为"填完 token 立刻生效"）——
+  两者相加 ⇒ `tests/test_notify.py` 里 **7 处"只测落库"的 warning/error 调用
+  会真的往用户微信发消息，跑一次测试刷一串**。修法是在**唯一网络出口**兜死；
+  要测 `pushplus_send()` 本体必须**同时**置 `AGENTMEMHUB_ALLOW_REAL_PUSH=1`
+  **且**把 `urlopen` 换成替身（两道条件缺一不可，名字故意写刺眼）。
+  三例同源（付费 LLM / 真删产物 / 发微信）：**花钱、发消息、删数据这类真实副作用，
+  靠"测试记得 mock"一定守不住 —— 必须在唯一出口兜死，并让"忘记 mock"表现为
+  响亮失败而不是静默外发。**
 - **日志纪律**：统一 `logs/` 按程序分文件；测试必须隔离日志与数据目录
   —— 隔离靠**两道**：`conftest` 的 autouse 夹具把 `logs.log_dir` 指向 tmp
   （只对当前测试生效），以及**进程级**环境变量 `AGENTMEMHUB_TEST_LOG_DIR`

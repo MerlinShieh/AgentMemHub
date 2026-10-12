@@ -204,6 +204,9 @@ def test_推送成功与业务失败(monkeypatch):
     """成功判定是响应体的 `code == 200`；业务失败返回 ok=False 但**不抛**。"""
     monkeypatch.setattr(N, "_notify_cfg",
                         lambda: {"pushplus": {"enabled": True, "token": "tk"}})
+    # 本测试要走到 `pushplus_send()` **本体**（报文拼装 + 响应解析），故开逃生门；
+    # 网络出口已在下面换成替身 ⇒ 仍然不出网。
+    monkeypatch.setenv(N.ALLOW_REAL_PUSH_ENV, "1")
 
     monkeypatch.setattr(N.urllib.request, "urlopen",
                         _fake_open('{"code":200,"msg":"请求成功"}'))
@@ -227,11 +230,65 @@ def test_推送网络异常永不抛(monkeypatch):
 
     monkeypatch.setattr(N, "_notify_cfg",
                         lambda: {"pushplus": {"enabled": True, "token": "tk"}})
+    monkeypatch.setenv(N.ALLOW_REAL_PUSH_ENV, "1")
     monkeypatch.setattr(N.urllib.request, "urlopen", _boom)
 
     r = N.push("info", "batch", "x")["pushplus"]
 
     assert r["ok"] is False and "TimeoutError" in r["error"]
+
+
+# ---------------------------------------------------------------------------
+# **测试绝不出网**（2026-10-12 事故：测试真的往微信发了消息）
+#
+# `notify()` 默认 `push_too=True`，而 `_notify_cfg()` 刻意绕过 config 单例
+# **直读真实 yaml** ⇒ 任何"只测落库"的 `notify("warning"/"error", …)` 都会
+# 用真实 token 真发微信。实测本文件有 7 处这样的调用，**跑一次测试刷一串微信**。
+# 现在唯一网络出口 `pushplus_send()` 见沙箱变量即短路 —— 下面三条把它钉死。
+# ---------------------------------------------------------------------------
+
+def test_沙箱下pushplus_send一个字节都不出网(monkeypatch):
+    """判据最硬：把 `urlopen` 换成"一调用就炸"，若仍返回 skipped ⇒ 根本没出网。"""
+    def _must_not_call(*a, **k):
+        raise AssertionError("沙箱下不该有任何网络调用")
+
+    monkeypatch.delenv(N.ALLOW_REAL_PUSH_ENV, raising=False)
+    monkeypatch.setattr(N.urllib.request, "urlopen", _must_not_call)
+
+    assert N.pushplus_send(token="tk", title="t", content="c") == {
+        "ok": False, "skipped": "test_sandbox"}
+
+
+def test_逃生门与替换网络出口缺一不可(monkeypatch):
+    """只置逃生门、不换出口 = **真的发消息**，所以本测试两道都做。"""
+    monkeypatch.setenv(N.ALLOW_REAL_PUSH_ENV, "1")
+    monkeypatch.setattr(N.urllib.request, "urlopen",
+                        _fake_open('{"code":200,"msg":"ok"}'))
+
+    r = N.pushplus_send(token="tk", title="t", content="c")
+
+    assert r["ok"] is True and _fake_open.sent["token"] == "tk"
+
+
+def test_配置真开着时warning通知也只落库不出网(db, monkeypatch):
+    """端到端：即使 pushplus **真的 enabled 且 token 非空**，测试里也不出网。
+
+    同时验证**落库不受影响** —— 推送是旁路，短路不该影响主流程。
+    """
+    monkeypatch.setattr(N, "_notify_cfg", lambda: {
+        "pushplus": {"enabled": True, "token": "real-token-shape"},
+        "push_when": {"warning": True, "error": True}})
+    monkeypatch.delenv(N.ALLOW_REAL_PUSH_ENV, raising=False)
+
+    def _must_not_call(*a, **k):
+        raise AssertionError("不该出网")
+
+    monkeypatch.setattr(N.urllib.request, "urlopen", _must_not_call)
+
+    assert N.notify("warning", "batch", "标题", "正文", db=db) is True
+    assert [n["title"] for n in N.list_notifications(db=db)] == ["标题"]
+    # 审计里能看到"没发出去"的原因，而不是静默
+    assert N.push("warning", "batch", "标题")["pushplus"]["skipped"] == "test_sandbox"
 
 
 # ---------------------------------------------------------------------------
