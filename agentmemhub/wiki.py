@@ -1004,7 +1004,10 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
         from agentmemhub.rag.config import load_settings
         conn = open_index(load_settings().index_db)
         try:
-            page_index = wiki_index.project_pages(conn, l2, log=lambda *_: None)
+            # **所有页面根**（L2 + 投喂交付物 kb）—— 单点定义在
+            # `wiki_index.page_roots()`，CLI/面板/wiki 管道共用，免得漂移
+            page_index = wiki_index.project_pages(
+                conn, wiki_index.page_roots(l2), log=lambda *_: None)
         finally:
             conn.close()
     except Exception as e:                      # noqa: BLE001

@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -124,7 +125,9 @@ def test_投影_页面整页进units且带层级标记(env, monkeypatch):
     assert row[2] == "01-域A"
     assert row[3] == "页A"
     assert "摘要A" in row[4] and "正文A" in row[4]     # 整页文本（不切片）
-    assert row[5] == "01-域A/001-页A.md"               # 两阶段第二阶段入口
+    # 两阶段第二阶段入口：必须是**能直接打开的绝对路径** ——
+    # 此前存的是根内相对路径，而消费者不知道根在哪 ⇒ 拿到也没法读（2026-10-12 改）
+    assert os.path.isabs(row[5]) and row[5].endswith("01-域A" + os.sep + "001-页A.md")
     assert row[6].startswith("wiki_")
 
 

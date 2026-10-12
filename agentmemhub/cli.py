@@ -1041,7 +1041,7 @@ def cmd_wiki(args) -> int:
             return 2
         idx = open_index(load_settings().index_db)
         try:
-            r = wiki_index.project_pages(idx, l2)
+            r = wiki_index.project_pages(idx, wiki_index.page_roots(l2))
         finally:
             idx.close()
         print(_json.dumps(r, ensure_ascii=False, indent=2))
