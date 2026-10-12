@@ -200,6 +200,16 @@ class MaterialsDB:
                                 doc_id))
         self.conn.commit()
 
+    def delete(self, doc_id: str) -> bool:
+        """删掉登记行（`forget` 用）。返回是否真的删到了。
+
+        ⚠️ **只删登记**：原件（raw/）与交付物（kb/）由调用方决定去留 ——
+        原件是不可再生的那一份，"删登记"不该顺手把它带走。
+        """
+        cur = self.conn.execute("DELETE FROM materials WHERE doc_id=?", (doc_id,))
+        self.conn.commit()
+        return bool(cur.rowcount)
+
     # -- 读 ---------------------------------------------------------------
 
     def get(self, doc_id: str) -> Optional[dict[str, Any]]:

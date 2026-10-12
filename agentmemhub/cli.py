@@ -1396,11 +1396,15 @@ def build_parser() -> argparse.ArgumentParser:
     # 动作既支持自然写法 `feed add <文件>`，也支持项目惯例 `feed --action add`
     # —— 两种都收在 `args` 里再解析（用 `--action` 单独占一个 dest 会与位置参数打架）
     pfeed.add_argument("args", nargs="*",
-                       help="动作 + 参数：add <文件…> / list / show <doc_id> / retry <doc_id>")
+                       help="动作 + 参数：add <文件…> / list / show <doc_id> / "
+                            "retry <doc_id> / retract <doc_id> / forget <doc_id> / lint")
     pfeed.add_argument("--action", default="",
-                       choices=["", "add", "list", "show", "retry"],
+                       choices=["", "add", "list", "show", "retry",
+                                "retract", "forget", "lint"],
                        help="动作（与位置写法等价；项目惯例写法）")
-    pfeed.add_argument("--id", default="", help="show/retry 用：doc_id")
+    pfeed.add_argument("--id", default="", help="show/retry/retract/forget 用：doc_id")
+    pfeed.add_argument("--purge", action="store_true",
+                       help="forget 用：**连原件一起删**（默认保留原件，因为它不可再生）")
     pfeed.add_argument("--kind", default="",
                        help="显式指定类型（text/url/wechat/pdf/image）")
     pfeed.add_argument("--force", action="store_true",
@@ -1500,11 +1504,12 @@ def cmd_feed(args) -> int:
     # 不这么做的话 `feed add X` 会把 "add" 当成**文件路径**去投喂 —— 能跑、
     # 但把用户意图理解错了（实测：报"找不到文件：add"，随后又真的投喂了 X）。
     tokens = [str(t) for t in (getattr(args, "args", []) or [])]
-    if not action and tokens and tokens[0] in ("add", "list", "show", "retry"):
+    _ACTIONS = ("add", "list", "show", "retry", "retract", "forget", "lint")
+    if not action and tokens and tokens[0] in _ACTIONS:
         action = tokens.pop(0)
     action = action or "add"
     doc_id_arg = (getattr(args, "id", "") or "").strip()
-    if not doc_id_arg and action in ("show", "retry") and tokens:
+    if not doc_id_arg and action in ("show", "retry", "retract", "forget") and tokens:
         doc_id_arg = tokens.pop(0)
 
     if action == "add":
@@ -1580,6 +1585,37 @@ def cmd_feed(args) -> int:
         print("镜像      : %s" % (row.get("mirror_path") or "（无）"))
         print("交付物    : %s" % (row.get("kb_path") or "（无）"))
         return 0
+
+    if action == "retract":
+        doc_id = doc_id_arg
+        if not doc_id:
+            print("用法：agentmemhub feed retract <doc_id>")
+            return 2
+        r = _svc.retract(doc_id)
+        if as_json:
+            print(_json.dumps(r, ensure_ascii=False, indent=2))
+        return 0 if r.get("ok") else 1
+
+    if action == "forget":
+        doc_id = doc_id_arg
+        if not doc_id:
+            print("用法：agentmemhub feed forget <doc_id> [--purge]"
+                  "（--purge 连原件一起删；默认保留原件）")
+            return 2
+        r = _svc.forget(doc_id, purge=bool(getattr(args, "purge", False)))
+        if as_json:
+            print(_json.dumps(r, ensure_ascii=False, indent=2))
+        return 0 if r.get("ok") else 1
+
+    if action == "lint":
+        from agentmemhub.feed.lint import format_report
+        r = _svc.lint()
+        if as_json:
+            print(_json.dumps(r, ensure_ascii=False, indent=2))
+        else:
+            print(format_report(r))
+        # P0 > 0 ⇒ 非零退出码（可直接当提交/巡检门槛，照 lint.py 的做法）
+        return 1 if r.get("p0") else 0
 
     if action == "retry":
         doc_id = doc_id_arg

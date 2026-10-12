@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -259,6 +260,123 @@ def get_material(doc_id: str, *, config=None) -> Optional[dict[str, Any]]:
         return db.get(doc_id)
     finally:
         db.close()
+
+
+def _reproject(config, log=print) -> dict[str, Any]:
+    """让投影收敛（撤下 / 清除之后）。
+
+    **复用 `project_pages` 的全量对齐 + 清扫，而不是另写一份"按 doc_id 删投影"的逻辑**：
+    删除要同时处理向量行、价值行、FTS 与"只清本轮扫过的根"那套规则 —— 另写一份必然
+    与投影路径漂移（本项目在"两处各写一份"上踩过多次）。代价是重算一次页面向量
+    （几百页、秒级），对"撤下"这种低频人工操作完全可接受。
+
+    ⚠️ **测试沙箱下直接跳过**（`AGENTMEMHUB_TEST_SANDBOX`）：它打开的是**真实索引库**。
+    本项目 2026-09-26 的事故就是"测试通过一条真实路径改了真实产物"，所以凡碰真实路径的
+    出口都必须有进程级熔断（见 AGENTS.md 测试纪律）。测试要验证收敛请自行注入替身。
+    """
+    try:
+        from agentmemhub.logs import SANDBOX_ENV
+        if os.environ.get(SANDBOX_ENV):
+            log("  （测试沙箱：跳过投影收敛）")
+            return {"skipped": "test_sandbox"}
+    except Exception:                       # noqa: BLE001 —— 判不出来就当不在沙箱
+        pass
+    try:
+        from agentmemhub import wiki_index
+        from agentmemhub.rag.ingest import open_index
+        from agentmemhub.rag.config import load_settings
+
+        l2 = (config.wiki.get("out_l2") or "")
+        roots = wiki_index.page_roots(l2, config=config)
+        conn = open_index(load_settings().index_db)
+        try:
+            return wiki_index.project_pages(conn, roots, log=lambda *_: None)
+        finally:
+            conn.close()
+    except Exception as e:                  # noqa: BLE001 —— 索引库不可用不该让撤下失败
+        log("  ⚠️ 投影收敛失败（交付物与登记已处理）：%s: %s"
+            % (type(e).__name__, str(e)[:160]))
+        return {"error": "%s: %s" % (type(e).__name__, str(e)[:200])}
+
+
+def retract(doc_id: str, *, config=None, log=print) -> dict[str, Any]:
+    """**撤下**投喂内容（可恢复）：删交付物 + 收敛投影，**原件保留**。
+
+    为什么交付物可以直接删、不需要回收站：kb 是**派生物** ——
+    `raw/` 的原件还在，`reconvert` 随时能重建。这正是"三段保留"的回报：
+    **派生物不需要回收站**，而回收站恰恰会引出"扫描器漏排回收站 ⇒ 真断链被掩盖"
+    这类双向失效的坑（参考实现 `lint.py` 踩过，见计划 §11.4）。
+    """
+    cfg = config or _cfg()
+    row = get_material(doc_id, config=cfg)
+    if not row:
+        return {"ok": False, "error": "没有这条素材：%s" % doc_id,
+                "error_kind": "not_found"}
+    paths = cfg.feed_paths()
+    store = MaterialStore(root=paths["store"], kb_dir=paths["kb"])
+    kb = store.kb_file(doc_id)
+    removed_kb = kb.is_file()
+    if removed_kb:
+        kb.unlink()
+    db = MaterialsDB(paths["db"])
+    try:
+        db.set_status(doc_id, "retracted")
+    finally:
+        db.close()
+    _audit(event="feed_retracted", doc_id=doc_id, kb_removed=removed_kb,
+           title=row.get("title") or "", raw_kept=True)
+    log("[+] 已撤下：%s（交付物%s；原件保留，可 retry 恢复）"
+        % ((row.get("title") or doc_id), "已删" if removed_kb else "本就不存在"))
+    proj = _reproject(cfg, log=log)
+    return {"ok": True, "doc_id": doc_id, "kb_removed": removed_kb,
+            "raw_kept": True, "projection": proj}
+
+
+def forget(doc_id: str, *, purge: bool = False, config=None,
+           log=print) -> dict[str, Any]:
+    """**彻底清除**登记（+ 交付物 + 投影）。**原件默认保留**，`purge=True` 才删。
+
+    为什么原件要单独确认：`raw/` 那份是**不可再生**的，而交付物与投影都能从它重来。
+    默认留下原件 ⇒ "忘掉它"仍然可逆（重新 `add` 或 `reconvert` 即可）。
+    """
+    cfg = config or _cfg()
+    row = get_material(doc_id, config=cfg)
+    if not row:
+        return {"ok": False, "error": "没有这条素材：%s" % doc_id,
+                "error_kind": "not_found"}
+    paths = cfg.feed_paths()
+    store = MaterialStore(root=paths["store"], kb_dir=paths["kb"])
+    kb = store.kb_file(doc_id)
+    removed_kb = kb.is_file()
+    if removed_kb:
+        kb.unlink()
+    removed_raw = False
+    raw_rel = row.get("raw_path") or ""
+    if purge and raw_rel:
+        raw = store.raw_path(raw_rel)
+        if raw.is_file():
+            raw.unlink()
+            removed_raw = True
+    db = MaterialsDB(paths["db"])
+    try:
+        db.delete(doc_id)
+    finally:
+        db.close()
+    _audit(event="feed_forgot", doc_id=doc_id, kb_removed=removed_kb,
+           raw_removed=removed_raw, title=row.get("title") or "")
+    log("[+] 已清除登记：%s（交付物%s；原件%s）"
+        % ((row.get("title") or doc_id), "已删" if removed_kb else "无",
+           "已删（purge）" if removed_raw else "保留"))
+    proj = _reproject(cfg, log=log)
+    return {"ok": True, "doc_id": doc_id, "kb_removed": removed_kb,
+            "raw_removed": removed_raw, "projection": proj}
+
+
+def lint(*, config=None, with_index: bool = True,
+         index_db=None) -> dict[str, Any]:
+    """确定性产物体检（见 `feed/lint.py`）。"""
+    from .lint import run_lint
+    return run_lint(config=config, with_index=with_index, index_db=index_db)
 
 
 def reconvert(doc_id: str, *, kind: str = "", config=None,
