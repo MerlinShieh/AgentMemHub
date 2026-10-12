@@ -1391,6 +1391,27 @@ def build_parser() -> argparse.ArgumentParser:
     _register_memory_log_parser(sub)
     _register_llm_config_parser(sub)
 
+    pfeed = sub.add_parser(
+        "feed", help="外部投喂：把外部素材转译成统一 md 并登记（含素材库查询）")
+    # 动作既支持自然写法 `feed add <文件>`，也支持项目惯例 `feed --action add`
+    # —— 两种都收在 `args` 里再解析（用 `--action` 单独占一个 dest 会与位置参数打架）
+    pfeed.add_argument("args", nargs="*",
+                       help="动作 + 参数：add <文件…> / list / show <doc_id> / retry <doc_id>")
+    pfeed.add_argument("--action", default="",
+                       choices=["", "add", "list", "show", "retry"],
+                       help="动作（与位置写法等价；项目惯例写法）")
+    pfeed.add_argument("--id", default="", help="show/retry 用：doc_id")
+    pfeed.add_argument("--kind", default="",
+                       help="显式指定类型（text/url/wechat/pdf/image）")
+    pfeed.add_argument("--force", action="store_true",
+                       help="add/retry 用：同内容已投喂过也重跑")
+    pfeed.add_argument("--dry-run", action="store_true",
+                       help="add 用：只做查重与认领，不写盘")
+    pfeed.add_argument("--status", default="", help="list 用：按状态筛")
+    pfeed.add_argument("--low-quality", action="store_true",
+                       help="list 用：只列质量偏低或有告警的")
+    pfeed.add_argument("--limit", type=int, default=0, help="list 用：最多几条（0=全部）")
+    pfeed.add_argument("--json", action="store_true", help="以 JSON 输出（便于脚本消费）")
     pwk = sub.add_parser("wiki", help="LLM Wiki 运维：对齐审计 / 增量更新 / 查看失败清单 / 定向补跑")
     pwk.add_argument("--action", default="failures",
                      choices=["failures", "retry", "align", "update",
@@ -1460,9 +1481,131 @@ def _harvest_quietly() -> None:
         pass
 
 
+def cmd_feed(args) -> int:
+    """外部投喂（`feed`）：转译 → 登记 → 发布，以及素材库查询。
+
+    四个动作全部走 `agentmemhub.feed.service` 的同一份编排 —— CLI / MCP / 面板
+    只做参数解析与呈现，绝不在各自那里重写流程（wiki 上踩过"两处流程对不齐"的坑）。
+    """
+    import json as _json
+
+    from agentmemhub import feed as _feed
+    from agentmemhub.feed import service as _svc
+
+    action = (getattr(args, "action", "") or "").strip()
+    as_json = bool(getattr(args, "json", False))
+    # 位置写法（`feed add X`）与 `--action add` 等价：首 token 命中动作名就取走。
+    # 不这么做的话 `feed add X` 会把 "add" 当成**文件路径**去投喂 —— 能跑、
+    # 但把用户意图理解错了（实测：报"找不到文件：add"，随后又真的投喂了 X）。
+    tokens = [str(t) for t in (getattr(args, "args", []) or [])]
+    if not action and tokens and tokens[0] in ("add", "list", "show", "retry"):
+        action = tokens.pop(0)
+    action = action or "add"
+    doc_id_arg = (getattr(args, "id", "") or "").strip()
+    if not doc_id_arg and action in ("show", "retry") and tokens:
+        doc_id_arg = tokens.pop(0)
+
+    if action == "add":
+        paths = [p for p in tokens if p.strip()]
+        if not paths:
+            print("用法：agentmemhub feed add <文件路径> [更多路径…] "
+                  "[--kind text] [--dry-run] [--force]")
+            return 2
+        out = []
+        failed = 0
+        for p in paths:
+            r = _svc.ingest(p, kind=getattr(args, "kind", "") or "",
+                            force=bool(getattr(args, "force", False)),
+                            dry_run=bool(getattr(args, "dry_run", False)))
+            out.append(r)
+            if not r.get("ok"):
+                failed += 1
+        if as_json:
+            print(_json.dumps(out, ensure_ascii=False, indent=2))
+        elif len(out) > 1:
+            print("\n合计：成功 %d / 失败 %d" % (len(out) - failed, failed))
+        return 1 if failed else 0
+
+    if action == "list":
+        rows = _svc.list_materials(
+            status=getattr(args, "status", "") or "",
+            low_quality=bool(getattr(args, "low_quality", False)),
+            limit=int(getattr(args, "limit", 0) or 0))
+        if as_json:
+            print(_json.dumps(rows, ensure_ascii=False, indent=2))
+            return 0
+        if not rows:
+            print("（没有已投喂的素材）")
+            return 0
+        print("已投喂素材 %d 条：" % len(rows))
+        print("  %-17s %-6s %-10s %-6s %s" % ("doc_id", "kind", "status",
+                                              "质量", "标题"))
+        for r in rows:
+            print("  %-17s %-6s %-10s %-6.2f %s"
+                  % (r.get("doc_id", ""), r.get("kind", ""), r.get("status", ""),
+                     float(r.get("quality") or 0.0), (r.get("title") or "")[:40]))
+            if r.get("warnings"):
+                print("      ⚠️ %s" % "；".join(r["warnings"])[:100])
+            if r.get("error"):
+                print("      ❌ [%s] %s" % (r.get("error_kind") or "", r["error"][:100]))
+        return 0
+
+    if action == "show":
+        doc_id = doc_id_arg
+        if not doc_id:
+            print("用法：agentmemhub feed show <doc_id>（或 --id <doc_id>）")
+            return 2
+        row = _svc.get_material(doc_id)
+        if not row:
+            print("[x] 没有这条素材：%s" % doc_id)
+            return 1
+        if as_json:
+            print(_json.dumps(row, ensure_ascii=False, indent=2))
+            return 0
+        import time as _t
+        print("doc_id    : %s" % row.get("doc_id"))
+        print("标题      : %s" % (row.get("title") or ""))
+        print("状态      : %s%s" % (row.get("status"),
+                                    ("（%s）" % row["error"]) if row.get("error") else ""))
+        print("类型/转换 : %s / %s" % (row.get("kind"), row.get("converter")))
+        print("来源      : %s" % row.get("source_ref"))
+        print("文档时间  : %s" % _t.strftime("%Y-%m-%d %H:%M",
+                                            _t.localtime(int(row.get("doc_time") or 0))))
+        print("质量      : %.2f%s" % (float(row.get("quality") or 0.0),
+                                      ("  ⚠️ " + "；".join(row["warnings"]))
+                                      if row.get("warnings") else ""))
+        print("原件      : %s" % row.get("raw_path"))
+        print("镜像      : %s" % (row.get("mirror_path") or "（无）"))
+        print("交付物    : %s" % (row.get("kb_path") or "（无）"))
+        return 0
+
+    if action == "retry":
+        doc_id = doc_id_arg
+        if not doc_id:
+            print("用法：agentmemhub feed retry <doc_id>（或 --id <doc_id>）")
+            return 2
+        r = _svc.retry(doc_id, force=bool(getattr(args, "force", False)))
+        if as_json:
+            print(_json.dumps(r, ensure_ascii=False, indent=2))
+        return 0 if r.get("ok") else 1
+
+    print("未知 feed 动作：%s" % action)
+    return 2
+
+
 def main() -> None:
     _force_utf8_stdio()
-    args = build_parser().parse_args()
+    parser = build_parser()
+    # argparse **不允许位置参数夹在选项之间**：`feed add --force X` 里的 X 会被判成
+    # "unrecognized arguments"（因为 `args` 是 nargs="*"，遇到 --force 就停止收集）。
+    # 这对 feed 是硬伤（路径与 flag 的书写顺序很自然），所以只对 feed 把落下的
+    # token 补回去；其余子命令**保持严格**，不能把拼错的参数吞掉。
+    args, unknown = parser.parse_known_args()
+    if unknown:
+        if getattr(args, "command", "") == "feed":
+            args.args = list(getattr(args, "args", []) or []) + list(unknown)
+        else:
+            parser.error("unrecognized arguments: %s" % " ".join(unknown))
     _harvest_quietly()
     if not args.command:
         # 无参数 = 进入交互式控制台（新用户入口）
@@ -1477,6 +1620,7 @@ def main() -> None:
         "sync": cmd_sync, "clean": cmd_clean, "score": cmd_score, "rebuild": cmd_rebuild,
         "distill": cmd_distill, "weight": cmd_weight,
         "wiki": cmd_wiki,
+        "feed": cmd_feed,
         "snapshot": cmd_snapshot,
         "memory-log": cmd_memory_log,
         "llm-config": cmd_llm_config,

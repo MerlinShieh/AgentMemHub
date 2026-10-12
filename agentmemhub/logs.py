@@ -668,6 +668,51 @@ def read_notify_audit(path: "Path | None" = None, limit: int = 0) -> list[dict]:
     return _read_jsonl(path, "notify.log", limit)
 
 
+# ---------------------------------------------------------------------------
+# 投喂事实流（logs/feed.log）
+#
+# 投喂是长流程（取回 → 转译 → 发布），且**每一步都可能部分失败**；落库（materials.db）
+# 记的是"当前状态"，事实流记的是"过程"——两者互补：排障要过程，查询要状态。
+# ---------------------------------------------------------------------------
+
+def feed_log_file() -> Path:
+    return log_dir() / "feed.log"
+
+
+def _feed_msg(e: dict) -> str:
+    parts = [str(e.get("event") or ""), str(e.get("kind") or "")]
+    if e.get("doc_id"):
+        parts.append("doc=%s" % e["doc_id"])
+    if e.get("title"):
+        parts.append(str(e["title"]))
+    if e.get("error"):
+        parts.append("error=%s" % str(e["error"])[:120])
+    return " ".join(p for p in parts if p)
+
+
+#: 投喂流里天然属于"出错"的事件名（除 `ok=False` / `error` 之外的判据）
+_FEED_ERROR_EVENTS = ("feed_failed",)
+
+
+def audit_feed(entry: dict, *, depth: int = 3) -> None:
+    """追加一条投喂事件（JSONL，带标准头 ts/level/module/line/msg）。
+
+    写失败一律静默：投喂是长流程，审计绝不能反过来把它弄失败。
+    `depth=3` 对应业务代码**直接**调用；隔了包装层的话调用方要自己 +1
+    （与 `audit_wiki()` 同一约定，否则 `line` 恒等、字段作废）。
+    """
+    e = standardize(entry, msg=entry.get("msg") or _feed_msg(entry),
+                    level=_level_of(entry, error_events=_FEED_ERROR_EVENTS),
+                    depth=depth)
+    _append_line(feed_log_file(),
+                 json.dumps(e, ensure_ascii=False) + "\n", name="feed")
+
+
+def read_feed_audit(path: "Path | None" = None, limit: int = 0) -> list[dict]:
+    """读投喂事件（坏行跳过）。path 默认 `logs/feed.log`，也接受日志目录。"""
+    return _read_jsonl(path, "feed.log", limit)
+
+
 def append_task_line(job_id: str, line: str) -> Path:
     """把任务输出的一行追加到该 job 的完整日志文件（**统一标准前缀**）。
 

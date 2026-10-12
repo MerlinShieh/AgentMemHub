@@ -240,6 +240,32 @@ DEFAULT_NOTIFY = {
 }
 
 
+#: 外部投喂转译层（`feed` 段）。设计见 `docs/feed-adapter-plan.md`。
+#:
+#: 三条路径互相独立、**都不进快照轮换**（快照 = 索引库 + wiki 产物）：
+#:   · `db`        素材登记表 `materials.db` —— 独立库，只存元数据与指针
+#:   · `store_dir` 三段物料 `raw/`（不可变原件）+ `mirror/`（中间形态）
+#:   · `kb_dir`    最终 md（**交付物/知识库本体**）—— 与 `out_l2_mimo` **并列**，
+#:                 全量 wiki 聚合**绝不碰它**（旁路根，投喂内容与自有 wiki 互不影响）
+DEFAULT_FEED = {
+    "db": "database/materials.db",
+    "store_dir": "exports/feed_store",
+    "kb_dir": "exports/wiki_work/out_feed",
+    #: 转换阶段的 LLM 开关。**默认关**（Q4 决策）：脚本能做的绝不花钱，
+    #: 只有质量自评不达标时才允许升级（见计划 §7.0.1）。
+    "convert": {
+        "llm": False,        # PDF 表格/图片理解是否允许 LLM 参与
+        "ocr": "local",      # local | llm | off —— 图片档的引擎选择
+    },
+    #: 取回阶段（M3 起用）：`renderer=none` 表示不装无头浏览器，能力按需开
+    "fetch": {
+        "renderer": "none",  # none | playwright
+        "timeout": 20,
+    },
+    "depth_default": "page",  # page（浅加工）/ session（深加工）—— 未显式声明时
+}
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     """深合并（嵌套 dict 递归合并，其余类型直接覆盖）。"""
     out = dict(base)
@@ -544,6 +570,31 @@ class Config:
         外部推送，`dedup_window_s` 防止失败重试把微信刷屏。
         """
         return _deep_merge(DEFAULT_NOTIFY, self._get("notify", {}) or {})
+
+    # -- 外部投喂转译层 ----------------------------------------------------
+
+    @property
+    def feed(self) -> dict[str, Any]:
+        """投喂转译层配置（已合并默认值）。
+
+        `convert.llm` **默认 false**：脚本解析是确定性的、免费的，LLM 只在
+        质量自评不达标时兜底（Q4 决策 + §7.0.1 的"脚本优先"分工）。
+        """
+        return _deep_merge(DEFAULT_FEED, self._get("feed", {}) or {})
+
+    def feed_paths(self) -> dict[str, Path]:
+        """`feed` 的三个落盘位置（**已解析成绝对路径**）：`db` / `store` / `kb`。
+
+        单列一个方法而不是散着 `_resolve`：三处路径必须来自**同一份配置**，
+        否则会写出"原件进 A 目录、登记表却指向 B"这类难查的错位。
+        """
+        f = self.feed
+        return {
+            "db": self._resolve(str(f.get("db") or DEFAULT_FEED["db"])),
+            "store": self._resolve(str(f.get("store_dir")
+                                       or DEFAULT_FEED["store_dir"])),
+            "kb": self._resolve(str(f.get("kb_dir") or DEFAULT_FEED["kb_dir"])),
+        }
 
     # -- 内部 -------------------------------------------------------------
 
