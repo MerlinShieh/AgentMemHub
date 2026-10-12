@@ -8,9 +8,13 @@
 from __future__ import annotations
 
 from .text import TextConverter
+from .url import UrlConverter
+from .wechat import WechatConverter
 
 #: 内置转换器类（顺序 = 认领优先级）
 BUILTIN = (
+    WechatConverter,    # T2b：公众号特化 —— **必须排在通用 url 之前**，否则被它先认领
+    UrlConverter,       # T2a：普通网页（trafilatura 抽取）
     TextConverter,      # T1：md / txt 直通（零依赖）
-    # T2 url / wechat（M3）、T3 pdf（M4）、T4 image（M4）后续加入
+    # T3 pdf / T4 image（M4）后续加入
 )

@@ -23,6 +23,7 @@ import os
 import time
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from .base import FeedDocument, FeedError
 from .store import MaterialStore, MaterialsDB, doc_id_of, sha256_of
@@ -62,6 +63,33 @@ def _claim(*, ref: str, kind: str = "", data: bytes | None = None):
     —— 两处各写一遍必然漂移（dry-run 说会认领、真跑却认领不到）。"""
     from . import get_converter
     return get_converter(ref=ref, kind=kind, data=data)
+
+
+def _fetch_timeout(cfg) -> float:
+    """取回超时（配置 `feed.fetch.timeout`，默认 20 秒）。
+
+    短超时是刻意的：一个慢站点不该拖死整批投喂（批量场景下一个卡住的请求
+    会让整轮看起来"卡死"）。
+    """
+    try:
+        feed_cfg = getattr(cfg, "feed", None)
+        if callable(feed_cfg):              # 测试替身可能把它写成方法
+            feed_cfg = feed_cfg()
+        return float((feed_cfg or {}).get("fetch", {}).get("timeout") or 20)
+    except Exception:                       # noqa: BLE001 —— 配置读不到就用默认
+        return 20.0
+
+
+def _image_writer(store, doc_id: str, kb_dir):
+    """返回"存一张图、并给出**相对 kb 页的引用路径**"的闭包。
+
+    为什么给相对路径而不是绝对：交付物是给人读的文件（可能被 Obsidian 打开），
+    库内相对路径既可移植、又能正确渲染 —— 绝对路径换台机器/换个目录就断。
+    """
+    def _put(url: str, blob: bytes) -> str:
+        rel = store.put_image(doc_id, url, blob)
+        return os.path.relpath(store.root / rel, kb_dir).replace("\\", "/")
+    return _put
 
 
 def render_kb_page(doc: FeedDocument) -> str:
@@ -108,26 +136,45 @@ def ingest(ref: str, *, kind: str = "", force: bool = False,
         log("[x] 投喂失败：%s" % msg)
         return res
 
-    # -- 取字节：本地文件，或**调用方直接给字节**（重转路径从 raw/ 读，见 `reconvert`）
-    # URL 归 M3：现在**显式报错**，不静默跳过
+    # -- 取字节：本地文件 / URL 抓取 / 调用方直接给字节（重转从 raw/ 读）
     src: Optional[Path] = None
+    fetched = None
+    is_url = "://" in str(ref)
+    if is_url and not kind:
+        # 自动判型（URL 不说 kind 也能跑）；`mp.weixin.qq.com` 走特化转换器
+        kind = "wechat" if "mp.weixin.qq.com" in str(ref).lower() else "url"
+        res["kind"] = kind                  # ⚠️ res 在判型**之前**就建好了，这里要回填
     if data_override is not None:
         data = data_override
-        # 重转时来源可能已不在（用户删了下载目录）—— 扩展名/标题回落到 ref
+        # 重转时来源可能已不在（用户删了下载目录 / URL 也是）—— 扩展名/标题回落到 ref
         src = Path(str(ref))
+    elif is_url:
+        from . import fetch as _fetch
+        ua = (_fetch.WECHAT_UA if "mp.weixin.qq.com" in str(ref).lower()
+              else _fetch.DEFAULT_UA)
+        try:
+            fetched = _fetch.fetch(
+                str(ref), ua=ua, timeout=_fetch_timeout(cfg))
+        except FeedError as e:
+            return _fail(str(e), e.kind, retryable=e.retryable)
+        if fetched.status != 200:
+            return _fail("取回失败：HTTP %s" % fetched.status, "fetch",
+                         retryable=fetched.status >= 500 or fetched.status == 429)
+        data = fetched.body
+        res["http_status"] = fetched.status
+        ref = fetched.url                  # 跟随重定向后的**最终 URL**（溯源用这个）
+        res["ref"] = str(ref)
     else:
-        if "://" in str(ref):
-            return _fail("URL 投喂尚未实现（M3）：请先下载为本地文件再投喂",
-                         "unsupported", retryable=False)
         src = Path(str(ref))
         if not src.is_file():
             return _fail("找不到文件：%s" % src, "not_found", retryable=False)
         data = src.read_bytes()
 
     # 扩展名 / 文件名 / mtime 统一取"来源可用就用来源，否则用 ref 的形态"
-    suffix = src.suffix if src.suffix else Path(str(ref)).suffix
-    stem = src.stem if src.stem else Path(str(ref)).stem
-    mtime = int(src.stat().st_mtime) if src.is_file() else 0
+    url_path = Path(urlparse(str(ref)).path)
+    suffix = (src.suffix if src and src.suffix else url_path.suffix)
+    stem = (src.stem if src and src.stem else url_path.stem) or "document"
+    mtime = int(src.stat().st_mtime) if (src and src.is_file()) else 0
 
     sha = sha256_of(data)
     doc_id = doc_id_of(sha)
@@ -138,10 +185,37 @@ def ingest(ref: str, *, kind: str = "", force: bool = False,
     # dry-run **不建库也不建目录** —— 它承诺"一个字都不写"，建库本身就是写
     db = None
     prev = None
+    prev_url = None
     if not dry or Path(paths["db"]).exists():
         db = MaterialsDB(paths["db"])
-        prev = db.find_by_sha(sha)
+        # **URL 的身份是"最终 URL"，不是内容 hash**：动态页面字节每次都变
+        # （时间戳 / CSRF / 广告位）—— 实测同一篇公众号文章两次抓取 sha 不同，
+        # 按内容判会"每投喂一次多一条素材"。所以同 URL 一律视为**原地更新**
+        # （复用 doc_id），内容 hash 只用来判断"这次字节有没有变"。
+        if is_url:
+            prev_url = db.find_by_source(str(ref))
+        prev = None if prev_url else db.find_by_sha(sha)
+    if prev_url is not None:
+        doc_id = prev_url["doc_id"]
+        res["doc_id"] = doc_id
+        res["updated_existing"] = True
     try:
+        if prev_url is not None and prev_url.get("sha256") == sha:
+            # 同 URL 且字节没变 ⇒ 真幂等
+            res.update(ok=True, skipped="duplicate", doc_id=prev_url["doc_id"],
+                       title=prev_url.get("title") or "",
+                       converter=prev_url.get("converter") or "",
+                       kb_path=prev_url.get("kb_path") or "",
+                       raw_path=prev_url.get("raw_path") or "",
+                       quality=float(prev_url.get("quality") or 0.0),
+                       error="", error_kind="")
+            _audit(event="feed_skipped", kind=kind, doc_id=prev_url["doc_id"],
+                   reason="duplicate", title=prev_url.get("title") or "")
+            log("[=] 已投喂过（内容未变）：%s"
+                % (prev_url.get("title") or prev_url["doc_id"]))
+            return res
+        if prev_url is not None:
+            log("[i] 同 URL 已存在 ⇒ 原地更新（doc_id=%s 不变）" % doc_id)
         if prev and not force:
             # 幂等：同字节已投喂过。**不是失败** —— 如实回报并附既有状态
             res.update(ok=True, skipped="duplicate", doc_id=prev["doc_id"],
@@ -164,12 +238,12 @@ def ingest(ref: str, *, kind: str = "", force: bool = False,
                 res.update(ok=False, skipped="dry_run", error_kind="unsupported",
                            error="没有转换器能处理这个输入（扩展名 %s / kind=%s）"
                                  % (suffix or "-", kind or "-"))
-                log("[i] dry-run：没有转换器能认领 .%s（未写盘）" % src.suffix)
+                log("[i] dry-run：没有转换器能认领 %s（未写盘）" % (suffix or "-"))
             return res
 
         # ② 原件落盘（内容寻址，天然幂等）→ 立即登记 received
         # **认领失败也要落** —— 原件是不可再生的那一份，将来补上转换器才能 retry
-        sha2, raw_rel = store.put_raw(data, ext=src.suffix)
+        sha2, raw_rel = store.put_raw(data, ext=suffix)
         res["raw_path"] = raw_rel
         _audit(event="feed_received", kind=kind, doc_id=doc_id, ref=str(ref),
                raw_path=raw_rel, bytes=len(data), sha256=sha2)
@@ -199,7 +273,12 @@ def ingest(ref: str, *, kind: str = "", force: bool = False,
                   raw_path=raw_rel, converter=conv.stamp, status="received")
 
         # ③ 转译
-        meta = {"doc_id": doc_id, "mtime": mtime}
+        meta = {"doc_id": doc_id, "mtime": mtime, "now": int(time.time()),
+                "url": str(ref) if is_url else "",
+                "headers": (fetched.headers if fetched else {}),
+                # 第 2 段物料的两个写入口（转换器**不碰存储**，只拿回调 —— 便于测试替身）
+                "put_mirror": lambda name, b: store.put_mirror(doc_id, name, b),
+                "put_image": _image_writer(store, doc_id, paths["kb"])}
         try:
             doc = conv.convert(ref=str(ref), data=data, meta=meta)
         except FeedError as e:
@@ -377,6 +456,30 @@ def lint(*, config=None, with_index: bool = True,
     """确定性产物体检（见 `feed/lint.py`）。"""
     from .lint import run_lint
     return run_lint(config=config, with_index=with_index, index_db=index_db)
+
+
+def ingest_text(text: str, *, title: str = "", source_ref: str = "",
+                config=None, log=print) -> dict[str, Any]:
+    """**兜底通路**：直接投喂一段文本（浏览器另存失败 / 反爬 / 只拿到正文时用）。
+
+    为什么必须有它：反爬是军备竞赛，直抓失败时若没有兜底，整条链路就废了
+    （计划 §7.6 把它列为一等公民而非补丁）。实测公众号就出现过"不带浏览器 UA
+    只拿到 18 KB 桩页"——那种情况下用户手动粘正文是最可靠的路。
+
+    实现上复用 `ingest(data_override=...)`：`ref` 只是一个**伪路径**（用于派生扩展名
+    与兜底标题，不参与读取），真正的人读来源放 `source_ref`（若给了就作为溯源值）。
+    """
+    body = str(text or "")
+    if not body.strip():
+        return {"ok": False, "error": "stdin 是空的，没有可投喂的内容",
+                "error_kind": "empty", "ref": source_ref or "stdin"}
+    ref = source_ref if source_ref else "stdin:%s.md" % (title or "pasted")
+    payload = body
+    if title and "title:" not in body[:200]:
+        # 用 frontmatter 传标题（`TextConverter` 的既有取值顺序：frontmatter > H1 > 文件名）
+        payload = "---\ntitle: %s\n---\n\n%s" % (title, body)
+    return ingest(ref, kind="text", config=config, log=log,
+                  data_override=payload.encode("utf-8"))
 
 
 def reconvert(doc_id: str, *, kind: str = "", config=None,

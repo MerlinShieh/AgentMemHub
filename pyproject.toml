@@ -13,6 +13,13 @@ dependencies = [
     "tokenizers>=0.19",
     "numpy>=1.26",
     "sqlite-vec>=0.1.6",
+    # 外部投喂转译层（agentmemhub/feed）：取回 + 正文抽取
+    #   httpx       —— HTTP 抓取（浏览器 UA / 代理 / 流式限长）。此前已装在环境里
+    #                  却没写进声明，属"隐形依赖"（2026-10-12 补上）
+    #   trafilatura —— 正文抽取（Apache-2.0）。选型是**用真实样本对比**出来的：
+    #                  公众号 3.6 MB 真页与 pushplus 文档站都能正确给出正文、标题、发布日期
+    "httpx>=0.27",
+    "trafilatura>=2.3",
 ]
 
 [project.optional-dependencies]

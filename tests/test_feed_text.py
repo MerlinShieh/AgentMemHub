@@ -324,11 +324,15 @@ def test_失败_文件不存在(tmp_path, cfg):
     assert not r["ok"] and r["error_kind"] == "not_found"
 
 
-def test_失败_URL显式告知未实现(cfg):
-    """URL 归 M3。现在必须**明确报错**而不是静默成功 —— 静默是本项目踩过的坑。"""
+def test_URL投喂已实现但沙箱下不出网(cfg):
+    """M3 起 URL 可投喂；而**测试沙箱下取回层熔断**（一个字节都不出网）。
+
+    这是本项目"凡真实副作用（花钱/发消息/出网）的出口都要熔断"的同一条纪律
+    —— 不能靠"测试记得 mock"。要测 URL 转译请 mock `feed.fetch.fetch` 并喂夹具。
+    """
     r = ingest("https://example.com/a.html", config=cfg, log=lambda *_: None)
-    assert not r["ok"] and r["error_kind"] == "unsupported"
-    assert "M3" in r["error"]
+    assert not r["ok"] and r["error_kind"] == "fetch"
+    assert "沙箱" in r["error"] and "mock" in r["error"]
 
 
 def test_失败_未知类型不静默跳过(tmp_path, cfg):

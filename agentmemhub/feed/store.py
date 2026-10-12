@@ -31,6 +31,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 #: 素材状态机：received（原件已落盘）→ converted（转译完成）→ published（交付物已发布）
 #: failed 不删原件 —— 换转换器版本后可以重转（这是三段保留的价值）
@@ -122,6 +123,18 @@ class MaterialStore:
         p.write_bytes(data)
         return str(p.relative_to(self.root)).replace("\\", "/")
 
+    def put_image(self, doc_id: str, url: str, data: bytes) -> str:
+        """把正文里的一张图存进 `mirror/<doc_id>/images/`。
+
+        文件名由 **URL 的 hash** 派生：稳定（同一张图重复本地化不会产生重复文件）、
+        且不会因为 URL 里的查询串/超长路径把文件名搞坏。
+        """
+        h = hashlib.sha1(str(url).encode("utf-8")).hexdigest()[:12]
+        ext = Path(urlparse(str(url)).path).suffix
+        if not re.fullmatch(r"\.[A-Za-z0-9]{1,5}", ext or ""):
+            ext = ".img"                    # 没有/异常扩展名也要能存
+        return self.put_mirror(doc_id, "images/%s%s" % (h, ext), data)
+
     # -- 第 3 段：最终 md（交付物 / 知识库） ------------------------------
 
     def kb_path_of(self, doc_id: str) -> str:
@@ -177,7 +190,8 @@ class MaterialsDB:
             " warnings, status, error, error_kind, created_at, updated_at)"
             " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(doc_id) DO UPDATE SET"
-            " kind=excluded.kind, source_ref=excluded.source_ref,"
+            " sha256=excluded.sha256, kind=excluded.kind,"
+            " source_ref=excluded.source_ref,"
             " title=excluded.title, doc_time=excluded.doc_time,"
             " raw_path=excluded.raw_path, mirror_path=excluded.mirror_path,"
             " kb_path=excluded.kb_path, converter=excluded.converter,"
@@ -221,6 +235,18 @@ class MaterialsDB:
         """**幂等查重**：同字节（同 sha256）是否已投喂过。"""
         r = self.conn.execute("SELECT * FROM materials WHERE sha256=?",
                               (sha256,)).fetchone()
+        return self._row(r) if r else None
+
+    def find_by_source(self, source_ref: str) -> Optional[dict[str, Any]]:
+        """按**来源标识**（最终 URL / 文件路径）查最近一条。
+
+        为什么 URL 需要它：动态页面的字节**每次都变**（时间戳、CSRF token、广告位），
+        若只按内容 hash 定身份，**同一个链接每投喂一次就多一条素材**
+        （2026-10-12 真机验收实测：同一篇公众号文章两次抓取 sha 不同）。
+        """
+        r = self.conn.execute(
+            "SELECT * FROM materials WHERE source_ref=?"
+            " ORDER BY updated_at DESC LIMIT 1", (str(source_ref),)).fetchone()
         return self._row(r) if r else None
 
     def list(self, *, status: str = "", low_quality: bool = False,

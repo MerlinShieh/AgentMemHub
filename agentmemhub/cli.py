@@ -1405,6 +1405,12 @@ def build_parser() -> argparse.ArgumentParser:
     pfeed.add_argument("--id", default="", help="show/retry/retract/forget 用：doc_id")
     pfeed.add_argument("--purge", action="store_true",
                        help="forget 用：**连原件一起删**（默认保留原件，因为它不可再生）")
+    pfeed.add_argument("--stdin", action="store_true",
+                       help="add 用：**兜底通路** —— 从标准输入读正文直接投喂"
+                            "（反爬/另存失败时用）；配合 --title / --source-ref")
+    pfeed.add_argument("--title", default="", help="--stdin 用：标题")
+    pfeed.add_argument("--source-ref", default="",
+                       help="--stdin 用：真实来源（URL 或文件路径），作溯源值")
     pfeed.add_argument("--kind", default="",
                        help="显式指定类型（text/url/wechat/pdf/image）")
     pfeed.add_argument("--force", action="store_true",
@@ -1513,6 +1519,16 @@ def cmd_feed(args) -> int:
         doc_id_arg = tokens.pop(0)
 
     if action == "add":
+        # **兜底通路**：从 stdin 读正文（反爬失败 / 只拿到正文时用）
+        if getattr(args, "stdin", False):
+            import sys as _sys
+            text = _sys.stdin.read()
+            r = _svc.ingest_text(text,
+                                 title=getattr(args, "title", "") or "",
+                                 source_ref=getattr(args, "source_ref", "") or "")
+            if as_json:
+                print(_json.dumps(r, ensure_ascii=False, indent=2))
+            return 0 if r.get("ok") else 1
         paths = [p for p in tokens if p.strip()]
         if not paths:
             print("用法：agentmemhub feed add <文件路径> [更多路径…] "
