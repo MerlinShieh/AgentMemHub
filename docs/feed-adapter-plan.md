@@ -2,7 +2,8 @@
 
 > 起草 2026-10-10｜**v2.1 修订（用户拍板 Q1–Q7 + 解析复杂度重理 + 四项交付纪律）**｜
 > **v2.2 修订（深读参考实现 `second-brain-skill` → 改判 T2c + 新增脚本的第三角色"验证器" + 回收站教训）**｜
-> 性质：**需求分析 + 计划，未动工**
+> 性质：**需求分析 + 计划**
+> 进度：**M0 ✅ 已实施（2026-10-10，commit `c3836ee`）**；M1–M5 未动工
 > 上游文档：[`external-ingest.md`](external-ingest.md)（09-22 调研，结论仍有效）、
 > [`external-ingest-plan.md`](external-ingest-plan.md)（09-24 可行性分析，**本文按 10-10 用户决策更新其路线**）
 > 本文与旧计划的关系：**继承**其硬约束盘点（§3）、素材库存放决策（§1.2）、风险清单骨架；
@@ -584,12 +585,23 @@ FeedDocument.warnings: list[str]     # 人可读的具体问题（不达标原�
 | **③ 开关配置** | 每个新增配置键**必须有真实消费点**，进 `scripts/check_config_keys.py` 可查范围；`feed.convert.llm` 默认 `false`；**真值/假值两路都要有测试** | `check_config_keys.py` 零僵尸键 + 开关两路测试（本项目已踩过三次假开关） |
 | **④ 文档更新** | 本文（随实施同步）+ `docs/modules/feed.md`（照 `docs/modules/*` 惯例的模块文档）+ `data-architecture.md` 新章 + 根 README 模块地图 + `AGENTS.md` 相关文档 | 文档与代码一致性自查（本项目有专门的审计手法） |
 
-### M0 · 地基（0.5 天）——独立、零风险、现在没有 feed 数据
-- `units` 幂等补 `doc_id` 列；`wiki_index.parse_page` 返回 `doc`、`project_pages` 写入 `doc_id`
-- `import_bundle` 加 `origin` 参数（默认 `native`，行为不变）
-- `data-architecture.md` §9 口径统一（`source=feed` 为准）
-- 顺手修 `rag/ingest.py` INSERT 补 origin（按 source 映射，与 `_project_one` 同口径）
-- **验收**：红→绿测试——feed 会话原始段落 `origin='external'`；投喂页投影后 `units.doc_id` 可反查
+### M0 · 地基（0.5 天）✅ **已完成（2026-10-10，commit `c3836ee`）**
+- ✅ `units` 幂等补 `doc_id` 列；`wiki_index.parse_page` 返回 `doc`，
+  `project_pages` **INSERT 与 UPDATE 两条路径都写**（非投喂页 NULL，便于 `IS NOT NULL` 查询）
+- ✅ `import_bundle` **逐条**可声明 `origin`（缺省/非法值回落 `native`）
+- ✅ `data-architecture.md` 口径统一（以代码的 `source=="feed"` 为准）+ 时间线第 22 条
+- ✅ `rag/ingest.py` 的 INSERT 补 origin —— **并抽成单点函数 `origin_of()`，
+  与 `distill._project_one` 共用**（消除两处漂移，这次的缺口正是漂移的产物）
+- ✅ **附带修复潜在崩溃**：`run_ingest` 写桥接列却**不保证列存在**（不调
+  `ensure_bridge_schema`）⇒ 全新索引库上只跑 ingest 会报 `no column named origin`
+- ✅ **附带文档纠错**：`external-ingest.md` 原记"面板有来源筛选 ✅"是**错的**
+  （`web/app.py:947,956` 那个 `origin` 是 UNION 的列别名，与 native/external 无关）
+- **验收已过**：修前 6 条失败 → 修后 6 条通过；全量 **1028 passed / 1 skipped**
+- **生产库核对（只读）**：`source='feed'` 行数 **0**（与预判一致 ⇒ 零风险）；
+  `origin` 分布 **20966 NULL / 482 native** —— 那 20966 正是采集层写的，量化印证缺口；
+  **不回填**（消费点均有 `or "native"` 兜底，回填只是装饰却要加热路径 UPDATE）
+- ⏭ **遗留（非 bug）**：`units.doc_id` 走**懒迁移** —— 需任一次记忆操作或
+  M2 的投影调用才会补上该列（`ensure_bridge_schema` 只在被调用时 ALTER）
 
 ### M1 · 素材库 + T1 直通（1.5 天）——第一个端到端价值点
 - `materials.db` schema（独立库，不进快照）+ `feed/store.py`（内容寻址 raw、hash 查重）
