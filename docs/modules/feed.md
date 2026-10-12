@@ -80,8 +80,14 @@ agentmemhub feed add --dry-run <路径>           # 只查重与认领，不写�
 agentmemhub feed add --force <路径>             # 同内容已投喂过也重跑（修标题/换转换器后用）
 agentmemhub feed list [--status failed] [--low-quality] [--json]
 agentmemhub feed show <doc_id>
-agentmemhub feed retry <doc_id>
+agentmemhub feed retry <doc_id>                 # 重转：优先原始来源；来源不可达时**自动回落 raw/ 原件**
+agentmemhub feed retry --from-raw <doc_id>      # 强制用 raw/ 原件重转（不碰原始来源）
 ```
+
+**为什么 `retry` 要有"回落 raw"这条**：三段保留的全部意义就是"原件不可再生、其余都可重建"。
+若重转只能靠 `source_ref`（用户的下载目录），用户一清理文件就再也转不了 ——
+**保留下来的原件等于白存**（2026-10-12 核对投喂数据时发现该缺口）。
+回落后 `source_ref` **不被改写**（仍指向原始路径），溯源不受影响。
 
 动作既支持自然写法 `feed add X`，也支持项目惯例 `feed --action add X`；
 **flag 可以夹在中间**（`feed add --force X`）—— 这一条是对 feed 特意放宽的
@@ -132,6 +138,8 @@ agentmemhub feed list --status failed
   标题取值顺序、**代码块注释不外泄成标题**、`doc_time` 用发布日
 - 端到端：投喂落三段并 `published`、重复投喂报幂等、内容变即新素材、
   `--force` 可重跑、`--dry-run` 不写盘
+- **重转**：来源被删也能从 `raw/` 原件重跑（且 `source_ref` 不被改写）、
+  原件也丢了则如实报错、不存在的 doc_id 报 `not_found`
 - 失败路径：文件不存在 / URL 未实现 / 未知类型 / **失败也保留原件并登记 failed**
 - 日志：**事件行号不恒等**（包装层 +1 的守护）、失败事件为 `error` 级
 - kb 渲染：frontmatter 可被 YAML 读回、低质量带 `warnings`
@@ -142,6 +150,8 @@ agentmemhub feed list --status failed
 
 1. **未知类型必须显式报错**，绝不静默跳过（本项目踩过"未知 source 静默跳过"的坑）。
 2. **原始件永不丢**：认领失败、转译失败都要先落 `raw/` —— 否则将来补上转换器也无法重转。
+   **推论：重转不得依赖原始来源可达** —— `retry` 在来源消失时必须回落到 `raw/` 原件
+   （`reconvert()`），否则"原件保留"只是摆设。
 3. **`kb` 文件路径只由 `doc_id` 派生**（`<doc_id>.md`）—— 投影的 `src_id`/`seq` 由路径派生，
    路径必须稳定；可变的标题放 frontmatter。
 4. **`doc_time` 是文档自身时间**，不是投喂时刻（与 `distill._origin_time` 同语义）。

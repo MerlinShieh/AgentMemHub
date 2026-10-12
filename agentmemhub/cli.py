@@ -1405,6 +1405,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="显式指定类型（text/url/wechat/pdf/image）")
     pfeed.add_argument("--force", action="store_true",
                        help="add/retry 用：同内容已投喂过也重跑")
+    pfeed.add_argument("--from-raw", action="store_true",
+                       help="retry 用：强制用 raw/ 里的原件重转（不碰原始来源）")
     pfeed.add_argument("--dry-run", action="store_true",
                        help="add 用：只做查重与认领，不写盘")
     pfeed.add_argument("--status", default="", help="list 用：按状态筛")
@@ -1584,7 +1586,8 @@ def cmd_feed(args) -> int:
         if not doc_id:
             print("用法：agentmemhub feed retry <doc_id>（或 --id <doc_id>）")
             return 2
-        r = _svc.retry(doc_id, force=bool(getattr(args, "force", False)))
+        r = (_svc.reconvert(doc_id) if getattr(args, "from_raw", False)
+             else _svc.retry(doc_id, force=bool(getattr(args, "force", False))))
         if as_json:
             print(_json.dumps(r, ensure_ascii=False, indent=2))
         return 0 if r.get("ok") else 1

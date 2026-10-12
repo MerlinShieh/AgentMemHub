@@ -354,6 +354,50 @@ def test_失败_原件已落盘且登记failed(tmp_path, cfg):
         db.close()
 
 
+def test_重转_来源被删也能从raw原件重跑(tmp_path, cfg):
+    """**三段保留的全部意义**：原件不可再生、其余都可重建。
+
+    若重转只能靠 `source_ref`（用户的下载目录），用户一清理文件就再也转不了
+    —— 保留下来的原件等于白存（2026-10-12 核对投喂数据时发现的缺口）。
+    """
+    from agentmemhub.feed.service import reconvert, retry
+
+    src = _md(tmp_path, "会消失.md", "# 原始标题\n\n原始内容\n")
+    r1 = ingest(str(src), config=cfg, log=lambda *_: None)
+    assert r1["ok"]
+
+    src.unlink()                                   # 用户清空了下载目录
+    r2 = retry(r1["doc_id"], config=cfg, log=lambda *_: None)
+    assert r2["ok"] and r2["doc_id"] == r1["doc_id"]
+    # 溯源不被改写：source_ref 仍是原来那个路径（不是 raw 路径）
+    row = [m for m in list_materials(config=cfg) if m["doc_id"] == r1["doc_id"]][0]
+    assert row["source_ref"].endswith("会消失.md")
+    assert row["status"] == "published"
+
+    # 显式 from-raw 也走同一条路
+    r3 = reconvert(r1["doc_id"], config=cfg, log=lambda *_: None)
+    assert r3["ok"] and r3["doc_id"] == r1["doc_id"]
+
+
+def test_重转_原件也丢了就如实报错(tmp_path, cfg):
+    from agentmemhub.feed.service import reconvert
+
+    src = _md(tmp_path, "a.md")
+    r1 = ingest(str(src), config=cfg, log=lambda *_: None)
+    # 手工删掉 raw 里的原件（模拟磁盘故障/误删）
+    (cfg.paths["store"] / r1["raw_path"]).unlink()
+    r2 = reconvert(r1["doc_id"], config=cfg, log=lambda *_: None)
+    assert not r2["ok"] and r2["error_kind"] == "not_found"
+    assert "raw" in r2["error"]
+
+
+def test_重转_不存在的doc_id如实报错(cfg):
+    from agentmemhub.feed.service import reconvert, retry
+    for fn in (retry, reconvert):
+        r = fn("没有这个id", config=cfg, log=lambda *_: None)
+        assert not r["ok"] and r["error_kind"] == "not_found"
+
+
 # ---------------------------------------------------------------------------
 # 日志：标准头五项（加新事件流必须守住）
 # ---------------------------------------------------------------------------

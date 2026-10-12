@@ -83,7 +83,8 @@ def render_kb_page(doc: FeedDocument) -> str:
 
 
 def ingest(ref: str, *, kind: str = "", force: bool = False,
-           dry_run: bool = False, config=None, log=print) -> dict[str, Any]:
+           dry_run: bool = False, config=None, log=print,
+           data_override: Optional[bytes] = None) -> dict[str, Any]:
     """投喂一个本地文件（URL 归 M3）。返回结构化结果，**失败也返回**（不抛）。
 
     返回字段：`ok / skipped / doc_id / converter / kb_path / quality /
@@ -106,15 +107,27 @@ def ingest(ref: str, *, kind: str = "", force: bool = False,
         log("[x] 投喂失败：%s" % msg)
         return res
 
-    # -- URL 归 M3（现在**显式报错**，不静默跳过）----------------------------
-    if "://" in str(ref):
-        return _fail("URL 投喂尚未实现（M3）：请先下载为本地文件再投喂",
-                     "unsupported", retryable=False)
-    src = Path(str(ref))
-    if not src.is_file():
-        return _fail("找不到文件：%s" % src, "not_found", retryable=False)
+    # -- 取字节：本地文件，或**调用方直接给字节**（重转路径从 raw/ 读，见 `reconvert`）
+    # URL 归 M3：现在**显式报错**，不静默跳过
+    src: Optional[Path] = None
+    if data_override is not None:
+        data = data_override
+        # 重转时来源可能已不在（用户删了下载目录）—— 扩展名/标题回落到 ref
+        src = Path(str(ref))
+    else:
+        if "://" in str(ref):
+            return _fail("URL 投喂尚未实现（M3）：请先下载为本地文件再投喂",
+                         "unsupported", retryable=False)
+        src = Path(str(ref))
+        if not src.is_file():
+            return _fail("找不到文件：%s" % src, "not_found", retryable=False)
+        data = src.read_bytes()
 
-    data = src.read_bytes()
+    # 扩展名 / 文件名 / mtime 统一取"来源可用就用来源，否则用 ref 的形态"
+    suffix = src.suffix if src.suffix else Path(str(ref)).suffix
+    stem = src.stem if src.stem else Path(str(ref)).stem
+    mtime = int(src.stat().st_mtime) if src.is_file() else 0
+
     sha = sha256_of(data)
     doc_id = doc_id_of(sha)
     res["doc_id"] = doc_id
@@ -149,7 +162,7 @@ def ingest(ref: str, *, kind: str = "", force: bool = False,
             else:
                 res.update(ok=False, skipped="dry_run", error_kind="unsupported",
                            error="没有转换器能处理这个输入（扩展名 %s / kind=%s）"
-                                 % (src.suffix or "-", kind or "-"))
+                                 % (suffix or "-", kind or "-"))
                 log("[i] dry-run：没有转换器能认领 .%s（未写盘）" % src.suffix)
             return res
 
@@ -167,25 +180,25 @@ def ingest(ref: str, *, kind: str = "", force: bool = False,
             conv = _claim(ref=str(ref), kind=kind, data=data)
         except Exception as e:              # noqa: BLE001 —— 注册表故障也要如实报
             db.upsert(doc_id=doc_id, sha256=sha2, kind=kind or "unknown",
-                      source_ref=str(ref), title=src.stem, doc_time=0,
+                      source_ref=str(ref), title=stem, doc_time=0,
                       raw_path=raw_rel, status="failed",
                       error=str(e), error_kind="registry")
             return _fail("转换器注册表异常：%s" % e, "registry", doc_id=doc_id)
         if conv is None:
             msg = ("没有转换器能处理这个输入（扩展名 %s / kind=%s）—— "
-                   "未知类型必须显式报错，不静默跳过" % (src.suffix or "-", kind or "-"))
+                   "未知类型必须显式报错，不静默跳过" % (suffix or "-", kind or "-"))
             db.upsert(doc_id=doc_id, sha256=sha2, kind=kind or "unknown",
-                      source_ref=str(ref), title=src.stem, doc_time=0,
+                      source_ref=str(ref), title=stem, doc_time=0,
                       raw_path=raw_rel, status="failed",
                       error=msg, error_kind="unsupported")
             return _fail(msg, "unsupported", doc_id=doc_id, retryable=False)
         res["converter"] = conv.stamp
         db.upsert(doc_id=doc_id, sha256=sha2, kind=kind or "text",
-                  source_ref=str(ref), title=src.stem, doc_time=0,
+                  source_ref=str(ref), title=stem, doc_time=0,
                   raw_path=raw_rel, converter=conv.stamp, status="received")
 
         # ③ 转译
-        meta = {"doc_id": doc_id, "mtime": int(src.stat().st_mtime)}
+        meta = {"doc_id": doc_id, "mtime": mtime}
         try:
             doc = conv.convert(ref=str(ref), data=data, meta=meta)
         except FeedError as e:
@@ -248,11 +261,41 @@ def get_material(doc_id: str, *, config=None) -> Optional[dict[str, Any]]:
         db.close()
 
 
+def reconvert(doc_id: str, *, kind: str = "", config=None,
+              log=print) -> dict[str, Any]:
+    """**用 `raw/` 里的原件重跑转译** —— 不依赖原始来源是否还在。
+
+    为什么必须有这条路径：三段保留的全部意义就是"原件不可再生、其余都可重建"。
+    若重转只能靠 `source_ref`（用户的下载目录），用户一清理文件就再也转不了
+    ——**保留下来的原件等于白存**（2026-10-12 核对投喂数据时发现该缺口）。
+
+    溯源不受影响：`source_ref` 仍用登记表里的原值（**不**改成 raw 路径）。
+    """
+    cfg = config or _cfg()
+    paths = cfg.feed_paths()
+    row = get_material(doc_id, config=cfg)
+    if not row:
+        return {"ok": False, "error": "没有这条素材：%s" % doc_id,
+                "error_kind": "not_found"}
+    raw_rel = row.get("raw_path") or ""
+    store = MaterialStore(root=paths["store"], kb_dir=paths["kb"])
+    raw = store.raw_path(raw_rel) if raw_rel else None
+    if raw is None or not raw.is_file():
+        return {"ok": False, "error": "原件不在 raw/ 里，无法重转：%s" % raw_rel,
+                "error_kind": "not_found"}
+    ref = row.get("source_ref") or str(raw)
+    app_kind = kind or row.get("kind") or ""
+    if app_kind == "unknown":
+        app_kind = ""
+    return ingest(ref, kind=app_kind, force=True, config=cfg, log=log,
+                  data_override=raw.read_bytes())
+
+
 def retry(doc_id: str, *, force: bool = False, config=None,
           log=print) -> dict[str, Any]:
-    """按登记表里的 `source_ref` 重跑一次转译（原件始终在，所以必然可重跑）。
+    """重跑一次转译：**优先用原始来源，来源不可达时回落到 `raw/` 原件**。
 
-    用途：换了转换器版本、或上次因网络/LLM 失败之后补跑。
+    用途：换了转换器版本、或上次转译失败之后补跑。
     """
     cfg = config or _cfg()
     row = get_material(doc_id, config=cfg)
@@ -260,7 +303,9 @@ def retry(doc_id: str, *, force: bool = False, config=None,
         return {"ok": False, "error": "没有这条素材：%s" % doc_id,
                 "error_kind": "not_found"}
     ref = row.get("source_ref") or ""
-    if not ref or "://" in ref or not Path(ref).is_file():
-        return {"ok": False, "error": "原件来源不可达，无法重跑：%s" % ref,
-                "error_kind": "not_found"}
-    return ingest(ref, kind=row.get("kind") or "", force=True, config=cfg, log=log)
+    if ref and "://" not in ref and Path(ref).is_file():
+        kind = row.get("kind") or ""
+        return ingest(ref, kind="" if kind == "unknown" else kind, force=True,
+                      config=cfg, log=log)
+    log("[i] 原始来源不可达（%s）—— 改用 raw/ 里的原件重转" % (ref or "（空）"))
+    return reconvert(doc_id, config=cfg, log=log)
