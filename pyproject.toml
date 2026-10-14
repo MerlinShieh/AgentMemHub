@@ -20,9 +20,28 @@ dependencies = [
     #                  公众号 3.6 MB 真页与 pushplus 文档站都能正确给出正文、标题、发布日期
     "httpx>=0.27",
     "trafilatura>=2.3",
+    #   pypdf       —— T3 PDF：文本层抽取 + 加密探测 + 元数据（BSD-3，纯 Python，轻）
+    #   python-docx —— DOCX 直通（MIT，纯 Python）。**.docx 不属于"PDF 那一类"**：
+    #                  它本质是 ZIP+XML，有真实语义结构（标题层级/段落/表格），
+    #                  确定性抽取、**不需要 LLM**，难度接近 T1（见计划 §7.0.1）
+    "pypdf>=5.0",
+    "python-docx>=1.1",
 ]
 
 [project.optional-dependencies]
+# PDF 增强档：表格与扫描件渲染。**默认不装** —— 照 §7.2「默认零依赖可跑通、
+# 能力按需开启」的纪律（与 Playwright 同款处理：400MB 浏览器不该是默认成本）。
+#   pdfplumber —— T3b 表格抽取（MIT；带 pdfminer.six + Pillow，明显偏重）
+#   pypdfium2  —— T3c 扫描件渲染（PDFium 绑定，Apache-2.0/BSD-3）。
+#                 **选它而非 PyMuPDF 是为了避开 AGPL 传染性**（计划 §10.2 R2 的
+#                 待决项，就此结案）；也不是 `pdftoppm`（要外部装 poppler，
+#                 Windows 上得单独分发可执行程序）。
+# 缺这两个时的降级**不许静默**：T3b 退化为 T3a 并记 warning（表格丢失），
+# T3c 报 `needs_renderer` 并给出 `uv sync --extra feed-pdf` 指引。
+feed-pdf = [
+    "pdfplumber>=0.11",
+    "pypdfium2>=4.30",
+]
 web = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
