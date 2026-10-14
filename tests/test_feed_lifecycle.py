@@ -158,6 +158,21 @@ def test_体检_原件丢失报P0(tmp_path, cfg):
     assert "raw_missing" in _kinds(res) and res["p0"] >= 1
 
 
+def test_体检_扫描件待OCR时报P1不报P0(tmp_path, cfg):
+    """`needs_ocr` **不是数据不一致**（原件与页面镜像都已保住），所以不该报 P0；
+    但也不该静默躺在库里没人管 —— 体检要把它顶到台面上。"""
+    from pathlib import Path
+
+    fx = Path(__file__).resolve().parent / "fixtures" / "feed" / "pdf_scanned.pdf"
+    p = tmp_path / "scan.pdf"
+    p.write_bytes(fx.read_bytes())
+    r = service.ingest(str(p), config=cfg, log=lambda *_: None)
+    assert r["error_kind"] == "needs_ocr", r.get("error")
+    res = run_lint(config=cfg, with_index=False)
+    assert "awaiting_ocr" in _kinds(res)
+    assert res["p0"] == 0, "能力缺口不是数据不一致，不该拖垮提交门槛"
+
+
 def test_体检_溯源字段错了报P0(tmp_path, cfg):
     src, r = _add(tmp_path, cfg)
     kb = Path(r["kb_path"])

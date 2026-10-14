@@ -82,6 +82,17 @@ def run_lint(*, config=None, with_index: bool = True,
             add("P0", "raw_missing", doc,
                 "登记的原件不在 raw/ 里：%s（原件不可再生，必须查明）" % raw_rel)
         if r.get("status") != "published":
+            # **失败素材也要在体检里露头**：`needs_ocr` 不是数据坏了，而是能力还没接
+            # （原件与页面镜像都已保住，接上 T4 通路可 `feed retry` 续跑）。不报的话
+            # 这些素材会静默躺在库里 —— 而"静默"正是这个模块存在的理由。
+            kind = str(r.get("error_kind") or "")
+            if kind in ("needs_ocr", "needs_renderer"):
+                add("P1", "awaiting_ocr", doc,
+                    "扫描件待 OCR（%s）：原件与页面镜像已保住，接上 T4 通路后可 "
+                    "`feed retry`；也可先 `feed add --stdin` 投喂 OCR 结果" % kind)
+            elif str(r.get("status")) == "failed":
+                add("P1", "failed_material", doc,
+                    "转译失败（%s）：%s" % (kind or "-", (r.get("error") or "")[:100]))
             continue
         kb_file = kb_dir / ("%s.md" % doc)
         if not kb_file.is_file():

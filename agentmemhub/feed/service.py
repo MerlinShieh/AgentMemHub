@@ -290,7 +290,11 @@ def ingest(ref: str, *, kind: str = "", force: bool = False,
 
         res.update(title=doc.title, quality=doc.quality,
                    warnings=list(doc.warnings), low_quality=doc.low_quality,
-                   doc_time=int(doc.doc_time))
+                   doc_time=int(doc.doc_time), kind=doc.kind)
+        # `kind` 必须回填成**转换器判定的类型**，不是调用方传进来的那个：
+        # 本地文件传进来时 kind 是空串（靠扩展名/魔数判型），
+        # 不回填的话返回值里 `kind=""`、库里却是 `pdf` —— 同一件事两个答案。
+        # 2026-10-14 被 `test_端到端_文字版PDF_出kb页且保住页码` 逼出来。
         _audit(event="feed_converted", kind=doc.kind, doc_id=doc_id,
                converter=doc.converter, title=doc.title, chars=len(doc.markdown),
                quality=doc.quality, warnings=list(doc.warnings))

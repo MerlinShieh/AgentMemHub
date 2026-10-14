@@ -247,7 +247,8 @@ def test_T1_文档时间用发布日而非投喂时刻():
 
 def test_注册表_认领与未知返回None():
     assert get_converter(ref="a.md").name == "text"
-    assert get_converter(ref="a.pdf") is None       # 未知类型必须显式无认领
+    # ⚠️ 别拿 `.pdf` 当"未知类型"样本了 —— M4 起它归 T3 转换器认领
+    assert get_converter(ref="a.xyz") is None       # 未知类型必须显式无认领
 
 
 # ---------------------------------------------------------------------------
@@ -336,8 +337,8 @@ def test_URL投喂已实现但沙箱下不出网(cfg):
 
 
 def test_失败_未知类型不静默跳过(tmp_path, cfg):
-    p = tmp_path / "x.pdf"
-    p.write_bytes(b"%PDF-1.4 fake")
+    p = tmp_path / "x.xyz"
+    p.write_bytes(b"unknown-format-bytes")
     r = ingest(str(p), config=cfg, log=lambda *_: None)
     assert not r["ok"] and r["error_kind"] == "unsupported"
     assert "没有转换器" in r["error"]
@@ -345,8 +346,8 @@ def test_失败_未知类型不静默跳过(tmp_path, cfg):
 
 def test_失败_原件已落盘且登记failed(tmp_path, cfg):
     """转译失败**不删原件** —— 换更好的转换器版本后可以重转（三段保留的价值）。"""
-    p = tmp_path / "x.pdf"
-    p.write_bytes(b"%PDF-1.4 fake")
+    p = tmp_path / "x.xyz"
+    p.write_bytes(b"unknown-format-bytes")
     r = ingest(str(p), config=cfg, log=lambda *_: None)
     assert not r["ok"]
     db = MaterialsDB(cfg.paths["db"])

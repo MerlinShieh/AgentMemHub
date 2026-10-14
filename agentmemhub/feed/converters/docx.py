@@ -1,0 +1,362 @@
+# -*- coding: utf-8 -*-
+"""DOCX 直通：**.docx 不属于"PDF 那一类"**（计划 §7.0.1 专门纠正过这个误判）。
+
+为什么它和 T1 同级，而不是 T3
+============================
+`.docx` 本质是 ZIP + XML：标题是 `<w:pStyle>`、大纲级别是 `<w:outlineLvl>`、
+表格是 `<w:tbl>`、编号是 `<w:numPr>`、图片有 `<a:blip>` 的 rId ——
+**语义结构本来就在文件里**，`python-docx` 是确定性抽取：零 LLM、零猜测、可复现。
+
+对比 PDF：PDF 里只有"这个字画在坐标 (x, y)"，标题和表格全靠**重建**，
+所以两者在 §7.0 的四个维度上（可及性 / 可提取性 / 保真度 / **可复现性**）都不同级。
+把 `.docx` 按 PDF 估工期，是这个计划早期最贵的一个误判。
+
+一个必须避开的坑：段落与表格在 XML 里是**兄弟节点**且交错
+====================================================
+`document.paragraphs` 与 `document.tables` 是**两个独立列表** —— 分别遍历会让
+所有表格挤到文末，文档顺序全丢。必须按 `w:body` 的子节点顺序走
+（`iter_block_items`，python-docx 官方 FAQ 的做法）。夹具 `sample.docx` 里
+"表格前后的段落"就是这个坑的哨兵：只要顺序错了，那条断言立刻红。
+
+另外两处如实记账（不静默）
+======================
+· **合并单元格**：markdown 管道表表达不了跨行/跨列，同一格里的话会重复出现 ⇒ 记 warning；
+· **图片**：docx 有真实位置（`w:drawing` 就在某个段落里），所以图片**插回原位**，
+  比 PDF 那一档强 —— 但正因如此，"抽不出来"才更要报出来。
+"""
+from __future__ import annotations
+
+import io
+import re
+import time
+from pathlib import Path
+
+from ..base import BaseConverter, FeedDocument, FeedError
+from ..mdtable import table_md
+
+#: 认领的扩展名（`.docm` 与 `.docx` 同构：都是 ZIP+XML，只是 content-type 标了宏）
+EXTS = (".docx", ".docm")
+#: Word 97-2003 的 `.doc` 是 OLE 复合二进制文档，**根本不是 ZIP** ——
+#: 硬试只会得到"文件损坏"这种误导性错误，所以显式拦住并给可执行的指引。
+LEGACY_EXTS = (".doc",)
+
+#: 内嵌图片上限（一份文档几百张图的极端情况不该把投喂拖成批处理）
+MAX_IMAGES = 40
+
+_HEADING_RE = re.compile(r"^(?:heading|标题)\s*([1-9])$", re.I)
+_LIST_RE = re.compile(r"^(?:list|列表)", re.I)
+_TITLE_JUNK = {"", "untitled", "microsoft word", "document1", "doc1", "无标题"}
+
+
+def _qn(tag: str):
+    from docx.oxml.ns import qn
+    return qn(tag)
+
+
+def iter_block_items(parent):
+    """按**文档顺序**遍历段落与表格（`w:body` 的子节点本身就是交错排列的）。
+
+    `parent` 可以是 `Document`（走 `w:body`）或单元格（走 `w:tc`）——
+    后者用于将来展开嵌套表格。
+    """
+    from docx.document import Document as _Document
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    if isinstance(parent, _Document):
+        element = parent.element.body
+    else:
+        element = parent._tc
+    for child in element.iterchildren():
+        if child.tag == _qn("w:p"):
+            yield Paragraph(child, parent)
+        elif child.tag == _qn("w:tbl"):
+            yield Table(child, parent)
+
+
+def _para_text(p) -> str:
+    """段落文字。
+
+    不用 `paragraph.text`：它**漏掉 `<w:hyperlink>` 里的 run**（python-docx 的已知局限），
+    而带链接的段落恰恰是最容易出现在知识型文档里的（参考资料、引用）。
+    按 XML 顺序取所有 `w:t` 才是"在 Word 里看到的那段字"。
+    """
+    return "".join(node.text or "" for node in p._p.iter(_qn("w:t"))).strip()
+
+
+def _heading_level(p) -> int:
+    """段落的大纲级别（0 = 不是标题）。
+
+    两条判据：样式名（`Heading 1` / 本地化的 `标题 1`）与 `<w:outlineLvl>`。
+    后者才是**本质**判据 —— 自定义样式名千奇百怪，但"这是第几级标题"
+    在 Word 里就存在大纲级别这一处。
+    """
+    try:
+        m = _HEADING_RE.match((p.style.name or "").strip())
+        if m:
+            return int(m.group(1))
+    except Exception:                        # noqa: BLE001 —— 样式损坏不该毁掉整篇
+        pass
+    try:
+        pPr = p._p.pPr
+        if pPr is not None:
+            lvl = pPr.find(_qn("w:outlineLvl"))
+            if lvl is not None:
+                v = int(lvl.get(_qn("w:val")))
+                if 0 <= v <= 8:
+                    return v + 1
+    except Exception:                        # noqa: BLE001
+        pass
+    return 0
+
+
+def _is_list(p) -> bool:
+    """是否列表项。优先看 `<w:numPr>`（真正的编号属性），样式名只作兜底。"""
+    try:
+        pPr = p._p.pPr
+        if pPr is not None and pPr.numPr is not None:
+            return True
+    except Exception:                        # noqa: BLE001
+        pass
+    try:
+        return bool(_LIST_RE.match((p.style.name or "").strip()))
+    except Exception:                        # noqa: BLE001
+        return False
+
+
+def _para_images(p, *, put_image, state: dict) -> list[str]:
+    """段落里的图片 → markdown 引用（**位置就此保住**：docx 里图片属于某个段落）。"""
+    blips = [b for b in p._p.iter(_qn("a:blip"))
+             if b.get(_qn("r:embed")) or b.get(_qn("r:link"))]
+    if not blips:
+        return []
+    # 先记"文档里到底有几张图"，**再**看能不能抽 —— 否则"没有写入口"时
+    # `state["images"]` 恒为 0，告警条件永远不成立，图片就静默消失了
+    state["images_found"] += len(blips)
+    if not callable(put_image):
+        return []
+    refs: list[str] = []
+    for blip in blips:
+        rId = blip.get(_qn("r:embed")) or blip.get(_qn("r:link"))
+        try:
+            part = state["document"].part.related_parts[rId]
+            blob = part.blob
+        except Exception as e:               # noqa: BLE001
+            state["warnings"].append("内嵌图片（%s）读取失败：%s" % (rId, str(e)[:50]))
+            continue
+        if not blob:
+            continue
+        if state["images"] >= MAX_IMAGES:
+            if not state.get("image_capped"):
+                state["image_capped"] = True
+                state["warnings"].append("内嵌图片超过 %d 张，其余未抽取" % MAX_IMAGES)
+            break
+        state["images"] += 1
+        suffix = Path(str(getattr(part, "partname", ""))).suffix or ".png"
+        name = "image-%03d%s" % (state["images"], suffix)
+        try:
+            refs.append(put_image("docx/%s" % name, blob))
+        except Exception as e:               # noqa: BLE001
+            state["warnings"].append("图片 %s 保存失败：%s" % (name, str(e)[:50]))
+    return refs
+
+
+def _cell_text(cell) -> str:
+    """单元格文字：多段压成一行（markdown 表格单元格不能换行）。"""
+    try:
+        parts = [_para_text(p) for p in cell.paragraphs]
+    except Exception:                        # noqa: BLE001
+        return ""
+    return " ".join(x for x in parts if x).strip()
+
+
+def _table_rows(table) -> list[list[str]]:
+    try:
+        return [[_cell_text(c) for c in row.cells] for row in table.rows]
+    except Exception as e:                   # noqa: BLE001
+        raise FeedError("表格读取失败：%s" % str(e)[:100], kind="convert",
+                        retryable=False)
+
+
+def _has_merged(table) -> bool:
+    """表格里是否有合并单元格。
+
+    ⚠️ 判据必须落在 **XML 属性**上，不能靠 `id(cell._tc)` 比对象身份：
+    lxml 的元素代理对象**不保证身份唯一**（同一个元素两次取到不同代理），
+    早先那版据此把普通 3×3 表格误判成"有合并"，质量分从 1.0 掉到 0.8 ——
+    一个**假告警**，比漏报更伤（2026-10-14 被 `test_质量_无合并单元格时满分` 逼出来）。
+
+    真判据只有两处：`w:gridSpan > 1`（横向合并）与 `w:vMerge` 存在（纵向合并，
+    起始格是 `restart`、后续是 `continue`，两者都算）。
+    """
+    try:
+        for tr in table._tbl.tr_lst:
+            for tc in tr.tc_lst:
+                tcPr = tc.tcPr
+                if tcPr is None:
+                    continue
+                gs = tcPr.find(_qn("w:gridSpan"))
+                if gs is not None and int(gs.get(_qn("w:val")) or 1) > 1:
+                    return True
+                if tcPr.find(_qn("w:vMerge")) is not None:
+                    return True
+        return False
+    except Exception:                        # noqa: BLE001 —— 结构畸形时保守返回"没有"
+        return False
+
+
+def _doc_time_of(cp, meta: dict) -> tuple[int, str]:
+    """**文档自身时间**优先：core 的 modified → created → 文件 mtime → 当前时刻。"""
+    for attr, src in (("modified", "core_modified"), ("created", "core_created")):
+        v = getattr(cp, attr, None) if cp is not None else None
+        if v is not None and hasattr(v, "timestamp"):
+            try:
+                return int(v.timestamp()), src
+            except Exception:                # noqa: BLE001
+                pass
+    if meta.get("mtime"):
+        return int(meta["mtime"]), "mtime"
+    return int(time.time()), "now"
+
+
+def _collect(document, *, put_image) -> tuple[list, dict]:
+    """遍历文档，产出**有序**的块列表与统计。"""
+    state: dict = {"document": document, "images": 0, "images_found": 0,
+                   "warnings": [], "tables": 0, "merged": 0, "headings": 0}
+    items: list = []
+    first_h1 = ""
+    for block in iter_block_items(document):
+        cls_name = type(block).__name__
+        if cls_name == "Table":
+            state["tables"] += 1
+            if _has_merged(block):
+                state["merged"] += 1
+            items.append(("table", _table_rows(block)))
+            continue
+        level = _heading_level(block)
+        text = _para_text(block)
+        images = _para_images(block, put_image=put_image, state=state)
+        if level == 1 and text and not first_h1:
+            first_h1 = text
+        if level:
+            state["headings"] += 1
+        if not text and not images:
+            continue                         # 空段落（Word 里大量存在）不产出块
+        items.append(("para", (level, _is_list(block), text, images)))
+    state["first_h1"] = first_h1
+    return items, state
+
+
+def _render(items: list, *, head_title: str) -> str:
+    blocks: list[str] = []
+    if head_title:
+        blocks.append("# %s" % head_title)
+    for kind, payload in items:
+        if kind == "table":
+            tmd = table_md(payload)
+            if tmd:
+                blocks.append(tmd)
+            continue
+        level, is_list, text, images = payload
+        parts: list[str] = []
+        if text:
+            if level:
+                parts.append("%s %s" % ("#" * min(int(level), 6), text))
+            elif is_list:
+                parts.append("- %s" % text)
+            else:
+                parts.append(text)
+        parts += ["![](%s)" % rel for rel in images]
+        if parts:
+            blocks.append("\n\n".join(parts))
+    return "\n\n".join(b for b in blocks if b).strip() + "\n"
+
+
+def _title_of(cp, state: dict, ref: str) -> tuple[str, str]:
+    """标题：core `title` → 首个一级标题 → 文件名。"""
+    t = ""
+    try:
+        t = str(getattr(cp, "title", "") or "").strip()
+    except Exception:                        # noqa: BLE001
+        t = ""
+    if t and t.lower() not in _TITLE_JUNK:
+        return t, "core_title"
+    if state.get("first_h1"):
+        return state["first_h1"], "first_h1"
+    return Path(str(ref)).stem or "DOCX 文档", "stem"
+
+
+class DocxConverter(BaseConverter):
+    """`.docx` 直通（认领顺序同样要**排在通用 URL 之前**，理由同 PDF）。"""
+
+    name = "docx"
+    version = "1"
+
+    def can_handle(self, *, ref: str, kind: str = "",
+                   data: bytes | None = None) -> bool:
+        if kind == "docx":
+            return True
+        if kind and kind not in ("url",):
+            return False
+        suffix = Path(str(ref)).suffix.lower()
+        if suffix in EXTS or suffix in LEGACY_EXTS:
+            return True
+        # 没有扩展名：ZIP 魔数只是必要条件，还得**真的含 word/document.xml** ——
+        # 否则任何 zip 都会被它抢走（.xlsx/.pptx 也是 ZIP）
+        if data and bytes(data[:4]) == b"PK\x03\x04":
+            try:
+                import zipfile
+                with zipfile.ZipFile(io.BytesIO(data)) as z:
+                    names = set(z.namelist())
+                return "word/document.xml" in names
+            except Exception:                # noqa: BLE001
+                return False
+        return False
+
+    def convert(self, *, ref: str, data: bytes, meta: dict) -> FeedDocument:
+        suffix = Path(str(ref)).suffix.lower()
+        if suffix in LEGACY_EXTS:
+            raise FeedError(
+                "这是 Word 97-2003 的老格式 `.doc`（OLE 二进制文档），不是 `.docx` —— "
+                "两者内部结构完全不同，`python-docx` 读不了它。"
+                "请用 Word 另存为 `.docx` 后重新投喂",
+                kind="unsupported", retryable=False)
+
+        from docx import Document
+
+        try:
+            document = Document(io.BytesIO(data))
+        except Exception as e:               # noqa: BLE001
+            raise FeedError("DOCX 结构无法解析（文件可能损坏，或不是真正的 .docx）：%s"
+                            % str(e)[:120], kind="convert", retryable=False)
+
+        items, state = _collect(document, put_image=meta.get("put_image"))
+        cp = getattr(document, "core_properties", None)
+        title, title_src = _title_of(cp, state, ref)
+        # 正文里已经有同一个一级标题时不再补一个：core title 与首个 H1 常常就是
+        # 同一句话（模板生成的文档尤其如此），补了就是同一标题出现两次
+        head = "" if title_src == "first_h1" or state.get("first_h1") == title else title
+        md = _render(items, head_title=head)
+
+        warnings = list(state["warnings"])
+        quality = 1.0
+        if state["merged"]:
+            # markdown 表达不了合并单元格：同一格的话会在相邻格里重复 ⇒ 如实打标
+            warnings.append("有 %d 张表格含合并单元格，markdown 无法表达"
+                            "（合并区域的内容会在相邻单元格重复出现）" % state["merged"])
+            quality = min(quality, 0.8)
+        if state["images_found"] and not state["images"]:
+            warnings.append("文档含 %d 张图片，但本次没有可用的图片写入口，未保存"
+                            % state["images_found"])
+            quality = min(quality, 0.7)
+
+        doc_time, time_src = _doc_time_of(cp, meta)
+        return FeedDocument(
+            doc_id=meta["doc_id"], title=title[:200], markdown=md, kind="docx",
+            source_ref=str(ref), doc_time=doc_time, converter=self.stamp,
+            quality=round(float(quality), 2), warnings=warnings,
+            meta={"blocks": len(items), "tables": state["tables"],
+                  "headings": state["headings"], "images_extracted": state["images"],
+                  "merged_tables": state["merged"], "title_source": title_src,
+                  "doc_time_source": time_src, "chars": len(md)},
+        )
