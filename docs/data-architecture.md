@@ -667,7 +667,7 @@ api_memories = 蒸馏路（distilled_memories JOIN dst_ units）
 | 单成员页沿用源页 | L2 聚合时单来源页不调 LLM（成本优化） |
 | 测试隔离 | conftest 已钉 `wiki_triggers._targets`（测试禁止解析真实 wiki 目录）——蒸馏收尾钩子在测试里必然早退；蒸馏/触发器测试自行 mock 目标 |
 | wiki 进召回 | **已做**（§4.1）：L2 页面整页投影为 `wiki_<crc32>` 单元，走独立的页面向量路 + 页面全文路，参与六路融合；准入另有策略（§4.2） |
-| 外部投喂 | **地基已就位（M0 完成 2026-10-10），素材层与投喂入口未做**。转译层设计见 [`feed-adapter-plan.md`](feed-adapter-plan.md)（v2.2，含三段保留 raw/mirror/kb、四级格式、并列关系与召回接入）；上游调研见 [`external-ingest.md`](external-ingest.md)。**下游全在代码里**（`origin` 列 / 判定点 / 召回过滤 / 页面解析）。**M0 已补三处**：① **口径统一**——以代码的 `source=="feed"` 为准（格式信息放 `meta`），本格原先写的 `source=pdf/web` **作废**；② **采集层补 `origin`**（`rag.ingest.origin_of()` 单点函数，与 `distill._project_one` 共用，消除两处漂移）；③ **页面层持久化 `doc_id`**（投喂页回指原件的锚，投影的 INSERT/UPDATE 两条路径都写）+ `import_bundle` 逐条可声明 `origin`。**仍未做**：素材库 `materials.db`、三段保留 `raw/mirror/kb`、转换器注册表、投喂入口 |
+| 外部投喂 | **已落地到 M4（2026-10-14）**：素材库 `materials.db` + 三段保留（`raw/` 不可再生原件 · `mirror/` 中间物 · `exports/wiki_work/out_feed/` 交付 md）+ 转换器注册表（md/txt · 网页 · 公众号 · **PDF 四路由** · **DOCX**）+ CLI（`feed add/list/show/retry/retract/forget/lint`）。设计见 [`feed-adapter-plan.md`](feed-adapter-plan.md)、用法见 [`modules/feed.md`](modules/feed.md)；上游调研见 [`external-ingest.md`](external-ingest.md)。**仍缺**：T4 图片 OCR 档、MCP/面板入口（M5）。**下游全在代码里**（`origin` 列 / 判定点 / 召回过滤 / 页面解析）；M0 补的三处地基（① 口径统一以代码的 `source=="feed"` 为准，格式信息放 `meta`；② 采集层 `origin` 由 `rag.ingest.origin_of()` 单点给出；③ 页面层持久化 `doc_id` 作为回指原件的锚）至今仍是这条链路的地基 |
 | ~~编辑器在产物目录里自动新建的空文件会污染召回面~~ | **已修（2026-09-25）**。把产物目录当 Obsidian vault 打开时，点击 `[[链接]]` 若**未解析**（我们的页面只有 frontmatter `title` 而没有 `aliases`，而 Obsidian 按**文件名/aliases** 解析），编辑器会在 vault 根**自动新建 0 字节 md**，文件名就是链接文字。`wiki_index.project_pages` 会照收：`parse_page` 的 title 兜底成 `path.stem`（**看起来完全正当**）、`domain` 取父目录名（得到错误的 `out_l2_mimo`）、`origin` 标成 `native` → 变成"标题很正当、正文是空"的召回单元。实测当时已有 3 个待投影（`ADBController 核心设计与功能清单` 等），**所幸上次投影是 09-22、早于文件创建的 09-25 12:15，尚未污染**。已删除 3 个空文件，并在投影处加闸：**正文为空即跳过**（判据用正文、不用文件大小），`skipped_empty` 进返回值与日志。**根因（`[[标题]]` 解析不了）见 [`external-ingest-plan.md`](external-ingest-plan.md) §5.1** —— 补 `aliases` 才是治本 |
 | ~~全量聚合会删掉用户放在产物目录里的东西~~ | **已修（2026-09-25）**。`wiki_aggregate.py` 全量模式的清理是"**凡是不在本轮 `keep` 里的目录一律 `rmtree`**"，而用户**把产物目录直接当 Obsidian vault** 用时会在里面生成 `.obsidian/`（编辑器配置）—— 不在 keep 里 → **被静默删掉，不可逆**。逐字复现旧逻辑验证：清理后目录从 `['.obsidian','01-旧域','02-本轮域','用户自建目录']` 变成只剩 `['02-本轮域']`（**连"用户自建目录"也一起删了**）。现抽成 `_prune_stale_domain_dirs()` 并加两道闸：**跳过 `.` 开头的隐藏目录** + **只清 `%02d-` 数字前缀的域目录**（增量模式仍然绝不清目录）。教训：**产物目录若允许用户放东西，清理逻辑就必须白名单化，不能黑名单化**。⚠️ 已把用户的 `.obsidian/` 备份到 `exports/wiki_work/_obsidian_backup_20260925/` |
 | **两级中间态（L1 领先 L2）谁都查不出来** | **已修（2026-09-25）**。实测出现过 `L2 产物 17:11 / L1 产物 21:01`（落后近 4 小时），而**没有任何现成接口能报出来**：① `wiki --action pending` **只比 L1 的 manifest** → 报 0；② `align` 一次只吃**一个目录**，而两级 manifest 名固定是 `<目录>/manifest_<stage>.json`、**分居两个目录** → 只传 `--out` 必然只对上一级；③ 更糟的是不带 `--stage` 时它会报"**manifest_l2：缺失 —— 编译于该功能上线前**"——**凭空断因**（真相是文件在另一个目录），把人带偏。**修法**：`align()` 新增 `l1_dir`/`l2_dir`（CLI 用现成的 `--l1/--l2`，面板加 `l1`/`l2` 查询参数，三者都不给则按配置 `wiki.out_l1/out_l2` 解析），返回新增 **`consistency`**：`{comparable, l1_at, l2_at, skew_seconds, l1_inputs, l2_inputs, inputs_delta, verdict}`，`verdict` 取 `ok`（≤ `SKEW_TOL` 60 秒）/ **`l1_ahead`（L2 落后，要重编 L2）** / `l2_ahead`；缺 manifest 时 `stages[st]` 带上**期望路径** `path`，CLI 据此区分"真没有这个文件"与"它在另一个目录" |
@@ -947,6 +947,16 @@ GET  /api/wiki/pending/ignored  POST /api/wiki/pending/restore
     ingest 会报 `table units has no column named origin`；现在它自己调 `ensure_bridge_schema()`
     （不指望别的调用点已经迁移过这张库）。
     口径统一：本文件原写 `source=pdf/web`，**以代码的 `feed` 为准**（格式信息放 `meta`）。
+23. **外部投喂 M1–M4：转译层落地**（2026-10-10 ~ 10-14）：在 M0 的地基（口径统一 /
+    `origin` / `doc_id`）之上，把"用户投喂的外部素材"做成一条**与自有记忆并列**的通路 ——
+    **三段保留**（`raw/` 内容寻址原件、不可再生 · `mirror/` 中间物 · `out_feed/` 交付 md）
+    ＋ **转换器注册表**（md/txt 一等公民 · 网页 · 公众号 · **PDF 四路由** · **DOCX**）
+    ＋ **素材库** `materials.db`（`received/converted/published/failed/retracted`）。
+    三条关键决策：① **转译不改写**（LLM 只在质量自评不达标时介入，且产出立即冻结进 `mirror/`）；
+    ② 投喂内容**不进蒸馏、不进自有 wiki 编译**，只作为 `origin=external` 的页面单元参与召回
+    （两个页面根互不嵌套）；③ **能力缺口与数据损坏分开报**（`needs_ocr` 是 P1，数据不一致才是 P0）。
+    召回侧因此多两个锚：`units.doc_id`（页面回指原件）与 `wiki_path`（**绝对路径** ——
+    两阶段召回第二阶段必须能直接打开）。
 
 ---
 

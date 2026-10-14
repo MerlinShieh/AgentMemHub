@@ -263,7 +263,7 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 | `feed_received` | `doc_id` `ref` `raw_path` `bytes` `sha256` | 原件已入 `raw/`（内容寻址） | **这一步之后原件就保住了** —— 即使后续全败，也能换转换器重转 |
 | `feed_converted` | `converter`（`名字@版本`）`title` `chars` `quality` `warnings` | 转译完成 | `converter` 是**重转判据**；`warnings` 非空说明质量存疑（别只看 `quality`） |
 | `feed_published` | `kb_path` `quality` `low_quality` | 最终 md 已写进 kb 目录 | `low_quality=true` ⇒ 建议人工复核（`feed list --low-quality`） |
-| `feed_failed` | `error` `error_kind` `retryable`（`level=error`） | 任一步失败 | **`error_kind` 决定处置**：`unsupported` 换格式（重试无用）、`convert` 可重试、`registry`/`crash` 是代码 bug |
+| `feed_failed` | `error` `error_kind` `retryable`（`level=error`） | 任一步失败 | **`error_kind` 决定处置**（全表见 `docs/modules/feed.md` §9）：`unsupported`/`encrypted` 换输入（重试无用）、`needs_ocr`/`needs_renderer` 是**能力缺口**（原件都在，接上通路可 `feed retry`）、`convert` 可重试、`empty` 不可重试、`registry`/`crash` 是代码 bug |
 | `feed_skipped` | `reason="duplicate"` | 同字节已投喂过（幂等命中） | **不是失败** —— 内容没变就复用既有产物 |
 | `feed_retracted` | `doc_id` `kb_removed` `raw_kept=true` | 撤下投喂内容（可恢复） | 交付物删了、**原件仍在** ⇒ `feed retry` 能把同一份重新发布出来 |
 | `feed_forgot` | `doc_id` `kb_removed` `raw_removed` | 彻底清除登记 | ⚠️ `raw_removed=true` 表示**原件已被删**（不可恢复）—— 只有显式 `--purge` 才会 |

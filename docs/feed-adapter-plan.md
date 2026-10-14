@@ -483,8 +483,8 @@ agentmemhub feed add --stdin --title "…" --source-ref "<原始URL/路径>" --c
 | 亚型 | 客观判据 | 复杂度 | 依赖 | 估时 | 产出质量 |
 |---|---|---|---|---|---|
 | **T3a 文字版·单栏** | 每页文本 ≥ 50 字符；`find_tables()` 空 | **低**（C 高） | pypdf | 0.5 天 | ✅ 好，近乎无损 |
-| **T3b 文字版·含表格/多栏/公式** | 每页文本 ≥ 50 字符；表格命中 | **高**（C 低） | pdfplumber（表格）或 PyMuPDF（版式） | +1 天 | ⚠️ 表格可救、**公式基本丢失**、多栏可能串行 |
-| **T3c 扫描件（图片型）** | 每页文本 < 50 字符（或全空） | **极高**：等于逐页做 T4 | 渲染（PyMuPDF/pdftoppm）+ T4 通路 | +（T4 的时间） | ⚠️ 取决于 OCR |
+| **T3b 文字版·含表格/多栏/公式** | 每页文本 ≥ 50 字符；表格命中 | **高**（C 低） | pdfplumber（表格） | +1 天 | ⚠️ 表格可救、**公式基本丢失**、多栏可能串行 |
+| **T3c 扫描件（图片型）** | 每页文本 < 50 字符（或全空） | **极高**：等于逐页做 T4 | 渲染（**pypdfium2**）+ T4 通路 | +（T4 的时间） | ⚠️ 取决于 OCR |
 | **T3d 加密/DRM** | `is_encrypted` | 不可行 | — | — | ⛔ 要求密码，否则 `failed(encrypted)` |
 
 **路由判据实现（可测）**：
@@ -562,15 +562,19 @@ FeedDocument.warnings: list[str]     # 人可读的具体问题（不达标原�
 | PDF 文字 | `pypdf` | BSD-3 | 小 | 纯 Python，安全首选 |
 | PDF 表格 | `pdfplumber` | MIT | 中（依赖 pdfminer.six） | 表格最强 |
 | **Word** | `python-docx` | MIT | 小 | **确定性、零 LLM**（§7.0.1） |
-| PDF 版式/渲染 | `PyMuPDF` | ⚠️ **AGPL-3.0** | 大（二进制 ~20MB） | 快、版式好、渲染扫描件必备；**AGPL 有传染性**，见 R2 |
+| PDF 版式/渲染 | ~~`PyMuPDF`~~ → **`pypdfium2`** | ✅ **BSD-3-Clause / Apache-2.0**（PDFium 绑定） | 中（~4MB wheel） | **已改用 pypdfium2**：能力够（逐页光栅化）而许可完全宽松 —— 见下方结案 |
 | 本地 OCR | Windows.Media.Ocr | 系统自带 | 0 | 免费离线、中文一般 |
 | 本地 OCR（备） | `PaddleOCR` | Apache-2.0 | 大（模型 100MB+） | 中文最准 |
 | 图表理解 | 多模态 LLM | — | — | 唯一能处理 T4c 的手段 |
 
-> **AGPL 提示（需你知晓，不阻塞）**：`PyMuPDF` 是 AGPL-3.0。若本仓库**开源分发**则无碍；
-> 若将来有闭源分发计划，AGPL 会传染。**保底方案**：T3a/T3b 用 `pypdf`+`pdfplumber`（均宽松许可），
-> 仅当"扫描件渲染"确实需要时才评估 PyMuPDF，或改用 `pdftoppm`（poppler，GPL 但作为外部可执行程序不传染）。
-> 这条列入 §10-R2 待定。
+> **✅ AGPL 问题已结案（2026-10-14，M4 落地时）**：原计划里"扫描件渲染"只有两个选项 ——
+> `PyMuPDF`（**AGPL-3.0，有传染性**）或 `pdftoppm`（poppler，GPL，但作为外部可执行程序
+> 不传染、代价是 Windows 上要额外分发一套二进制）。落地时发现**第三个选项**：
+> **`pypdfium2`**（Google PDFium 的 Python 绑定），许可 **BSD-3-Clause / Apache-2.0**、
+> `pip` 直接装、无需外部程序，逐页 `render(scale=2.0)` 完全够 T3c 用。
+> 所以 `PyMuPDF` **不再需要**，`pdftoppm` 也不必。这条从 §10-R2 的"待定"转为"已决"。
+> 许可结论**不是查网页得来的**，而是从**已装包的 metadata**
+> （`License-Expression` / `Classifier`）读出来核实的 —— 依赖的真实许可只在装好的那一个版本上确定。
 
 ---
 
@@ -666,10 +670,10 @@ FeedDocument.warnings: list[str]     # 人可读的具体问题（不达标原�
 - **验收**：一个普通网页 + 一篇公众号文章端到端；**兜底通路必须有测试**；
   `renderer=playwright` 时渲染产物进 `mirror/`（溯源链不破）
 
-### M4 · T3 PDF + DOCX + T4 图片（2.5 天）
+### M4 · T3 PDF + DOCX（**已落地 2026-10-14**）· T4 图片（**未开工**）
 - **T3 分派器**（`probe → route`）：加密 → T3d；每页文本 < 50 字符 → T3c（逐页渲染转 T4）；
   表格命中 → T3b；否则 T3a。四种路由**每条都要有测试**（用构造的最小 PDF 样本）
-- T3a/T3b 接入（pypdf + pdfplumber；PyMuPDF 待 AGPL 决策）+ T3c 的页面渲染
+- T3a/T3b 接入（pypdf + pdfplumber）+ T3c 的页面渲染（**pypdfium2**，AGPL 问题已结案）
 - **DOCX 直通**（`python-docx`，确定性、零 LLM，~2 小时）—— 归 T1 类难度，别按 PDF 估
 - **T4 三级策略**：本地 OCR 先行 → 稀疏/乱码才升级多模态（受 `feed.convert.llm` 控制）→
   否则 `failed(needs_llm)` + 指引；LLM 产出**立即冻结进 mirror/**（§7.0 的 D 纪律）
@@ -678,6 +682,44 @@ FeedDocument.warnings: list[str]     # 人可读的具体问题（不达标原�
 - **沙箱熔断**：LLM 多模态客户端走 `AGENTMEMHUB_TEST_SANDBOX`，假客户端测试
 - **验收**：文字 PDF / 含表格 PDF / 扫描件 PDF / DOCX / 文字截图 / 图表截图 各一份端到端；
   `feed.convert.llm=false` 时**全程零外呼**（测试锁，防重演 900 秒超时事故）
+
+**实施记录（2026-10-14）—— 本轮做的是 T3 + DOCX，T4 图片档未开工**
+
+- **验收已过**（两类样本各守一件事）：
+  · **合成夹具**（`tests/fixtures/feed/make_fixtures_m4.py` 生成）守**路由判据** ——
+    四份形态确定的 PDF 覆盖 T3a/T3b/T3c/T3d 四条路由，加密档与扫描件档都验到；
+  · **真实素材**守**解析质量** —— `Intel_Proprietary_License.pdf`（86,805 B）→ T3a、2 页、
+    **10,333 字、质量 1.00**；DOCX 用 **Word 12.0 原生另存**的样本（43,115 B）→
+    标题层级/文档顺序/表格/列表/图片全对、质量 1.00；
+  · 全量测试绿、`feed lint` 真实库 **P0=0**
+- **依赖与 R2 结案**：`pypdf`(BSD-3) 进主依赖；`pdfplumber`(MIT) + `pypdfium2`
+  (**BSD-3-Clause / Apache-2.0**) 进可选档 `feed-pdf`。**渲染不用 PyMuPDF**（AGPL-3.0 有
+  传染性），也不用 `pdftoppm`（Windows 上要额外分发可执行程序）。许可全部从**已装包的
+  metadata** 读出来核实（`License-Expression` / `Classifier`），不是查网页。
+- **T4 图片（OCR）刻意未开工**：T3c 只做到"渲染进 `mirror/` + 报 `needs_ocr`"。
+  用户本轮指定的是"PDF 和 docX"；OCR 通路还牵涉多模态客户端与沙箱熔断，单独立项更安全。
+
+**M4 实施中发现的 6 件事（都不在原计划里）**：
+
+① **加密档不能先碰 `len(reader.pages)`** —— 未解密访问会抛 `FileNotDecryptedError`，
+   加密档就变成 `crash` 而不是可处置的 T3d。夹具把这条顺序约束逼了出来（有守护测试）；
+② **元数据不可盲信** —— 真实 PDF 的 `/Title` 停在 `…[v2022.12`，正文首行才是完整的
+   `…[v2022.12.20]`。修法的两个条件都不能省，且**不能用"谁更长"**：截断的元数据标题
+   因为多了 `C2A … (Commercial Use)` 反而更长，按长度判就会被它蒙过去；
+③ **PDF 日期里的 `Z` 被丢掉 ⇒ `doc_time` 偏 8 小时** —— 时间不是装饰，召回侧的时间衰减按它算；
+④ **表格区域必须从正文里剔除** —— `pdfplumber.extract_text()` 里**含**表格文字，
+   不剔除同一批字会以"流式正文 + 表格"出现两次（一种"看起来成功"的失真）；
+⑤ **合并单元格检测不能用 `id(cell._tc)`** —— lxml 的元素代理**不保证身份唯一**，
+   普通 3×3 表格被误判成"有合并"、质量分 1.0→0.8。**假告警比漏报更伤**（会让人不再信任质量信号）；
+⑥ **`.docx` 必须按 `w:body` 子节点顺序遍历** —— `document.paragraphs` 与 `document.tables`
+   是两个独立列表，分别遍历会让表格全挤到文末（夹具里"表格前后的段落"就是这个坑的哨兵）。
+
+**顺带修的两处既有缺陷**（都是新测试逼出来的，不是 M4 新代码引入的）：
+
+· `ingest()` 返回值的 `kind` **从不回填转换器判定的类型** —— 本地文件恒为空串，而库里存的是
+  `pdf`/`docx`：同一件事两个答案；
+· `feed lint` 对失败素材**完全不吭声** —— `needs_ocr` 这类"能力缺口"会静默躺在库里。
+  现在按 **能力缺口 P1（`awaiting_ocr`）/ 数据损坏 P0** 分开报（混在一起会让"体检红了"失去指向性）。
 
 ### M5 · 入口完善 + 收尾（2 天）
 - MCP 工具（**新增独立，不动五工具契约**）：`feed_add`（路径 / URL / `--stdin` 文本三形态）+
@@ -738,7 +780,7 @@ Q5 允许引入依赖（但复杂度须重理 ⇒ §7 已重写）· Q6 新增�
 | # | 事项 | 何时需要定 | 建议 |
 |---|---|---|---|
 | **R1** | 网页正文抽取库：`trafilatura` vs `bs4+lxml` 手工规则 | M3 开工时 | **用 3 个真实网页（含 1 篇公众号）对比**后定，两者都试、不凭印象 |
-| **R2** | PDF 扫描件渲染是否接受 **AGPL** 的 `PyMuPDF` | M4 开工时（T3c 需要） | 保底 `pypdf`+`pdfplumber`（宽松许可）先做 T3a/T3b；T3c 渲染改用 `pdftoppm`（外部可执行程序，不传染）或届时再评估 |
+| **R2** | PDF 扫描件渲染是否接受 **AGPL** 的 `PyMuPDF` | ✅ **已决 2026-10-14** | 用了**第三个选项** `pypdfium2`（BSD-3/Apache-2.0，pip 直装、无需外部程序）：AGPL 与 poppler 两条路都不必走。`pypdf`+`pdfplumber` 已先落地 T3a/T3b |
 | **R3** | `mirror/` 段清理策略（风险 R17） | M2 之后（有真实数据才好定） | 默认全留；若膨胀，按"只留 published 的 mirror"或"最近 N 份" |
 
 > 三项都**不影响 M0/M1/M2** —— 可以立即开工。
