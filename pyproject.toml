@@ -26,6 +26,7 @@ dependencies = [
     #                  确定性抽取、**不需要 LLM**，难度接近 T1（见计划 §7.0.1）
     "pypdf>=5.0",
     "python-docx>=1.1",
+    "python-pptx>=1.0",
 ]
 
 [project.optional-dependencies]
