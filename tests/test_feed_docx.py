@@ -178,7 +178,7 @@ def test_端到端_出kb页且frontmatter带溯源(tmp_path, cfg):
 
 
 def test_合并单元格被如实打标():
-    """markdown 管道表表达不了合并单元格 ⇒ 内容会在相邻格重复，必须打标让人复核。"""
+    """markdown 管道表表达不了合并单元格 ⇒ 语义有损，必须打标让人复核。"""
     from docx import Document
 
     d = Document()
@@ -192,6 +192,42 @@ def test_合并单元格被如实打标():
                                   meta={"doc_id": "m", "mtime": 0, "now": 0})
     assert any("合并单元格" in w for w in doc.warnings)
     assert doc.quality < 1.0
+
+
+def test_横向合并_内容只出现一次且列数对齐():
+    """**真实素材命中**：4 份接口测试报告里 3 份有整行合并的标题 ——
+    `row.cells` 会把同一个格子返回 3 次，标题在 markdown 里被复制 3 遍。
+    正确呈现是"内容写第一格、其余留空"（读者能看出这是一体的）。"""
+    from docx import Document
+
+    d = Document()
+    t = d.add_table(rows=2, cols=3)
+    t.style = "Table Grid"
+    t.cell(0, 0).merge(t.cell(0, 2)).text = "季度汇总"
+    t.cell(1, 0).text = "北区"
+    t.cell(1, 1).text = "1280"
+    t.cell(1, 2).text = "+12%"
+    md = _convert_doc(d)
+    assert md.count("季度汇总") == 1, "合并区域的内容被复制了"
+    assert "| 季度汇总 |  |  |" in md, md
+    assert "| 北区 | 1280 | +12% |" in md, md
+
+
+def test_纵向合并_续格留空不重复():
+    from docx import Document
+
+    d = Document()
+    t = d.add_table(rows=3, cols=2)
+    t.style = "Table Grid"
+    t.cell(0, 0).merge(t.cell(2, 0)).text = "同一分区"
+    t.cell(0, 1).text = "a"
+    t.cell(1, 1).text = "b"
+    t.cell(2, 1).text = "c"
+    md = _convert_doc(d)
+    assert md.count("同一分区") == 1, md
+    # 起始格有内容，续格留空 —— 读者由此看出"这两行属于同一分区"
+    assert "| 同一分区 | a |" in md, md
+    assert "|  | b |" in md and "|  | c |" in md, md
 
 
 # ---------------------------------------------------------------------------

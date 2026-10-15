@@ -276,6 +276,10 @@ def ingest(ref: str, *, kind: str = "", force: bool = False,
         meta = {"doc_id": doc_id, "mtime": mtime, "now": int(time.time()),
                 "url": str(ref) if is_url else "",
                 "headers": (fetched.headers if fetched else {}),
+                # 本地另存网页（`.html`）**图片相对路径按文件所在目录解析** ——
+                # 它们是文件系统路径而不是 URL，拿 urljoin 只会得到打不开的地址。
+                # 网络取回时为空（走 URL join）。
+                "base_dir": (str(src.parent) if (src is not None and not is_url) else ""),
                 # 第 2 段物料的两个写入口（转换器**不碰存储**，只拿回调 —— 便于测试替身）
                 "put_mirror": lambda name, b: store.put_mirror(doc_id, name, b),
                 "put_image": _image_writer(store, doc_id, paths["kb"])}

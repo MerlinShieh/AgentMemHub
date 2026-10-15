@@ -7,9 +7,11 @@
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .. import embeddata as ED
 from .. import fetch as F
 from ..base import BaseConverter, FeedDocument, FeedError
 
@@ -39,13 +41,15 @@ def build_document(*, data: bytes, ref: str, meta: dict, kind: str,
     original = data                        # **抓到的原始字节**（mirror 要存的就是它）
 
     # ① 图片：HTML 层面本地化（下载 + 把 src 换成本地相对路径）
+    #    `base_dir` 非空 = 这是一份**本地另存**的 HTML：相对路径的图按文件系统读
     put_image = meta.get("put_image")
     localized = 0
     if callable(put_image):
         try:
             data, localized, img_warns = F.localize_html_images(
                 data, page_url=ref, put_bytes=put_image,
-                referer=(meta.get("referer") or ""))
+                referer=(meta.get("referer") or ""),
+                base_dir=meta.get("base_dir") or None)
             warnings.extend(img_warns)
         except Exception as e:              # noqa: BLE001 —— 图片处理失败不该毁掉整篇
             warnings.append("图片本地化失败：%s" % str(e)[:100])
@@ -95,9 +99,12 @@ def build_document(*, data: bytes, ref: str, meta: dict, kind: str,
                         % localized)
 
     title = (title_hint or str(m.get("title") or "").strip()
-             or (Path(urlparse(ref).path).name or _domain(ref) or ref))
-    doc_time, t_src = F.doc_time_with_source(m, headers,
-                                             fallback=meta.get("now") or 0)
+             or Path(str(ref) if _is_local(ref) else urlparse(ref).path).name
+             or _domain(ref) or str(ref))
+    # 本地另存的网页没有 HTTP 头，**文件 mtime 比"投喂时刻"更接近文档时间**
+    doc_time, t_src = F.doc_time_with_source(
+        m, headers, fallback=(meta.get("mtime") if _is_local(ref)
+                              else meta.get("now")) or 0)
     if time_hint:
         doc_time, t_src = time_hint, "publish_time"
 
@@ -109,6 +116,21 @@ def build_document(*, data: bytes, ref: str, meta: dict, kind: str,
     quality = 1.0 if ratio >= 0.5 else max(0.3, min(1.0, ratio / 0.5))
     if any("图片下载失败" in w for w in warnings):
         quality = min(quality, 0.7)
+
+    # ④ **空壳抢救**：正文只有字段标签（数据由 JS 渲染）时，去文件里把内嵌 JSON 取回来。
+    #    真实素材：60 份"脚本录制工具"报告 —— 157 KB 的 HTML、可见文本 136 字，
+    #    数据是 `var resultData = {…}`（27 KB）。**它在文件里，不需要开浏览器渲染**。
+    #    没有这一步的话，`ratio` 会因为"抽取覆盖了全部可见文本"而给出 1.00，
+    #    知识库里就躺着一堆看起来正常、实际是空壳的页面。
+    rescued, rescue_warns = ED.rescue(original, md, label=title)
+    if rescued:
+        md = rescued                          # 空壳正文被"骨架 + 还原数据"替换掉
+        warnings.extend(rescue_warns)
+        quality = min(quality, 0.9)           # 数据取回来了，但结构是还原的
+    elif rescue_warns:
+        warnings.extend(rescue_warns)
+        quality = min(quality, 0.4)           # 空壳且没救回来 ⇒ 重降，逼出人工复核
+
     return FeedDocument(
         doc_id=meta["doc_id"], title=title[:200], markdown=md, kind=kind,
         source_ref=ref, doc_time=int(doc_time or 0),
@@ -123,21 +145,47 @@ def build_document(*, data: bytes, ref: str, meta: dict, kind: str,
     )
 
 
+#: 认领的**本地另存网页**扩展名。M3 的文档里承诺过这条兜底通路
+#: （"浏览器另存为 HTML 后 `feed add <文件>`"），但 `can_handle` 当时只认
+#: `http(s)://` —— 承诺的那条路**根本走不通**（2026-10-15 扫用户文档目录时发现：
+#: 61 个本地 .html 一个都进不来）。
+LOCAL_EXTS = (".html", ".htm", ".xhtml")
+
+
+def _is_local(ref: str) -> bool:
+    return not str(ref).lower().startswith(("http://", "https://"))
+
+
 class UrlConverter(BaseConverter):
-    """普通网页（T2a）。"""
+    """普通网页（T2a）—— **同时也收本地另存的网页**。
+
+    两者的字节形态完全一样（都是 HTML），差别只在"图片相对路径怎么解析"
+    （URL join vs 文件系统目录）与"文档时间取哪来"（HTTP 头 vs 文件 mtime）。
+    所以共用一套抽取逻辑，只把这两处分叉（`meta.base_dir` / `meta.mtime`）。
+    """
 
     name = "url"
     version = "1"
     #: 认领的 kind（`service` 对 URL 会显式传 kind="url"）
-    KINDS = ("url", "web", "http", "https")
+    KINDS = ("url", "web", "http", "https", "html")
 
     def can_handle(self, *, ref: str, kind: str = "",
                    data: bytes | None = None) -> bool:
         if kind and kind not in self.KINDS:
             return False
-        return str(ref).lower().startswith(("http://", "https://"))
+        if not _is_local(ref):
+            return True
+        # 本地文件：只认网页扩展名（`.txt`/`.md` 归 T1，别抢）
+        if Path(str(ref)).suffix.lower() in LOCAL_EXTS:
+            return True
+        # 没有扩展名但字节是 HTML（工具导出的报告常这样）
+        return bool(data) and re.match(rb"\s*<(?:!doctype\s+html|html)\b",
+                                       bytes(data[:64]), re.I) is not None
 
     def convert(self, *, ref: str, data: bytes, meta: dict) -> FeedDocument:
-        return build_document(data=data, ref=ref, meta=meta, kind="url",
+        # 本地另存网页给一个更准确的 kind —— 它**不是** URL
+        local = bool(meta.get("base_dir")) or _is_local(ref)
+        return build_document(data=data, ref=ref, meta=meta,
+                              kind="html" if local else "url",
                               name=self.name, version=self.version,
                               converter_stamp=self.stamp)

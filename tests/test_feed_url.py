@@ -40,6 +40,70 @@ class _FakeCfg:
         return {"out_l2": ""}
 
 
+# ---------------------------------------------------------------------------
+# 本地另存的网页（**M3 承诺过、实际走不通的那条路**）
+# ---------------------------------------------------------------------------
+
+def test_认领_本地另存的网页(tmp_path):
+    """M3 的文档里写了"浏览器另存为 HTML 后 `feed add <文件>`"，
+    但 `UrlConverter.can_handle` 当时只认 `http(s)://` —— 那条兜底通路**根本走不通**。
+    2026-10-15 扫用户文档目录时发现：61 个本地 `.html` 一个都进不来。"""
+    p = tmp_path / "saved.html"
+    p.write_bytes("<html><body><p>正文</p></body></html>".encode("utf-8"))
+    conv = get_converter(ref=str(p), kind="")
+    assert conv is not None and conv.name == "url"
+
+
+def test_认领_无扩展名的HTML报告(tmp_path):
+    """测试工具导出的报告常常没有扩展名，靠**字节**认。"""
+    p = tmp_path / "report"
+    p.write_bytes(b"<!DOCTYPE html>\n<html><body><p>x</p></body></html>")
+    conv = get_converter(ref=str(p), kind="", data=p.read_bytes())
+    assert conv is not None and conv.name == "url"
+
+
+def test_本地网页_图片按文件系统解析而不是urljoin(tmp_path):
+    """本地另存网页的图片是**文件系统相对路径**（`assets/a.png`）——
+    拿 `urljoin` 去解析只会得到一堆打不开的地址。"""
+    from agentmemhub.feed.converters.url import UrlConverter
+
+    (tmp_path / "assets").mkdir()
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+    (tmp_path / "assets" / "a.png").write_bytes(png)
+    html = tmp_path / "page.html"
+    html.write_text(
+        '<html><body><img src="assets/a.png"><p>%s</p></body></html>'
+        % ("本地网页的正文内容。" * 40), encoding="utf-8")
+    seen: dict[str, bytes] = {}
+
+    def put_image(url, blob):
+        seen[url] = blob
+        return "assets/localized.png"
+
+    doc = UrlConverter().convert(
+        ref=str(html), data=html.read_bytes(),
+        meta={"doc_id": "x", "mtime": 0, "now": 0, "base_dir": str(tmp_path),
+              "put_image": put_image})
+    assert doc.kind == "html", "本地网页不是 URL，kind 要说清楚"
+    assert seen, "相对路径的图片没被本地化"
+    assert next(iter(seen.values()))[:4] == b"\x89PNG"
+
+
+def test_本地网页_文档时间用文件mtime而不是投喂时刻(tmp_path):
+    """本地文件没有 HTTP 头 ⇒ 用 mtime 比"投喂时刻"更接近文档时间
+    （时间进召回侧衰减，不是装饰）。"""
+    from agentmemhub.feed.converters.url import UrlConverter
+
+    html = tmp_path / "page.html"
+    html.write_text("<html><body><p>%s</p></body></html>"
+                    % ("正文内容够长才不会被判空。" * 30), encoding="utf-8")
+    doc = UrlConverter().convert(
+        ref=str(html), data=html.read_bytes(),
+        meta={"doc_id": "x", "mtime": 1700000000, "now": 1800000000,
+              "base_dir": str(tmp_path)})
+    assert doc.doc_time == 1700000000, doc.meta.get("doc_time_source")
+
+
 @pytest.fixture()
 def cfg(tmp_path):
     return _FakeCfg(tmp_path)

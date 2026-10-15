@@ -22,8 +22,9 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 from .base import FeedError
 
@@ -39,8 +40,15 @@ WECHAT_UA = ("Mozilla/5.0 (Linux; Android 13; Pixel 7 Build/TQ3A.230805.001) "
 
 #: markdown / HTML 里的图片引用
 _IMG_RE = re.compile(r"!\[([^\]]*)\]\((https?://[^)\s]+)\)")
+#: ⚠️ **不能限定 `https?://`**：相对路径的图片（`/static/a.png`、`assets/a.png`）极常见。
+#: 早先那版只匹配绝对 URL ⇒ 相对路径的图**从来没被本地化过** ——
+#: 公众号恰好全用绝对 URL 才没暴露，普通网站与本地另存的网页则一张都留不下
+#: （2026-10-15 用本地 HTML 测试时发现）。改成匹配任意 src，由下游决定
+#: "按 URL 取" 还是 "按文件系统读"。
 _HTML_IMG_RE = re.compile(
-    rb"<img[^>]+?(?:data-src|src)\s*=\s*[\"'](https?://[^\"']+)[\"']", re.I)
+    rb"<img[^>]+?(?:data-src|src)\s*=\s*[\"']([^\"']+)[\"']", re.I)
+#: 不需要（也无法）取回的协议 —— `data:` 是内嵌 base64，本来就在文件里
+_SKIP_SCHEMES = ("data:", "javascript:", "mailto:", "about:", "tel:")
 
 
 @dataclass
@@ -181,8 +189,32 @@ def doc_time_of(meta: dict, headers: dict, *, fallback: float) -> int:
     return doc_time_with_source(meta, headers, fallback=fallback)[0]
 
 
+def _local_image_path(src: str, base_dir) -> Optional[str]:
+    """`src` 是"相对于本地 HTML 文件"的图片路径吗？是就返回它的实际路径。
+
+    为什么要单独判：**本地另存的网页**（浏览器"另存为"、测试工具导出的报告）里，
+    图片引用是**文件系统相对路径**（`xxx_files/1.png` 或 `../img/a.png`），
+    拿 `urljoin` 去解析只会得到一堆打不开的 URL。
+    """
+    if not base_dir:
+        return None
+    s = (src or "").strip()
+    if not s or s.startswith(("http://", "https://", "//", "data:", "mailto:",
+                              "javascript:", "#")):
+        return None
+    try:
+        p = Path(unquote(urlparse(s).path))
+    except Exception:                        # noqa: BLE001
+        return None
+    if p.is_absolute():
+        return str(p) if p.is_file() else None
+    cand = Path(base_dir) / p
+    return str(cand) if cand.is_file() else None
+
+
 def localize_html_images(html: bytes, *, page_url: str, put_bytes,
-                         referer: str = "", timeout: float = 20.0
+                         referer: str = "", timeout: float = 20.0,
+                         base_dir=None
                          ) -> tuple[bytes, int, list[str]]:
     """**在 HTML 层面**把外链图片换成本地引用（下载进 `mirror/`），再交给抽取器。
 
@@ -190,6 +222,10 @@ def localize_html_images(html: bytes, *, page_url: str, put_bytes,
     （真实公众号页 14 张 `<img>` → markdown **0 张**）。改在 HTML 层之后：
       · 图片**必定落进 `mirror/`**（三段保留里的第 2 段，知识库要能长期读）；
       · 抽取器若输出图片，引用**已经是本地相对路径** —— 不再依赖图床、不再受防盗链影响。
+
+    `base_dir` 非空表示"这是一份**本地另存**的 HTML"：此时相对路径的图
+    按**文件系统**读（见 `_local_image_path`），不走网络 —— 那些网页往往
+    早就打不开了，但图片还躺在同级目录里。
 
     返回 `(新 HTML, 本地化张数, 警告)`。单张失败只记警告（一张图挂了不该让整篇进不来）。
     """
@@ -203,6 +239,15 @@ def localize_html_images(html: bytes, *, page_url: str, put_bytes,
     mapping: dict[str, str] = {}
     warns: list[str] = []
     for u in urls:
+        if u.lower().startswith(_SKIP_SCHEMES) or u.startswith("#"):
+            continue                         # 内嵌图/锚点：本来就取不到，也不算失败
+        local = _local_image_path(u, base_dir)
+        if local is not None:
+            try:
+                mapping[u] = put_bytes(u, Path(local).read_bytes())
+            except Exception as e:           # noqa: BLE001 —— 单张失败不阻断整篇
+                warns.append("本地图片读取失败：%s（%s）" % (u[:50], str(e)[:60]))
+            continue
         try:
             f = fetch(urljoin(page_url, u), timeout=timeout,
                       referer=referer or page_url)

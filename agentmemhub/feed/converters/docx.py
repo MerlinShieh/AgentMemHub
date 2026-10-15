@@ -162,48 +162,64 @@ def _para_images(p, *, put_image, state: dict) -> list[str]:
     return refs
 
 
-def _cell_text(cell) -> str:
-    """单元格文字：多段压成一行（markdown 表格单元格不能换行）。"""
-    try:
-        parts = [_para_text(p) for p in cell.paragraphs]
-    except Exception:                        # noqa: BLE001
-        return ""
-    return " ".join(x for x in parts if x).strip()
+def _tc_text(tc) -> str:
+    """从一个 `w:tc` 取文字。
+
+    不经过 `_Cell` 包装、也不走 `row.cells` —— 因为我们要按**原始 tc 列表**遍历
+    （`row.cells` 会把合并区域展开成重复的格子，见 `_table_rows`）。
+    """
+    parts: list[str] = []
+    for para in tc.findall(_qn("w:p")):
+        t = "".join(node.text or "" for node in para.iter(_qn("w:t"))).strip()
+        if t:
+            parts.append(t)
+    return " ".join(parts).strip()
 
 
-def _table_rows(table) -> list[list[str]]:
+def _table_rows(table) -> tuple[list[list[str]], bool]:
+    """表格 → `(二维文本, 是否含合并单元格)`。**行列对齐、合并区域不重复。**
+
+    ⚠️ 不能用 `[[c.text for c in row.cells] for row in table.rows]`：
+    `row.cells` 对合并区域会把**同一个格子返回多次** ⇒ 内容在 markdown 里被复制好几遍。
+    **真实素材命中**：4 份接口测试报告里 3 份有合并单元格，标题行整行合并 ⇒
+    同一个标题在表格里出现 3 次，读起来像文档写错了。
+
+    markdown 管道表表达不了"跨行/跨列"，最接近的呈现是**留空**：
+      · 横向合并（`w:gridSpan > 1`）⇒ 内容写第一格，其余补空列；
+      · 纵向合并的续格（`w:vMerge` 且不是 `restart`）⇒ 留空。
+    读者能由此看出"这几格是一体的"；而重复的文字只会让人以为有 3 列相同内容。
+
+    为什么会话"是否含合并"与"渲染"合成一次遍历：两个判据分开写必然漂移 ——
+    一边认为"有合并"、另一边却按无合并渲染，质量分会与实际呈现对不上。
+    """
+    rows: list[list[str]] = []
+    merged = False
     try:
-        return [[_cell_text(c) for c in row.cells] for row in table.rows]
+        for tr in table._tbl.tr_lst:
+            cells: list[str] = []
+            for tc in tr.tc_lst:
+                span, continued = 1, False
+                tcPr = tc.tcPr
+                if tcPr is not None:
+                    gs = tcPr.find(_qn("w:gridSpan"))
+                    if gs is not None:
+                        try:
+                            span = max(1, int(gs.get(_qn("w:val")) or 1))
+                        except Exception:        # noqa: BLE001
+                            span = 1
+                    vm = tcPr.find(_qn("w:vMerge"))
+                    if vm is not None:
+                        # 缺 `w:val` 或 `continue` 都表示"这一格是上面那格的延续"
+                        continued = (vm.get(_qn("w:val")) or "").lower() != "restart"
+                if span > 1 or continued:
+                    merged = True
+                cells.append("" if continued else _tc_text(tc))
+                cells.extend([""] * (span - 1))
+            rows.append(cells)
     except Exception as e:                   # noqa: BLE001
         raise FeedError("表格读取失败：%s" % str(e)[:100], kind="convert",
                         retryable=False)
-
-
-def _has_merged(table) -> bool:
-    """表格里是否有合并单元格。
-
-    ⚠️ 判据必须落在 **XML 属性**上，不能靠 `id(cell._tc)` 比对象身份：
-    lxml 的元素代理对象**不保证身份唯一**（同一个元素两次取到不同代理），
-    早先那版据此把普通 3×3 表格误判成"有合并"，质量分从 1.0 掉到 0.8 ——
-    一个**假告警**，比漏报更伤（2026-10-14 被 `test_质量_无合并单元格时满分` 逼出来）。
-
-    真判据只有两处：`w:gridSpan > 1`（横向合并）与 `w:vMerge` 存在（纵向合并，
-    起始格是 `restart`、后续是 `continue`，两者都算）。
-    """
-    try:
-        for tr in table._tbl.tr_lst:
-            for tc in tr.tc_lst:
-                tcPr = tc.tcPr
-                if tcPr is None:
-                    continue
-                gs = tcPr.find(_qn("w:gridSpan"))
-                if gs is not None and int(gs.get(_qn("w:val")) or 1) > 1:
-                    return True
-                if tcPr.find(_qn("w:vMerge")) is not None:
-                    return True
-        return False
-    except Exception:                        # noqa: BLE001 —— 结构畸形时保守返回"没有"
-        return False
+    return rows, merged
 
 
 def _doc_time_of(cp, meta: dict) -> tuple[int, str]:
@@ -231,9 +247,10 @@ def _collect(document, *, put_image) -> tuple[list, dict]:
         cls_name = type(block).__name__
         if cls_name == "Table":
             state["tables"] += 1
-            if _has_merged(block):
+            rows, merged = _table_rows(block)
+            if merged:
                 state["merged"] += 1
-            items.append(("table", _table_rows(block)))
+            items.append(("table", rows))
             continue
         level = _heading_level(block)
         text = _para_text(block)
@@ -368,10 +385,11 @@ class DocxConverter(BaseConverter):
                             "信息量），已用占位标题「%s」" % title)
             quality = min(quality, 0.8)
         if state["merged"]:
-            # markdown 表达不了合并单元格：同一格的话会在相邻格里重复 ⇒ 如实打标
-            warnings.append("有 %d 张表格含合并单元格，markdown 无法表达"
-                            "（合并区域的内容会在相邻单元格重复出现）" % state["merged"])
-            quality = min(quality, 0.8)
+            # 合并单元格现在以"空单元格"呈现（内容不再重复），但跨行/跨列的**语义**
+            # 在 markdown 里仍然表达不了 ⇒ 轻降 + 如实说明
+            warnings.append("有 %d 张表格含合并单元格，markdown 只能以空单元格表示"
+                            "（内容不再重复，但跨行/跨列的合并语义有损）" % state["merged"])
+            quality = min(quality, 0.9)
         if state["images_found"] and not state["images"]:
             warnings.append("文档含 %d 张图片，但本次没有可用的图片写入口，未保存"
                             % state["images_found"])
