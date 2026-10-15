@@ -28,13 +28,13 @@ from __future__ import annotations
 
 import io
 import re
-import time
 from pathlib import Path
 
 from ..base import BaseConverter, FeedDocument, FeedError
 from ..mdtable import table_md
 from ..titles import (TITLE_MAX, clean_meta_title, clip_title, is_junk_title,
                       looks_like_title)
+from .office import doc_time_of
 
 #: 认领的扩展名（`.docm` 与 `.docx` 同构：都是 ZIP+XML，只是 content-type 标了宏）
 EXTS = (".docx", ".docm")
@@ -222,20 +222,6 @@ def _table_rows(table) -> tuple[list[list[str]], bool]:
     return rows, merged
 
 
-def _doc_time_of(cp, meta: dict) -> tuple[int, str]:
-    """**文档自身时间**优先：core 的 modified → created → 文件 mtime → 当前时刻。"""
-    for attr, src in (("modified", "core_modified"), ("created", "core_created")):
-        v = getattr(cp, attr, None) if cp is not None else None
-        if v is not None and hasattr(v, "timestamp"):
-            try:
-                return int(v.timestamp()), src
-            except Exception:                # noqa: BLE001
-                pass
-    if meta.get("mtime"):
-        return int(meta["mtime"]), "mtime"
-    return int(time.time()), "now"
-
-
 def _collect(document, *, put_image) -> tuple[list, dict]:
     """遍历文档，产出**有序**的块列表与统计。"""
     state: dict = {"document": document, "images": 0, "images_found": 0,
@@ -398,7 +384,7 @@ class DocxConverter(BaseConverter):
                             % state["images_found"])
             quality = min(quality, 0.7)
 
-        doc_time, time_src = _doc_time_of(cp, meta)
+        doc_time, time_src = doc_time_of(cp, meta)
         return FeedDocument(
             doc_id=meta["doc_id"], title=title[:200], markdown=md, kind="docx",
             source_ref=str(ref), doc_time=doc_time, converter=self.stamp,

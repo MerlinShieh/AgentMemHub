@@ -285,8 +285,10 @@ def looks_like_verify_page(html: bytes) -> str:
 def is_probably_js_rendered(html: bytes, extracted: str) -> bool:
     """SPA 判据（**客观**）：抽出的正文相对 HTML 太小、且命中 SPA 标记。
 
-    命中后的处置由 `feed.fetch.renderer` 决定（`none` = 失败 + 指引，
-    `playwright` = 二级渲染兜底）—— 见计划 §7.2.1。
+    命中后的处置**当前只有一种**：如实失败 + 给出人可走的兜底通路
+    （另存为 HTML / `--stdin`）。计划 §7.2.1 的 Playwright 二级渲染**尚未实现** ——
+    曾有过 `feed.fetch.renderer` 开关，但它没有任何读取点（假开关），
+    2026-10-15 已删除；这个判据保留，因为"报错说清原因"本身就有用。
     """
     if len(html) < 20000:
         return False

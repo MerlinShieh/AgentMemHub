@@ -23,6 +23,7 @@ CID 编码的 CJK 字形（本脚本刻意回避 —— 手工拼 CJK 字体成�
 from __future__ import annotations
 
 import io
+import re
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -176,12 +177,31 @@ def build_pdf_table() -> bytes:
     return make_pdf([body], title="PDF table routing fixture")
 
 
-def _stable_zip(data: bytes, *, date=(2026, 1, 1, 0, 0, 0)) -> bytes:
-    """把 ZIP（docx）的条目时间戳固定下来，让产物**逐字节可复现**。
+#: `docProps/core.xml` 里的 W3CDTF 时间字段（`created` / `modified`）
+_CORE_TIME_RE = re.compile(rb"(<dcterms:(?:created|modified)[^>]*>)[^<]*(</dcterms:)")
 
-    为什么必须做：`python-docx` 保存时用的是"当前时间"，于是每次生成字节都不同 ——
-    夹具在本会话里承诺的"可复现"就成了空话，git 里还会看到没有意义的变更
-    （实测：连续生成两次，`sample.docx` 的 SHA256 不同）。
+
+def _pin_core_time(xml: bytes, stamp: str) -> bytes:
+    """把 core.xml 里的 `created` / `modified` 钉成固定值。
+
+    为什么必须做：**openpyxl 在保存时会把 `dcterms:modified` 改写成"当前 UTC 时间"**
+    （`python-docx` 不会，所以 DOCX 夹具只要设一次 `core_properties.modified` 就够）。
+    不钉死的话，同一份夹具每次生成字节都不同 —— "逐字节可复现"成了空话，
+    git 里还会不断冒出没有意义的二进制变更（实测：连续两次生成 SHA256 不同）。
+    """
+    return _CORE_TIME_RE.sub(
+        lambda m: m.group(1) + stamp.encode("ascii") + m.group(2), xml)
+
+
+def _stable_zip(data: bytes, *, date=(2026, 1, 1, 0, 0, 0),
+                core_stamp: str = "") -> bytes:
+    """把 ZIP（docx / xlsx）的条目时间戳固定下来，让产物**逐字节可复现**。
+
+    为什么必须做：`python-docx` / `openpyxl` 保存时用的是"当前时间"，于是每次生成
+    字节都不同 —— 夹具在本会话里承诺的"可复现"就成了空话，git 里还会看到没有意义的
+    变更（实测：连续生成两次，`sample.docx` 的 SHA256 不同）。
+
+    `core_stamp`：core.xml 里那些**打包工具自己会改写**的时间字段（见 `_pin_core_time`）。
     """
     import zipfile
 
@@ -195,7 +215,10 @@ def _stable_zip(data: bytes, *, date=(2026, 1, 1, 0, 0, 0)) -> bytes:
                 info.external_attr = item.external_attr
                 info.internal_attr = item.internal_attr
                 info.create_system = item.create_system
-                dst.writestr(info, src.read(item.filename))
+                body = src.read(item.filename)
+                if core_stamp and item.filename == "docProps/core.xml":
+                    body = _pin_core_time(body, core_stamp)
+                dst.writestr(info, body)
     finally:
         src.close()
     return out.getvalue()
@@ -338,6 +361,47 @@ def build_docx() -> bytes:
     return _stable_zip(out.getvalue())
 
 
+def build_xlsx() -> bytes:
+    """XLSX 夹具：**两张表 + 日期 / 布尔 / 公式 / 刺字符**。
+
+    每个格子的形态都是刻意选的 —— 它们正好是 xlsx 比"纯文本直通"多出来的那部分：
+      · **日期**在文件里是**序列号**（`<v>45000</v>` 配 `styles.xml` 的数字格式 id）
+        ⇒ 必须验证它被还原成 `2026-10-15` 而不是 `45000`。这是"用库、不自己解 XML"
+        的**全部理由**：解错了不报错，只是表里静静多一列数字；
+      · **布尔**要出 `TRUE`（Excel 的显示样式），不是 Python 的 `True`；
+      · **公式**没有缓存值时（文件生成后从没被 Excel 打开过）读出来是 `None`
+        ⇒ 空格子。这是**已知边界**，夹具把它钉住：将来有人看到空格子时，
+        能看到这是"记录在案的行为"而不是"某次改动把数据弄丢了"；
+      · `|` 与换行会破坏 md 管道表结构 ⇒ 必须被转义 / 压平；
+      · 一张**默认名**（`Sheet1`）的表也在里面 —— 单表且默认名时正文不写 `## 表名`。
+    """
+    from datetime import date, datetime
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "销售明细"
+    ws.append(["日期", "产品", "数量", "金额"])
+    ws.append([datetime(2026, 10, 15), "A|B", 3, 12.5])
+    ws.append([date(2026, 1, 2), "含\n换行", None, 100])
+    ws.append([datetime(2026, 10, 15, 14, 30, 5), "C", True, 0.1])
+    ws.append([None, None, None, None])              # 全空行：必须被跳过
+    ws.append(["合计", "", None, "=SUM(D2:D4)"])     # 公式：无缓存 ⇒ 空格子
+    other = wb.create_sheet("Sheet1")                # 默认名（见 docstring）
+    other.append(["项", "值"])
+    other.append(["甲", 1])
+    wb.properties.title = ""                         # 空 title ⇒ 标题回落到文件名
+    # 文档自身时间：写死 + **钉进 core.xml**（openpyxl 保存时会把它改成"当前 UTC"，
+    # 所以只设 `properties.modified` 不够 —— 见 `_pin_core_time`）
+    wb.properties.created = datetime(2026, 1, 1, 12, 0, 0)
+    wb.properties.modified = datetime(2026, 1, 1, 12, 0, 0)
+    out = io.BytesIO()
+    wb.save(out)
+    # 过一遍固定时间戳的 ZIP —— 否则每次生成字节都不同（同 DOCX）
+    return _stable_zip(out.getvalue(), core_stamp="2026-01-01T12:00:00Z")
+
+
 #: 产物清单：文件名 → 构造函数
 FIXTURES = {
     "pdf_text.pdf": build_pdf_text,
@@ -347,6 +411,7 @@ FIXTURES = {
     "pdf_false_table.pdf": build_pdf_false_table,
     "pdf_wrapped.pdf": build_pdf_wrapped,
     "sample.docx": build_docx,
+    "sample.xlsx": build_xlsx,
 }
 
 

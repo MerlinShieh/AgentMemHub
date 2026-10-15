@@ -38,7 +38,8 @@ class _FakeCfg:
         return dict(self.paths)
 
     def feed(self):
-        return {"convert": {"llm": False, "ocr": "local"}}
+        # 空 = 全走内置默认（假开关 `convert.*` 已删，别再复刻）
+        return {}
 
 
 @pytest.fixture()
@@ -352,11 +353,17 @@ def test_认领_无扩展名但真是docx():
 
 
 def test_认领_别的zip不被当成docx():
-    """ZIP 魔数只是必要条件：`.xlsx`/`.pptx` 同样是 ZIP，不能都抢过来。"""
+    """ZIP 魔数只是必要条件：`.xlsx`/`.pptx` 同样是 ZIP，不能都抢过来。
+
+    含 `xl/workbook.xml` 的 ZIP 是**工作簿** ⇒ 必须归 `xlsx`
+    （2026-10-15 加 XLSX 通路之前，这里断言的是"谁都不认领"；
+    现在归属明确了，断言也该比"没人要"更具体）。"""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
         z.writestr("xl/workbook.xml", "<worksheet/>")
-    assert get_converter(ref="download", kind="", data=buf.getvalue()) is None
+    conv = get_converter(ref="download", kind="", data=buf.getvalue())
+    assert conv is not None and conv.name == "xlsx", \
+        "工作簿该归 xlsx —— 既不该被 docx 抢走，也不该谁都不认"
 
 
 def test_认领_https链接的docx归docx而非url():

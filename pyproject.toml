@@ -28,6 +28,13 @@ dependencies = [
     "python-docx>=1.1",
     "python-pptx>=1.0",
     "python-multipart>=0.0.9",
+    #   openpyxl    —— XLSX / XLSM 直通（MIT，纯 Python，无重依赖）。
+    #                  与 docx/pptx 同属 OOXML，但**必须用库而不能自己解 XML**：
+    #                  单元格的日期是"序列号 + 数字格式 id"两步表达（`45000` 是
+    #                  1900 纪元的第 45000 天），格式定义在 `styles.xml` 里；
+    #                  自己解析极易把日期当整数放出去 —— 那是**看不出来的错**
+    #                  （表格里静静多一列 45000），比报错难查得多。
+    "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]

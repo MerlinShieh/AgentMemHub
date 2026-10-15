@@ -7,12 +7,14 @@
 """
 from __future__ import annotations
 
+from .csvfile import CsvConverter
 from .docx import DocxConverter
 from .pdf import PdfConverter
 from .pptx import PptxConverter
 from .text import TextConverter
 from .url import UrlConverter
 from .wechat import WechatConverter
+from .xlsx import XlsxConverter
 from .xmind import XmindConverter
 
 #: 内置转换器类（顺序 = 认领优先级）
@@ -23,7 +25,9 @@ BUILTIN = (
                         # 就会拿 trafilatura 去解析 PDF 字节（必然抽不出正文）
     DocxConverter,      # DOCX（T1 级难度的一档，见计划 §7.0.1）
     PptxConverter,      # PPTX（OOXML，与 DOCX 同类：确定性、零 LLM）
+    XlsxConverter,      # XLSX —— 办公三件套的最后一件（同样是 OOXML）
     XmindConverter,     # XMIND 思维导图（ZIP + JSON/XML，零依赖）
+    CsvConverter,       # CSV / TSV 分隔符文本表（零依赖；排在通用 Text 之前）
     UrlConverter,       # T2a：普通网页 + **本地另存的网页**
     TextConverter,      # T1：md / txt 直通（零依赖）
     # T4 image（OCR）后续加入

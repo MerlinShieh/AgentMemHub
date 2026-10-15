@@ -43,15 +43,24 @@
   检查清单 —— 不清机制最容易写出"配了不生效"或"覆盖范围超出预期"。
   **想知道某个调用方到底在用哪份 LLM 配置**：`uv run python -m agentmemhub llm-config`。
   **加/改配置键后必跑** `uv run python scripts/check_config_keys.py` —— 它查
-  "定义了却没有任何读取点"的**僵尸键**。本项目踩过三次同一个坑
-  （`wiki.single_shot_max`、`wiki.workers`、`wiki.l2.*`，以及没有任何消费点的
+  "定义了却没有任何读取点"的**僵尸键**。本项目踩过**四次**同一个坑：
+  前三次是 `wiki.single_shot_max`、`wiki.workers`、`wiki.l2.*`，以及没有任何消费点的
   假开关 `wiki.enabled` —— 它直到 **2026-10-07** 才真修：此前只把
   `_configured()` 的注释改成了"现在是真开关"，代码里却**没有任何触发链检查它**
   （`_configured()` 只被 `status()` 调用）；真正的拦截点现补在
   `wiki_triggers._run_locked()` 开头。**教训：注释不等于实现 ——
-  判定"某个键到底有没有消费点"必须去查调用点，别读注释**），
-  **共同特征是配置里的值恰好等于代码里硬编码的默认值**
-  —— 所以既不报错、也不让测试变红，能潜伏数月。`tests/test_config_audit.py`
+  判定"某个键到底有没有消费点"必须去查调用点，别读注释**；
+  前三次的**共同特征是配置里的值恰好等于代码里硬编码的默认值**
+  —— 所以既不报错、也不让测试变红，能潜伏数月。
+  **第四次是 `feed` 段的四个假开关**（`feed.convert.llm` / `feed.convert.ocr` /
+  `feed.fetch.renderer` / `feed.depth_default`，2026-10-15 删除）：能力还没做，
+  开关先写好了。这一次**审计压根没看见它们** —— `agentmemhub.yaml.example` 当时
+  **没有 `feed` 段**，而审计只扫 example 与本地 yaml 里**出现过**的键
+  （不是"注释骗过了它"：注释在 `yaml.safe_load` 时就已被丢弃）。
+  **教训：加配置键必须与"写进 example"同一步做，否则这条防线是空的**。
+  还有一条：**报错文案不许引用不存在的开关** —— 当时 `url.py` 指引用户
+  "置 `feed.fetch.renderer=playwright`"，指向一个假开关，比不说更坏
+  （用户会去改它，然后发现毫无反应）。`tests/test_config_audit.py`
   里有一条守护测试会在提交前拦住它。**注意该脚本是启发式**（按"键名在代码里
   出现过"判定）——像 `rag.retrieval.candidate_k` 这种"代码里有同名字段但 yaml
   配了不生效"的，它查不出来，需人工复核。
@@ -59,7 +68,7 @@
   （记忆排除 UI 已下线，后端能力保留）；记忆页承载筛选/溯源/⭐加权/👍👎/蒸馏入口。
   会话与记忆通过 `session_uid`（全局递增）双向绑定跳转。
 - **测试纪律**：每次改动带测试；bug 修复先写复现测试（红→绿）；
-  `uv run pytest` 全绿是提交门槛（数量以实测为准，当前 1031 passed / 1 skipped）。
+  `uv run pytest` 全绿是提交门槛（数量以实测为准，当前 1261 passed / 1 skipped）。
   ⚠️ **别并发跑两个 `uv run`**（例如后台跑全量测试、前台又跑脚本）—— uv 会争用环境锁，
   实测导致 10 个毫不相干的测试假失败（snapshot / wiki_triggers），干净重跑即全绿。
   ⚠️ **`monkeypatch` 挡不住「活过测试的线程/子进程」**：MCP 的写入钩子会起 daemon

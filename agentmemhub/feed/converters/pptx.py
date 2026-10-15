@@ -25,6 +25,7 @@ from pathlib import Path
 from ..base import BaseConverter, FeedDocument, FeedError
 from ..mdtable import table_md
 from ..titles import TITLE_MAX, clean_meta_title, clip_title, is_junk_title
+from .office import doc_time_of
 
 #: 认领的扩展名（`.pptm` 是带宏的同构格式）
 EXTS = (".pptx", ".pptm", ".ppsx")
@@ -126,19 +127,6 @@ def _slide_notes(slide) -> str:
         return "" if text.isdigit() else text
     except Exception:                        # noqa: BLE001
         return ""
-
-
-def _doc_time_of(cp, meta: dict) -> tuple[int, str]:
-    for attr, src in (("modified", "core_modified"), ("created", "core_created")):
-        v = getattr(cp, attr, None) if cp is not None else None
-        if v is not None and hasattr(v, "timestamp"):
-            try:
-                return int(v.timestamp()), src
-            except Exception:                # noqa: BLE001
-                pass
-    if meta.get("mtime"):
-        return int(meta["mtime"]), "mtime"
-    return int(meta.get("now") or 0), "now"
 
 
 def _title_of(cp, page_titles: list[str], ref: str) -> tuple[str, str]:
@@ -253,7 +241,7 @@ class PptxConverter(BaseConverter):
         cp = getattr(prs, "core_properties", None)
         title, title_src = _title_of(cp, page_titles, ref)
         md = self._render(title, pages, total=len(slides))
-        doc_time, time_src = _doc_time_of(cp, meta)
+        doc_time, time_src = doc_time_of(cp, meta)
 
         quality = 1.0
         if thin:

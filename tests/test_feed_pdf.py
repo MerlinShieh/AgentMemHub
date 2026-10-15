@@ -41,7 +41,8 @@ class _FakeCfg:
         return dict(self.paths)
 
     def feed(self):
-        return {"convert": {"llm": False, "ocr": "local"}}
+        # 空 = 全走内置默认（假开关 `convert.*` 已删，别再复刻）
+        return {}
 
 
 @pytest.fixture()

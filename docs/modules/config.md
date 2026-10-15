@@ -219,6 +219,7 @@
 | 键名匹配只看**最后一段** | `a.b.workers` 与 `x.y.workers` 只要代码里出现过 `"workers"` 都算命中，无法区分段 |
 | 只有**未被注释的**叶子键参与审计 | 审计用 `yaml.safe_load` 读文件，注释一律丢弃——`agentmemhub.yaml.example` 里大段被注释掉的示例（如 `rag.retrieval.callers` 的四个调用方、`llm.thinking` / `reasoning_effort` / `headers`）不在检查范围内，注释里的错键名也永远不会被发现 |
 | 不校验**取值合法性** | 只查"有没有读取点"，不查"值合不合理"。`recall_level: 9` / `logs.rotate.max_mb: "abc"` 这类越界值审计不报，由运行时的逐键兜底回退默认值 |
+| **不在这两个文件里的键，审计压根看不见** | 审计对象只有 `agentmemhub.yaml.example` 与本地 `agentmemhub.yaml`。在 `DEFAULT_*` 里定义了、但**这两个文件都没写**的键，不进检查范围 —— 2026-10-15 实测：`feed` 段四个假开关（`feed.convert.llm` / `feed.convert.ocr` / `feed.fetch.renderer` / `feed.depth_default`）就是这样**长期躲过审计**的（当时 example 里没有 `feed` 段，审计一路报"0 僵尸键"）。**推论：加配置键必须与"写进 `agentmemhub.yaml.example`"同一步做，否则这条防线是空的** |
 
 ### 5.3 本项目踩过的假开关
 
@@ -228,6 +229,7 @@
 | `wiki.workers` | 配了不生效 | `compile_all` 的 `workers=4` 默认值 + `wiki.py` 的 `workers or 4` 两处硬编码 | 2026-09-22 配置审计补上，`_limits()` 第 4 位 |
 | `wiki.l2.workers` / `min_pages` / `domain_max` | 配了不生效 | `scripts/wiki_aggregate.py` 只认 argparse，默认值恰好等于配置值 | 已收口：命令行显式传值 > 配置 > 脚本常量 |
 | `wiki.enabled` | **曾是假开关**：没有任何消费点，置 false 照样触发 | 只定义未接线 | 2026-09-22 接入 `wiki_triggers._configured()`。**实测复核（2026-09-27）：消费点仍只有 `status()`**，自动触发链不经过它（`agentmemhub/**/*.py` 与 `scripts/**/*.py` 全量 grep `get("enabled"` 只有 7 处，wiki 层的唯一一处就在 `_configured()` 内）→ 「置 false 后触发器不再跑」这句目前只对状态报告成立。**待核实**：是设计上就该由 `wiki.update.enabled` 管自动触发、`wiki.enabled` 只管可用性，还是漏接线；在结论出来前，要停自动触发请关 `wiki.update.enabled` |
+| `feed.convert.llm` / `feed.convert.ocr` / `feed.fetch.renderer` / `feed.depth_default` | **四个从未有过消费点的假开关**（能力还没做、开关先写好了）；更坏的是**报错文案也在指引它们**（`feed/converters/url.py` 曾让用户"置 `feed.fetch.renderer=playwright`"） | **审计根本没看见它们**：`agentmemhub.yaml.example` 当时**没有 `feed` 段**，而不在这两个文件里的键不在审计范围（见 §5.2 末行）—— 所以一路报"0 僵尸键" | 2026-10-15 **删除**，并把真正有消费点的 5 个键（`db` / `store_dir` / `kb_dir` / `fetch.timeout` / `accept.exts`）补进 example；报错文案同步改掉 |
 | `llm.thinking` / `llm.reasoning_effort` | 写进 yaml 读不到 | `llm` 段是**白名单过滤**，漏加进 `_LLM_SCALAR_KEYS` | 已加入白名单；注释里写明"新增 provider 开关务必同步" |
 
 共同特征：**配置里的值恰好等于代码里硬编码的默认值**，所以既不报错也不让测试变红，能潜伏数月。

@@ -251,15 +251,25 @@ DEFAULT_FEED = {
     "db": "database/materials.db",
     "store_dir": "exports/feed_store",
     "kb_dir": "exports/wiki_work/out_feed",
-    #: 转换阶段的 LLM 开关。**默认关**（Q4 决策）：脚本能做的绝不花钱，
-    #: 只有质量自评不达标时才允许升级（见计划 §7.0.1）。
-    "convert": {
-        "llm": False,        # PDF 表格/图片理解是否允许 LLM 参与
-        "ocr": "local",      # local | llm | off —— 图片档的引擎选择
-    },
-    #: 取回阶段（M3 起用）：`renderer=none` 表示不装无头浏览器，能力按需开
+    #: 取回阶段（M3 起真正生效）：单次抓取超时，消费点是 `service._fetch_timeout`。
+    #:
+    #: ⚠️ 这一段曾有一批**假开关**，2026-10-15 实测后删除：
+    #: `convert.llm` / `convert.ocr`（转换阶段是否让 LLM / OCR 参与）、
+    #: `fetch.renderer`（Playwright 二级渲染）、`depth_default`（加工深度）。
+    #: 四个键**没有任何读取点** —— 能力还没做，开关先写好了。
+    #:
+    #: 为什么必须删而不是留着"以后用"：配置的语义是**承诺**
+    #: （"改了它就会变"）。改了没反应、且**不报错**，用户只会以为自己改错了地方；
+    #: 更坏的是**报错文案也在引用它**（`url.py` 曾指引"置
+    #: `feed.fetch.renderer=playwright`"，指向一个不存在的开关），
+    #: 把假的当成了真的。**能力真正落地时再加回来** —— 那时它自然带消费点。
+    #:
+    #: 附带教训（记在这里免得下次重踩）：`scripts/check_config_keys.py`
+    #: **没能发现**这四个键，原因不是"键名出现在注释里骗过了它"，
+    #: 而是 `agentmemhub.yaml.example` 当时**根本没有 `feed` 段** ——
+    #: 审计只扫 example 与本地 yaml 里出现过的键，不在这两处的键**不在它视野内**。
+    #: 所以"加配置键"和"写进 example"必须同一步做，否则防线是空的。
     "fetch": {
-        "renderer": "none",  # none | playwright
         "timeout": 20,
     },
     #: **允许投喂的格式**（后缀白名单）。见 `agentmemhub/feed/formats.py`。
@@ -268,7 +278,6 @@ DEFAULT_FEED = {
     "accept": {
         "exts": [],
     },
-    "depth_default": "page",  # page（浅加工）/ session（深加工）—— 未显式声明时
 }
 
 
@@ -583,8 +592,9 @@ class Config:
     def feed(self) -> dict[str, Any]:
         """投喂转译层配置（已合并默认值）。
 
-        `convert.llm` **默认 false**：脚本解析是确定性的、免费的，LLM 只在
-        质量自评不达标时兜底（Q4 决策 + §7.0.1 的"脚本优先"分工）。
+        **"脚本优先"分工不走配置**：脚本解析确定性、免费，LLM 只在质量自评
+        不达标时兜底 —— 这是实现里的升级路径（§7.0.1），不是开关键。
+        所以这里**没有** `convert.llm` / `convert.ocr`（细节见 `DEFAULT_FEED` 的注）。
         """
         return _deep_merge(DEFAULT_FEED, self._get("feed", {}) or {})
 

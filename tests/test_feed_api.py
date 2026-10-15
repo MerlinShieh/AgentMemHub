@@ -36,7 +36,8 @@ class _FeedCfg:
         return dict(self._paths)
 
     def feed(self):
-        return {"convert": {"llm": False, "ocr": "local"}, "accept": {"exts": []}}
+        # 只留真实存在的键：`accept.exts` 空 = 跟随转换器注册表
+        return {"accept": {"exts": []}}
 
 
 @pytest.fixture(autouse=True)
@@ -198,7 +199,10 @@ def _tree(tmp_path: Path) -> Path:
     _md(root, "a.md")
     _md(root / "子目录", "b.md")
     (root / "工具.exe").write_bytes(b"MZ" + b"\x00" * 40)
+    # `.xlsx` 自 2026-10-15 起**已支持**（办公三件套的最后一件）。
+    # 内容不必是真工作簿 —— `scan` 只按后缀分类，不解析字节（`batch` 用 dry-run）。
     (root / "结果.xlsx").write_bytes(b"PK\x03\x04" + b"\x00" * 40)
+    (root / "归档.rar").write_bytes(b"Rar!" + b"\x00" * 40)   # 仍不在白名单
     return root
 
 
@@ -206,17 +210,17 @@ def test_scan_列出可投喂与被挡(client, tmp_path):
     root = _tree(tmp_path)
     r = client.post("/api/feed/scan", json={"roots": [str(root)]})
     body = r.json()
-    assert body["allowedCount"] == 2, body
-    assert body["skippedCount"] == 2
+    assert body["allowedCount"] == 3, body          # a.md / b.md / 结果.xlsx
+    assert body["skippedCount"] == 2                # 工具.exe / 归档.rar
     exts = sorted(body["byExt"])
-    assert exts == [".md"]
+    assert exts == [".md", ".xlsx"], body["byExt"]
 
 
 def test_scan_不递归(client, tmp_path):
     root = _tree(tmp_path)
     body = client.post("/api/feed/scan",
                        json={"roots": [str(root)], "recursive": False}).json()
-    assert body["allowedCount"] == 1, "只扫一层就该只有一个 .md"
+    assert body["allowedCount"] == 2, "只扫一层：a.md + 结果.xlsx（子目录里的不算）"
 
 
 def test_batch_长任务_先扫描默认不投(client, tmp_path):
@@ -274,3 +278,55 @@ def test_lint_接口可用(client, tmp_path):
     client.post("/api/feed/add", json={"input": "path", "value": str(p)})
     body = client.get("/api/feed/lint?with_index=false").json()
     assert body["p0"] == 0, body["issues"]
+
+
+# ---------------------------------------------------------------------------
+# 办公表格端到端：新格式必须走**完整链路**（登记 → raw → 转译 → 发布 kb）
+# ---------------------------------------------------------------------------
+
+def test_端到端_xlsx出kb页(client, feed_cfg, tmp_path):
+    """XLSX 是办公三件套的最后一件 —— 单测过不算数，得走完整链路。
+
+    这里同时验三件事：`kind` 回填成转换器判定的类型、kb 页有 frontmatter
+    （`origin: external` 是与自有 wiki 的分界线）、日期没变成序列号。
+    """
+    from datetime import datetime
+
+    from openpyxl import Workbook
+
+    p = tmp_path / "台账.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "销售明细"
+    ws.append(["日期", "产品", "金额"])
+    ws.append([datetime(2026, 10, 15), "甲", 100])
+    wb.save(p)
+
+    body = client.post("/api/feed/add",
+                       json={"input": "path", "value": str(p)}).json()
+    assert body["ok"] is True, body
+    assert body["kind"] == "xlsx" and body["kb_path"]
+
+    pages = list(feed_cfg.feed_paths()["kb"].rglob("*.md"))
+    assert len(pages) == 1, pages
+    text = pages[0].read_text(encoding="utf-8")
+    assert "origin: external" in text
+    assert "2026-10-15" in text and "销售明细" in text
+    assert "45000" not in text
+
+
+def test_端到端_csv出kb页(client, feed_cfg, tmp_path):
+    """CSV 用 GBK 写（中文 Excel 的默认导出编码）—— 端到端必须也解得对。"""
+    p = tmp_path / "名单.csv"
+    p.write_bytes("姓名,部门\n张三,研发\n".encode("gb18030"))
+
+    body = client.post("/api/feed/add",
+                       json={"input": "path", "value": str(p)}).json()
+    assert body["ok"] is True, body
+    assert body["kind"] == "csv" and body["kb_path"]
+
+    pages = list(feed_cfg.feed_paths()["kb"].rglob("*.md"))
+    assert len(pages) == 1, pages
+    text = pages[0].read_text(encoding="utf-8")
+    assert "张三" in text and "研发" in text
+    assert "origin: external" in text

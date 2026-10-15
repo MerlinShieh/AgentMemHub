@@ -74,9 +74,12 @@ def build_document(*, data: bytes, ref: str, meta: dict, kind: str,
                         % why, kind="fetch", retryable=True)
     if not md.strip():
         if F.is_probably_js_rendered(data, md):
+            # 这里**不许**再指引 `feed.fetch.renderer=playwright` ——
+            # 那个开关没有任何读取点（假开关），2026-10-15 已删。
+            # 指向一个不存在的开关比不说更坏：用户会去改它，然后发现毫无反应。
             raise FeedError("正文疑似由 JS 渲染（静态 HTML 里没有内容）—— "
-                            "装 Playwright 并置 feed.fetch.renderer=playwright 可自动处理，"
-                            "否则请另存为 HTML 或 --stdin 粘贴",
+                            "二级渲染（Playwright）**尚未实现**，请走兜底通路："
+                            "浏览器另存为 HTML 后 feed add <文件>，或 feed add --stdin 粘贴正文",
                             kind="fetch", retryable=True)
         raise FeedError("抽取结果为空（页面可能不是文章页）",
                         kind="convert", retryable=True)

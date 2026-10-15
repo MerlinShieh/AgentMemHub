@@ -33,7 +33,9 @@ class _FakeCfg:
         return dict(self.paths)
 
     def feed(self):
-        return {"convert": {"llm": False}, "fetch": {"renderer": "none", "timeout": 20}}
+        # 只放真实存在的键（`feed.convert.*` / `feed.fetch.renderer` 是没有读取点的
+        # 假开关，2026-10-15 已从 DEFAULT_FEED 删除，测试里的假配置也不该再复刻它们）
+        return {"fetch": {"timeout": 20}}
 
     @property
     def wiki(self):
