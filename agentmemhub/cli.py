@@ -1532,7 +1532,7 @@ def cmd_feed(args) -> int:
         paths = [p for p in tokens if p.strip()]
         if not paths:
             print("用法：agentmemhub feed add <文件路径> [更多路径…] "
-                  "[--kind text|pdf|docx] [--dry-run] [--force]")
+                  "[--kind text|pdf|docx|pptx|xmind|html] [--dry-run] [--force]")
             return 2
         out = []
         failed = 0

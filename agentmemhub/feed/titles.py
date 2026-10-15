@@ -21,9 +21,17 @@ from __future__ import annotations
 import re
 
 #: 占位标题（元数据里出现这些值等于没有标题）
+#:
+#: 这张名单是**三个真实素材**凑出来的，每一条都对应一次实测：
+#: · `文字文稿1` —— WPS 默认文件名（求职文档的标题一度成了它）；
+#: · `PowerPoint 演示文稿` —— PowerPoint 的默认 core title（4 份评审 PPT 全是它）；
+#: · `中心主题` —— XMind 新建导图的**默认根节点名**（2 份业务导图没改过它）。
+#: 共同点：**对所有同类文档都一样**，所以作为标题等于零信息。
 TITLE_JUNK = {
     "", "untitled", "无标题", "未命名", "microsoft word",
     "document1", "doc1", "word 文档", "新建文档",
+    "中心主题", "powerpoint 演示文稿", "powerpoint presentation",
+    "presentation1", "幻灯片1", "思维导图", "sheet1",
 }
 #: 办公软件的**默认文件名**：WPS 的 `文字文稿1`、Word 的 `新建 Microsoft Word 文档`
 #: —— 它们作为知识库标题毫无信息量（真实素材踩到：一份求职文档的标题成了"文字文稿1"）
