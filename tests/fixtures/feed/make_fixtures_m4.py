@@ -176,12 +176,42 @@ def build_pdf_table() -> bytes:
     return make_pdf([body], title="PDF table routing fixture")
 
 
+def _stable_zip(data: bytes, *, date=(2026, 1, 1, 0, 0, 0)) -> bytes:
+    """把 ZIP（docx）的条目时间戳固定下来，让产物**逐字节可复现**。
+
+    为什么必须做：`python-docx` 保存时用的是"当前时间"，于是每次生成字节都不同 ——
+    夹具在本会话里承诺的"可复现"就成了空话，git 里还会看到没有意义的变更
+    （实测：连续生成两次，`sample.docx` 的 SHA256 不同）。
+    """
+    import zipfile
+
+    src = zipfile.ZipFile(io.BytesIO(data))
+    out = io.BytesIO()
+    try:
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+            for item in src.infolist():
+                info = zipfile.ZipInfo(item.filename, date_time=date)
+                info.compress_type = item.compress_type
+                info.external_attr = item.external_attr
+                info.internal_attr = item.internal_attr
+                info.create_system = item.create_system
+                dst.writestr(info, src.read(item.filename))
+    finally:
+        src.close()
+    return out.getvalue()
+
+
 def build_pdf_scanned() -> bytes:
     """T3c：**图片型** PDF（无文本层）。
 
-    用 Pillow 把一张"有内容但不可选"的位图存成 PDF —— 这正是扫描件的本质：
-    像素里有字，字节里没字。它同时是 T4 通路的输入形态。
+    这正是扫描件的本质：**像素里有字，字节里没字**。它同时是 T4 通路的输入形态。
+
+    位图用 Pillow 画，但**手工**把它嵌进最小 PDF 结构，而不是让 Pillow 直接输出 PDF ——
+    Pillow 会写进当前时间，夹具字节每次生成都不同（实测确认过），
+    那"逐字节可复现"就是一句空话。
     """
+    import zlib
+
     from PIL import Image, ImageDraw
 
     img = Image.new("RGB", (900, 320), "white")
@@ -190,9 +220,24 @@ def build_pdf_scanned() -> bytes:
     draw.text((30, 90), "Row 1   alpha   beta   gamma", fill="black")
     draw.text((30, 130), "Row 2   delta   epsilon   zeta", fill="black")
     draw.rectangle([20, 20, 880, 300], outline="black", width=2)
-    buf = io.BytesIO()
-    img.save(buf, format="PDF", resolution=150.0)
-    return buf.getvalue()
+    w, h = img.size
+    comp = zlib.compress(img.tobytes())
+
+    objs: list[bytes] = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"",                                            # Pages：稍后回填
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Title () /CreationDate (D:20260101120000Z) >>",
+        ("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %d %d] "
+         "/Resources << /XObject << /Im0 7 0 R >> >> /Contents 6 0 R >>"
+         % (w, h)).encode("latin-1"),
+        _stream("q %d 0 0 %d 0 0 cm /Im0 Do Q" % (w, h)),
+        (b"<< /Type /XObject /Subtype /Image /Width %d /Height %d "
+         b"/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode "
+         b"/Length %d >>\nstream\n" % (w, h, len(comp))) + comp + b"\nendstream",
+    ]
+    objs[1] = b"<< /Type /Pages /Kids [5 0 R] /Count 1 >>"
+    return _build(objs, info_id=4)
 
 
 def build_pdf_encrypted() -> bytes:
@@ -204,6 +249,42 @@ def build_pdf_encrypted() -> bytes:
     buf = io.BytesIO()
     writer.write(buf)
     return buf.getvalue()
+
+
+def build_pdf_false_table() -> bytes:
+    """T3b 的**误检**守卫：一行文字被线条框成"1 行 2 列"。
+
+    真实素材（求职文档）里 pdfplumber 把一行等宽字体代码检成了 1 行 2 列表格；
+    若照单全收，那行字会被当表格**从正文里剔除**，而它又不足以构成表格
+    ⇒ 内容两头落空、**永久丢失**（这是静默失真里最坏的一种）。
+
+    构造方式与误检形态一致：三条竖线 + 两条横线围出"一行两列"。
+    页面下方另放正常段落，用于验证"没把正文一起削掉"。
+    """
+    body = table_stream(
+        [['const el = driver.findElement(By.id("submit"));',
+          'const ok = await el.isVisible();']],
+        x0=72, y_top=700, col_w=210, row_h=20)
+    body += "\n" + text_stream([
+        "The paragraph after the boxed line must survive:",
+        "a route that drops prose to gain structure is a regression.",
+    ], y=600)
+    return make_pdf([body], title="")
+
+
+def build_pdf_wrapped() -> bytes:
+    """首行被**行宽硬切** + **没有元数据标题** —— 标题兜底的守卫。
+
+    真实素材（求职 PDF）里首行是 `…今年有六年有余的工作经`，`验。` 落在第二行；
+    直接拿首行当标题就得到一句断掉的话。这里用 ASCII 复现同一形态。
+    """
+    page = text_stream([
+        "Quarterly review of the memory pipeline for the",   # 被行宽切掉
+        "north region",                                       # 续行碎片（很短）
+        "The remaining lines are ordinary body text and must",
+        "not be mistaken for a continuation of the title.",
+    ], y=700)
+    return make_pdf([page], title="")
 
 
 def build_docx() -> bytes:
@@ -253,7 +334,8 @@ def build_docx() -> bytes:
 
     out = io.BytesIO()
     doc.save(out)
-    return out.getvalue()
+    # 过一遍固定时间戳的 ZIP —— 否则每次生成字节都不同（见 `_stable_zip`）
+    return _stable_zip(out.getvalue())
 
 
 #: 产物清单：文件名 → 构造函数
@@ -262,6 +344,8 @@ FIXTURES = {
     "pdf_table.pdf": build_pdf_table,
     "pdf_scanned.pdf": build_pdf_scanned,
     "pdf_encrypted.pdf": build_pdf_encrypted,
+    "pdf_false_table.pdf": build_pdf_false_table,
+    "pdf_wrapped.pdf": build_pdf_wrapped,
     "sample.docx": build_docx,
 }
 

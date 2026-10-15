@@ -278,6 +278,63 @@ def test_加密档_报encrypted不硬闯(tmp_path, cfg):
 # 认领：谁处理什么
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# 真实素材逼出来的两条：误检表格会**吞掉正文**、首行被行宽硬切
+# ---------------------------------------------------------------------------
+
+def test_单行误检表格不算表格_正文一个字都不能少():
+    """**真实素材（求职 PDF）踩到的静默丢内容**：pdfplumber 把一行等宽字体代码
+    检成"1 行 2 列"的表格；照单全收的话那行字会被当表格**从正文里剔除**，
+    而它又不足以构成表格 ⇒ 内容两头落空、永久丢失。
+
+    这里同时守住三件事：路由不判 T3b、那行字仍在正文里、误检数量可查。
+    """
+    info = probe(_fx("pdf_false_table.pdf"))
+    assert info["tables"] == 0, "1 行 2 列不算表格"
+    assert info["tables_skipped"] >= 1, "「看见了但没当表格」必须可查（不静默）"
+    assert route(info) == ROUTE_TEXT
+
+    from agentmemhub.feed.converters.pdf import PdfConverter
+
+    doc = PdfConverter().convert(
+        ref="x.pdf", data=_fx("pdf_false_table.pdf"),
+        meta={"doc_id": "x", "mtime": 0, "now": 0})
+    # 被框住的那行必须还在（这正是当初丢掉的内容）
+    assert "const ok = await el.isVisible();" in doc.markdown
+    # 框外面的正文也不能被顺手削掉
+    assert "must survive" in doc.markdown
+    assert "| --- |" not in doc.markdown, "误检表格不该被渲染成 markdown 表格"
+    assert doc.meta["tables"] == 0
+
+
+def test_首行被行宽硬切时缝合成完整句子():
+    """PDF 文本层里"一行"是**排版产物**：真实素材的首行停在 `…工作经`，
+    `验。` 落在第二行。直接取首行当标题就是一句断掉的话。"""
+    from agentmemhub.feed.converters.pdf import title_of
+
+    info = probe(_fx("pdf_wrapped.pdf"))
+    assert info["title"] == "", "夹具必须没有元数据标题，否则测的不是兜底路径"
+    assert info["first_line"] == \
+        "Quarterly review of the memory pipeline for the north region"
+    title, src = title_of(info, "x.pdf")
+    assert title == "Quarterly review of the memory pipeline for the north region"
+    assert src == "first_line"
+
+
+def test_首行过长时限长并如实打标():
+    """标题是"替代品"必须让人知道 —— 像是原文的标题比占位标题更危险。"""
+    from agentmemhub.feed.converters.pdf import PdfConverter
+    from agentmemhub.feed.titles import TITLE_MAX
+
+    doc = PdfConverter().convert(
+        ref="x.pdf", data=_fx("pdf_false_table.pdf"),
+        meta={"doc_id": "x", "mtime": 0, "now": 0})
+    assert doc.meta["title_source"] == "first_line_clipped"
+    assert doc.title.endswith("…") and len(doc.title) <= TITLE_MAX + 1
+    assert any("首段前" in w for w in doc.warnings)
+    assert doc.quality < 1.0
+
+
 def test_认领_无扩展名但PDF魔数():
     conv = get_converter(ref="download", kind="", data=_fx("pdf_text.pdf"))
     assert conv is not None and conv.name == "pdf"

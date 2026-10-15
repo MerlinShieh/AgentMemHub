@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-from .base import FeedDocument, FeedError
+from .base import QUALITY_WARN, FeedDocument, FeedError
 from .store import MaterialStore, MaterialsDB, doc_id_of, sha256_of
 
 
@@ -314,8 +314,15 @@ def ingest(ref: str, *, kind: str = "", force: bool = False,
         res.update(ok=True, kb_path=kb_path)
         log("[+] 已发布：%s" % kb_path)
         if doc.low_quality:
-            log("    ⚠️ 质量偏低（%.2f）%s —— 可用 feed list --low-quality 复核"
-                % (doc.quality, ("；" + "；".join(doc.warnings)) if doc.warnings else ""))
+            # `low_quality` 的语义是"质量分低 **或** 有告警"，两者必须分开说 ——
+            # 否则会打出「质量偏低（1.00）」这种自相矛盾的话
+            # （2026-10-15 投喂真实 PDF 时在控制台看到）
+            reasons: list[str] = []
+            if float(doc.quality) < QUALITY_WARN:
+                reasons.append("质量分偏低（%.2f）" % doc.quality)
+            reasons.extend(doc.warnings or [])
+            log("    ⚠️ 需要人工复核：%s —— 可用 feed list --low-quality 复核"
+                % "；".join(reasons))
         return res
     finally:
         if db is not None:                  # dry-run 下没有库可关

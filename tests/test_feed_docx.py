@@ -248,6 +248,43 @@ def test_超链接里的文字不丢():
     assert "项目主页" in _convert_doc(d)
 
 
+def test_无样式文档用正文首段当标题而不是默认文件名():
+    """**真实素材（求职 docx）逼出来的**：那份文档完全没用标题样式（38 段全是正文）、
+    core title 也为空，于是标题落到了文件名上 —— 而那是 WPS 的默认名「文字文稿1」。
+    **默认文件名比正文首段更没有信息量**：它对所有这类文档都一样。"""
+    from docx import Document
+
+    d = Document()
+    d.add_paragraph("杨工，姚工，您好，我叫谢睦邻。")
+    d.add_paragraph("正文第二段。")
+    buf = io.BytesIO()
+    d.save(buf)
+    for ref in ("文字文稿1.docx", "新建 Microsoft Word 文档.docx"):
+        doc = DocxConverter().convert(ref=ref, data=buf.getvalue(),
+                                      meta={"doc_id": "x", "mtime": 0, "now": 0})
+        assert doc.title == "杨工，姚工，您好，我叫谢睦邻。", ref
+        assert doc.meta["title_source"] == "first_para", ref
+        # 正文里已经有这句了，不该再补 H1 造成重复
+        assert doc.markdown.count("杨工，姚工，您好，我叫谢睦邻。") == 1, ref
+
+
+def test_首段也没信息量时用占位标题并打标():
+    """四个来源全不可用时（无 core title / 无样式 / 首段太短 / 文件名是默认名）
+    不能默默给一个像模像样的标题 —— 要占位 + 打标让人复核。"""
+    from docx import Document
+
+    d = Document()
+    d.add_paragraph("文档")                    # 2 字，够不上标题
+    buf = io.BytesIO()
+    d.save(buf)
+    doc = DocxConverter().convert(ref="文字文稿1.docx", data=buf.getvalue(),
+                                  meta={"doc_id": "x", "mtime": 0, "now": 0})
+    assert doc.title == "DOCX 文档"
+    assert doc.meta["title_source"] == "fallback"
+    assert any("无法确定标题" in w for w in doc.warnings)
+    assert doc.quality < 1.0
+
+
 # ---------------------------------------------------------------------------
 # 老格式与坏文件：**显式报错并指路**，不是"文件损坏"
 # ---------------------------------------------------------------------------

@@ -1,0 +1,51 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [5 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Title () /CreationDate (D:20260101120000Z) >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 415 >>
+stream
+0.8 w
+72 680 m 72 700 l S
+282 680 m 282 700 l S
+492 680 m 492 700 l S
+72 700 m 492 700 l S
+72 680 m 492 680 l S
+BT /F1 10 Tf 78 688 Td (const el = driver.findElement\(By.id\("submit"\)\);) Tj ET
+BT /F1 10 Tf 288 688 Td (const ok = await el.isVisible\(\);) Tj ET
+BT
+/F1 12 Tf
+72 600 Td
+(The paragraph after the boxed line must survive:) Tj
+0 -18 Td
+(a route that drops prose to gain structure is a regression.) Tj
+ET
+endstream
+endobj
+xref
+0 7
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000191 00000 n 
+0000000256 00000 n 
+0000000382 00000 n 
+trailer
+<< /Size 7 /Root 1 0 R /Info 4 0 R >>
+startxref
+848
+%%EOF

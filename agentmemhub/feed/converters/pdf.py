@@ -37,6 +37,8 @@ from pathlib import Path
 
 from ..base import BaseConverter, FeedDocument, FeedError
 from ..mdtable import table_md
+from ..titles import (TITLE_MAX, clean_meta_title, clip_title, is_junk_title,
+                      join_wrapped, looks_like_title)
 
 #: 认领的扩展名
 EXTS = (".pdf",)
@@ -51,16 +53,21 @@ MAX_PAGES = 300
 MAX_RENDER_PAGES = 20
 #: 内嵌图片抽取上限
 MAX_IMAGES = 40
+#: **有意义的表格**的下限：至少 2 行 2 列。
+#: 为什么要有这条闸（真实素材踩到）：一份求职文档里，一行等宽字体代码被 pdfplumber
+#: 误检成"1 行 2 列"的表格；照单全收的话那行字会被当表格**从正文里剔除**，
+#: 而它又不足以构成表格 ⇒ **内容两头落空、永久丢失**。这是静默失真里最坏的一种。
+MIN_TABLE_ROWS = 2
+MIN_TABLE_COLS = 2
+#: 剔除表格区域后允许丢的字符数；超出就判"剔除会丢字"，**宁可不剔除**
+#: （重复很难看，丢字是数据事故 —— 两者的代价不对称）
+LOSS_TOLERANCE = 2
 
 ROUTE_TEXT = "T3a"
 ROUTE_TABLE = "T3b"
 ROUTE_SCANNED = "T3c"
 ROUTE_ENCRYPTED = "T3d"
 
-#: 元数据里的标题常是这些"占位值"（Word 导出尤其常见）—— 它们不构成标题
-_TITLE_JUNK = {"", "untitled", "microsoft word", "document1", "doc1", "无标题"}
-#: Word 导出的经典脏标题前缀：`Microsoft Word - 季度报告.doc`
-_JUNK_TITLE_PREFIX = re.compile(r"^(?:microsoft\s+word|word)\s*[-–—]\s*", re.I)
 #: PDF 日期：`D:YYYYMMDDHHmmSSOHH'mm'`（各段可截断，`O` 是 `+` / `-` / `Z`）
 _PDF_DATE_RE = re.compile(
     r"D:(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?"
@@ -152,8 +159,43 @@ def _open_reader(data: bytes):
                         % str(e)[:120], kind="convert", retryable=False)
 
 
-def _probe_tables(data: bytes) -> tuple[int, str]:
-    """探表格命中数。返回 `(命中数, 引擎)`。
+def meaningful_tables(page) -> tuple[list, int]:
+    """把一页里**有意义的**表格挑出来。返回 `([(表格对象, 二维内容)], 被判误检的数量)`。
+
+    两个作用合在一处：
+      ① 路由判据（`probe` 用它数"真有没有表格"）；
+      ② 抽取阶段（`_extract_pdf_tables` 用它，保证**判据一致** ——
+         否则会出现"路由说是 T3b、转换时又不认"的分裂）。
+
+    真实素材踩到的误检形态：一行等宽字体代码被检出成"1 行 2 列"。
+    单行表格在 markdown 里只是一个光秃秃的表头，语义上也不成立 —— 直接不算。
+
+    为什么要把"跳过了几个"也报出来：处置虽然正确（那本来就不是表格），
+    但"我们看见了却没当表格"这件事得**可查** —— 万一那真的是个表格，
+    人得能从 `meta.tables_skipped` 看出线索。这属于"不静默"的一部分，
+    但**不记 warning**：它没有造成失真，不该把整篇标成低质量。
+    """
+    out: list = []
+    skipped = 0
+    try:
+        found = page.find_tables()
+    except Exception:                        # noqa: BLE001 —— 单页探测失败不毁全局
+        return out, skipped
+    for t in found:
+        try:
+            rows = t.extract() or []
+        except Exception:                    # noqa: BLE001
+            continue
+        ncol = max((len(r) for r in rows), default=0)
+        if len(rows) >= MIN_TABLE_ROWS and ncol >= MIN_TABLE_COLS:
+            out.append((t, rows))
+        else:
+            skipped += 1
+    return out, skipped
+
+
+def _probe_tables(data: bytes) -> tuple[int, str, int]:
+    """探**有意义的**表格数。返回 `(命中数, 引擎, 误检跳过数)`。
 
     **探测失败不算失败**：表格是"增强"，探不到就按 T3a 走 —— 但要把"为什么没探"
     记进结果（`engine` 为 `unavailable`/`error`），让降级**可见**而不是静默。
@@ -161,18 +203,18 @@ def _probe_tables(data: bytes) -> tuple[int, str]:
     try:
         import pdfplumber
     except ImportError:
-        return 0, "unavailable"
+        return 0, "unavailable", 0
     try:
         with pdfplumber.open(io.BytesIO(data)) as pdf:
             n = 0
+            skipped = 0
             for page in pdf.pages[:MAX_PAGES]:
-                try:
-                    n += len(page.find_tables())
-                except Exception:            # noqa: BLE001 —— 单页探测失败不毁全局
-                    continue
-            return n, "pdfplumber"
+                good, bad = meaningful_tables(page)
+                n += len(good)
+                skipped += bad
+            return n, "pdfplumber", skipped
     except Exception:                        # noqa: BLE001
-        return 0, "error"
+        return 0, "error", 0
 
 
 def probe(data: bytes) -> dict:
@@ -188,7 +230,7 @@ def probe(data: bytes) -> dict:
         "encrypted": False, "decrypted": False, "pages": 0, "texts": [],
         "chars": [], "avg_chars": 0.0, "empty_pages": 0,
         "title": "", "doc_time": 0, "first_line": "",
-        "tables": 0, "table_engine": "", "warnings": [],
+        "tables": 0, "tables_skipped": 0, "table_engine": "", "warnings": [],
     }
     reader = _open_reader(data)
 
@@ -237,12 +279,20 @@ def probe(data: bytes) -> dict:
         info["title"] = ""
     info["doc_time"] = _meta_time(md)
     if texts:
-        head = _clean_text(texts[0]).splitlines()
-        info["first_line"] = head[0].strip() if head else ""
+        lines = [ln.strip() for ln in _clean_text(texts[0]).splitlines() if ln.strip()]
+        head = lines[0] if lines else ""
+        if len(lines) > 1:
+            # PDF 的"一行"是版面产物，首行常被**行宽硬切**：真实素材里
+            # `…今年有六年有余的工作经` 的 `验。` 落在第二行。不缝合就会得到
+            # 一句断掉的话当标题。
+            head = join_wrapped(head, lines[1])
+        info["first_line"] = head
 
     # 表格只在"文字够多"时才探：扫描件没有文本层，探也是空 —— 先路由更省时间
     if info["avg_chars"] >= MIN_CHARS_PER_PAGE:
-        info["tables"], info["table_engine"] = _probe_tables(data)
+        n, engine, skipped = _probe_tables(data)
+        info["tables"], info["table_engine"] = n, engine
+        info["tables_skipped"] = skipped
     return info
 
 
@@ -283,41 +333,38 @@ def _similar(needle: str, haystack: str) -> float:
     return len(a & b) / len(a)
 
 
-def _clean_meta_title(raw: str) -> str:
-    t = (raw or "").strip()
-    t = _JUNK_TITLE_PREFIX.sub("", t).strip()
-    if t.lower() in _TITLE_JUNK:
-        return ""
-    return t
-
-
 def title_of(info: dict, ref: str) -> tuple[str, str]:
-    """取标题，返回 `(标题, 来源)`。
+    """取标题，返回 `(标题, 来源)`。判据在 `feed/titles.py` 单点定义。
 
-    顺序：元数据 `/Title` → 首页首行 → 文件名。
+    顺序：元数据 `/Title` → 首页首行 → 文件名。来源字符串会进 `meta`，
+    所以它必须是**能被读懂**的：`meta` / `first_line` / `stem` / `fallback`。
+
     为什么不无条件用首行：PDF 的"第一行"经常是页眉、日期或页码。
-    所以只接受"像标题"的首行（不是纯日期/数字、长度在合理区间）。
-
     为什么也不无条件信元数据：**真实素材实测**（`Intel_Proprietary_License.pdf`）
     的 `/Title` 被写坏了 —— 停在 `…License Agreement [v2022.12`，而正文首行是
     完整的 `…[v2022.12.20]`。所以加两条同时成立的条件：
       ① 首行不短于元数据标题的 60%（**不能用"谁更长"**：截断的元数据标题因为多了
          `C2A … (Commercial Use)` 反而更长，按长度就会被它蒙过去）；
       ② 首行的 2-gram 有 ≥60% 能在元数据标题里找到（排除"首行是页眉"）。
-    两者同时成立，才认为首行是它的完整版。
     """
-    meta_title = _clean_meta_title(info.get("title") or "")
+    meta_title = clean_meta_title(info.get("title") or "")
     first = (info.get("first_line") or "").strip()
-    first_ok = (4 <= len(first) <= 120
-                and not re.fullmatch(r"[\d\s\-/.:年月日]+", first))
+    first_ok = looks_like_title(first)
     if meta_title:
         if (first_ok and len(first) >= 0.6 * len(meta_title)
                 and _similar(first, meta_title) >= 0.6):
-            return first, "first_line"
+            t, clipped = clip_title(first)
+            return t, "first_line_clipped" if clipped else "first_line"
         return meta_title, "meta"
     if first_ok:
-        return first, "first_line"
-    return Path(str(ref)).stem or "PDF 文档", "stem"
+        # 没有元数据标题时，首行是**唯一**的信息源 —— 但要限长：
+        # 一份没标题的文档，首段动辄上百字，那不是标题
+        t, clipped = clip_title(first)
+        return t, "first_line_clipped" if clipped else "first_line"
+    stem = Path(str(ref)).stem
+    if is_junk_title(stem):
+        return "PDF 文档", "fallback"        # 三个来源全不可用，如实说出来
+    return stem, "stem"
 
 
 def _table_md(rows, *, index: int, page: int, total: int) -> str:
@@ -352,12 +399,32 @@ def _build_markdown(info: dict, *, tables: dict, head_title: str) -> str:
     return "\n\n".join(b for b in blocks if b).strip() + "\n"
 
 
+def _missing_chars(original: str, *processed: str) -> int:
+    """`original` 里有多少字符**没有**出现在后面这些文本里（按字符**多重集**算）。
+
+    必须用多重集而不是集合：正文里同一个字出现很多次是常态，
+    集合比较会把"少了 3 个『的』字"这种整体吞掉。
+    """
+    from collections import Counter
+
+    need = Counter(re.sub(r"\s+", "", original or ""))
+    got = Counter(re.sub(r"\s+", "", "".join(processed)))
+    return sum((need - got).values())
+
+
 def _extract_pdf_tables(data: bytes, info: dict) -> tuple[dict, list[str]]:
     """用 pdfplumber 抽表格，**并把表格区域从正文里剔除**。
 
-    为什么必须剔除（不能"正文 + 表格"简单相加）：pdfplumber 的 `extract_text()`
-    里**包含**表格中那些文字 —— 不剔除的话同一批字会以"流式正文"和"表格"
-    两种形态各出现一次，读起来像文档被复制了一遍。
+    为什么必须剔除（不能"正文 + 表格"简单相加）：`extract_text()` 里**包含**表格中那些
+    文字 —— 不剔除的话同一批字会以"流式正文"和"表格"两种形态各出现一次。
+
+    ⚠️ 但剔除是**危险操作**：它会从正文里删东西。所以配两道闸（都是真实素材逼出来的）：
+      ① 只认**有意义的表格**（`meaningful_tables`：≥2 行且 ≥2 列 —— 一行代码被误检成
+         "1 行 2 列"的表格时，照单全收会把那行**从正文删掉**，而它又不足以构成表格
+         ⇒ 内容两头落空、永久丢失）；
+      ② 剔除后做**字符覆盖校验**：`剔除后的正文 + 表格内容` 必须覆盖原页的全部字符；
+         差得多了就**放弃剔除**（保留完整正文、接受表格文字重复），并如实记 warning。
+    原则：**重复很难看，丢字是数据事故** —— 两者代价不对称，所以偏向重复。
     """
     tables: dict[int, list] = {}
     warns: list[str] = []
@@ -367,45 +434,54 @@ def _extract_pdf_tables(data: bytes, info: dict) -> tuple[dict, list[str]]:
         warns.append("未安装 pdfplumber，表格未能结构化抽取（表格文字仍留在流式正文里，"
                      "但行列关系已丢）—— `uv sync --extra feed-pdf` 可开启")
         return tables, warns
+    texts = info.get("texts")
+    if not isinstance(texts, list):
+        return tables, warns
     try:
         with pdfplumber.open(io.BytesIO(data)) as pdf:
             for i, page in enumerate(pdf.pages[:MAX_PAGES]):
-                try:
-                    found = page.find_tables()
-                except Exception as e:       # noqa: BLE001
-                    warns.append("第 %d 页表格探测失败：%s" % (i + 1, str(e)[:60]))
-                    continue
+                # **统一引擎**：T3b 路由下整篇正文都改用 pdfplumber 抽。
+                # 为什么必须统一：下面那道丢字校验要拿"未剔除的原文"跟"剔除后的结果"比，
+                # 两者若来自不同引擎，光**空格处理差异**就会被判成丢字，
+                # 于是永远不敢剔除（校验形同虚设）。
+                if i < len(texts):
+                    try:
+                        texts[i] = page.extract_text() or ""
+                    except Exception:        # noqa: BLE001 —— 抽不出来就留着 pypdf 那版
+                        pass
+                found, _skipped = meaningful_tables(page)
                 if not found:
                     continue
-                rows_list = []
-                for t in found:
-                    try:
-                        rows = t.extract()
-                    except Exception as e:   # noqa: BLE001
-                        warns.append("第 %d 页有表格但内容抽取失败：%s"
-                                     % (i + 1, str(e)[:60]))
-                        continue
-                    if rows:
-                        rows_list.append(rows)
-                if not rows_list:
-                    continue
+                rows_list = [rows for _t, rows in found]
+                boxes = [t.bbox for t, _rows in found]
                 tables[i] = rows_list
-                texts = info.get("texts") or []
-                if i < len(texts):
-                    boxes = [t.bbox for t in found]
+                if i >= len(texts):
+                    continue
+                orig = texts[i]
 
-                    def _outside(obj, _boxes=boxes):
-                        for (x0, top, x1, bottom) in _boxes:
-                            if not (obj["x1"] <= x0 or obj["x0"] >= x1
-                                    or obj["bottom"] <= top or obj["top"] >= bottom):
-                                return False
-                        return True
+                def _outside(obj, _boxes=boxes):
+                    for (x0, top, x1, bottom) in _boxes:
+                        if not (obj["x1"] <= x0 or obj["x0"] >= x1
+                                or obj["bottom"] <= top or obj["top"] >= bottom):
+                            return False
+                    return True
 
-                    try:
-                        texts[i] = page.filter(_outside).extract_text() or ""
-                    except Exception as e:   # noqa: BLE001 —— 剔除失败就留着（宁可重复也别丢字）
-                        warns.append("第 %d 页表格区域剔除失败（该页表格文字会重复出现在正文）：%s"
-                                     % (i + 1, str(e)[:60]))
+                try:
+                    filtered = page.filter(_outside).extract_text() or ""
+                except Exception as e:       # noqa: BLE001 —— 剔除失败就留着（宁可重复也别丢字）
+                    warns.append("第 %d 页表格区域剔除失败（该页表格文字会重复出现在正文）：%s"
+                                 % (i + 1, str(e)[:60]))
+                    continue
+                table_text = "".join(str(c or "") for rows in rows_list
+                                     for row in rows for c in row)
+                missing = _missing_chars(orig, filtered, table_text)
+                if missing > LOSS_TOLERANCE:
+                    warns.append(
+                        "第 %d 页表格区域剔除会丢字（缺 %d 个字符）⇒ **已保留完整正文**，"
+                        "该页表格内容可能在正文里重复出现（表格识别可能不准，建议复核）"
+                        % (i + 1, missing))
+                    continue                 # 不动 texts[i]
+                texts[i] = filtered
     except Exception as e:                   # noqa: BLE001
         warns.append("表格抽取整体失败：%s" % str(e)[:80])
     return tables, warns
@@ -504,8 +580,20 @@ def _make_doc(info: dict, *, ref: str, meta: dict, stamp: str, route_name: str,
               tables: dict, images: int, warnings: list[str],
               quality: float) -> FeedDocument:
     title, src = title_of(info, ref)
-    # 标题来自**首行**时不再补 H1：那行字本来就在正文里，补了就是同一标题出现两次
-    head = "" if src == "first_line" else title
+    warns = list(warnings)
+    # 标题来自**首行**（含被限长的版本）时不再补 H1：那段字本来就在正文里，
+    # 补了就是同一标题出现两次
+    head = "" if src.startswith("first_line") else title
+    # 标题是"替代品"时必须让人知道 —— 一个像是原文、其实是半句话的标题，
+    # 比一个明显是占位的标题更危险（前者会被当成文档真标题用下去）
+    if src == "first_line_clipped":
+        warns.append("文档没有可用标题（无元数据 /Title，首段过长），已用正文首段前 %d 字代替"
+                     "，建议人工确认" % TITLE_MAX)
+        quality = min(quality, 0.9)
+    elif src == "fallback":
+        warns.append("无法确定标题（元数据无 /Title、首行不像标题、文件名也无信息量），"
+                     "已用占位标题「%s」" % title)
+        quality = min(quality, 0.8)
     md = _build_markdown(info, tables=tables, head_title=head)
     doc_time = int(info.get("doc_time") or 0) or int(meta.get("mtime") or 0) \
         or int(time.time())
@@ -513,12 +601,13 @@ def _make_doc(info: dict, *, ref: str, meta: dict, stamp: str, route_name: str,
     return FeedDocument(
         doc_id=meta["doc_id"], title=title[:200], markdown=md, kind="pdf",
         source_ref=str(ref), doc_time=doc_time, converter=stamp,
-        quality=round(float(quality), 2), warnings=warnings,
+        quality=round(float(quality), 2), warnings=warns,
         meta={"route": route_name, "pages": info.get("pages", 0),
               "chars_per_page": info.get("chars", []),
               "avg_chars": round(float(info.get("avg_chars") or 0.0), 1),
               "empty_pages": info.get("empty_pages", 0),
               "tables": n_tables, "table_engine": info.get("table_engine", ""),
+              "tables_skipped": info.get("tables_skipped", 0),
               "images_extracted": images, "title_source": src,
               "doc_time_source": "pdf_metadata" if info.get("doc_time") else "mtime"},
     )

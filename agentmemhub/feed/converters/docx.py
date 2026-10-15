@@ -33,6 +33,8 @@ from pathlib import Path
 
 from ..base import BaseConverter, FeedDocument, FeedError
 from ..mdtable import table_md
+from ..titles import (TITLE_MAX, clean_meta_title, clip_title, is_junk_title,
+                      looks_like_title)
 
 #: 认领的扩展名（`.docm` 与 `.docx` 同构：都是 ZIP+XML，只是 content-type 标了宏）
 EXTS = (".docx", ".docm")
@@ -45,7 +47,6 @@ MAX_IMAGES = 40
 
 _HEADING_RE = re.compile(r"^(?:heading|标题)\s*([1-9])$", re.I)
 _LIST_RE = re.compile(r"^(?:list|列表)", re.I)
-_TITLE_JUNK = {"", "untitled", "microsoft word", "document1", "doc1", "无标题"}
 
 
 def _qn(tag: str):
@@ -222,7 +223,8 @@ def _doc_time_of(cp, meta: dict) -> tuple[int, str]:
 def _collect(document, *, put_image) -> tuple[list, dict]:
     """遍历文档，产出**有序**的块列表与统计。"""
     state: dict = {"document": document, "images": 0, "images_found": 0,
-                   "warnings": [], "tables": 0, "merged": 0, "headings": 0}
+                   "warnings": [], "tables": 0, "merged": 0, "headings": 0,
+                   "first_para": ""}
     items: list = []
     first_h1 = ""
     for block in iter_block_items(document):
@@ -238,6 +240,9 @@ def _collect(document, *, put_image) -> tuple[list, dict]:
         images = _para_images(block, put_image=put_image, state=state)
         if level == 1 and text and not first_h1:
             first_h1 = text
+        if text and not state["first_para"]:
+            # 首个有文字的段落 —— 标题的**最后一档兜底**（见 `_title_of`）
+            state["first_para"] = text
         if level:
             state["headings"] += 1
         if not text and not images:
@@ -273,17 +278,29 @@ def _render(items: list, *, head_title: str) -> str:
 
 
 def _title_of(cp, state: dict, ref: str) -> tuple[str, str]:
-    """标题：core `title` → 首个一级标题 → 文件名。"""
-    t = ""
-    try:
-        t = str(getattr(cp, "title", "") or "").strip()
-    except Exception:                        # noqa: BLE001
-        t = ""
-    if t and t.lower() not in _TITLE_JUNK:
+    """标题：core `title` → 首个一级标题 → **正文首段** → 文件名。
+
+    为什么必须有"正文首段"这一档（真实素材逼出来的）：一份求职文档
+    **完全没用标题样式**（38 段全是正文），core title 为空 —— 于是标题落到了文件名上，
+    而那是 WPS 的默认名「文字文稿1」。**默认文件名比正文首段更没有信息量**：
+    前者对所有这类文档都一样，后者至少是这份文档的内容。
+
+    但首段要**限长**：首段动辄上百字，那不是标题。限长后还要把"这是替代品"
+    记进 warning（由调用方做），不能让人以为它就是文档标题。
+    """
+    t = clean_meta_title(getattr(cp, "title", "") or "")
+    if t:
         return t, "core_title"
     if state.get("first_h1"):
         return state["first_h1"], "first_h1"
-    return Path(str(ref)).stem or "DOCX 文档", "stem"
+    para = (state.get("first_para") or "").strip()
+    if looks_like_title(para):
+        clipped, was_clipped = clip_title(para)
+        return clipped, "first_para_clipped" if was_clipped else "first_para"
+    stem = Path(str(ref)).stem
+    if is_junk_title(stem):
+        return "DOCX 文档", "fallback"       # 四个来源全不可用，如实说出来
+    return stem, "stem"
 
 
 class DocxConverter(BaseConverter):
@@ -333,13 +350,23 @@ class DocxConverter(BaseConverter):
         items, state = _collect(document, put_image=meta.get("put_image"))
         cp = getattr(document, "core_properties", None)
         title, title_src = _title_of(cp, state, ref)
-        # 正文里已经有同一个一级标题时不再补一个：core title 与首个 H1 常常就是
-        # 同一句话（模板生成的文档尤其如此），补了就是同一标题出现两次
-        head = "" if title_src == "first_h1" or state.get("first_h1") == title else title
+        # 正文里已经有这个标题时不再补 H1：core title 与首个 H1 常常就是同一句话；
+        # 而 `first_para*` 那一档更明显 —— 标题**就是**正文首段，补了必然重复
+        head = "" if (title_src in ("first_h1", "first_para", "first_para_clipped")
+                      or state.get("first_h1") == title) else title
         md = _render(items, head_title=head)
 
         warnings = list(state["warnings"])
         quality = 1.0
+        # 标题是"替代品"时必须让人知道（同 PDF 通路：像是原文的标题比占位标题更危险）
+        if title_src == "first_para_clipped":
+            warnings.append("文档没有可用标题（无 core title、无标题样式），"
+                            "已用正文首段前 %d 字代替，建议人工确认" % TITLE_MAX)
+            quality = min(quality, 0.9)
+        elif title_src == "fallback":
+            warnings.append("无法确定标题（无 core title、无标题样式、首段与文件名都无"
+                            "信息量），已用占位标题「%s」" % title)
+            quality = min(quality, 0.8)
         if state["merged"]:
             # markdown 表达不了合并单元格：同一格的话会在相邻格里重复 ⇒ 如实打标
             warnings.append("有 %d 张表格含合并单元格，markdown 无法表达"
