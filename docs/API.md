@@ -306,6 +306,91 @@ python -m agentmemhub llm-config [--json]                       # 各 LLM 使用
 | 接口 | 说明 |
 |---|---|
 | `GET /api/wiki/failures`、`POST /api/wiki/retry` | v2.1 新增。按"暂时只提供服务接口"的需求，前端 UI 尚未做 |
+| `/api/feed/*` | 外部投喂（见 §3.7）。**后端已完整提供，面板尚未接线** —— 用户要求"后面通过数据看板直接控制" |
+
+---
+
+### 3.7 外部投喂（`/api/feed/*`）
+
+把外部素材（文件 / 二进制 / 网页）转译进知识库页面层。**装配与动作都在
+`agentmemhub/feed/service.py`（与 CLI 共用）**，网关只做 HTTP 语义与渲染。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/feed/formats` | 当前**允许投喂的格式**（看板渲染勾选项用）|
+| `PUT` | `/api/feed/formats` | 调整允许的格式（写**运行时覆盖**，不改 yaml）|
+| `POST` | `/api/feed/add` | 投喂一项（**三种输入形态**，见下）|
+| `POST` | `/api/feed/upload` | 投喂：直接上传**文件字节**（multipart）|
+| `POST` | `/api/feed/scan` | 扫描目录列出可投喂项（**只读，不写盘**）|
+| `POST` | `/api/feed/batch` | 批量投喂（**长任务**，轮询 `/api/admin/job`）|
+| `GET` | `/api/feed/list` | 素材列表（`status` / `low_quality` / `limit`）|
+| `GET` | `/api/feed/show/{doc_id}` | 单条详情（404 = 没有这条）|
+| `POST` | `/api/feed/retry` | 重转（来源不可达时**自动回落 `raw/` 原件**）|
+| `POST` | `/api/feed/retract` | 撤下（可恢复；**原件保留**）|
+| `POST` | `/api/feed/forget` | 清除登记（`purge=true` 才连原件一起删）|
+| `GET` | `/api/feed/lint` | 确定性体检（`P0>0` 表示数据不一致）|
+
+#### 三种输入形态（`POST /api/feed/add`）
+
+用户 2026-10-15 明确要求区分"传输的是二进制、还是路径、还是链接"：
+
+| `input` | `value` 是什么 | 必填 | 说明 |
+|---|---|---|---|
+| `path` | **服务器本机**文件路径 | — | 转换器自己去 `open/read` |
+| `data` | **二进制内容**（调用方已读好） | `filename` | JSON 装不下裸字节 ⇒ 用 `encoding="base64"`；或用 `/api/feed/upload` |
+| `url` | 网页链接 | — | 取回层出网抓（走代理） |
+
+```jsonc
+// ① 路径
+{"input": "path", "value": "D:/docs/报告.docx"}
+
+// ② 二进制（客户端 open(p,"rb").read() 之后 base64）
+{"input": "data", "value": "<base64>", "encoding": "base64", "filename": "报告.docx"}
+//    ⚠️ filename 必填：扩展名是判格式与认领转换器的依据，裸字节没有名字
+
+// ③ 链接
+{"input": "url", "value": "https://mp.weixin.qq.com/s/xxxx"}
+```
+
+> **失败返回 200 + `ok=false`**（不是 4xx）—— 投喂失败是**业务结果**而不是传输错误，
+> 调用方要看的是 `error_kind`（它决定处置：`unsupported_format` 要换输入、
+> `needs_ocr` 等 T4 通路、`convert` 可重试）。详见 `docs/modules/feed.md` §9。
+
+#### 格式白名单（`GET`/`PUT /api/feed/formats`）
+
+用户要求"以不同格式文件后缀控制输入（**大小写不强制**），后续可调整哪些格式支持投喂"。
+
+- **后缀驱动、大小写不敏感**：`.PDF` ≡ `.pdf`；
+- **默认跟随转换器注册表**：不配 = 支持当前全部格式（加转换器自动生效，不必回来改清单）；
+- **无后缀放行**：URL 与工具导出的无扩展名报告没有后缀可查，硬拦会把它们全挡在门外 ——
+  交给认领机制按内容判型，判不出来照旧**显式报错**（不静默跳过）；
+- 优先级：**运行时覆盖 > yaml `feed.accept.exts` > 注册表默认**。
+
+```jsonc
+// 只放开三种
+PUT /api/feed/formats  {"exts": [".pdf", ".docx", ".xmind"]}
+// 清除覆盖，回到 yaml / 默认（不传 exts 即可）
+PUT /api/feed/formats  {}
+```
+
+**为什么运行时覆盖是独立文件**（`logs/feed_formats.json`）：看板要能直接点选，
+但**不该反过来去改用户的 yaml**。
+
+#### 批量投喂（`POST /api/feed/batch`）
+
+长任务（几百个文件是分钟级），与 `/api/admin/*` 同约定：立即返回 `{"job": {...}}`、
+已有任务在跑时 `409`、进度用 `tasks.set_progress` 回填、逐行输出落
+`logs/tasks/<job_id>.log`。请求体：
+
+```jsonc
+{"roots": ["D:/TCL/文档"], "recursive": true, "dry_run": false,
+ "force": false, "limit": 0}
+```
+
+**先扫描再投喂**（用户强调"先筛选再落库"）：`POST /api/feed/scan` 是**只读**的，
+返回"可投喂 N / 被格式挡掉 M + 按后缀分布 + 被挡原因"，人确认后再开 `batch`。
+
+---
 
 ### 6.4 已知的**前端缺口**（后端没问题）
 

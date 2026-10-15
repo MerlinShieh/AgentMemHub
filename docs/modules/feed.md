@@ -324,6 +324,39 @@ agentmemhub feed forget <doc_id> [--purge]      # **清除登记**；--purge 才
 agentmemhub feed lint [--json]                  # **确定性体检**；P0>0 时退出码 1
 ```
 
+**批量与格式控制**（2026-10-15 新增，用户要求"用后缀控制输入、可调整支持哪些格式"）：
+
+```powershell
+agentmemhub feed formats                          # 查看当前允许的格式（含来源）
+agentmemhub feed formats --set-formats ".md,.pdf,.docx"   # 运行时调整（**大小写不敏感**）
+agentmemhub feed formats --set-formats clear      # 清除覆盖，回到 yaml / 默认
+agentmemhub feed scan  <目录> [--no-recursive]    # **只扫描**：能投多少、被挡多少、按后缀分布
+agentmemhub feed batch <目录>                     # 默认**只看不写**（等价 scan + 提示）
+agentmemhub feed batch <目录> --apply             # 真的投喂
+agentmemhub feed batch <目录> --apply --dry-run   # 走完整流程但一个字都不写
+```
+
+**为什么 `batch` 默认不写盘**：批量影响面大（一次可能落几百份），而用户明确要求
+"未筛选的数据禁止入库" ⇒ 默认行为必须是"先看清楚再动手"。
+`scan` 与 `batch` 分开，也正对应"先筛选再落库"。
+
+**三种输入形态**（用户 2026-10-15 要求明确区分）：
+
+| 形态 | 是什么 | 注意 |
+|---|---|---|
+| `path` | **本机**文件路径 | 转换器自己去 `open/read` |
+| `data` | **二进制内容**（调用方已 `open/read` 出来） | **必须给 `filename`** —— 扩展名是判格式的依据，裸字节没有名字 |
+| `url` | 网页链接 | 取回层出网抓 |
+
+统一入口是 `service.ingest_any()`：**CLI / HTTP / 看板三条路走同一个门**，
+各写一遍必然漂移（本项目在 wiki 上踩过"两处流程对不齐"）。
+
+**HTTP 全套**（供数据看板直接控制，见 [`docs/API.md` §3.7](../API.md)）：
+`/api/feed/formats`（查/调格式）、`/api/feed/add`（三种形态）、
+`/api/feed/upload`（**二进制直传**，multipart）、`/api/feed/scan`（只读预览）、
+`/api/feed/batch`（**长任务**，轮询 `/api/admin/job`），以及
+`list` / `show` / `retry` / `retract` / `forget` / `lint`。
+
 **撤下与清除的分界**：`retract` 撤下投喂内容但**原件保留** ⇒ `reconvert` 能把同一份
 重新发布出来（不是单向门）；`forget` 连登记一起清除，**原件默认保留**，只有显式
 `--purge` 才删。理由是同一条：`raw/` 是不可再生的那一份，其他两层都能从它重建。
@@ -565,3 +598,10 @@ Word 脏标题前缀剥离 · **缝合英文续行补空格 / 中文不补** · 
     打满分（抽取确实覆盖了全部可见文本）。所以自评之外还要有**形态判据**
     （`looks_like_label_shell`）去识别"看起来抽全了、其实是空的"，
     否则指标越正确、问题越隐蔽。
+20. **格式白名单必须跟随注册表，不能人工维护第二份清单**。`feed/formats.py` 从
+    转换器类的 `EXTS` 收集默认值 —— 两处清单必然漂移，而"明明支持却投不进来"
+    是最难查的那类问题。
+    ⚠️ 后缀常量必须是**类属性**：写成模块级常量时注册表收集不到，白名单会静默退化成
+    "什么都不许投"（实测第一次跑就撞上）。
+21. **批量入口默认不落盘**。批量投喂影响面大（一次几百份），而"投进去容易、清干净难" ——
+    所以默认是"只扫描列清单"，必须显式 `--apply` 才写。这与"先筛选再落库"是同一条纪律。

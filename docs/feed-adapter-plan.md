@@ -790,6 +790,41 @@ FeedDocument.warnings: list[str]     # 人可读的具体问题（不达标原�
    它们"对所有同类文档都一样"，作为标题等于零信息。这张名单现在是**三个真实素材**
    凑出来的（`文字文稿1` / `PowerPoint 演示文稿` / `中心主题`）。
 
+**第五轮：批量投喂接口 + HTTP 服务（2026-10-15，用户明确提出）**
+
+用户原话要点：**批量投喂**、**以文件后缀控制输入（大小写不强制）**、
+**后续可调整哪些格式支持投喂**、**要区分二进制 / path / url 三种输入**、
+**这些接口要支持 HTTP 服务**、**后面通过数据看板直接控制**。
+
+| 层 | 交付 | 位置 |
+|---|---|---|
+| 统一入口 | `ingest_any(source, value, filename, …)` —— 三种形态走同一个门 | `feed/service.py` |
+| 批量 | `scan_targets()`（**只读**列清单）+ `ingest_batch()`（逐条、互不中断） | `feed/service.py` |
+| 格式白名单 | 后缀驱动、大小写不敏感、**默认跟随注册表**、支持运行时覆盖 | `feed/formats.py`（新） |
+| CLI | `feed formats` / `feed scan` / `feed batch [--apply]` | `cli.py` |
+| HTTP | `/api/feed/*` 共 11 个接口（含 multipart 直传与长任务批量） | `web/app.py` |
+
+四个设计决定：
+
+① **白名单默认跟随转换器注册表**（而不是写死一份清单）：两处清单必然漂移，
+   而"明明支持却投不进来"是最难查的那类问题。加一个转换器就自动支持；
+   ⚠️ 但后缀常量必须是**类属性** —— 早先各转换器写成模块级 `EXTS`，注册表收集不到，
+   白名单静默退化成"什么都不许投"（第一次跑就撞上）；
+② **无后缀放行**：URL（`https://…/s/xxx`）与工具导出的无扩展名报告没有后缀可查，
+   硬拦会把它们全挡在门外 ⇒ 交给认领机制按内容判型，判不出来照旧显式报错；
+③ **`batch` 默认不落盘**（只扫描列清单，`--apply` 才写）：批量影响面大，
+   而"投进去容易、清干净难"。这与用户的"先筛选再落库"是同一条纪律；
+④ **运行时覆盖与 yaml 分开**（`logs/feed_formats.json`）：看板要能直接点选，
+   但**不该反过来去改用户的 yaml**（与 `wiki_triggers` 的 overrides 同机制）。
+
+两个实测坑：
+· **`UploadFile` 必须写在模块顶层**：`app.py` 启用了 `from __future__ import annotations`，
+  FastAPI 从**模块全局命名空间**解析路由函数的类型注解 —— 写在 `create_app()` 里的
+  import 解析不到，报 `PydanticUserError: …ForwardRef('UploadFile')… is not fully defined`
+  （正是该文件第 25 行那条警告说的情形，我还是踩了）；
+· **测试隔离多一道**：格式覆盖是**真实路径**（`logs/`）⇒ conftest 用进程级环境变量
+  `AGENTMEMHUB_FEED_FORMATS_STATE` 兜死（本项目第四次"测试经真实路径改真实状态"）。
+
 ### M5 · 入口完善 + 收尾（2 天）
 - MCP 工具（**新增独立，不动五工具契约**）：`feed_add`（路径 / URL / `--stdin` 文本三形态）+
   `feed_list` + `feed_status`；与 CLI **能力对等**
