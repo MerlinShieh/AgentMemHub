@@ -26,7 +26,236 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 from .base import QUALITY_WARN, FeedDocument, FeedError
+from .formats import is_allowed
 from .store import MaterialStore, MaterialsDB, doc_id_of, sha256_of
+
+
+#: 三种输入形态（用户 2026-10-15 明确要求区分的）
+INPUT_PATH = "path"     # 文件路径（转换器自己去 open/read）
+INPUT_DATA = "data"     # **二进制数据**（调用方已经 open/read 出来，直接给我字节）
+INPUT_URL = "url"       # 网页链接（取回层出网抓）
+INPUTS = (INPUT_PATH, INPUT_DATA, INPUT_URL)
+
+
+def _as_bytes(value: Any, *, encoding: str = "") -> bytes:
+    """把调用方给的 `data` 值转成字节。
+
+    三种现实来源：已经读好的 `bytes`、文本、以及**HTTP 场景下的 base64**
+    （JSON 装不下裸二进制，必须有个明确的编码开关，不能靠猜）。
+    """
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    s = str(value or "")
+    if (encoding or "").lower() == "base64":
+        import base64
+        return base64.b64decode(s)
+    return s.encode("utf-8")
+
+
+def ingest_any(*, source: str, value: Any, filename: str = "", encoding: str = "",
+               kind: str = "", force: bool = False, dry_run: bool = False,
+               config=None, log=print) -> dict[str, Any]:
+    """**统一投喂入口**：`path` / `data` / `url` 三种形态走同一个门。
+
+    为什么要统一：CLI、HTTP、看板三条路都要投喂，各写一遍必然漂移
+    （本项目在 wiki 上踩过"两处流程对不齐"）。三种形态的差异只在**前两步**
+    （怎么拿到字节、怎么判格式），拿到字节之后完全一样 —— 所以这里只做
+    "归一化 + 白名单校验"，随后交给既有的 `ingest()`。
+
+    `data` 形态**必须给 `filename`**：扩展名是判格式与认领转换器的依据，
+    而裸字节没有名字。宁可明确报错，也不要"猜一个扩展名"。
+    """
+    cfg = config
+    src = str(source or "").strip().lower()
+    if src not in INPUTS:
+        return _early_fail("未知输入形态：%r（应为 %s 之一）"
+                           % (source, " / ".join(INPUTS)),
+                           "bad_input", ref=str(value)[:200])
+
+    if src == INPUT_URL:
+        url = str(value or "").strip()
+        if not url:
+            return _early_fail("url 形态必须给链接", "bad_input")
+        if not is_allowed(url, config=cfg):
+            return _early_fail(_format_msg(url, cfg), "unsupported_format", ref=url)
+        return ingest(url, kind=kind, force=force, dry_run=dry_run,
+                      config=cfg, log=log)
+
+    if src == INPUT_PATH:
+        p = Path(str(value or ""))
+        if not p.is_file():
+            return _early_fail("找不到文件：%s" % p, "not_found",
+                               ref=str(p), retryable=False)
+        if not is_allowed(str(p), config=cfg):
+            return _early_fail(_format_msg(str(p), cfg), "unsupported_format",
+                               ref=str(p))
+        return ingest(str(p), kind=kind, force=force, dry_run=dry_run,
+                      config=cfg, log=log)
+
+    # src == INPUT_DATA
+    name = str(filename or "").strip()
+    if not name:
+        return _early_fail("data 形态必须给 filename（用于判格式与认领转换器）—— "
+                           "裸字节没有扩展名，不能靠猜", "bad_input")
+    if not is_allowed(name, config=cfg):
+        return _early_fail(_format_msg(name, cfg), "unsupported_format", ref=name)
+    try:
+        blob = _as_bytes(value, encoding=encoding)
+    except Exception as e:                   # noqa: BLE001 —— base64 写坏要明说
+        return _early_fail("data 解码失败（encoding=%s）：%s"
+                           % (encoding or "utf-8", str(e)[:100]), "bad_input",
+                           ref=name)
+    if not blob:
+        return _early_fail("data 为空（0 字节）", "bad_input", ref=name)
+    return ingest(name, kind=kind, force=force, dry_run=dry_run, config=cfg,
+                  log=log, data_override=blob)
+
+
+def _format_msg(name: str, cfg) -> str:
+    """格式被挡时的提示 —— 带上当前允许清单（否则用户只知道"进不来"）。"""
+    from .formats import allowed_exts
+    allowed = allowed_exts(cfg)
+    return ("不支持的格式：%s（当前允许：%s）—— 改配置 `feed.accept.exts`，"
+            "或调 `PUT /api/feed/formats`"
+            % (Path(str(name)).suffix or "（无后缀）",
+               "、".join(allowed) if allowed else "（空清单，已被显式禁止）"))
+
+
+def _early_fail(msg: str, kind: str, *, ref: str = "",
+                retryable: bool = False) -> dict[str, Any]:
+    """进 `ingest()` 之前就失败的返回体 —— 字段与 `ingest()` 的成功/失败返回保持**同形**。
+
+    同形很重要：调用方（CLI / HTTP / 看板）不该为"哪一步失败"写两套解析。
+    """
+    _audit(event="feed_failed", kind="", doc_id="", error=msg, error_kind=kind,
+           retryable=retryable, ref=ref)
+    return {"ref": ref, "ok": False, "skipped": "", "doc_id": "", "kind": "",
+            "converter": "", "kb_path": "", "raw_path": "", "title": "",
+            "quality": 0.0, "warnings": [], "error": msg, "error_kind": kind,
+            "low_quality": False, "dry_run": False}
+
+
+def scan_targets(*, roots: Any = None, recursive: bool = True, limit: int = 0,
+                 config=None) -> dict[str, Any]:
+    """扫描目录/文件，列出**可投喂**的项（白名单过滤，**不读文件内容**）。
+
+    为什么单独有这一步：用户反复强调"先筛选再落库"。看板需要先展示
+    "这个目录里哪些能被投喂、哪些会被挡、各多少"，人再决定投不投 ——
+    直接开投等于把筛选责任推给事后清理。
+
+    `roots` 可以是单个路径或路径列表；目录按 `recursive` 决定是否递归。
+    """
+    if isinstance(roots, (str, Path)):
+        roots = [roots]
+    root_list = [str(r) for r in (roots or [])]
+    allowed: list[str] = []
+    skipped: list[dict[str, str]] = []
+    truncated = False
+
+    def _consider(p: Path) -> None:
+        nonlocal truncated
+        if limit and (len(allowed) + len(skipped)) >= limit:
+            truncated = True
+            return
+        if is_allowed(str(p), config=config):
+            allowed.append(str(p))
+        else:
+            skipped.append({"path": str(p),
+                            "reason": "格式不在允许清单（%s）"
+                                      % (p.suffix or "无后缀")})
+
+    for root in root_list:
+        p = Path(root)
+        if p.is_file():
+            _consider(p)
+            continue
+        if not p.is_dir():
+            skipped.append({"path": str(p), "reason": "路径不存在"})
+            continue
+        it = p.rglob("*") if recursive else p.glob("*")
+        try:
+            for f in sorted(it):
+                if f.is_file():
+                    _consider(f)
+                if truncated:
+                    break
+        except Exception as e:               # noqa: BLE001 —— 单个目录不可读不毁全局
+            skipped.append({"path": str(p), "reason": "扫描失败：%s" % str(e)[:60]})
+    by_ext: dict[str, int] = {}
+    for a in allowed:
+        e = Path(a).suffix.lower() or "（无后缀）"
+        by_ext[e] = by_ext.get(e, 0) + 1
+    return {"roots": root_list, "allowed": allowed, "skipped": skipped,
+            "total": len(allowed) + len(skipped), "allowedCount": len(allowed),
+            "skippedCount": len(skipped), "byExt": by_ext, "truncated": truncated,
+            "formats": _formats_brief(config)}
+
+
+def _formats_brief(config=None) -> dict[str, Any]:
+    from . import formats as F
+    return {"allowed": F.allowed_exts(config), "source": F.source_of(config)}
+
+
+def ingest_batch(*, paths: Any = None, roots: Any = None, recursive: bool = True,
+                 force: bool = False, dry_run: bool = False, limit: int = 0,
+                 on_progress=None, config=None, log=print) -> dict[str, Any]:
+    """**批量投喂**：把 `paths`（显式清单）或 `roots`（目录，按白名单筛）逐条投喂。
+
+    返回 `{total, ok, skipped, failed, items, errors, dryRun, formats}`。
+    `on_progress(done, total, label)` 供长任务回填进度条（`tasks.set_progress`）。
+
+    ⚠️ 逐条调 `ingest()` 而不是"开一次库投一批"：单条互不影响，
+    一条失败不该中断整批（用户目录里混着各种文件，这几乎是必然发生的）。
+    每条的失败都**如实进结果**，不吞。
+    """
+    if paths is not None:
+        targets = [str(p) for p in ((paths,) if isinstance(paths, (str, Path))
+                                    else paths)]
+        scan = {"allowed": targets, "skipped": [], "skippedCount": 0,
+                "byExt": {}, "allowedCount": len(targets)}
+    else:
+        scan = scan_targets(roots=roots, recursive=recursive, limit=limit,
+                            config=config)
+        targets = scan["allowed"]
+
+    items: list[dict] = []
+    errors: list[dict] = []
+    ok = skipped = failed = 0
+    total = len(targets)
+    for i, t in enumerate(targets, start=1):
+        if on_progress:
+            try:
+                on_progress(i - 1, total, Path(t).name)
+            except Exception:                # noqa: BLE001 —— 进度回调坏了不该中断投喂
+                pass
+        r = ingest(t, kind="", force=force, dry_run=dry_run, config=config,
+                   log=(lambda *_a: None) if on_progress else log)
+        items.append(r)
+        if r.get("ok") and r.get("skipped"):
+            skipped += 1
+        elif r.get("ok"):
+            ok += 1
+            if log and not on_progress:
+                log("[+] %s → %s（%.2f）"
+                    % (Path(t).name, r.get("title") or "", r.get("quality") or 0))
+        else:
+            failed += 1
+            errors.append({"path": t, "error_kind": r.get("error_kind") or "",
+                           "error": r.get("error") or ""})
+            if log:
+                log("[x] %s → %s" % (Path(t).name, (r.get("error") or "")[:120]))
+    if on_progress:
+        try:
+            on_progress(total, total, "完成")
+        except Exception:                    # noqa: BLE001
+            pass
+    _audit(event="feed_batch", total=total, ok=ok, skipped=skipped, failed=failed,
+           dry_run=bool(dry_run))
+    return {"total": total, "ok": ok, "skipped": skipped, "failed": failed,
+            "items": items, "errors": errors, "dryRun": bool(dry_run),
+            "skippedByFormat": scan.get("skipped") or [],
+            "byExt": scan.get("byExt") or {},
+            "formats": _formats_brief(config)}
 
 
 def _cfg():

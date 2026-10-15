@@ -14,6 +14,14 @@ from pydantic import BaseModel
 
 from agentmemhub.store import Store
 
+# ⚠️ **`UploadFile` 必须在这里（模块顶层）导入**，不能像其它 fastapi 名字那样写在
+# `create_app()` 里面：app.py 启用了 `from __future__ import annotations`，
+# 路由函数的**类型注解是字符串**，FastAPI 从**模块全局命名空间**解析它 ——
+# 函数内 import 解析不到，会抛
+# `PydanticUserError: TypeAdapter[Annotated[ForwardRef('UploadFile')…]] is not fully defined`。
+# （2026-10-15 加 `/api/feed/upload` 时实测撞上，正是第 25 行那条警告说的情形。）
+from fastapi import UploadFile  # noqa: F401
+
 # ---- 截断规则（与静态快照流水线口径一致，防止巨大 payload）----
 _CAP_CONTENT = 320
 _CAP_OUTPUT = 200
@@ -57,6 +65,55 @@ _SORTABLE = {
     "updated": "updated_at", "created": "created_at",
     "events": "event_count", "title": "title",
 }
+
+
+# ---- 外部投喂（feed）用的请求模型 ----
+# ⚠️ 必须定义在**模块顶层**（见上面第 25 行的说明）：app.py 启用了
+# `from __future__ import annotations`，FastAPI 从模块全局命名空间解析类型注解，
+# 嵌套在工厂函数里的模型会让 body 参数被当成必需查询参数（422 missing body）。
+
+
+class FeedAddIn(BaseModel):
+    """投喂一项。**三种输入形态**（用户 2026-10-15 要求明确区分）：
+
+    · `input="path"` —— `value` 是**服务器本机**文件路径（转换器自己去 open/read）；
+    · `input="data"` —— `value` 是**二进制内容**，已由调用方读好（`open(p,"rb").read()`）。
+      JSON 装不下裸字节，所以要么 `encoding="base64"` 传 base64，要么直接用
+      `POST /api/feed/upload` 走 multipart。**此形态必须给 `filename`** ——
+      扩展名是判格式与认领转换器的依据，裸字节没有名字；
+    · `input="url"` —— `value` 是网页链接（取回层出网抓）。
+    """
+    input: str = "path"
+    value: str = ""
+    filename: str = ""
+    encoding: str = ""          # "" | "base64"
+    kind: str = ""
+    force: bool = False
+    dry_run: bool = False
+
+
+class FeedBatchIn(BaseModel):
+    """批量投喂。`roots` 是目录/文件（**按格式白名单筛**），`paths` 是显式清单。"""
+    roots: list[str] = []
+    paths: list[str] = []
+    recursive: bool = True
+    force: bool = False
+    dry_run: bool = False
+    limit: int = 0
+
+
+class FeedFormatsIn(BaseModel):
+    """调整允许投喂的格式。
+
+    `exts=None`（不传）= **清除运行时覆盖**，回到 yaml / 转换器默认。
+    想临时只放开某几种就传具体清单（如 `[".pdf", ".docx"]`）。
+    """
+    exts: Optional[list[str]] = None
+
+
+class FeedIdIn(BaseModel):
+    doc_id: str = ""
+    purge: bool = False
 
 
 def _exclusions_map(store) -> dict:
@@ -498,7 +555,7 @@ def create_app(db_path: Path | None = None):
     """创建 FastAPI 应用（独立于核心功能，serve 子命令调用）。"""
     import threading
 
-    from fastapi import Body, FastAPI, HTTPException, Query
+    from fastapi import Body, FastAPI, File, Form, HTTPException, Query, UploadFile
     from fastapi.middleware.gzip import GZipMiddleware
     from fastapi.responses import JSONResponse
     from fastapi.staticfiles import StaticFiles
@@ -1533,6 +1590,142 @@ def create_app(db_path: Path | None = None):
         """统一操作日志（面板控制/任务执行的最近记录，内存 + JSONL 留痕）。"""
         from agentmemhub import logs
         return JSONResponse({"logs": logs.recent(limit)})
+
+    # ---- 外部投喂（feed）----
+    # 装配与动作都在 `agentmemhub/feed/service.py`（与 CLI 共用），这里只做
+    # "HTTP 语义 + 渲染" —— 与 `batch_ops` 同一套分工，不在网关里重写流程。
+    # ⚠️ 单条投喂是秒级 → 同步返回；**批量是长任务**（几百个文件、分钟级）→
+    # 走后台任务设施，调用方轮询 `/api/admin/job`（与 `/api/admin/*` 同约定）。
+    @app.get("/api/feed/formats", summary="投喂：当前允许的格式（看板渲染勾选项）")
+    def api_feed_formats():
+        """返回**生效清单 + 来源 + 三层原始值** —— 看板要能显示"这是谁定的"。"""
+        from agentmemhub.feed import formats as F
+        return JSONResponse(F.state())
+
+    @app.put("/api/feed/formats", summary="投喂：调整允许的格式（写运行时覆盖）")
+    def api_feed_formats_put(payload: FeedFormatsIn):
+        """运行时覆盖（写状态文件，**不改用户的 yaml**）。
+
+        `exts` 不传 = 清除覆盖回到 yaml/默认；传清单 = 只允许这些（后缀，大小写不敏感）。
+        """
+        from agentmemhub.feed import formats as F
+        return JSONResponse(F.set_overrides(payload.exts))
+
+    @app.post("/api/feed/add", summary="投喂：投喂一项（path / data / url 三种形态）")
+    def api_feed_add(payload: FeedAddIn):
+        from agentmemhub.feed import service as svc
+        lines: list[str] = []
+        r = svc.ingest_any(source=payload.input, value=payload.value,
+                           filename=payload.filename, encoding=payload.encoding,
+                           kind=payload.kind, force=payload.force,
+                           dry_run=payload.dry_run, log=lines.append)
+        # 失败也返回 200 + `ok=false`：投喂失败是**业务结果**不是传输错误，
+        # 调用方要看的是 `error_kind`（决定处置），不该被 HTTP 状态码绕一层。
+        return JSONResponse({**r, "log": lines})
+
+    @app.post("/api/feed/upload", summary="投喂：直接上传文件字节（multipart）")
+    async def api_feed_upload(file: UploadFile = File(...),
+                              kind: str = Form(default=""),
+                              force: bool = Form(default=False),
+                              dry_run: bool = Form(default=False)):
+        """二进制直传通道 —— 客户端不必自己 base64（大文件省 1/3 体积）。"""
+        from agentmemhub.feed import service as svc
+        blob = await file.read()
+        lines: list[str] = []
+        r = svc.ingest_any(source="data", value=blob,
+                           filename=file.filename or "", kind=kind,
+                           force=force, dry_run=dry_run, log=lines.append)
+        return JSONResponse({**r, "log": lines})
+
+    @app.post("/api/feed/scan", summary="投喂：扫描目录列可投喂项（只读，不写盘）")
+    def api_feed_scan(payload: FeedBatchIn):
+        """先给人看"哪些能进、哪些被格式挡掉、各多少"，再决定投不投。
+
+        用户明确要求"先筛选再落库"，所以这一步与投喂**分开**。
+        """
+        from agentmemhub.feed import service as svc
+        return JSONResponse(svc.scan_targets(
+            roots=payload.roots or payload.paths,
+            recursive=payload.recursive, limit=payload.limit))
+
+    @app.post("/api/feed/batch", summary="投喂：批量投喂（**长任务**）")
+    def api_feed_batch(payload: FeedBatchIn):
+        import json as _json
+
+        from agentmemhub.feed import service as svc
+        from agentmemhub.web import tasks
+
+        def run(emit, meta):
+            job_id = meta["id"]
+
+            def on_progress(done: int, total: int, label: str) -> None:
+                tasks.set_progress(job_id, {
+                    "done": done, "total": total,
+                    "pct": int(done * 100 / max(1, total)), "label": label})
+                if done:
+                    emit("[%d/%d] %s" % (done, total, label))
+                else:
+                    emit("开始批量投喂：共 %d 项" % total)
+
+            out = svc.ingest_batch(
+                roots=payload.roots or None, paths=payload.paths or None,
+                recursive=payload.recursive, force=payload.force,
+                dry_run=payload.dry_run, limit=payload.limit,
+                on_progress=on_progress, log=lambda s: emit(str(s)))
+            for e in out["errors"][:50]:
+                emit("[x] %s：[%s] %s" % (e["path"], e["error_kind"], e["error"][:120]))
+            emit("完成：成功 %d / 幂等跳过 %d / 失败 %d（共 %d）%s"
+                 % (out["ok"], out["skipped"], out["failed"], out["total"],
+                    "（dry-run 未写盘）" if out["dryRun"] else ""))
+            # 终态结构化结果（前端从 job.output 之外还能拿到机器可读的汇总）
+            return _json.dumps({"total": out["total"], "ok": out["ok"],
+                                "skipped": out["skipped"], "failed": out["failed"],
+                                "dryRun": out["dryRun"],
+                                "byExt": out["byExt"],
+                                "errors": out["errors"][:50]},
+                               ensure_ascii=False, indent=2)
+
+        job = tasks.submit("feed-batch", run)
+        if job is None:
+            raise HTTPException(status_code=409, detail="已有长任务在运行")
+        return JSONResponse({"job": job})
+
+    @app.get("/api/feed/list", summary="投喂：素材列表")
+    def api_feed_list(status: str = Query(default="", description="按状态筛"),
+                      low_quality: bool = Query(default=False, description="只列低质量/有告警"),
+                      limit: int = Query(default=0, description="最多几条（0=全部）")):
+        from agentmemhub.feed import service as svc
+        return JSONResponse({"items": svc.list_materials(
+            status=status, low_quality=low_quality, limit=limit)})
+
+    @app.get("/api/feed/show/{doc_id}", summary="投喂：单条详情")
+    def api_feed_show(doc_id: str):
+        from agentmemhub.feed import service as svc
+        m = svc.get_material(doc_id)
+        if not m:
+            raise HTTPException(status_code=404, detail="没有这条素材：%s" % doc_id)
+        return JSONResponse(m)
+
+    @app.post("/api/feed/retry", summary="投喂：重转（来源不可达时自动回落原件）")
+    def api_feed_retry(payload: FeedIdIn):
+        from agentmemhub.feed import service as svc
+        return JSONResponse(svc.retry(payload.doc_id, log=lambda *_: None))
+
+    @app.post("/api/feed/retract", summary="投喂：撤下（可恢复；原件保留）")
+    def api_feed_retract(payload: FeedIdIn):
+        from agentmemhub.feed import service as svc
+        return JSONResponse(svc.retract(payload.doc_id, log=lambda *_: None))
+
+    @app.post("/api/feed/forget", summary="投喂：清除登记（purge=true 才连原件删）")
+    def api_feed_forget(payload: FeedIdIn):
+        from agentmemhub.feed import service as svc
+        return JSONResponse(svc.forget(payload.doc_id, purge=payload.purge,
+                                       log=lambda *_: None))
+
+    @app.get("/api/feed/lint", summary="投喂：确定性体检（P0>0 表示数据不一致）")
+    def api_feed_lint(with_index: bool = Query(default=True, description="是否检查投影")):
+        from agentmemhub.feed import lint as L
+        return JSONResponse(L.run_lint(with_index=with_index))
 
     # ---- 静态页面（index.html 由 StaticFiles html=True 自动兜底 /）----
     static_dir = Path(__file__).resolve().parent / "static"

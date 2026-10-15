@@ -642,6 +642,9 @@ class PdfConverter(BaseConverter):
 
     name = "pdf"
     version = "1"
+    #: 认领的后缀。⚠️ 必须是**类属性** —— 格式白名单（`feed/formats.py`）从注册表
+    #: 收集后缀时按 `EXTS` 取，而模块级同名常量拿不到（踩过：白名单恒空）。
+    EXTS = EXTS
 
     def can_handle(self, *, ref: str, kind: str = "",
                    data: bytes | None = None) -> bool:

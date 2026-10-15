@@ -149,7 +149,9 @@ def build_document(*, data: bytes, ref: str, meta: dict, kind: str,
 #: （"浏览器另存为 HTML 后 `feed add <文件>`"），但 `can_handle` 当时只认
 #: `http(s)://` —— 承诺的那条路**根本走不通**（2026-10-15 扫用户文档目录时发现：
 #: 61 个本地 .html 一个都进不来）。
-LOCAL_EXTS = (".html", ".htm", ".xhtml")
+#: ⚠️ 名字统一成 `EXTS`：格式白名单（`feed/formats.py`）从注册表收集后缀时
+#: 要一个**统一属性名**，否则加一个转换器就得回来改收集逻辑。
+EXTS = (".html", ".htm", ".xhtml")
 
 
 def _is_local(ref: str) -> bool:
@@ -166,6 +168,8 @@ class UrlConverter(BaseConverter):
 
     name = "url"
     version = "1"
+    #: 认领的后缀（**类属性**，供格式白名单从注册表收集 —— 见 `feed/formats.py`）
+    EXTS = EXTS
     #: 认领的 kind（`service` 对 URL 会显式传 kind="url"）
     KINDS = ("url", "web", "http", "https", "html")
 
@@ -176,7 +180,7 @@ class UrlConverter(BaseConverter):
         if not _is_local(ref):
             return True
         # 本地文件：只认网页扩展名（`.txt`/`.md` 归 T1，别抢）
-        if Path(str(ref)).suffix.lower() in LOCAL_EXTS:
+        if Path(str(ref)).suffix.lower() in EXTS:
             return True
         # 没有扩展名但字节是 HTML（工具导出的报告常这样）
         return bool(data) and re.match(rb"\s*<(?:!doctype\s+html|html)\b",

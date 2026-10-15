@@ -325,6 +325,9 @@ class DocxConverter(BaseConverter):
 
     name = "docx"
     version = "1"
+    #: 认领的后缀（**类属性**，供格式白名单从注册表收集 —— 见 `feed/formats.py`）
+    EXTS = EXTS
+    LEGACY_EXTS = LEGACY_EXTS
 
     def can_handle(self, *, ref: str, kind: str = "",
                    data: bytes | None = None) -> bool:

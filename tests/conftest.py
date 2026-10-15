@@ -96,7 +96,17 @@ def _sandbox_data_dir(tmp_path_factory):
     # 环境变量是进程级的，`logs.log_dir()` 认它。
     oldl = os.environ.get("AGENTMEMHUB_TEST_LOG_DIR")
     os.environ["AGENTMEMHUB_TEST_LOG_DIR"] = str(d / "logs")
+    # 投喂格式白名单的**运行时状态文件**也要跟着沙箱走：`PUT /api/feed/formats`
+    # 会把它写进 `logs/feed_formats.json`（真实路径）。这是本项目第四次遇到
+    # "测试经真实路径改了真实状态"，所以同样用**进程级环境变量**兜死，
+    # 而不是指望每个用例记得 monkeypatch。
+    oldf = os.environ.get("AGENTMEMHUB_FEED_FORMATS_STATE")
+    os.environ["AGENTMEMHUB_FEED_FORMATS_STATE"] = str(d / "logs" / "feed_formats.json")
     yield
+    if oldf is None:
+        os.environ.pop("AGENTMEMHUB_FEED_FORMATS_STATE", None)
+    else:
+        os.environ["AGENTMEMHUB_FEED_FORMATS_STATE"] = oldf
     if oldl is None:
         os.environ.pop("AGENTMEMHUB_TEST_LOG_DIR", None)
     else:

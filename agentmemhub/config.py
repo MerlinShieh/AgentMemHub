@@ -262,6 +262,12 @@ DEFAULT_FEED = {
         "renderer": "none",  # none | playwright
         "timeout": 20,
     },
+    #: **允许投喂的格式**（后缀白名单）。见 `agentmemhub/feed/formats.py`。
+    #: `exts` 留空 = 跟随转换器注册表（默认，加转换器就自动支持）；填了 = 只允许这些。
+    #: 运行时还能被 `PUT /api/feed/formats` 覆盖（写状态文件，不改这里的 yaml）。
+    "accept": {
+        "exts": [],
+    },
     "depth_default": "page",  # page（浅加工）/ session（深加工）—— 未显式声明时
 }
 

@@ -1397,10 +1397,12 @@ def build_parser() -> argparse.ArgumentParser:
     # —— 两种都收在 `args` 里再解析（用 `--action` 单独占一个 dest 会与位置参数打架）
     pfeed.add_argument("args", nargs="*",
                        help="动作 + 参数：add <文件…> / list / show <doc_id> / "
-                            "retry <doc_id> / retract <doc_id> / forget <doc_id> / lint")
+                            "retry <doc_id> / retract <doc_id> / forget <doc_id> / "
+                            "lint / scan <目录> / batch <目录…> / formats")
     pfeed.add_argument("--action", default="",
                        choices=["", "add", "list", "show", "retry",
-                                "retract", "forget", "lint"],
+                                "retract", "forget", "lint",
+                                "scan", "batch", "formats"],
                        help="动作（与位置写法等价；项目惯例写法）")
     pfeed.add_argument("--id", default="", help="show/retry/retract/forget 用：doc_id")
     pfeed.add_argument("--purge", action="store_true",
@@ -1422,7 +1424,15 @@ def build_parser() -> argparse.ArgumentParser:
     pfeed.add_argument("--status", default="", help="list 用：按状态筛")
     pfeed.add_argument("--low-quality", action="store_true",
                        help="list 用：只列质量偏低或有告警的")
-    pfeed.add_argument("--limit", type=int, default=0, help="list 用：最多几条（0=全部）")
+    pfeed.add_argument("--limit", type=int, default=0,
+                       help="list/scan/batch 用：最多几条（0=全部）")
+    pfeed.add_argument("--apply", action="store_true",
+                       help="batch 用：**真的投喂**。不加则只扫描列清单（默认只看不写）")
+    pfeed.add_argument("--no-recursive", action="store_true",
+                       help="scan/batch 用：只扫目录第一层")
+    pfeed.add_argument("--set-formats", default="",
+                       help="formats 用：设置运行时允许的格式（逗号分隔，如 "
+                            "'.pdf,.docx'）；传 'clear' 清除覆盖回到配置/默认")
     pfeed.add_argument("--json", action="store_true", help="以 JSON 输出（便于脚本消费）")
     pwk = sub.add_parser("wiki", help="LLM Wiki 运维：对齐审计 / 增量更新 / 查看失败清单 / 定向补跑")
     pwk.add_argument("--action", default="failures",
@@ -1510,7 +1520,8 @@ def cmd_feed(args) -> int:
     # 不这么做的话 `feed add X` 会把 "add" 当成**文件路径**去投喂 —— 能跑、
     # 但把用户意图理解错了（实测：报"找不到文件：add"，随后又真的投喂了 X）。
     tokens = [str(t) for t in (getattr(args, "args", []) or [])]
-    _ACTIONS = ("add", "list", "show", "retry", "retract", "forget", "lint")
+    _ACTIONS = ("add", "list", "show", "retry", "retract", "forget", "lint",
+                "scan", "batch", "formats")
     if not action and tokens and tokens[0] in _ACTIONS:
         action = tokens.pop(0)
     action = action or "add"
@@ -1548,6 +1559,85 @@ def cmd_feed(args) -> int:
         elif len(out) > 1:
             print("\n合计：成功 %d / 失败 %d" % (len(out) - failed, failed))
         return 1 if failed else 0
+
+    if action == "formats":
+        # 格式白名单：查看 / 调整（用户要求"通过调整文档格式参数控制哪些数据支持投喂"）
+        from agentmemhub.feed import formats as _fmt
+        spec = (getattr(args, "set_formats", "") or "").strip()
+        if spec:
+            if spec.lower() == "clear":
+                st = _fmt.clear_overrides()
+            else:
+                st = _fmt.set_overrides([e for e in spec.split(",") if e.strip()])
+        else:
+            st = _fmt.state()
+        if as_json:
+            print(_json.dumps(st, ensure_ascii=False, indent=2))
+            return 0
+        print("当前允许投喂的格式（来源：%s）：" % st["source"])
+        print("  " + "、".join(st["allowed"]) if st["allowed"] else "  （空）")
+        print("  转换器支持：%s" % "、".join(st["supported"]))
+        print("  覆盖文件：%s" % st["stateFile"])
+        return 0
+
+    if action == "scan":
+        roots = [p for p in tokens if p.strip()]
+        if not roots:
+            print("用法：agentmemhub feed scan <目录或文件> [更多路径…] "
+                  "[--no-recursive] [--limit N] [--json]")
+            return 2
+        res = _svc.scan_targets(roots=roots,
+                                recursive=not bool(getattr(args, "no_recursive", False)),
+                                limit=int(getattr(args, "limit", 0) or 0))
+        if as_json:
+            print(_json.dumps(res, ensure_ascii=False, indent=2))
+            return 0
+        print("扫描：可投喂 %d / 被格式挡掉 %d%s"
+              % (res["allowedCount"], res["skippedCount"],
+                 "（已按 --limit 截断）" if res["truncated"] else ""))
+        for ext, n in sorted(res["byExt"].items(), key=lambda x: -x[1]):
+            print("    %-14s %d" % (ext, n))
+        for s in res["skipped"][:10]:
+            print("    [挡] %s（%s）" % (s["path"], s["reason"]))
+        return 0
+
+    if action == "batch":
+        roots = [p for p in tokens if p.strip()]
+        if not roots:
+            print("用法：agentmemhub feed batch <目录或文件> [更多路径…] "
+                  "[--apply] [--dry-run] [--force] [--no-recursive] [--limit N]")
+            print("      **不加 --apply 时只扫描列清单**（默认只看不写）")
+            return 2
+        recursive = not bool(getattr(args, "no_recursive", False))
+        limit = int(getattr(args, "limit", 0) or 0)
+        if not getattr(args, "apply", False):
+            # 默认只看不写：批量影响面大，且用户明确"未筛选的数据禁止入库"
+            res = _svc.scan_targets(roots=roots, recursive=recursive, limit=limit)
+            if as_json:
+                print(_json.dumps(res, ensure_ascii=False, indent=2))
+                return 0
+            print("（只扫描，未投喂）可投喂 %d / 被格式挡掉 %d%s"
+                  % (res["allowedCount"], res["skippedCount"],
+                     "（已按 --limit 截断）" if res["truncated"] else ""))
+            for ext, n in sorted(res["byExt"].items(), key=lambda x: -x[1]):
+                print("    %-14s %d" % (ext, n))
+            print("确认无误后加 `--apply` 真的投喂"
+                  "（想连盘都不写就再加 `--dry-run` 先走一遍全流程）")
+            return 0
+        out = _svc.ingest_batch(roots=roots, recursive=recursive,
+                                force=bool(getattr(args, "force", False)),
+                                dry_run=bool(getattr(args, "dry_run", False)),
+                                limit=limit)
+        if as_json:
+            print(_json.dumps(out, ensure_ascii=False, indent=2))
+        else:
+            print("批量投喂：成功 %d / 幂等跳过 %d / 失败 %d（共 %d）%s"
+                  % (out["ok"], out["skipped"], out["failed"], out["total"],
+                     "（dry-run 未写盘）" if out["dryRun"] else ""))
+            for e in out["errors"][:10]:
+                print("    [x] %s：[%s] %s"
+                      % (e["path"], e["error_kind"], e["error"][:80]))
+        return 1 if out["failed"] else 0
 
     if action == "list":
         rows = _svc.list_materials(
