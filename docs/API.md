@@ -295,9 +295,30 @@ python -m agentmemhub llm-config [--json]                       # 各 LLM 使用
 
 ## 六、接口使用现状（面板未调用的接口）
 
-一次一致性排查（前端 `fetch` ↔ 后端路由 ↔ MCP 工具 ↔ CLI ↔ 本文）发现
-**11 个后端接口面板前端没有调用**。这**不是缺陷**，而是设计选择 —— 但必须写清楚，
+**2026-10-16 实测**：后端 **60 个 HTTP 路由**，面板前端调用了 **18 个**，
+**42 个未接**。复跑一条命令即可对账：
+
+```powershell
+python scripts/audit_frontend_api.py        # 或 --used 连已用的一起列 / --json 给机器读
+```
+
+| 域 | 路由 | 面板已用 | 未用 | 未接的是什么 |
+|---|---|---|---|---|
+| 会话 + 记忆排除 | 8 | 4 | 4 | **记忆排除 UI 已下线**（3 个 + `exclusions/summary`） |
+| 记忆 | 6 | 5 | 1 | `GET /api/memos/traces`（时间线明细） |
+| 引导与统计 | 4 | 1 | 3 | 面板走 `/api/bootstrap`（**其中已含统计**），其余供外部调用 |
+| 运维 | 11 | 8 | 3 | `admin/score`（入口已隐藏）、`admin/exclude`、`admin/rebuild` |
+| **Wiki** | **16** | **0** | **16** | **整块未接**：失败重跑 / 待更新记忆 / 触发器 / 对齐审计 / 离线批次 |
+| **快照** | **3** | **0** | **3** | **整块未接**：创建 / 列表 / 回滚 |
+| **外部投喂** | **12** | **0** | **12** | **整块未接** —— 用户要求"后面通过数据看板直接控制" |
+
+未接的 42 个**不是缺陷**，而是设计选择（或"等前端统一重做"）—— 但必须写清楚，
 否则下次排查又会当成"未完成"。
+
+> ⚠️ **静态扫描一定有漏网**：URL 写在变量里（`` const u = `/api/…`; fetch(u) ``）、
+> 前端用模板串拼路径（`` `/api/conversations/${encodeURIComponent(x)}/…` ``）都可能匹配不到。
+> 2026-10-16 实测：脚本第一版没先归一 `${...}`，把会话详情 / 删除 / 改标题三个
+> **其实在用**的接口报成了未调用 —— 所以**关键接口必须再用关键字 grep 交叉验证**。
 
 ### 6.1 保留**供外部调用**（面板走 `/api/bootstrap`）
 
@@ -318,12 +339,28 @@ python -m agentmemhub llm-config [--json]                       # 各 LLM 使用
 表被 `ingest` 与 `distill` 读取，用于跳过不写入记忆的会话/轮次）。
 **UI 下线 ≠ 能力下线**，且它随时可能重新上架。
 
-### 6.3 **新加的后端服务接口**（UI 待后续）
+### 6.3 **整块未接的三个域**（后端完整可用，只差前端）
+
+三块能力**一个接口都没被前端调用**，且各自完整（后端 + CLI + 部分 MCP 都在）：
+
+| 域 | 接口 | 能做什么 | 备注 |
+|---|---|---|---|
+| **外部投喂** `/api/feed/*` | 12 个（见 §3.7） | 投喂文件 / 链接 / 正文、批量扫描与投喂、格式白名单点选、素材列表与详情、重转 / 撤下 / 清除、产物体检 | 用户明确要求"通过数据看板直接控制"；**MCP 侧已有 `feed_add`/`feed_list`/`feed_status`**（Agent 可用，人不方便） |
+| **LLM Wiki** `/api/wiki/*` | 16 个 | 失败清单与定向补跑、待更新记忆的查看 / 丢弃 / 恢复、触发器状态**热改**、对齐审计、增量更新、离线批次（状态 / 推进 / 取消 / 重提 / 预检） | v2.1/A2 陆续加的后端；目前全靠 CLI（`wiki --action …`） |
+| **快照** `/api/snapshots*` | 3 个 | 列出 / 创建 / 回滚（索引库 + wiki 产物整包） | 回滚是**破坏性操作**，做 UI 时要二次确认 |
+
+### 6.3.1 v2.1 之后新增、前端未接的接口（逐个）
 
 | 接口 | 说明 |
 |---|---|
-| `GET /api/wiki/failures`、`POST /api/wiki/retry` | v2.1 新增。按"暂时只提供服务接口"的需求，前端 UI 尚未做 |
-| `/api/feed/*` | 外部投喂（见 §3.7）。**后端已完整提供，面板尚未接线** —— 用户要求"后面通过数据看板直接控制" |
+| `GET /api/wiki/failures`、`POST /api/wiki/retry` | 编译失败清单与**定向补跑**（只跑失败的，不全量重来） |
+| `GET /api/wiki/pending`、`POST /api/wiki/pending/drop`、`GET /api/wiki/pending/ignored`、`POST /api/wiki/pending/restore` | **待更新记忆**的查看 / 丢弃 / 恢复 —— 丢弃分 soft（不进 wiki、仍可召回）与 hard（真删，需 `--confirm` 语义） |
+| `GET`/`PUT /api/wiki/triggers`、`POST /api/wiki/trigger/run` | 触发器状态查询 / **热改**（写 overrides，不用重启）/ 手动触发一次 |
+| `GET /api/wiki/align` | 对齐审计（只读）：库里变了但 wiki 没跟上的输入 |
+| `POST /api/wiki/update` | 增量更新 wiki |
+| `GET /api/wiki/batch/status`、`run`、`cancel`、`resubmit`、`checks` | 离线批处理（Batch API，官方价 5 折）的推进与预检 |
+| `GET /api/snapshots`、`POST /api/snapshots/create`、`POST /api/snapshots/restore` | 快照与回滚 |
+| `GET /api/memos/traces` | 记忆**时间线明细**（原始的逐条轨迹）。面板"记忆报表"目前走 `/api/memories` + 搜索，没用它 |
 
 ---
 
@@ -422,7 +459,16 @@ PUT /api/feed/formats  {}
 
 ### 6.5 复查手段
 
-一次性脚本 `exports/wiki_work/check_api_gaps.py`（工作区，未入库）会输出五份清单的差异。
+**入库脚本** `scripts/audit_frontend_api.py`（2026-10-16 由"工作区一次性脚本"正规化）：
+
+```powershell
+python scripts/audit_frontend_api.py          # 按域分组列"面板未用"的接口
+python scripts/audit_frontend_api.py --used   # 连已用的一起列
+python scripts/audit_frontend_api.py --json   # 机器读（给看板 / CI）
+```
+
+**什么时候跑**：改完前端就跑一次 —— 它会立刻告诉你"哪些刚接上、哪些还空着"。
+它的边界（漏网情形）写在脚本 docstring 里，**别把它的结论当唯一真相**。
 
 > ⚠️ **静态扫描前端调用一定有漏网**：URL 若写在变量里
 > （如 `` const u = `/api/memos/feedback?...`; fetch(u) ``），正则匹配不到。
