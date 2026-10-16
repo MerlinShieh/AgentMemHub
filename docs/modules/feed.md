@@ -1,8 +1,17 @@
 # feed — 外部投喂转译层
 
-> 设计文档：[`../feed-adapter-plan.md`](../feed-adapter-plan.md)（v2.2，**为什么这么设计**）
+> 设计文档：[`../feed-adapter-plan.md`](../feed-adapter-plan.md)（v2.2 + 六轮实施记录，**为什么这么设计**）
 > 本文是**模块文档**：职责边界 / 数据形态 / 怎么用 / 怎么排查（**改代码前先读它**）
-> 状态：**M0 地基 + M1（素材库 + T1 文本直通）已实施**；M2 入图并列、M3 网页公众号、M4 PDF/图片未做
+> 状态：**M0–M5 全部落地**（2026-10-16，tag `feed-m5`）。这条线只剩两件事：
+> **T4 图片 OCR**（用户指定放后）与**面板入口**（遵守"UI 统一重做放最后"；后端已就绪）
+
+> **30 秒速览**：把外部素材（文件 / 网址 / 正文）转译成统一 markdown，发布到**与自有
+> wiki 并列**的知识库页面层（`origin=external`），**不进**记忆 / 蒸馏 / wiki 编译。
+> 已适配：md·txt / 网页（含本地另存）/ 公众号 / PDF（四路由）/ DOCX / PPTX / XLSX /
+> XMIND / CSV·TSV。
+> 三个入口：**CLI**（`feed` 子命令）· **HTTP**（`/api/feed/*`，11 个）·
+> **MCP**（`feed_add` / `feed_list` / `feed_status`）。
+> **功能与参数总览在 §7**（"时间长了忘了就来对一遍"）；配置项只有 5 个键。
 
 ---
 
@@ -351,7 +360,7 @@ CSV 是**导出格式的默认选择**（几乎每个系统都"能导出 CSV"）
 | 类型全丢 | **坚决不做类型推断**：`00123` 变成 `123` 是**改数据**（工号 / 邮编 / 批次号的前导零有含义），比"没识别出这是个日期"严重得多 |
 | 无后缀的文件 | **不猜**"它是不是 CSV" —— 纯文本里含逗号太常见，猜错的代价是一份笔记被当成表格 |
 
-## 7. 怎么用（CLI）
+## 7. 怎么用（CLI / MCP / 配置）
 
 ```powershell
 agentmemhub feed add <文件路径> [更多路径…]     # 投喂（默认动作，可省略）
@@ -382,19 +391,20 @@ agentmemhub feed batch <目录> --apply --dry-run   # 走完整流程但一个�
 "未筛选的数据禁止入库" ⇒ 默认行为必须是"先看清楚再动手"。
 `scan` 与 `batch` 分开，也正对应"先筛选再落库"。
 
-**三种输入形态**（用户 2026-10-15 要求明确区分）：
+**四种输入形态**（2026-10-15 用户要求明确区分；2026-10-16 补第四种 `text`）：
 
 | 形态 | 是什么 | 注意 |
 |---|---|---|
 | `path` | **本机**文件路径 | 转换器自己去 `open/read` |
 | `data` | **二进制内容**（调用方已 `open/read` 出来） | **必须给 `filename`** —— 扩展名是判格式的依据，裸字节没有名字 |
 | `url` | 网页链接 | 取回层出网抓 |
+| `text` | **正文本身** | `filename` 兼作标题；CLI 侧就是 `feed add --stdin` |
 
-统一入口是 `service.ingest_any()`：**CLI / HTTP / 看板三条路走同一个门**，
+统一入口是 `service.ingest_any()`：**CLI / HTTP / 看板 / MCP 四条路走同一个门**，
 各写一遍必然漂移（本项目在 wiki 上踩过"两处流程对不齐"）。
 
 **HTTP 全套**（供数据看板直接控制，见 [`docs/API.md` §3.7](../API.md)）：
-`/api/feed/formats`（查/调格式）、`/api/feed/add`（三种形态）、
+`/api/feed/formats`（查/调格式）、`/api/feed/add`（四种形态）、
 `/api/feed/upload`（**二进制直传**，multipart）、`/api/feed/scan`（只读预览）、
 `/api/feed/batch`（**长任务**，轮询 `/api/admin/job`），以及
 `list` / `show` / `retry` / `retract` / `forget` / `lint`。
@@ -459,6 +469,72 @@ agentmemhub wiki --action index-pages    # 投影**所有页面根**（L2 自有
 
 **面板入口不做**（遵守"面板 UI 统一重做放最后"的既有约定），但后端 11 个 HTTP
 接口已就绪（见 `docs/API.md` §3.7），届时只差前端。
+
+### 功能与入口总览（时间长了忘了就来对一遍）
+
+| 能力 | CLI | HTTP | MCP |
+|---|---|---|---|
+| 投喂一项 | `feed add <路径>` · `feed add --stdin` | `POST /api/feed/add`（四形态）· `/api/feed/upload`（multipart 直传） | `feed_add` |
+| 看投过什么 | `feed list [--status X] [--low-quality]` | `GET /api/feed/list` | `feed_list` |
+| 看单条详情 | `feed show <doc_id>` | `GET /api/feed/show/{doc_id}` | `feed_status`（传 `doc_id`） |
+| 看整体健康 | `feed lint [--json]` | `GET /api/feed/lint` | `feed_status`（**`with_index=False`**） |
+| 目录批量 | `feed scan <目录>`（只读）· `feed batch <目录> [--apply]` | `POST /api/feed/scan` · `/api/feed/batch`（长任务） | **不给** |
+| 格式白名单 | `feed formats [--set-formats …]` | `GET`/`PUT /api/feed/formats` | 只在 `feed_status` 里显示 |
+| 重转 | `feed retry <doc_id> [--from-raw]` | `POST /api/feed/retry` | **不给** |
+| 撤下 / 清除 | `feed retract` · `feed forget [--purge]` | `POST /api/feed/retract` · `/forget` | **不给** |
+
+**MCP 为什么只给三个**：低门槛写入 + 随时自查。批量与删除影响面大
+（`forget --purge` 删的是**不可再生**的原件），留在 CLI / 看板由人把关。
+
+### 配置项（`agentmemhub.yaml` 的 `feed` 段）
+
+| 键 | 默认 | 作用 | 什么时候调 |
+|---|---|---|---|
+| `feed.db` | `database/materials.db` | 素材登记表（**独立库，不进快照**） | 换库位置（少见） |
+| `feed.store_dir` | `exports/feed_store` | 三段物料根：`raw/`（不可再生原件）+ `mirror/`（中间形态） | 挪到别的盘 |
+| `feed.kb_dir` | `exports/wiki_work/out_feed` | 最终 md（**交付物 / 知识库本体**），与 `out_l2_*` **并列** | 挪产物目录（**改完要重投影**） |
+| `feed.fetch.timeout` | `20` | 单次抓取超时（秒） | 站点慢 / 走代理时调大 |
+| `feed.accept.exts` | `[]` | 允许投喂的后缀白名单；**留空 = 跟随转换器注册表** | 只想放开少数几种格式时填 |
+
+⚠️ **这里曾有四个假开关**（`convert.llm` / `convert.ocr` / `fetch.renderer` /
+`depth_default`）—— 2026-10-15 实测确认**没有任何读取点**后删除（§11 不变量 25）。
+**能力做出来再加键**，别先放开关。改 yaml **不用重启**（`Config` 每次读盘），
+但 MCP 是长驻进程，**换代码要重启**。
+
+### 格式白名单的三处作用域
+
+优先级 **运行时覆盖 > yaml > 注册表**，判定单点是 `feed/formats.py`：
+
+| 来源 | 怎么设 | 用途 |
+|---|---|---|
+| **运行时覆盖** | `PUT /api/feed/formats`（写 `logs/feed_formats.json`）· `feed formats --set-formats` | 看板点选；**不改用户的 yaml** |
+| **yaml** | `feed.accept.exts` | 长期口径 |
+| **注册表**（默认） | 什么都不配 ⇒ 从**转换器类的 `EXTS` 类属性**收集 | 加一个转换器就自动支持 |
+
+三条语义边界（都踩过）：**大小写不敏感**（`.PDF` ≡ `.pdf`）·
+**空清单 ≠ 禁止一切**（`exts: []` 与"没配"等价，否则不配这个键的用户会被默认全禁）·
+**无后缀一律放行**（URL 与无扩展名报告没有后缀可查，交给认领机制按内容判型，
+判不出来照旧显式报错）。当前清单随时可查：`feed formats` 或 `feed_status`。
+
+### 规模上限与质量降级（都是**代码常量**，不是配置）
+
+| 常量 | 值 | 位置 | 超限后果 |
+|---|---|---|---|
+| `MAX_ROWS` / `MAX_COLS` / `MAX_CELL` | 1000 / 60 / 300 | `feed/mdtable.py` | **截断 + 质量 0.7**（XLSX / CSV 与 PDF / DOCX 的表格**共用同一套**） |
+| `MIN_CHARS_PER_PAGE` | 50 | `converters/pdf.py` | 平均每页低于它 ⇒ 判为**扫描件**（T3c） |
+| `MAX_PAGES` / `MAX_RENDER_PAGES` / `MAX_IMAGES` | 300 / 20 / 40 | `converters/pdf.py` | 页数超限不转；扫描件最多渲 20 页 |
+| `MIN_TABLE_ROWS` / `MIN_TABLE_COLS` / `LOSS_TOLERANCE` | 2 / 2 / 2 | `converters/pdf.py` | 误检表格的闸门 + 剔除前的字符覆盖容忍 |
+| `MAX_SLIDES` / `MAX_IMAGES` / `THIN_TEXT_RATIO` | 300 / 60 / 0.3 | `converters/pptx.py` | 只转前 N 页；有字页占比过低 ⇒ 判"基本是图"并降分 |
+| `MAX_IMAGES` | 40 | `converters/docx.py` | 图片超限不再抽取 |
+| `MAX_SHEETS` | 50 | `converters/xlsx.py` | 只转前 N 张工作表 + 告警 |
+| `MAX_TOPICS` / `MAX_NOTE` / `THIN_TOPICS` | 20000 / 200 / 3 | `converters/xmind.py` | 主题数超限截断 |
+| `MIN_ARTICLE_CHARS` | 200 | `converters/url.py` | 抽取短于它 ⇒ 报"这不是正文页"并给兜底通路 |
+| `MIN_DATA_BYTES` / `MAX_BLOCKS` / `MAX_ROWS` / `MAX_COLS` / `MAX_CELL` | 256 / 4 / 200 / 12 / 80 | `feed/embeddata.py` | 内嵌数据抢救的规模闸门 |
+| `TITLE_MAX` | 60 | `feed/titles.py` | 标题超长 ⇒ 截断**并记 warning**（替代标题必须让人看见） |
+| `QUALITY_WARN` | 0.5 | `feed/base.py` | 低于它的已发布素材会被 `feed list --low-quality` 筛出 |
+
+**截断是丢数据 ⇒ 必须降质量分**（不是只记一条 warning）：这样它一定会出现在
+`--low-quality` 视野里，投喂通知也会升到 `warning` 级。
 
 ---
 

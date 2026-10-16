@@ -74,14 +74,18 @@ _SORTABLE = {
 
 
 class FeedAddIn(BaseModel):
-    """投喂一项。**三种输入形态**（用户 2026-10-15 要求明确区分）：
+    """投喂一项。**四种输入形态**（2026-10-15 用户要求明确区分"传的是二进制 / 路径 / 链接"，
+    2026-10-16 补上第四种 `text`）：
 
     · `input="path"` —— `value` 是**服务器本机**文件路径（转换器自己去 open/read）；
     · `input="data"` —— `value` 是**二进制内容**，已由调用方读好（`open(p,"rb").read()`）。
       JSON 装不下裸字节，所以要么 `encoding="base64"` 传 base64，要么直接用
       `POST /api/feed/upload` 走 multipart。**此形态必须给 `filename`** ——
       扩展名是判格式与认领转换器的依据，裸字节没有名字；
-    · `input="url"` —— `value` 是网页链接（取回层出网抓）。
+    · `input="url"` —— `value` 是网页链接（取回层出网抓）；
+    · `input="text"` —— `value` 直接是**正文**（粘一段内容），`filename` 兼作标题。
+      与 CLI 的 `feed add --stdin` 等价；单列它是为了让 HTTP / MCP 两条入口
+      不必各自去 base64 硬凑一条"字符串 → 字节"的路。
     """
     input: str = "path"
     value: str = ""
@@ -1611,7 +1615,7 @@ def create_app(db_path: Path | None = None):
         from agentmemhub.feed import formats as F
         return JSONResponse(F.set_overrides(payload.exts))
 
-    @app.post("/api/feed/add", summary="投喂：投喂一项（path / data / url 三种形态）")
+    @app.post("/api/feed/add", summary="投喂：投喂一项（path / data / url / text 四种形态）")
     def api_feed_add(payload: FeedAddIn):
         from agentmemhub.feed import service as svc
         lines: list[str] = []

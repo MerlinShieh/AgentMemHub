@@ -253,7 +253,7 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 它的规则是"`entry["level"]` 优先于传参的 `level`"，而 `warning` 不在日志流的
 `LEVELS`（`debug/info/warn/error`）里，不先改写就会被静默回落成 `info`（实测踩过）。
 
-### 5.7 `logs/feed.log`（7 个事件，2026-10-12 随 M1/M2 落地）
+### 5.7 `logs/feed.log`（8 个事件，2026-10-12 随 M1/M2 落地；2026-10-15 补 `feed_batch`）
 
 投喂是**长流程**（原件落盘 → 转译 → 发布），每一步都可能失败；`database/materials.db`
 记的是**当前状态**，本流记的是**过程** —— 排障要过程、查询要状态，两者互补。
@@ -267,6 +267,7 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 | `feed_skipped` | `reason="duplicate"` | 同字节已投喂过（幂等命中） | **不是失败** —— 内容没变就复用既有产物 |
 | `feed_retracted` | `doc_id` `kb_removed` `raw_kept=true` | 撤下投喂内容（可恢复） | 交付物删了、**原件仍在** ⇒ `feed retry` 能把同一份重新发布出来 |
 | `feed_forgot` | `doc_id` `kb_removed` `raw_removed` | 彻底清除登记 | ⚠️ `raw_removed=true` 表示**原件已被删**（不可恢复）—— 只有显式 `--purge` 才会 |
+| `feed_batch` | `total` `ok` `skipped` `failed` `dry_run` | **批量投喂的汇总**（一批一条，不是每份一条） | 单份的过程在各自的 `feed_*` 事件里；这条回答"这批投了多少、失败几份"。批量的**通知**也只发这一条汇总（逐条推会刷爆手机） |
 
 ⚠️ **`depth` 必须算对**：`feed.service._audit()` 是包装层，所以传 `depth=4`。
 不 +1 会让本流**所有事件的 `line` 恒等**、字段作废 —— 同一坑 2026-10-04 在 wiki 流

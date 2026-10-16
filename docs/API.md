@@ -336,7 +336,7 @@ python -m agentmemhub llm-config [--json]                       # 各 LLM 使用
 |---|---|---|
 | `GET` | `/api/feed/formats` | 当前**允许投喂的格式**（看板渲染勾选项用）|
 | `PUT` | `/api/feed/formats` | 调整允许的格式（写**运行时覆盖**，不改 yaml）|
-| `POST` | `/api/feed/add` | 投喂一项（**三种输入形态**，见下）|
+| `POST` | `/api/feed/add` | 投喂一项（**四种输入形态**，见下）|
 | `POST` | `/api/feed/upload` | 投喂：直接上传**文件字节**（multipart）|
 | `POST` | `/api/feed/scan` | 扫描目录列出可投喂项（**只读，不写盘**）|
 | `POST` | `/api/feed/batch` | 批量投喂（**长任务**，轮询 `/api/admin/job`）|
@@ -347,15 +347,17 @@ python -m agentmemhub llm-config [--json]                       # 各 LLM 使用
 | `POST` | `/api/feed/forget` | 清除登记（`purge=true` 才连原件一起删）|
 | `GET` | `/api/feed/lint` | 确定性体检（`P0>0` 表示数据不一致）|
 
-#### 三种输入形态（`POST /api/feed/add`）
+#### 四种输入形态（`POST /api/feed/add`）
 
-用户 2026-10-15 明确要求区分"传输的是二进制、还是路径、还是链接"：
+用户 2026-10-15 明确要求区分"传输的是二进制、还是路径、还是链接"；
+2026-10-16 补上第四种 `text`（与 CLI 的 `--stdin`、MCP 的 `input="text"` 等价）。
 
 | `input` | `value` 是什么 | 必填 | 说明 |
 |---|---|---|---|
 | `path` | **服务器本机**文件路径 | — | 转换器自己去 `open/read` |
 | `data` | **二进制内容**（调用方已读好） | `filename` | JSON 装不下裸字节 ⇒ 用 `encoding="base64"`；或用 `/api/feed/upload` |
 | `url` | 网页链接 | — | 取回层出网抓（走代理） |
+| `text` | **正文本身** | — | `filename` 兼作标题；省掉"字符串 → 字节 → base64"的绕路 |
 
 ```jsonc
 // ① 路径
@@ -367,6 +369,9 @@ python -m agentmemhub llm-config [--json]                       # 各 LLM 使用
 
 // ③ 链接
 {"input": "url", "value": "https://mp.weixin.qq.com/s/xxxx"}
+
+// ④ 正文（浏览器另存失败 / 反爬 / 只拿到文字时最省事的通路）
+{"input": "text", "value": "# 会议纪要\n\n……", "filename": "会议纪要"}
 ```
 
 > **失败返回 200 + `ok=false`**（不是 4xx）—— 投喂失败是**业务结果**而不是传输错误，

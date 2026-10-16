@@ -4,8 +4,9 @@
 > **v2.2 修订（深读参考实现 `second-brain-skill` → 改判 T2c + 新增脚本的第三角色"验证器" + 回收站教训）**｜
 > 性质：**需求分析 + 计划**
 > 进度：**M0 ✅（`c3836ee`）、M1 ✅（`7b18fb8`）、M2 ✅（`4adc6eb`+`40c85e5`）、
-> M3 ✅（`0dcea2e`，用真实链接验收）、M4 ✅（PDF 四路由 + DOCX/PPTX/XLSX/XMIND/CSV）、
-> M5 🔶（批量接口 + HTTP 服务已落地；剩 MCP 工具 / 通知接入 / 文档收口）**。
+> M3 ✅（`0dcea2e`，用真实链接验收）、M4 ✅（PDF 四路由 + DOCX/PPTX/XLSX/XMIND/CSV/TSV）、
+> **M5 ✅（2026-10-16，tag `feed-m5`）：MCP 三个投喂工具 + 投喂通知接入 + 文档收口**。
+> 这条线**只剩两件事**：T4 图片 OCR（用户指定放后）与面板入口（用户要求放最后，后端已就绪）**。
 > ⚠️ **M3 遗留的 Playwright 二级渲染仍未接**；原先为它预留的 `feed.fetch.renderer`
 > 开关**没有任何消费点（假开关），2026-10-15 已删除**（见 §第六轮记录）——
 > 能力真正做出来时再加回来，那时它自带消费点。
@@ -802,7 +803,7 @@ FeedDocument.warnings: list[str]     # 人可读的具体问题（不达标原�
 
 | 层 | 交付 | 位置 |
 |---|---|---|
-| 统一入口 | `ingest_any(source, value, filename, …)` —— 三种形态走同一个门 | `feed/service.py` |
+| 统一入口 | `ingest_any(source, value, filename, …)` —— 三种形态走同一个门（2026-10-16 补 `text`，现为**四种**） | `feed/service.py` |
 | 批量 | `scan_targets()`（**只读**列清单）+ `ingest_batch()`（逐条、互不中断） | `feed/service.py` |
 | 格式白名单 | 后缀驱动、大小写不敏感、**默认跟随注册表**、支持运行时覆盖 | `feed/formats.py`（新） |
 | CLI | `feed formats` / `feed scan` / `feed batch [--apply]` | `cli.py` |

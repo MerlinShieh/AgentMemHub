@@ -327,6 +327,7 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 | `folders [--source] [--limit]` | 按文件夹统计各 Agent 会话数 |
 | `sync [--source] [--full]` | **采集 + 向量化写入记忆索引**（增量；小模型先跑完即可检索，大模型后台并发补齐）|
 | `mcp [--http] [--bind H] [--port P]` | MCP 记忆网关：默认 stdio（Agent 拉起）；`--http` 常驻为 Streamable HTTP 供团队共享 |
+| `feed --action add\|list\|show\|retry\|retract\|forget\|lint\|formats\|scan\|batch` | **外部投喂转译层**：把 md / 网页 / PDF / Office / 思维导图 / 表格转译成知识库页面（与自有 wiki **并列**，`origin=external`，不进记忆与 wiki 编译）。`add` 支持"路径 / 二进制 / URL / 正文"**四形态**（CLI 侧是 `feed add <路径>` 或 `feed add --stdin`）；`scan` 只读预览、`batch` **默认不落盘**（`--apply` 才写）；`formats` 控制允许哪些后缀 —— 详见 [docs/modules/feed.md](docs/modules/feed.md) |
 | `memos [--source] [--out]` | 回退路径：生成 MemOS bundle（backend=memos 时用）|
 | `clean [--source x] [--apply]` | 记忆清洗：删除系统注入事件（默认预览，`--apply` 才执行并重建 FTS/计数；sync 会自动只清变更会话）|
 | `score [--pending] [--limit N] [--dry-run] [--workers N] [--ids id1,id2] [--unscored-count] [--sync-episodes]` | ⚠️ **当前不生效**（入口已从控制台/面板隐藏；实测评为 neutral 居多且跑批全跳过，质量把关由蒸馏置信度 + 面板 👍/👎 承担）——命令保留备查。原功能：LLM 批量自动评分历史记忆（**增量优先**：pending_score 队列非空只评队列·定点读零全量枚举，队列空则先筛未评 id 再读正文；`--pending` 仅评队列，`--ids` 只评指定条（写后即评），`--unscored-count` 统计未评条数（只读 id），`--sync-episodes` 回填 episode.r_task；**三档 verdict 均记入跳过清单**——positive/negative 写 value、neutral 不写值但仍标记「已评」避免下次重评（dry-run 一律不记录）；网关**内容审核拒评（如智谱 1301）自动归 neutral 并记账**，不再每次卡该条报错；LLM 调用**强制直连**、不受系统代理影响，确需代理设 `AGENTMEMHUB_LLM_PROXY`）|
@@ -864,7 +865,7 @@ uv run python -m agentmemhub llm-config --json   # 机器读
 | 日志与可观测性 | `logs.py`、`failures.py`、`snapshot.py`、`notify.py` | [docs/logging.md](docs/logging.md)（**事件字典 + 排查剧本**） | 已写 |
 | 离线批处理（Batch API） | `llm_batch.py`、`batch_client.py`、`wiki_batch.py`、`task_queue.py`（通用惰性收割）、`batch_ops.py`（CLI/HTTP 共用动作层） | [docs/modules/batch-offline.md](docs/modules/batch-offline.md) | 已落地（M0–M3 + M4/M5 核心；剩 M6 收尾，见 [计划](docs/batch-offline-plan.md)） |
 | 通知与推送 | `notify.py`（**通道可插拔**）、`logs.py`（`audit_notify`） | [docs/modules/notify.md](docs/modules/notify.md) | 已写（2026-10-04） |
-| 外部投喂转译层 | `agentmemhub/feed/**`（转换器注册表 + 三段物料）、`cli.py`（`feed` 子命令） | [docs/modules/feed.md](docs/modules/feed.md) | **常用文档已适配**：md/txt · 网页（含本地另存）· **PDF** · **DOCX** · **PPTX** · **XLSX** · **XMIND** · **CSV/TSV**；图片 OCR（T4）与 M5 入口未做（见 [计划](docs/feed-adapter-plan.md)） |
+| 外部投喂转译层 | `agentmemhub/feed/**`（转换器注册表 + 三段物料）、`cli.py`（`feed` 子命令）、`mcp_server.py`（`feed_add`/`feed_list`/`feed_status`） | [docs/modules/feed.md](docs/modules/feed.md) | **常用文档已适配**：md/txt · 网页（含本地另存）· 公众号 · **PDF** · **DOCX** · **PPTX** · **XLSX** · **XMIND** · **CSV/TSV**；MCP 三个投喂工具与通知已接（M5 ✅）；剩 T4 图片 OCR 与面板入口（见 [计划](docs/feed-adapter-plan.md)） |
 | 记忆引擎（内置 rag） | `agentmemhub/rag/**` | `docs/modules/memory-engine.md` | 计划中 |
 | 面板后端网关 | `agentmemhub/web/**` | `docs/modules/panel.md` | 计划中 |
 | 采集与适配 | `agentmemhub/adapters/**`、`store.py`、`models.py`、`watermarks.py` | `docs/modules/ingest-adapters.md` | 计划中 |
