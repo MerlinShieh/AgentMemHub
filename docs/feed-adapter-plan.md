@@ -870,16 +870,27 @@ FeedDocument.warnings: list[str]     # 人可读的具体问题（不达标原�
 
 **验收**：全量 **1261 passed / 1 skipped**（新增 29 条）；`check_config_keys.py` 零僵尸键。
 
-### M5 · 入口完善 + 收尾（2 天）
-- MCP 工具（**新增独立，不动五工具契约**）：`feed_add`（路径 / URL / `--stdin` 文本三形态）+
-  `feed_list` + `feed_status`；与 CLI **能力对等**
-- 通知接入：投喂成功/失败按推送策略走（复用 notify 五开关）
-- `feed list --low-quality` 复核入口（§7.5 质量自评的消费面）
-- 文档收口：本文同步 + `docs/modules/feed.md` 定稿 + `data-architecture.md` 新章 +
-  README 模块地图 + `AGENTS.md`；旧两份 ingest 文档标记"已被 v2 取代"
-- 面板入口**不做**（遵守"面板 UI 统一重做放最后"的既有约定，届时一并）
-- **验收**：全量测试绿；从 MCP 工具投喂一条 URL 全链路可复盘（日志能回答"跑到哪/失败在哪/花了多少"）；
-  `check_config_keys.py` 零僵尸键
+### M5 · 入口完善 + 收尾（2 天）—— **已完成（2026-10-16）**
+
+- ✅ **MCP 工具**（**新增独立，不动五工具契约**）：`feed_add` + `feed_list` + `feed_status`。
+  形态比原计划多一个：`path` / `url` / **`data`**（二进制，与 HTTP 接口对齐）/ `text`
+  （直接给正文）。三个工具都是 `feed/service.py` 的**薄封装**，且**不依赖记忆引擎**
+  （跳过 `auth_state()` 检查 —— 索引没建好不该妨碍投喂）。
+  ⚠️ 一个必须守的实现细节：**过程日志不能写 stdout**（MCP 的 stdout 是 JSON-RPC 协议流，
+  而 service 的 `log` 默认是 `print`），统一收进返回文本，另有专门测试守它；
+- ✅ **通知接入**：投喂结果按 `category="feed"` 走既有 `push_when` 五开关（**未新增配置键**）——
+  成功 `info`（默认不推）、低质量 / 失败 `warning`、代码 bug（`crash` / `registry`）`error`。
+  **批量只推一条汇总**（逐条推时标题各异 ⇒ 去重窗口失效 ⇒ 手机被刷爆）；
+- ✅ `feed list --low-quality` 复核入口（MCP 侧就是 `feed_list` 的 `low_quality` 参数）；
+- ✅ 文档收口（本次）：`docs/modules/feed.md`（§7 加 MCP 子节 + 不变量 26/27）·
+  `docs/API.md` §四（5 → 8 个工具，并写明 feed 的三条约定）；
+- ⬜ **面板入口不做**（遵守"面板 UI 统一重做放最后"的既有约定，届时一并）——
+  后端 11 个 HTTP 接口已就绪，只差前端；
+- ⬜ 旧两份 ingest 文档**逐节**标注"已被 v2 取代"（如 `external-ingest.md` 里仍写着四个
+  后来从未实现的 `feed.*` 开关）：目前只在本文头部加了状态注记，原文尚未逐节标注。
+- **验收**：全量 **1294 passed / 1 skipped**（本次新增 33 条）；`check_config_keys.py` 零僵尸键；
+  feed 三工具各有测试（含"引擎离线仍可用"·"stdout 不被日志污染"·"批量只发一条通知"）。
+  ⚠️ 仍缺的一项：**从真实 MCP 会话投喂一条 URL 做全链路复盘** —— 新工具要重启 DSH 才可见。
 
 ### 总计与压缩路径
 

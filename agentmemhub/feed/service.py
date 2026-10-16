@@ -27,6 +27,8 @@ from urllib.parse import urlparse
 
 from .base import QUALITY_WARN, FeedDocument, FeedError
 from .formats import is_allowed
+from .notify import notify_batch as _notify_batch
+from .notify import notify_result as _notify_result
 from .store import MaterialStore, MaterialsDB, doc_id_of, sha256_of
 
 
@@ -34,7 +36,11 @@ from .store import MaterialStore, MaterialsDB, doc_id_of, sha256_of
 INPUT_PATH = "path"     # 文件路径（转换器自己去 open/read）
 INPUT_DATA = "data"     # **二进制数据**（调用方已经 open/read 出来，直接给我字节）
 INPUT_URL = "url"       # 网页链接（取回层出网抓）
-INPUTS = (INPUT_PATH, INPUT_DATA, INPUT_URL)
+#: 直接给**正文文本**（不落临时文件）：Agent 在会话里粘一段内容、
+#: 或浏览器另存/反爬失败时的人工兜底。它是 `data` 形态的语法糖，
+#: 但值得单列 —— "我手上就是一段字"是最常见的输入，不该逼调用方去 base64。
+INPUT_TEXT = "text"
+INPUTS = (INPUT_PATH, INPUT_DATA, INPUT_URL, INPUT_TEXT)
 
 
 def _as_bytes(value: Any, *, encoding: str = "") -> bytes:
@@ -91,6 +97,16 @@ def ingest_any(*, source: str, value: Any, filename: str = "", encoding: str = "
                                ref=str(p))
         return ingest(str(p), kind=kind, force=force, dry_run=dry_run,
                       config=cfg, log=log)
+
+    if src == INPUT_TEXT:
+        body = str(value or "")
+        if not body.strip():
+            return _early_fail("text 形态给的内容是空的", "empty",
+                               ref=str(filename or "stdin"))
+        # `filename` 在这里兼作**标题**：调用方写 "会议纪要" 或 "note.md" 都能用。
+        # 标题拼进 frontmatter 的活由 `ingest_text` 干（标题取值顺序不在这里重复一份）
+        return ingest_text(body, title=str(filename or "").strip(),
+                           force=force, dry_run=dry_run, config=cfg, log=log)
 
     # src == INPUT_DATA
     name = str(filename or "").strip()
@@ -228,7 +244,10 @@ def ingest_batch(*, paths: Any = None, roots: Any = None, recursive: bool = True
                 on_progress(i - 1, total, Path(t).name)
             except Exception:                # noqa: BLE001 —— 进度回调坏了不该中断投喂
                 pass
+        # notify_too=False：批量**不逐条通知** —— 一次几百份、标题各不相同，
+        # 去重窗口形同虚设 ⇒ 用户手机被刷爆。批量的通知在结束时发**一条汇总**。
         r = ingest(t, kind="", force=force, dry_run=dry_run, config=config,
+                   notify_too=False,
                    log=(lambda *_a: None) if on_progress else log)
         items.append(r)
         if r.get("ok") and r.get("skipped"):
@@ -251,11 +270,14 @@ def ingest_batch(*, paths: Any = None, roots: Any = None, recursive: bool = True
             pass
     _audit(event="feed_batch", total=total, ok=ok, skipped=skipped, failed=failed,
            dry_run=bool(dry_run))
-    return {"total": total, "ok": ok, "skipped": skipped, "failed": failed,
-            "items": items, "errors": errors, "dryRun": bool(dry_run),
-            "skippedByFormat": scan.get("skipped") or [],
-            "byExt": scan.get("byExt") or {},
-            "formats": _formats_brief(config)}
+    summary = {"total": total, "ok": ok, "skipped": skipped, "failed": failed,
+               "items": items, "errors": errors, "dryRun": bool(dry_run),
+               "skippedByFormat": scan.get("skipped") or [],
+               "byExt": scan.get("byExt") or {},
+               "formats": _formats_brief(config)}
+    # **批量的唯一一条通知**（见 `feed/notify.py` 第 3 条纪律）
+    _notify_batch(summary)
+    return summary
 
 
 def _cfg():
@@ -342,11 +364,15 @@ def render_kb_page(doc: FeedDocument) -> str:
 
 def ingest(ref: str, *, kind: str = "", force: bool = False,
            dry_run: bool = False, config=None, log=print,
-           data_override: Optional[bytes] = None) -> dict[str, Any]:
+           data_override: Optional[bytes] = None,
+           notify_too: bool = True) -> dict[str, Any]:
     """投喂一个本地文件（URL 归 M3）。返回结构化结果，**失败也返回**（不抛）。
 
     返回字段：`ok / skipped / doc_id / converter / kb_path / quality /
     warnings / error / error_kind / dry_run`。
+
+    `notify_too=False` 供**批量**路径用（见 `ingest_batch`）：批量逐条通知会把
+    用户手机刷爆（标题各不相同 ⇒ 去重窗口失效），所以批量改在结束时推**一条汇总**。
     """
     cfg = config or _cfg()
     paths = cfg.feed_paths()
@@ -363,6 +389,10 @@ def ingest(ref: str, *, kind: str = "", force: bool = False,
         _audit(event="feed_failed", kind=kind, doc_id=doc_id, error=msg,
                error_kind=err_kind, retryable=retryable, ref=str(ref))
         log("[x] 投喂失败：%s" % msg)
+        if notify_too:
+            # 失败就在这里统一出口通知一次（`_fail` 覆盖了"认领之前/之后"所有失败路径，
+            # 在各调用点分别通知必然漏掉几条）
+            _notify_result(res, log=log)
         return res
 
     # -- 取字节：本地文件 / URL 抓取 / 调用方直接给字节（重转从 raw/ 读）
@@ -556,6 +586,8 @@ def ingest(ref: str, *, kind: str = "", force: bool = False,
             reasons.extend(doc.warnings or [])
             log("    ⚠️ 需要人工复核：%s —— 可用 feed list --low-quality 复核"
                 % "；".join(reasons))
+        if notify_too:
+            _notify_result(res, log=log)      # 成功/低质量两种结果在 `describe` 里分级
         return res
     finally:
         if db is not None:                  # dry-run 下没有库可关
@@ -703,6 +735,7 @@ def lint(*, config=None, with_index: bool = True,
 
 
 def ingest_text(text: str, *, title: str = "", source_ref: str = "",
+                force: bool = False, dry_run: bool = False,
                 config=None, log=print) -> dict[str, Any]:
     """**兜底通路**：直接投喂一段文本（浏览器另存失败 / 反爬 / 只拿到正文时用）。
 
@@ -712,6 +745,9 @@ def ingest_text(text: str, *, title: str = "", source_ref: str = "",
 
     实现上复用 `ingest(data_override=...)`：`ref` 只是一个**伪路径**（用于派生扩展名
     与兜底标题，不参与读取），真正的人读来源放 `source_ref`（若给了就作为溯源值）。
+
+    `force` / `dry_run` 与其它形态**参数对齐**（`ingest_any` 的四种形态都转发它们）——
+    否则 text 形态会变成"唯一不能 dry-run 的那一种"，调用方得为它写特例。
     """
     body = str(text or "")
     if not body.strip():
@@ -722,8 +758,8 @@ def ingest_text(text: str, *, title: str = "", source_ref: str = "",
     if title and "title:" not in body[:200]:
         # 用 frontmatter 传标题（`TextConverter` 的既有取值顺序：frontmatter > H1 > 文件名）
         payload = "---\ntitle: %s\n---\n\n%s" % (title, body)
-    return ingest(ref, kind="text", config=config, log=log,
-                  data_override=payload.encode("utf-8"))
+    return ingest(ref, kind="text", force=force, dry_run=dry_run, config=config,
+                  log=log, data_override=payload.encode("utf-8"))
 
 
 def reconvert(doc_id: str, *, kind: str = "", config=None,

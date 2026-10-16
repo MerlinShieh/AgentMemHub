@@ -36,7 +36,7 @@ N.error("wiki", "落盘失败", "PermissionError: ...", path="D:/...")
 N.debug("trigger", "判定细节", "...")          # 默认不推（等级开关不含 debug）
 ```
 
-- `category` 是**分流标签**，常见值：`batch` / `wiki` / `trigger` / `memory` / `general`
+- `category` 是**分流标签**，常见值：`batch` / `wiki` / `trigger` / `memory` / `feed` / `general`
 - `**meta` 与 `meta={...}` **两种写法都支持**（关键字直接展开更适合手写）
 - **一样是旁路**：`notify()` **永不抛**；落库失败降级写 `logs/notify_fallback.jsonl`
 - 推不推由 `push_when` 决定（见 §5）——**落库不受影响**
@@ -113,6 +113,14 @@ notify:
 `push_when` 的**两类开关是 OR**（任一命中即推）：按**类别**（`memory_write` /
 `wiki_trigger`）或按**等级**（`info` / `warning` / `error`）。这样"只看警告以上"与
 "wiki 的动作我都要知道"能并存，不必枚举"等级 × 类别"的组合。
+
+> **外部投喂（`category="feed"`）刻意只用等级分支**：它既不是 `memory` 也不在
+> `wiki/batch/trigger` 里 ⇒ 只受 ③④⑤ 控制。默认配置下的效果正好是想要的：
+> **成功不打扰**（`info=false`）、**失败必达**（`warning`/`error=true`）。
+> 所以**没有 `push_when.feed` 这个键** —— "别为了一个已经合理的默认去加键"
+> 与"加了键必须有消费点"是同一条纪律的两面。
+> ⚠️ 批量投喂**只发一条汇总**（`feed/notify.py`）：一次几百份若逐条通知，
+> 标题各不相同 ⇒ 去重窗口失效 ⇒ 手机被刷爆。
 
 > ⚠️ **配置**改完**不用重启**：`_notify_cfg()` 每次直接读盘，不走 `config()` 的
 > 进程级单例（长驻的 MCP 进程否则看不到新 token）。

@@ -39,7 +39,10 @@ def test_http_tools_list():
     r = _post({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     assert r.status_code == 200
     names = {t["name"] for t in r.json()["result"]["tools"]}
-    assert names == {"memory_search", "memory_recent", "memory_stats", "memory_save", "memory_score"}
+    # 五个记忆工具必须在（HTTP 与 stdio 共用同一份 `_TOOLS`）；
+    # 不写死总数 —— feed 三个是新增的独立工具（stdio 侧有专门测试）
+    assert {"memory_search", "memory_recent", "memory_stats",
+            "memory_save", "memory_score"} <= names
 
 
 @mock.patch.object(memos_daemon, "auth_state", return_value=None)

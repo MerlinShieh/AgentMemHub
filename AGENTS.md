@@ -32,7 +32,12 @@
 - **引擎归属**：`agentmemhub/rag/`（内置记忆引擎）是**本项目自有代码**，可改、需写测试；
   `memOS/` 是**回退用的上游 vendored 引擎**，源码不得改动（所有修复落在本项目代码）。
   `memos*.py` 是回退路径适配层，非必要不动。
-- **架构不变量**：MCP 五工具与面板网关的**响应契约不得破坏**（Skill 侧强依赖）；
+- **架构不变量**：MCP 的**五个记忆工具**与面板网关的**响应契约不得破坏**（Skill 侧强依赖）；
+  `feed_add` / `feed_list` / `feed_status` 三个投喂工具是**新增独立**的（2026-10-16）：
+  它们**不依赖记忆引擎**（本地文件处理，跳过 `auth_state()` 检查），且**只给写入与查看、
+  不给删除**（`retract` / `forget --purge` 留在 CLI）。
+  ⚠️ 加新入口时记住：**stdio 的 stdout 只许放协议** —— service 层的 `log` 默认值是
+  `print`（CLI 场景），MCP 必须把过程日志收进返回文本（否则日志混进 JSON-RPC，客户端解析失败）；
   源库（`database/agentmemhub.db`）只读、索引库（`session_rag.db`）自持；
   摄取幂等（`src_id` 锚）、排除机制防回流。
 - **配置单点**：模型/分桶/召回/写入策略/蒸馏/LLM 一律经 `agentmemhub.yaml`，
@@ -68,7 +73,7 @@
   （记忆排除 UI 已下线，后端能力保留）；记忆页承载筛选/溯源/⭐加权/👍👎/蒸馏入口。
   会话与记忆通过 `session_uid`（全局递增）双向绑定跳转。
 - **测试纪律**：每次改动带测试；bug 修复先写复现测试（红→绿）；
-  `uv run pytest` 全绿是提交门槛（数量以实测为准，当前 1261 passed / 1 skipped）。
+  `uv run pytest` 全绿是提交门槛（数量以实测为准，当前 1294 passed / 1 skipped）。
   ⚠️ **别并发跑两个 `uv run`**（例如后台跑全量测试、前台又跑脚本）—— uv 会争用环境锁，
   实测导致 10 个毫不相干的测试假失败（snapshot / wiki_triggers），干净重跑即全绿。
   ⚠️ **`monkeypatch` 挡不住「活过测试的线程/子进程」**：MCP 的写入钩子会起 daemon

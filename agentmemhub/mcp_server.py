@@ -24,6 +24,13 @@ Tools:
 - memory_recent(limit)        最近记忆时间线（/api/v1/traces）
 - memory_stats()              引擎在线状态与记忆概要
 - memory_save(content, tags)  写入一条记忆（构造 bundle → /api/v1/import）
+- memory_score(trace_id, p)   写后即评：打极性分（/api/v1/feedback）
+- feed_add(input, value, …)   投喂外部素材（path / url / data / text 四种形态）
+- feed_list(status, …)        列已投喂素材（按状态 / 低质量筛）
+- feed_status(doc_id)         素材库健康快照；给 doc_id 看单条详情
+
+⚠️ **feed 三个工具不依赖记忆引擎**（本地文件处理，与索引无关），其余五个依赖。
+   新增而不改动既有五个的 schema 与返回格式 —— Skill 侧强依赖它们。
 """
 from __future__ import annotations
 
@@ -33,6 +40,7 @@ import re
 import sys
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from agentmemhub import memos_daemon
@@ -403,12 +411,205 @@ def _score(args: dict) -> str:
     return f"已评分（{tid} → {polarity}，引擎已重算 value/priority）"
 
 
+# ---------------------------------------------------------------------------
+# feed 工具（外部投喂转译层）—— **不依赖记忆引擎**
+#
+# 为什么单列一组：feed 是**纯本地文件处理**（读文件 / 抓网页 → 转译 → 落旁路根），
+# 与记忆索引毫无关系。而 `_tools_call` 对所有工具统一做"引擎在线"检查 ——
+# 若罩住 feed，"索引不可用时连投喂都做不了"，荒谬。所以这三个工具跳过那道检查。
+#
+# ⚠️ **过程日志必须收集，绝不能 print**：MCP 走 stdio JSON-RPC，stdout 就是
+# **协议流**；而 `feed/service.py` 的 `log` 默认值恰恰是 `print`（CLI 场景）。
+# 照抄 CLI 的写法会把 `[+] 原件入 raw：…` 混进协议里，客户端解析直接失败。
+# 这里一律收进返回文本 —— 既是隔离，也让模型看得到"跑到哪一步"。
+# ---------------------------------------------------------------------------
+
+#: 不依赖记忆引擎的工具（见上）
+_ENGINE_FREE_TOOLS = frozenset({"feed_add", "feed_list", "feed_status"})
+
+
+def _feed_svc():
+    from agentmemhub.feed import service as feed_service
+    return feed_service
+
+
+def _log_sink(lines: list) -> Callable[..., None]:
+    """把 feed 的过程日志收进列表（**绝不写 stdout**，见上面的警告）。"""
+    def _sink(msg, *_a, **_kw):
+        try:
+            lines.append(str(msg))
+        except Exception:                   # noqa: BLE001
+            pass
+    return _sink
+
+
+def _render_feed_add(res: dict, lines: list) -> str:
+    """投喂结果 → 可读文本（字段与 CLI / HTTP 的返回**同源**，不多不少）。"""
+    if res.get("skipped") == "duplicate":
+        out = ["已投喂过（内容未变，未重复入库）：%s"
+               % (res.get("title") or res.get("doc_id"))]
+    elif res.get("dry_run"):
+        out = ["dry-run：一个字都没写。会认领转换器：%s"
+               % (res.get("converter") or "（没有转换器能处理）")]
+    elif res.get("ok"):
+        out = ["投喂成功：%s" % (res.get("title") or res.get("doc_id"))]
+    else:
+        out = ["投喂失败：%s" % (res.get("error") or "未知原因")]
+    if res.get("ok") and not res.get("dry_run"):
+        out.append("  质量：%.2f" % float(res.get("quality") or 0.0))
+    for key, label in (("doc_id", "doc_id"), ("kind", "格式"),
+                       ("converter", "转换器"), ("raw_path", "原件"),
+                       ("kb_path", "交付物"), ("error_kind", "失败分类")):
+        v = res.get(key)
+        if v:
+            out.append("  %s：%s" % (label, v))
+    for w in (res.get("warnings") or []):
+        out.append("  ⚠️ %s" % w)
+    if lines:
+        out.append("")
+        out.append("过程：")
+        # 只留尾部若干行：工具结果该是结论，不是一整份日志
+        out.extend("  " + ln for ln in lines[-14:])
+    return "\n".join(out)
+
+
+def _feed_add(args: dict) -> str:
+    """投喂一条素材（路径 / URL / 二进制 / 正文 四种形态）。"""
+    svc = _feed_svc()
+    src = str(args.get("input") or args.get("source") or "").strip().lower()
+    value = args.get("value")
+    if not src:
+        # 容错：没写 input 就按值的形态猜 —— URL 最明确，存在的文件次之，
+        # 其余一律当正文（"我手上就是一段字"是最常见的用法）
+        s = str(value or "")
+        if "://" in s:
+            src = svc.INPUT_URL
+        elif s and Path(s).is_file():
+            src = svc.INPUT_PATH
+        else:
+            src = svc.INPUT_TEXT
+    if src not in svc.INPUTS:
+        raise _ToolError("input 必须是 %s 之一（收到 %r）"
+                         % (" / ".join(svc.INPUTS), src))
+    lines: list = []
+    res = svc.ingest_any(
+        source=src, value=value,
+        filename=str(args.get("filename") or ""),
+        encoding=str(args.get("encoding") or ""),
+        kind=str(args.get("kind") or ""),
+        force=bool(args.get("force")),
+        dry_run=bool(args.get("dry_run")),
+        log=_log_sink(lines))
+    return _render_feed_add(res, lines)
+
+
+def _feed_list(args: dict) -> str:
+    """列素材（可按状态 / 低质量筛）。"""
+    svc = _feed_svc()
+    status = str(args.get("status") or "").strip()
+    rows = svc.list_materials(status=status,
+                              low_quality=bool(args.get("low_quality")),
+                              limit=_clamp(args.get("limit"), 1, 200, 20))
+    if not rows:
+        return ("素材库里没有符合条件的记录。%s"
+                % ("（换个 status 试试，取值见 feed_status）" if status else ""))
+    out = ["共 %d 条（上限 200）" % len(rows), ""]
+    for r in rows:
+        mark = "⚠️ " if (r.get("warnings")
+                        or float(r.get("quality") or 1.0) < 0.5) else ""
+        out.append("- %s[%s] %s · %s · 质量 %.2f · %s"
+                   % (mark, r.get("status") or "?", r.get("title") or "（无标题）",
+                      r.get("kind") or "-", float(r.get("quality") or 0.0),
+                      r.get("doc_id") or ""))
+    return "\n".join(out)
+
+
+def _render_material(row: dict) -> str:
+    """单条素材详情（三段路径、转换器、质量、告警都在）。"""
+    out = ["素材 %s" % row.get("doc_id"),
+           "  标题：%s" % (row.get("title") or "（无）"),
+           "  格式：%s · 状态：%s"
+           % (row.get("kind") or "-", row.get("status") or "-"),
+           "  质量：%.2f" % float(row.get("quality") or 0.0),
+           "  来源：%s" % (row.get("source_ref") or "-"),
+           "  转换器：%s" % (row.get("converter") or "-")]
+    for key, label in (("raw_path", "原件"), ("mirror_path", "镜像"),
+                       ("kb_path", "交付物")):
+        if row.get(key):
+            out.append("  %s：%s" % (label, row[key]))
+    ts = row.get("doc_time")
+    if ts:
+        out.append("  文档时间：%s"
+                   % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(ts))))
+    for w in (row.get("warnings") or []):
+        out.append("  ⚠️ %s" % w)
+    if row.get("error"):
+        out.append("  失败：%s（%s）" % (row["error"], row.get("error_kind") or ""))
+    return "\n".join(out)
+
+
+def _feed_status(args: dict) -> str:
+    """素材库健康概览；给 `doc_id` 时看单条详情。"""
+    svc = _feed_svc()
+    doc_id = str(args.get("doc_id") or "").strip()
+    if doc_id:
+        row = svc.get_material(doc_id)
+        if not row:
+            raise _ToolError("没有这条素材：%s" % doc_id)
+        return _render_material(row)
+
+    from agentmemhub.feed.base import QUALITY_WARN
+
+    rows = svc.list_materials()
+    counts: dict = {}
+    for r in rows:
+        k = str(r.get("status") or "?")
+        counts[k] = counts.get(k, 0) + 1
+    low = [r for r in rows
+           if (r.get("warnings")
+               or float(r.get("quality") or 1.0) < QUALITY_WARN)]
+    out = ["投喂素材库：共 %d 条" % len(rows)]
+    if counts:
+        out.append("  状态：" + "、".join("%s %d" % (k, counts[k])
+                                         for k in sorted(counts)))
+    out.append("  需人工复核：%d 条（`feed_list` 带 low_quality=true 可看）" % len(low))
+    try:
+        from agentmemhub.feed import formats
+        st = formats.state()
+        allowed = st.get("allowed") or []
+        out.append("  格式白名单：来源 %s，允许 %d 种（%s）"
+                   % (st.get("source"), len(allowed),
+                      "、".join(allowed[:12]) + ("…" if len(allowed) > 12 else "")))
+    except Exception as e:                  # noqa: BLE001 —— 概览不该因一项失败而全废
+        out.append("  格式白名单：读取失败（%s）" % str(e)[:80])
+    try:
+        # ⚠️ `with_index=False`：带索引的体检要打开**真实**索引库（`session_rag.db`）。
+        # MCP 是长驻进程，这里只做"素材库自身"的健康检查；投影层是否残留请用
+        # CLI `feed lint`（它会显式去查索引库）。
+        lint = svc.lint(with_index=False)
+        out.append("  产物体检：P0=%d（%s）"
+                   % (lint.get("p0", 0),
+                      "数据一致" if not lint.get("p0") else "有数据不一致，需修"))
+        for i in (lint.get("issues") or [])[:5]:
+            out.append("    [%s] %s: %s"
+                       % (i.get("level"), i.get("kind"), i.get("detail")))
+    except Exception as e:                  # noqa: BLE001
+        out.append("  产物体检：跳过（%s）" % str(e)[:80])
+    return "\n".join(out)
+
+
 _TOOL_HANDLERS: dict[str, Callable[[dict], str]] = {
+    # ── 记忆工具（依赖引擎）────────────────────────────────────────────
     "memory_search": _search,
     "memory_recent": _recent,
     "memory_stats": _stats,
     "memory_save": _save,
     "memory_score": _score,
+    # ── feed 工具（**不依赖引擎**，见上面的说明）──────────────────────
+    # 新增而不改动既有五个：Skill 侧强依赖它们的 schema 与返回格式
+    "feed_add": _feed_add,
+    "feed_list": _feed_list,
+    "feed_status": _feed_status,
 }
 
 #: `note` 参数说明：Agent 补充的**意图**（为什么做这次操作）。
@@ -512,6 +713,88 @@ _TOOLS: list[dict] = [
                 "note": {"type": "string", "description": _NOTE_DESC},
             },
             "required": ["trace_id", "polarity"],
+        },
+    },
+    # ── feed（外部投喂转译层）：新增独立工具，**不动上面五个的契约** ──────
+    {
+        "name": "feed_add",
+        "description": (
+            "把外部素材投喂进知识库（外部投喂转译层）：统一转译成 markdown，发布到"
+            "与自有 wiki **并列**的知识库页面层（origin=external），"
+            "**不进**记忆 / 蒸馏 / wiki 编译。四种输入形态：path=本地文件路径；"
+            "url=网页链接（含公众号）；data=**二进制数据**（调用方已 open/read 出来的"
+            "字节，须配 filename，encoding 传 base64）；text=直接给正文。"
+            "支持 md/txt · 网页 · PDF · DOCX · PPTX · XLSX · XMIND · CSV；"
+            "格式不在白名单时会返回当前允许清单。同内容重复投喂返回「已投喂过」，不重复入库。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "input": {
+                    "type": "string",
+                    "enum": ["path", "url", "data", "text"],
+                    "description": ("输入形态。不传则按 value 猜：含 :// 当 url、"
+                                    "是存在的文件当 path、其余当 text"),
+                },
+                "value": {
+                    "type": "string",
+                    "description": "内容本身：路径 / URL / base64 字节 / 正文",
+                },
+                "filename": {
+                    "type": "string",
+                    "description": ("data 形态**必填**（扩展名是判格式与认领转换器的依据）；"
+                                    "text 形态下兼作标题"),
+                },
+                "encoding": {
+                    "type": "string",
+                    "enum": ["base64", "utf-8"],
+                    "description": "data 形态的字节编码方式（默认 utf-8）",
+                },
+                "kind": {"type": "string",
+                         "description": "（可选）强制指定类型，一般不用传"},
+                "force": {"type": "boolean",
+                          "description": "（可选）同内容已投喂过也重跑"},
+                "dry_run": {"type": "boolean",
+                            "description": "（可选）只查重与认领转换器，一个字都不写"},
+                "note": {"type": "string", "description": _NOTE_DESC},
+            },
+            "required": ["value"],
+        },
+    },
+    {
+        "name": "feed_list",
+        "description": ("列出已投喂的素材（可按状态或低质量筛选）。"
+                        "用来回答「我投过什么、哪些需要复核」以及确认一次投喂是否落库。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "description": ("（可选）received / converted / published / "
+                                    "failed / retracted"),
+                },
+                "low_quality": {"type": "boolean",
+                                "description": "（可选）只看质量低或有告警的"},
+                "limit": {"type": "integer",
+                          "description": "返回条数（默认 20，最大 200）"},
+                "note": {"type": "string", "description": _NOTE_DESC},
+            },
+        },
+    },
+    {
+        "name": "feed_status",
+        "description": (
+            "投喂素材库的健康快照：各状态计数、需人工复核的条数、当前格式白名单、"
+            "产物体检（P0/P1）。给 doc_id 时改为看**单条**素材的详情"
+            "（三段路径 / 转换器 / 质量 / 告警 / 失败原因）。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "doc_id": {"type": "string",
+                           "description": "（可选）看这条素材的详情"},
+                "note": {"type": "string", "description": _NOTE_DESC},
+            },
         },
     },
 ]
@@ -675,8 +958,10 @@ class MCPHandler:
             raise LookupError(f"unknown tool: {name}")
 
         def _run(a: dict) -> str:
-            # 引擎未运行时所有工具统一返回明确指引（网关不代管引擎生命周期）
-            if memos_daemon.auth_state() is None:
+            # 引擎未运行时**记忆工具**统一返回明确指引（网关不代管引擎生命周期）。
+            # feed 工具**跳过这道检查**：它们是本地文件处理，与索引是否就绪无关 ——
+            # "索引没建好就不能投喂"没有任何道理（投喂产物落在旁路根，本来也不进索引）。
+            if name not in _ENGINE_FREE_TOOLS and memos_daemon.auth_state() is None:
                 raise _ToolError(_engine_hint())
             return fn(a)
 

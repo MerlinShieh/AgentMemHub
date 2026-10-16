@@ -225,7 +225,11 @@ GET  /api/admin/job  →  轮询进度
 
 ---
 
-## 四、MCP 工具（Agent 侧，5 个）
+## 四、MCP 工具（Agent 侧，8 个）
+
+**分两组**：五个**记忆工具**（依赖记忆引擎）+ 三个 **feed 工具**（外部投喂，
+**不依赖引擎**）。feed 是后加的**独立**工具 —— 原有五个的名称、参数与返回格式
+一字未改（Skill 侧强依赖）。
 
 | 工具 | 参数 | 说明 |
 |---|---|---|
@@ -234,14 +238,27 @@ GET  /api/admin/job  →  轮询进度
 | `memory_recent` | `limit`、`note` | 最近记忆时间线 |
 | `memory_stats` | `note` | 引擎在线状态与记忆总量 |
 | `memory_score` | `trace_id`、`polarity`、`note` | 给记忆打极性分（**仅用户明确说重要时才用**）|
+| `feed_add` | `input`、`value`（必填）、`filename`、`encoding`、`kind`、`force`、`dry_run`、`note` | 投喂外部素材（`path` / `url` / `data` / `text` 四形态）：转译成统一 md，发布到与自有 wiki **并列**的知识库页面层 |
+| `feed_list` | `status`、`low_quality`、`limit`、`note` | 列已投喂素材 —— 回答「我投过什么、哪些要复核」 |
+| `feed_status` | `doc_id`、`note` | 素材库健康快照（状态计数 / 格式白名单 / 产物体检）；给 `doc_id` 看**单条**详情 |
 
 **契约要点（Skill 侧强依赖，不得破坏）**：
 
-- 五个工具的**名称与参数名**是 Skill 侧硬依赖
+- 五个**记忆工具**的**名称与参数名**是 Skill 侧硬依赖；feed 三个是**新增**，不许改前者
 - `note` 是**可选**参数，用于记录调用意图（为什么），写进 `logs/mcp.log`
-- **调用审计由服务端在唯一分发点自动写**，不依赖 Agent 手动记
+- **调用审计由服务端在唯一分发点自动写**，不依赖 Agent 手动记（feed 工具同样被覆盖）
 - `importance` 档位：`high` 0.8 / `normal` 0.6 / `low` 0.4（不传即 `normal`）
 - **写后不立即评分** —— 价值分由真实使用演化
+
+**feed 三个工具的三条约定**：
+
+- **不依赖记忆引擎**：索引没建好、引擎没起来，投喂照样能用（feed 是本地文件处理，
+  与索引无关）；反之记忆工具此时会返回"引擎未运行"的指引；
+- **只给"写入 + 查看"，不给删除**：`retract` / `forget` 仍在 CLI —— 后者的 `--purge`
+  会删**不可再生**的原件。低门槛写入、高门槛删除；
+- **过程日志进返回文本，不写 stdout**：MCP 的 stdout 是 JSON-RPC 协议流，
+  而 `feed/service.py` 的 `log` 默认值正是 `print`（CLI 场景）—— 直连会把
+  `[+] 原件入 raw：…` 混进协议里，客户端解析直接失败。
 
 **`memory_search` 的返回形态**：
 

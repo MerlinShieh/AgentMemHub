@@ -96,7 +96,10 @@ def test_tools_list_contract():
     h, _ = _handler()
     r = _call(h, _req("tools/list"))
     tools = {t["name"]: t for t in r["result"]["tools"]}
-    assert set(tools) == {"memory_search", "memory_recent", "memory_stats", "memory_save", "memory_score"}
+    # **原有五个必须在**（Skill 侧强依赖它们的 schema）—— 但**总数不写死**：
+    # feed 三个是后来加的独立工具（见 `test_mcp_feed.py`），列表允许增长。
+    assert {"memory_search", "memory_recent", "memory_stats",
+            "memory_save", "memory_score"} <= set(tools)
     # memory_search 的 query 必填
     assert tools["memory_search"]["inputSchema"]["required"] == ["query"]
     assert "topK" in tools["memory_search"]["inputSchema"]["properties"]

@@ -425,7 +425,40 @@ agentmemhub wiki --action index-pages    # 投影**所有页面根**（L2 自有
 **flag 可以夹在中间**（`feed add --force X`）—— 这一条是对 feed 特意放宽的
 （argparse 默认会把 X 判成"unrecognized arguments"，见 `cli.main()` 里的说明）。
 
-`MCP` 工具（`feed_add` / `feed_list`）与面板入口**归 M5**。
+### MCP（Agent 侧，三个工具）
+
+有了它，Agent 在会话里就能直接投喂 —— 不必让用户去切终端敲命令。
+
+| 工具 | 用途 | 落到服务层 |
+|---|---|---|
+| `feed_add` | 投喂（`path` / `url` / `data` / `text` 四种形态） | `ingest_any()` |
+| `feed_list` | 列素材（按状态 / 低质量筛） | `list_materials()` |
+| `feed_status` | 素材库健康快照；给 `doc_id` 看单条详情 | `list_materials()` + `get_material()` + `lint(with_index=False)` |
+
+四条实现纪律（都在 `mcp_server.py` 里守着，**各有测试**）：
+
+1. **不依赖记忆引擎** —— 这三个工具跳过 `auth_state()` 检查。feed 是本地文件处理，
+   "索引没建好就不能投喂"没有任何道理；
+2. **过程日志绝不写 stdout** —— MCP 的 stdout 是 JSON-RPC **协议流**，而
+   `feed/service.py` 的 `log` 默认值正是 `print`（给 CLI 用的）。照抄 CLI 写法会把
+   `[+] 原件入 raw：…` 混进协议里、客户端解析直接失败。日志被**收进返回文本**，
+   模型由此能看到"跑到哪一步"。有一条测试专门把 `sys.stdout` 换成捕获流来守它；
+3. **`lint` 用 `with_index=False`** —— MCP 是长驻进程，不该在这里打开**真实**索引库；
+   投影层是否残留请用 CLI `feed lint`（它会显式去查索引库）；
+4. **只给写入与查看，不给删除** —— `retract` / `forget` 留在 CLI（后者的 `--purge`
+   会删**不可再生**的原件）。低门槛写入、高门槛删除。
+
+**新增独立、不动五工具契约**：原有五个记忆工具的名称 / 参数 / 返回格式一字未改
+（Skill 侧强依赖，见 `docs/API.md` §四）。
+
+**通知**：投喂结果按 `category="feed"` 落通知库，并按既有的 `push_when` 五开关
+决定是否推微信（**不新增开关**）。默认配置下 `info=false` ⇒ 成功不打扰、失败必达
+（`warning`；错误码 `crash` / `registry` 用 `error`）。
+⚠️ **批量只推一条汇总** —— 一次几百份若逐条通知，标题各不相同、去重窗口失效，
+用户手机会被刷爆（`test_feed_notify.py` 里有一条专门守它）。
+
+**面板入口不做**（遵守"面板 UI 统一重做放最后"的既有约定），但后端 11 个 HTTP
+接口已就绪（见 `docs/API.md` §3.7），届时只差前端。
 
 ---
 
@@ -683,3 +716,15 @@ Word 脏标题前缀剥离 · **缝合英文续行补空格 / 中文不补** · 
     `fetch.renderer` / `depth_default`）长期存在而审计报"0 僵尸键"，原因正是
     example 里**根本没有 `feed` 段**。已删键并把真实的 5 个键补进 example ——
     **能力没做出来之前，不要先在这里放开关**（配了不生效比没有这个键更坏）。
+26. **新入口必须薄封装服务层，且不污染协议流**。CLI / HTTP / MCP 三处都调
+    `feed/service.py` 的**同一批函数**（`ingest_any` / `list_materials` /
+    `get_material` / `lint`…）—— 各写一份逻辑必然漂移。两条推论：
+    · **stdio 的 stdout 只许放协议**：MCP 那层把 feed 的过程日志**收进返回文本**
+      （`log` 默认 `print` 是给 CLI 场景的）；
+    · **新入口不许改原有契约**：feed 三个工具是新增，五个记忆工具的 schema 与
+      返回格式一字未改（Skill 侧强依赖）。
+27. **通知是旁路，且批量不许逐条推**。投喂结果按 `category="feed"` 复用既有
+    `push_when` 五开关（**不新增键**）：成功 `info`（默认不推）、低质量与失败
+    `warning`、代码 bug（`crash` / `registry`）`error`。**批量只在结束时推一条汇总** ——
+    逐条推时标题各不相同 ⇒ 去重窗口失效 ⇒ 手机被刷爆。
+    通知层的任何异常都必须吞掉：推送通道挂了不能让投喂失败（`feed/notify.py`）。

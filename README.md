@@ -126,7 +126,7 @@ AgentMemHub/
 │   ├── rag_bridge.py             # ★ 引擎接缝：MCP/面板/cli 的统一调用入口
 │   ├── health.py                 # 记忆库一致性巡检（面板健康卡片/CLI/测试共用判据）
 │   ├── failures.py               # ★ 长任务失败清单（分类/汇总/单独重跑，供 wiki 两级使用）
-│   ├── mcp_server.py             # MCP 记忆网关（stdio / Streamable HTTP；含调用审计）
+│   ├── mcp_server.py             # MCP 记忆网关（stdio / Streamable HTTP；含调用审计与 feed 投喂工具）
 │   ├── scoring.py                # LLM 三轴评分（策略层，与引擎的存值层分工）
 │   ├── adapters/                 # 8 个 Agent 数据源适配器（src_id/turn_key/注入识别）
 │   ├── web/                      # FastAPI 记忆面板 + 前端 + /api/memos 网关
@@ -980,7 +980,7 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 - [x] 统一配置 `agentmemhub.yaml`（模型注册/分桶/召回/写入策略/后端开关单文件）
 - [x] 记忆蒸馏（离线，四入口：Python/CLI/start.bat 控制台/面板）：S0 窗口化切片 → S1 段级蒸馏 → S2 同会话合并 → S3 跨会话去重 → S4 投影为可召回 unit；幂等增量、脱敏、失败可重跑
 - [x] 权重体系：来源初始分 → 反馈演化（状态式可撤销）→ 手动加权（⭐ 两态锁定不衰减，有界 boost）
-- [x] **MCP 调用审计**：每次记忆调用（save / search / recent / stats / score）由服务端在**唯一分发点**自动留痕到 `logs/mcp.log`（每次两条 `call`/`result` + `call_id`，含参数摘要、耗时、成败），**不依赖 Agent 记得写**；Agent 可用可选参数 `note` 补充意图（为什么）；查询走 `scripts/mcp_log.py`
+- [x] **MCP 调用审计**：每次调用（记忆：save / search / recent / stats / score；投喂：feed_add / feed_list / feed_status）由服务端在**唯一分发点**自动留痕到 `logs/mcp.log`（每次两条 `call`/`result` + `call_id`，含参数摘要、耗时、成败），**不依赖 Agent 记得写**；Agent 可用可选参数 `note` 补充意图（为什么）；查询走 `scripts/mcp_log.py`
 - [x] 带标签的版本锚点（`v0-pre-rag` 回滚点 / `v1-rag-backend-only` / v2.0）
 
 ### v2.1（2026-09-18）LLM Wiki 两级编译 + 调用兜底
