@@ -7,7 +7,7 @@ AgentMemHub 从所有 Agent Harness（ZCode / OpenCode / Hermes / WorkBuddy / Qw
 → 存入本地 SQLite（可搜索，可导出 JSONL / Markdown）
 → **记忆蒸馏**（LLM 离线提炼为结构化记忆）
 → **内置记忆引擎 `agentmemhub.rag`**（向量化 + 混合召回 + 价值评分，进程内直调）
-→ 面板（双标签页：统一会话 / 记忆报表）与 MCP 网关（供任何 Agent 实时读写记忆）。
+→ 面板（三标签页：统一会话 / 记忆报表 / **wiki知识库**）与 MCP 网关（供任何 Agent 实时读写记忆）。
 
 ```
 各 Agent 原始数据                       AgentMemHub
@@ -82,10 +82,11 @@ AgentMemHub/
 │   │   ├── eval.py             #   评测（71 题集 + MRR/precision）
 │   │   └── source.py / cli.py  #   素材读取与引擎 CLI
 │   └── web/                    # 面板（FastAPI + 原生 JS 单页）
-│       ├── app.py              #   路由：会话/记忆报表/加权/反馈/管理任务/日志
+│       ├── app.py              #   路由：会话/记忆报表/知识库/加权/反馈/管理任务/日志
 │       ├── aggregates.py       #   统计聚合（SQL 下推 + TTL 缓存）
 │       ├── tasks.py            #   后台任务（单并发 + 进度 + 日志落盘）
-│       └── static/index.html   #   双标签页面板（vendor 离线化）
+│       ├── wiki_pages.py       #   知识库页面清单/读取（**以磁盘为准**；路径限根内）
+│       └── static/index.html   #   三标签页面板（vendor 离线化）
 ├── models/                     # 嵌入模型（自带 bge-small；更大模型按需下载）
 ├── scripts/                    # fetch_model / sync_llm_from_zcode / sync_llm_from_dsh /
 │                               #   export_memories / distill_sandbox / web_verify /
@@ -180,8 +181,10 @@ fail-open（失败不登记哈希，重跑自动补）；`PROMPT_VER` 升版自�
 
 ### 7. Web 面板设计要点
 
-- **双标签页**：统一会话（浏览/筛选/抽屉/改标题/删除）+ 记忆报表（筛选/展开溯源/
-  ⭐加权/👍👎/表头排序/语义检索）；两页共用全局任务进度条
+- **三标签页**：统一会话（浏览/筛选/抽屉/改标题/删除）+ 记忆报表（筛选/展开溯源/
+  ⭐加权/👍👎/表头排序/语义检索）+ **wiki知识库**（L2 蒸馏产物 + 外部投喂页面：
+  左域栏 / 右列表 / 右栏内渲染正文；**数据以磁盘为准**，不查投影表）；
+  三页共用全局任务进度条
 - **会话↔记忆绑定**：`session_uid` 为绑定键；会话行「🧠」→ 记忆页按会话筛选；
   记忆行「来源会话」→ 回会话抽屉并定位轮次（`turn_key`）
 - **性能模型**：引导数据只含会话元数据；事件按需分页；记忆报表服务端分页 +

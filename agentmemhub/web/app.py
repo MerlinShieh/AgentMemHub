@@ -1317,6 +1317,46 @@ def create_app(db_path: Path | None = None):
         logs.record(f"提交任务：{name}（id={job['id']}）")
         return JSONResponse({"job": job})
 
+    # ---- 知识库浏览（面板「wiki知识库」页）--------------------------------
+    # 与上面这组"运维动作"（补跑/丢弃/触发器/批次）不同：这里是**读**，
+    # 数据来自磁盘上的页面产物，不碰索引库、不触发任何重编。
+    @app.get("/api/wiki/pages", summary="知识库页面清单（L2 蒸馏 + 外部投喂，按域分组）")
+    def api_wiki_pages(
+        origin: str = Query(default="",
+                            description="native=蒸馏L2 | external=外部投喂 | 留空=全部"),
+        domain: str = Query(default="", description="域（目录名）；留空=全部"),
+        q: str = Query(default="", description="标题关键字"),
+        page: int = Query(default=1, ge=1, description="页码，从 1 起"),
+        page_size: int = Query(default=100, ge=1, le=500, description="每页条数"),
+    ):
+        """知识库页面清单 —— **以磁盘为准**（不查投影表）。
+
+        为什么不用索引库：投影（`wiki --action index-pages`）是**运维动作、会滞后** ——
+        2026-10-18 实测：磁盘 424 页 / 投影 399 行。面板要看的是**知识库本身**，
+        不该随"有没有跑过投影"起落；"能不能被召回"是另一件事。
+        """
+        from agentmemhub.web import wiki_pages
+        try:
+            return JSONResponse(wiki_pages.list_pages(
+                origin=origin, domain=domain, q=q,
+                page=page, page_size=page_size))
+        except wiki_pages.WikiPageError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.get("/api/wiki/page", summary="读一页知识库正文（markdown → HTML）")
+    def api_wiki_page(path: str = Query(...,
+                                        description="页面绝对路径（必须在知识库根内）")):
+        """读单页：返回 frontmatter + 原始 markdown + 渲染后的 HTML 片段。
+
+        ⚠️ `path` **只允许在 `page_roots()` 之内** —— 面板是本地服务，
+        但"能读任意路径"这种口子不该存在（`?path=C:\\Windows\\win.ini` 直接 400）。
+        """
+        from agentmemhub.web import wiki_pages
+        try:
+            return JSONResponse(wiki_pages.read_page(path))
+        except wiki_pages.WikiPageError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
     @app.get("/api/wiki/failures", summary="查询 LLM Wiki 失败清单（按原因分类）")
     def api_wiki_failures(out: str = Query(..., description="wiki 产出目录（失败清单在其下）"),
                           stage: str = Query(default="", description="l1 / l2；留空=全部阶段")):

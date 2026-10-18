@@ -169,7 +169,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         </button>
       </div>
     </div>
-    <!-- Tabs：统一会话 / 记忆报表（两套筛选栏随标签页切换） -->
+    <!-- Tabs：统一会话 / 记忆报表 / wiki知识库（筛选栏随标签页切换） -->
     <div class="flex items-center gap-1 border-t border-border px-5 pt-1.5">
       <button id="tabConvs" data-tab="convs"
               class="tab-btn -mb-px inline-flex items-center gap-1.5 border-b-2 border-transparent px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground">
@@ -180,6 +180,12 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
               class="tab-btn -mb-px inline-flex items-center gap-1.5 border-b-2 border-transparent px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground">
         <i data-lucide="brain" class="h-3.5 w-3.5"></i>记忆报表
         <span id="tabMemCount" class="tnum rounded bg-muted px-1 text-[10px] font-semibold text-muted-foreground"></span>
+      </button>
+      <!-- wiki知识库：与"统一会话"零耦合（蒸馏产物 + 外部投喂都是**页面**，不是会话） -->
+      <button id="tabWiki" data-tab="wiki"
+              class="tab-btn -mb-px inline-flex items-center gap-1.5 border-b-2 border-transparent px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground">
+        <i data-lucide="library" class="h-3.5 w-3.5"></i>wiki知识库
+        <span id="tabWikiCount" class="tnum rounded bg-muted px-1 text-[10px] font-semibold text-muted-foreground"></span>
       </button>
     </div>
     <!-- Filter bar：统一会话 -->
@@ -551,6 +557,50 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       </div>
     </section>
   </div><!-- /viewMemories -->
+
+  <!-- ============ 视图：wiki知识库（Tab 3） ============ -->
+  <!-- 与「统一会话」零耦合：展示的是**页面产物**（L2 蒸馏 + 外部投喂），不是会话。
+       数据以磁盘为准（不查投影表），见 app.py /api/wiki/pages 的说明。 -->
+  <div id="viewWiki" class="hidden">
+    <section class="px-5 pt-4">
+      <div class="rounded-xl border border-border bg-card p-3 shadow-sm">
+        <div class="flex flex-wrap items-center gap-2">
+          <i data-lucide="library" class="h-4 w-4 text-primary"></i>
+          <span class="text-xs font-medium text-foreground">知识库</span>
+          <span id="wikiStat" class="tnum text-[11px] text-muted-foreground">加载中…</span>
+          <span class="ml-auto"></span>
+          <!-- 来源：全部 / 蒸馏 L2 / 外部投喂 -->
+          <div id="wikiOriginSeg" class="flex overflow-hidden rounded-md border border-border text-[11px]">
+            <button data-origin="" class="wiki-origin bg-primary px-2 py-1 font-medium text-primary-foreground">全部</button>
+            <button data-origin="native" class="wiki-origin border-l border-border px-2 py-1 text-muted-foreground hover:bg-muted">蒸馏 L2</button>
+            <button data-origin="external" class="wiki-origin border-l border-border px-2 py-1 text-muted-foreground hover:bg-muted">外部投喂</button>
+          </div>
+          <input id="wikiSearch" type="search" placeholder="搜索标题…"
+                 class="w-44 rounded-md border border-input bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring">
+        </div>
+      </div>
+    </section>
+    <section class="px-5 py-3">
+      <div class="flex gap-3" style="height:calc(100vh - 230px);min-height:400px">
+        <!-- 左：域列表（21 个域，含页数） -->
+        <aside id="wikiDomains" class="w-52 shrink-0 overflow-y-auto scroll-thin rounded-xl border border-border bg-card p-2 text-xs"></aside>
+        <!-- 右：页面列表 ⇄ 页面正文 -->
+        <div class="min-w-0 flex-1 overflow-hidden rounded-xl border border-border bg-card">
+          <div id="wikiListPane" class="h-full overflow-y-auto scroll-thin"></div>
+          <div id="wikiPagePane" class="hidden h-full flex-col">
+            <div class="flex items-center gap-2 border-b border-border px-3 py-2">
+              <button id="wikiBack" class="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-foreground hover:bg-muted">
+                <i data-lucide="arrow-left" class="h-3 w-3"></i>返回列表
+              </button>
+              <span id="wikiPageTitle" class="truncate text-xs font-medium text-foreground"></span>
+              <span id="wikiPageMeta" class="ml-auto shrink-0 text-[10px] text-muted-foreground"></span>
+            </div>
+            <div id="wikiPageBody" class="flex-1 overflow-y-auto scroll-thin px-5 py-4"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div><!-- /viewWiki -->
 </div>
 
 <!-- Detail Drawer -->
@@ -658,6 +708,30 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   .mem-type-lesson    { background: color-mix(in srgb, #F59E0B 16%, transparent); color:#F59E0B; }
   .mem-type-manual    { background: color-mix(in srgb, #64748B 16%, transparent); color:#64748B; }
   .mem-row-expand > td { background: color-mix(in srgb, var(--as-primary) 5%, var(--as-card)); }
+  /* ---- wiki知识库正文（agentmemhub/mdmini.py 的输出）---- */
+  .md-body { font-size: 13px; line-height: 1.75; color: var(--as-foreground); word-break: break-word; }
+  .md-body h1,.md-body h2,.md-body h3,.md-body h4 { font-weight: 600; line-height: 1.35; margin: 1.1em 0 .45em; color: var(--as-foreground); }
+  .md-body h1 { font-size: 1.32em; } .md-body h2 { font-size: 1.16em; }
+  .md-body h3 { font-size: 1.05em; } .md-body h4 { font-size: 1em; }
+  .md-body > :first-child { margin-top: 0; }
+  .md-body p { margin: .55em 0; }
+  .md-body ul,.md-body ol { margin: .5em 0 .5em 1.4em; }
+  .md-body ul { list-style: disc; } .md-body ol { list-style: decimal; }
+  .md-body li { margin: .18em 0; }
+  .md-body code { font-family: var(--as-font-mono); font-size: .92em; background: color-mix(in srgb, var(--as-foreground) 8%, transparent); padding: 1px 4px; border-radius: 4px; }
+  .md-body pre.md-pre { background: color-mix(in srgb, var(--as-foreground) 6%, var(--as-card)); border: 1px solid var(--as-border); border-radius: 8px; padding: .7em .85em; overflow-x: auto; margin: .6em 0; }
+  .md-body pre.md-pre code { background: none; padding: 0; font-size: 11.5px; line-height: 1.55; }
+  .md-body blockquote { border-left: 3px solid var(--as-border); padding-left: .85em; margin: .6em 0; color: var(--as-muted-foreground); }
+  .md-body table.md-table { border-collapse: collapse; margin: .7em 0; font-size: .95em; }
+  .md-body table.md-table th,.md-body table.md-table td { border: 1px solid var(--as-border); padding: .3em .6em; vertical-align: top; }
+  .md-body table.md-table th { background: color-mix(in srgb, var(--as-foreground) 5%, var(--as-card)); font-weight: 600; }
+  .md-body a { color: var(--as-primary); text-decoration: underline; }
+  .md-body hr { border: 0; border-top: 1px solid var(--as-border); margin: 1.1em 0; }
+  .md-body .md-cite { font-size: .76em; font-weight: 600; background: var(--as-primary); color: #fff; border-radius: 3px; padding: 0 .28em; vertical-align: super; opacity: .85; }
+  /* 知识库域列表项 */
+  .wiki-dom { display: flex; align-items: center; gap: 6px; width: 100%; border-radius: 6px; padding: 5px 7px; text-align: left; }
+  .wiki-dom:hover { background: color-mix(in srgb, var(--as-primary) 7%, transparent); }
+  .wiki-dom.on { background: color-mix(in srgb, var(--as-primary) 12%, transparent); color: var(--as-primary); font-weight: 600; }
 </style>
 
 <!-- ============ LOGIC（v2: 数据全部来自本机 API，事件按需加载）============ -->
@@ -759,7 +833,8 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     bindTrendDrag();
     updateSummary();
     initMemTab();                       // 记忆报表页：索引状态 + 筛选 chips + 事件 + 首次加载
-    switchTab(location.hash==='#memories' ? 'memories' : 'convs');
+    switchTab(location.hash==='#wiki' ? 'wiki'
+              : (location.hash==='#memories' ? 'memories' : 'convs'));
     reicons();
     return true;
   }
@@ -965,27 +1040,210 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   }
 
   // ==================================================================
+  // wiki知识库页（Tab 3）：L2 蒸馏知识库 + 外部投喂
+  //
+  // 数据来源：`/api/wiki/pages` + `/api/wiki/page`（**以磁盘为准**，不查投影表）。
+  // 为什么不用索引库：投影（index-pages）是运维动作、会滞后（实测磁盘 424 页 /
+  // 投影 399 行），面板要看的是**知识库本身**；"能否被召回"是另一件事。
+  // ==================================================================
+  const WIKI = { origin:'', domain:'', q:'', page:1, pageSize:120,
+                 data:null, loaded:false, bound:false };
+
+  const wikiEsc = s => String(s==null?'':s).replace(/[&<>"']/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  function wikiQs(){
+    const qs = new URLSearchParams();
+    if(WIKI.origin) qs.set('origin', WIKI.origin);
+    if(WIKI.domain) qs.set('domain', WIKI.domain);
+    if(WIKI.q) qs.set('q', WIKI.q);
+    qs.set('page', String(WIKI.page));
+    qs.set('page_size', String(WIKI.pageSize));
+    return qs.toString();
+  }
+
+  async function loadWiki(){
+    $('#wikiStat').textContent = '加载中…';
+    try{
+      const r = await fetch('/api/wiki/pages?' + wikiQs());
+      const d = await r.json();
+      if(!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+      WIKI.data = d; WIKI.loaded = true;
+      renderWikiDomains(); renderWikiList(); showWikiPage(false);
+      const oc = d.originCounts || {};
+      $('#wikiStat').textContent = `${d.total} 页`
+        + (d.pageCount > 1 ? `（第 ${d.page}/${d.pageCount} 页）` : '')
+        + ` · 蒸馏 ${oc.native||0} · 投喂 ${oc.external||0}`
+        + ` · ${(d.domains||[]).filter(x=>x.name).length} 个域`;
+      $('#tabWikiCount').textContent = (oc.native||0) + (oc.external||0);
+      reicons();
+    }catch(e){
+      $('#wikiStat').textContent = '加载失败：' + e.message;
+      $('#wikiListPane').innerHTML =
+        `<div class="p-6 text-xs text-error">${wikiEsc(e.message)}</div>`;
+    }
+  }
+
+  function renderWikiDomains(){
+    const d = WIKI.data; if(!d) return;
+    const oc = d.originCounts || {};
+    const all = (oc.native||0) + (oc.external||0);
+    const total = WIKI.origin==='native' ? (oc.native||0)
+                : WIKI.origin==='external' ? (oc.external||0) : all;
+    const parts = [];
+    parts.push(`<button class="wiki-dom ${WIKI.domain===''?'on':''}" data-domain="">
+        <i data-lucide="layers" class="h-3 w-3 shrink-0 text-primary"></i>
+        <span class="min-w-0 flex-1 truncate">全部</span>
+        <span class="tnum text-[10px] text-muted-foreground">${total}</span></button>`);
+    // 空域名（根目录下的散页，如 out_l2/index.md）只在"全部"里出现，不单独成组
+    (d.domains||[]).filter(x=>x.name).forEach(x=>{
+      parts.push(`<button class="wiki-dom ${WIKI.domain===x.name?'on':''}" data-domain="${wikiEsc(x.name)}">
+          <i data-lucide="folder" class="h-3 w-3 shrink-0 ${x.origin==='external'?'text-info':'text-muted-foreground'}"></i>
+          <span class="min-w-0 flex-1 truncate" title="${wikiEsc(x.name)}">${wikiEsc(x.name)}</span>
+          <span class="tnum text-[10px] text-muted-foreground">${x.count}</span></button>`);
+    });
+    $('#wikiDomains').innerHTML = parts.join('');
+    reicons();
+  }
+
+  function renderWikiList(){
+    const d = WIKI.data; if(!d) return;
+    const pane = $('#wikiListPane');
+    const items = d.items || [];
+    if(!items.length){
+      pane.innerHTML = '<div class="p-8 text-center text-xs text-muted-foreground">没有符合条件的页面</div>';
+      return;
+    }
+    const chipOrigin = o => o==='external'
+      ? '<span class="chip bg-info-soft text-info">投喂</span>'
+      : '<span class="chip bg-muted text-muted-foreground">蒸馏</span>';
+    const rows = items.map(it=>`
+      <tr class="wiki-row cursor-pointer border-b border-border/60 hover:bg-muted/50" data-path="${wikiEsc(it.path)}">
+        <td class="max-w-0 px-3 py-1.5">
+          <div class="truncate font-medium text-foreground" title="${wikiEsc(it.title)}">${wikiEsc(it.title)}</div>
+          <div class="truncate text-[10px] text-muted-foreground">${wikiEsc(it.rel)}</div>
+        </td>
+        <td class="whitespace-nowrap px-3 py-1.5 text-[11px] text-muted-foreground">${wikiEsc(it.domain||'—')}</td>
+        <td class="whitespace-nowrap px-3 py-1.5 text-[11px] text-muted-foreground">${wikiEsc(it.type||'—')}</td>
+        <td class="whitespace-nowrap px-3 py-1.5">${chipOrigin(it.origin)}</td>
+        <td class="whitespace-nowrap px-3 py-1.5 text-[10px] text-muted-foreground">${wikiEsc((it.compiled_at||'').slice(0,16))}</td>
+      </tr>`).join('');
+    const pager = d.pageCount > 1 ? `
+      <div class="flex items-center gap-2 border-t border-border px-3 py-2 text-[11px] text-muted-foreground">
+        <button id="wikiPrev" class="rounded border border-border px-2 py-0.5 hover:bg-muted ${d.page<=1?'opacity-40':''}">上一页</button>
+        <span class="tnum">${d.page} / ${d.pageCount}</span>
+        <button id="wikiNext" class="rounded border border-border px-2 py-0.5 hover:bg-muted ${d.page>=d.pageCount?'opacity-40':''}">下一页</button>
+      </div>` : '';
+    pane.innerHTML = `<table class="w-full text-xs">
+        <thead class="sticky top-0 z-10 bg-card">
+          <tr class="border-b border-border text-left text-[10px] uppercase tracking-wide text-muted-foreground">
+            <th class="px-3 py-2 font-medium">页面</th>
+            <th class="px-3 py-2 font-medium">域</th>
+            <th class="px-3 py-2 font-medium">类型</th>
+            <th class="px-3 py-2 font-medium">来源</th>
+            <th class="px-3 py-2 font-medium">编译时间</th>
+          </tr>
+        </thead><tbody>${rows}</tbody></table>${pager}`;
+  }
+
+  function showWikiPage(on){
+    $('#wikiListPane').classList.toggle('hidden', on);
+    $('#wikiPagePane').classList.toggle('hidden', !on);
+    $('#wikiPagePane').classList.toggle('flex', on);
+  }
+
+  async function openWikiPage(path){
+    showWikiPage(true);
+    $('#wikiPageTitle').textContent = '加载中…';
+    $('#wikiPageMeta').textContent = '';
+    $('#wikiPageBody').innerHTML = '<div class="text-xs text-muted-foreground">加载中…</div>';
+    try{
+      const r = await fetch('/api/wiki/page?' + new URLSearchParams({path}).toString());
+      const d = await r.json();
+      if(!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+      const fm = d.frontmatter || {};
+      $('#wikiPageTitle').textContent = d.title;
+      $('#wikiPageTitle').title = d.rel || '';
+      $('#wikiPageMeta').textContent = [
+        d.origin==='external' ? '外部投喂' : '蒸馏 L2',
+        d.domain || '', fm.type || '',
+        fm.sources ? ('源自 ' + fm.sources) : '',
+        `${d.chars} 字`
+      ].filter(Boolean).join(' · ');
+      $('#wikiPageBody').innerHTML = d.html
+        || '<div class="text-xs text-muted-foreground">（空页面）</div>';
+      reicons();
+    }catch(e){
+      $('#wikiPageTitle').textContent = '读取失败';
+      $('#wikiPageBody').innerHTML = `<div class="text-xs text-error">${wikiEsc(e.message)}</div>`;
+    }
+  }
+
+  function initWikiTab(){
+    if(WIKI.bound) return;
+    WIKI.bound = true;
+    $$('.wiki-origin').forEach(b=>{
+      b.onclick = () => {
+        $$('.wiki-origin').forEach(x=>{
+          const on = x===b;
+          x.classList.toggle('bg-primary', on);
+          x.classList.toggle('text-primary-foreground', on);
+          x.classList.toggle('text-muted-foreground', !on);
+          x.classList.toggle('font-medium', on);
+        });
+        WIKI.origin = b.dataset.origin || '';
+        WIKI.domain = ''; WIKI.page = 1;
+        loadWiki();
+      };
+    });
+    $('#wikiDomains').addEventListener('click', e=>{
+      const b = e.target.closest('.wiki-dom'); if(!b) return;
+      WIKI.domain = b.dataset.domain || '';
+      WIKI.page = 1;
+      loadWiki();
+    });
+    $('#wikiListPane').addEventListener('click', e=>{
+      const prev = e.target.closest('#wikiPrev'),
+            next = e.target.closest('#wikiNext'),
+            row = e.target.closest('.wiki-row');
+      if(prev){ if(WIKI.page>1){ WIKI.page--; loadWiki(); } return; }
+      if(next){ if(WIKI.data && WIKI.page<WIKI.data.pageCount){ WIKI.page++; loadWiki(); } return; }
+      if(row) openWikiPage(row.dataset.path);
+    });
+    let t;
+    $('#wikiSearch').addEventListener('input', e=>{
+      clearTimeout(t);
+      const v = e.target.value;
+      t = setTimeout(()=>{ WIKI.q = v.trim(); WIKI.page = 1; loadWiki(); }, 250);
+    });
+    $('#wikiBack').onclick = () => showWikiPage(false);
+  }
+
+  // ==================================================================
   // 记忆报表页（Tab 2）：筛选 chips + 记忆列表 + ⭐加权/反馈 + 双向跳转
   // ==================================================================
   function switchTab(tab, opts){
-    curTab = (tab==='memories') ? 'memories' : 'convs';
-    const isMem = curTab==='memories';
+    curTab = (tab==='memories'||tab==='wiki') ? tab : 'convs';
+    const isMem = curTab==='memories', isWiki = curTab==='wiki';
     closeDrawer();                       // 切页收起详情抽屉（避免遮罩挡住另一页）
-    $('#viewConvs').classList.toggle('hidden', isMem);
+    $('#viewConvs').classList.toggle('hidden', isMem||isWiki);
     $('#viewMemories').classList.toggle('hidden', !isMem);
-    $('#convFilterBar').classList.toggle('hidden', isMem);
-    $('#convFilterBar').classList.toggle('flex', !isMem);
+    $('#viewWiki').classList.toggle('hidden', !isWiki);
+    $('#convFilterBar').classList.toggle('hidden', isMem||isWiki);
+    $('#convFilterBar').classList.toggle('flex', !isMem && !isWiki);
     $('#memFilterBar').classList.toggle('hidden', !isMem);
     $('#memFilterBar').classList.toggle('flex', isMem);
-    if(isMem){
+    if(isMem||isWiki){
       $('#filterSummary').classList.add('hidden');
       $('#filterSummary').classList.remove('flex');
     }else if($('#summaryChips').innerHTML){
       updateSummary();                     // 回到会话页恢复摘要条
     }
     $$('.tab-btn').forEach(b=>b.classList.toggle('active', b.dataset.tab===curTab));
-    try{ history.replaceState(null,'', isMem?'#memories':'#convs'); }catch(e){}
+    try{ history.replaceState(null,'', isWiki?'#wiki':(isMem?'#memories':'#convs')); }catch(e){}
     if(isMem && !(opts && opts.silent)) loadMemories().catch(()=>{});
+    // 知识库页**懒加载**：首次切过去才拉数据（不拖慢首屏）
+    if(isWiki){ initWikiTab(); if(!WIKI.loaded) loadWiki(); }
     reicons();
   }
   // 会话 → 记忆报表：按该会话筛选（sessionUid 优先，回退 conversationId）
@@ -1652,6 +1910,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   function bindStaticEvents(){
     $('#tabConvs').onclick=()=>switchTab('convs');       // 标签页：统一会话
     $('#tabMems').onclick=()=>switchTab('memories');     // 标签页：记忆报表
+    $('#tabWiki').onclick=()=>switchTab('wiki');         // 标签页：wiki知识库
     $('#agentOptions').addEventListener('change',e=>{ if(e.target.classList.contains('src-chk')){ const v=e.target.value; if(e.target.checked)F.sources.delete(v); else F.sources.add(v); updateFilterChips(); markDirty(); } });
     $('#wsOptions').addEventListener('change',e=>{ if(e.target.classList.contains('ws-chk')){ const v=e.target.value; if(e.target.checked)F.cwds.delete(v); else F.cwds.add(v); updateFilterChips(); markDirty(); } });
     $('[data-act="agent-all"]').onclick=()=>{ $$('.src-chk').forEach(c=>{c.checked=true;});F.sources.clear();updateFilterChips();markDirty(); };

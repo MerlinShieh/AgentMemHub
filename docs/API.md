@@ -153,6 +153,37 @@ GET  /api/admin/job  →  轮询进度
 | `POST` | `/api/wiki/pending/drop` | **删除待更新记忆**：body `{ids, mode, confirm, out}`；`soft`=不进 wiki，`hard`=真删（需 `confirm`）|
 | `GET` | `/api/wiki/pending/ignored` | 已软删除（不进 wiki）的记忆 —— 供取消忽略 |
 | `POST` | `/api/wiki/pending/restore` | **取消软删除**：body `{ids, out}` |
+| `GET` | `/api/wiki/pages` | **知识库页面清单**（面板「wiki知识库」页）：`origin`（native/external）、`domain`、`q`、`page`/`page_size` —— **以磁盘为准**，不查投影表 |
+| `GET` | `/api/wiki/page` | **读一页正文**：`path` 必须在页面根内（越界 400）；返回 frontmatter + markdown + **渲染后的 HTML** |
+
+**知识库浏览（`/api/wiki/pages`、`/api/wiki/page`）**
+
+面板第三个标签页「wiki知识库」的数据源（2026-10-18 新增）。两个决定：
+
+- **以磁盘为准，不查投影表**：投影（`wiki --action index-pages`）是运维动作、会滞后 ——
+  实测磁盘 424 页 / 投影 399 行。面板要看的是**知识库本身**，不该随"跑没跑过投影"起落；
+  "能不能被召回"是另一件事（由投影决定）。
+- **读页面只允许在 `page_roots()` 之内**：`path` 会 `resolve()` 后比对根，越界直接 400 ——
+  面板是本地服务，但 `?path=C:\Windows\win.ini` 这种口子不该存在。
+
+```jsonc
+// GET /api/wiki/pages?origin=native&page_size=2
+{
+  "total": 424, "page": 1, "pageSize": 120, "pageCount": 4,
+  "originCounts": {"native": 418, "external": 6},
+  "domains": [{"name": "01-ADBController-与-Android-自动化",
+               "origin": "native", "count": 17}],
+  "items": [{"title": "…", "domain": "01-…", "rel": "01-…/xxx.md",
+             "type": "analysis", "compiled_at": "2026-10-04 17:14:11",
+             "sources": "5", "path": "D:\\…\\out_l2_mimo\\01-…\\xxx.md",
+             "origin": "native"}],
+  "roots": [{"path": "D:\\…\\out_l2_mimo", "origin": "native", "exists": true}]
+}
+```
+
+`page` 返回 `{path, rel, origin, domain, title, frontmatter, markdown, html, chars}`；
+`html` 由 `agentmemhub/mdmini.py` 渲染（**先转义再套结构**，内容里的 `<script>`
+只会显示成文本；链接只放行 http/https）。
 
 **待更新记忆的查看与删除（`/api/wiki/pending*`）**
 
