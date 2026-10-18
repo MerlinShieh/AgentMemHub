@@ -1473,8 +1473,19 @@ def create_app(db_path: Path | None = None):
         from agentmemhub import logs, wiki
         from agentmemhub.web import tasks
         name = "LLM Wiki 增量更新"
-        job = tasks.submit(name, _logged_task(
-            name, lambda: wiki.update(l1_dir=l1, l2_dir=l2, db=db, workers=workers)))
+
+        # ⚠️ `tasks.submit` 的契约是 **`fn(emit, meta)`**（见 `web/tasks.py`），
+        # 而 `_logged_task` 内部还会再调 `fn(emit_full, meta)` —— 所以这里
+        # **必须收两个参数**。2026-10-18 实测事故：写成零参 lambda ⇒ 真机点
+        # 「增量更新」立刻报 `lambda() takes 0 positional arguments but 2 were given`
+        # （此前前端没接，这条路径从没被真实调用过，测试也覆盖不到）。
+        def _run(emit, _meta):
+            import json as _json
+            r = wiki.update(l1_dir=l1, l2_dir=l2, db=db, workers=workers)
+            emit(_json.dumps(r, ensure_ascii=False, default=str))
+            return "增量更新结束"
+
+        job = tasks.submit(name, _logged_task(name, _run))
         if job is None:
             raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
         logs.record(f"提交任务：{name}")
@@ -1544,9 +1555,14 @@ def create_app(db_path: Path | None = None):
         except batch_ops.BatchOpsError as e:
             raise HTTPException(status_code=422, detail=str(e))
         name = "离线批处理：推进一段"
-        job = tasks.submit(name, _logged_task(
-            name, lambda: batch_ops.run(deadline_s=deadline,
-                                        offline_plan=offline_plan)))
+
+        def _run(emit, _meta):      # 同 `api_wiki_update`：tasks.submit 契约是 (emit, meta)
+            import json as _json
+            r = batch_ops.run(deadline_s=deadline, offline_plan=offline_plan)
+            emit(_json.dumps(r, ensure_ascii=False, default=str))
+            return "离线批处理推进结束"
+
+        job = tasks.submit(name, _logged_task(name, _run))
         if job is None:
             raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
         logs.record("提交任务：%s" % name)
