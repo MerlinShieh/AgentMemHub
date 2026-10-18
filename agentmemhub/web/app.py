@@ -464,19 +464,24 @@ def _logged_task(name: str, fn) -> Any:
     return _do
 
 
-def _tail_wiki_log(emit, stop) -> None:
-    """把 `logs/wiki.log` 的新增进度事件实时 emit 出去（供长任务显示日志）。
+def _tail_wiki_log(emit, stop, job_id: str = "") -> None:
+    """把 `logs/wiki.log` 的新增进度事件实时 emit 出去（供长任务显示日志 + 进度条）。
 
     为什么用 tail 而不是给下层加回调（2026-10-18 实测确认）：
       · `wiki_compile` / `wiki_aggregate` 的进度**只写审计流**（`logs/wiki.log` 的
-        `progress` / `run_start` / `run_end` 事件），没有 `on_progress` 参数；
-      · `wiki.update(on_progress=...)` 这个参数**收了却从没调用过**（签名有、体内零调用点）。
+        `progress` / `call` / `domain_planned` / `run_*` 事件），没有 `on_progress` 参数；
+      · `wiki.update(on_progress=...)` 这个参数**收了却从没调用过**（签名有、体内零调用）。
     与其为"一次展示"去改两个核心脚本模块，不如读它们**本来就在写的**权威流水 ——
     日志是既有的事实来源，任务日志与它同源也不会出现两套进度口径。
+
+    `job_id` 给了就**顺带回填进度条**：进度消息里通常带 `[N/M]`（如 `[12/84]`），
+    解析出来交给 `tasks.set_progress` —— 否则前端只能看到"已运行 N 秒"在涨、
+    百分比永远是 0（用户实测："感觉过了很长时间，好像一直没有变化"）。
 
     `stop` 是 `threading.Event`：任务结束后置位，tail 线程自己退出。
     """
     import json as _json
+    import re as _re
     from pathlib import Path as _Path
 
     from agentmemhub.logs import log_dir
@@ -509,13 +514,36 @@ def _tail_wiki_log(emit, stop) -> None:
             ev = str(d.get("event") or "")
             if ev == "progress":
                 msg = str(d.get("message") or "").strip()
-                if msg:
-                    emit(msg)
-            elif ev in ("run_start", "run_end", "run_aborted"):
-                emit("[%s] %s" % (ev, _json.dumps(
-                    {k: v for k, v in d.items()
-                     if k not in ("ts", "event", "module", "line", "level")},
-                    ensure_ascii=False)[:200]))
+                if not msg:
+                    continue
+                emit(msg)
+                m = _re.search(r"\[(\d+)/(\d+)\]", msg)
+                if m and job_id:
+                    try:
+                        from agentmemhub.web import tasks as _tasks
+                        done, total = int(m.group(1)), int(m.group(2))
+                        _tasks.set_progress(job_id, {
+                            "done": done, "total": total,
+                            "pct": round(done * 100.0 / total, 1) if total else 0,
+                            "label": msg[:60]})
+                    except Exception:      # noqa: BLE001 —— 回填失败不影响日志
+                        pass
+            elif ev == "call":
+                tag = str(d.get("tag") or "").strip()
+                if not tag:
+                    continue
+                if d.get("ok"):
+                    emit("  ✓ %s %.0fs" % (tag, float(d.get("seconds") or 0)))
+                else:
+                    emit("  ✗ %s %.0fs  %s"
+                         % (tag, float(d.get("seconds") or 0),
+                            str(d.get("error") or "")[:90]))
+            elif ev in ("run_start", "run_end", "run_aborted", "domain_planned",
+                        "session_done", "manifest"):
+                detail = {k: v for k, v in d.items()
+                          if k not in ("ts", "event", "module", "line", "level",
+                                       "usage", "msg")}
+                emit("[%s] %s" % (ev, _json.dumps(detail, ensure_ascii=False)[:200]))
 
 
 def _conv_to_dict(c: Any, *, excl_map: Optional[dict] = None) -> dict[str, Any]:
@@ -1539,8 +1567,10 @@ def create_app(db_path: Path | None = None):
             emit("[i] 开始增量更新：L1=%s / L2=%s" % (l1, l2))
             # 进度来自 `logs/wiki.log`（下层只写审计流、没有回调参数，见 `_tail_wiki_log`）
             stop = threading.Event()
-            th = threading.Thread(target=_tail_wiki_log, args=(emit, stop),
-                                  daemon=True)
+            th = threading.Thread(
+                target=_tail_wiki_log,
+                args=(emit, stop, (_meta or {}).get("id", "")),
+                daemon=True)
             th.start()
             try:
                 r = wiki.update(l1_dir=l1, l2_dir=l2, db=db, workers=workers)
@@ -1626,8 +1656,10 @@ def create_app(db_path: Path | None = None):
             import threading
             emit("[i] 推进离线批处理（状态机自判段位）…")
             stop = threading.Event()
-            th = threading.Thread(target=_tail_wiki_log, args=(emit, stop),
-                                  daemon=True)
+            th = threading.Thread(
+                target=_tail_wiki_log,
+                args=(emit, stop, (_meta or {}).get("id", "")),
+                daemon=True)
             th.start()
             try:
                 r = batch_ops.run(deadline_s=deadline, offline_plan=offline_plan)
