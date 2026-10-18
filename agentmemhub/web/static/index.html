@@ -562,6 +562,13 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   <!-- 与「统一会话」零耦合：展示的是**页面产物**（L2 蒸馏 + 外部投喂），不是会话。
        数据以磁盘为准（不查投影表），见 app.py /api/wiki/pages 的说明。 -->
   <div id="viewWiki" class="hidden">
+    <!-- 二级切换：浏览（只读页面）/ 运维（补跑·待更新记忆·触发器·离线批次） -->
+    <div class="flex items-center gap-1 border-b border-border px-5 pt-3">
+      <button id="wkTabBrowse" class="wk-subtab active">浏览</button>
+      <button id="wkTabOps" class="wk-subtab">运维</button>
+      <span id="wkOpsBadge" class="ml-2 hidden text-[11px] font-medium text-warning"></span>
+    </div>
+    <div id="wikiBrowsePane">
     <section class="px-5 pt-4">
       <div class="rounded-xl border border-border bg-card p-3 shadow-sm">
         <div class="flex flex-wrap items-center gap-2">
@@ -600,6 +607,80 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         </div>
       </div>
     </section>
+    </div><!-- /wikiBrowsePane -->
+
+    <!-- ============ 运维：增量更新 / 待更新记忆 / 编译失败 / 触发器 / 离线批次 ============ -->
+    <div id="wikiOpsPane" class="hidden px-5 py-3">
+      <!-- ① 健康概览 -->
+      <div class="rounded-xl border border-border bg-card p-3.5 shadow-sm">
+        <div class="flex flex-wrap items-center gap-2">
+          <i data-lucide="activity" class="h-4 w-4 text-primary"></i>
+          <span class="text-xs font-medium text-foreground">健康概览</span>
+          <span id="opsUpdatedAt" class="text-[10px] text-muted-foreground"></span>
+          <span class="ml-auto"></span>
+          <button id="opsRefreshBtn" class="wk-act">刷新</button>
+          <button id="opsUpdateBtn" class="wk-act-primary">增量更新</button>
+          <button id="opsTriggerBtn" class="wk-act">手动触发检测</button>
+        </div>
+        <div id="opsHealth" class="mt-3 grid grid-cols-2 gap-2 text-xs lg:grid-cols-4"></div>
+        <div id="opsWarn" class="mt-2 hidden rounded-md bg-warning-soft px-2.5 py-1.5 text-[11px] text-warning"></div>
+      </div>
+
+      <!-- ② 待更新记忆 -->
+      <div class="mt-3 rounded-xl border border-border bg-card">
+        <div class="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
+          <i data-lucide="inbox" class="h-3.5 w-3.5 text-primary"></i>
+          <span class="text-xs font-medium text-foreground">待更新记忆</span>
+          <span id="opsPendingMeta" class="text-[11px] text-muted-foreground"></span>
+          <span class="ml-auto"></span>
+          <button id="opsSelectAll" class="wk-act">全选</button>
+          <button id="opsSoftDropBtn" class="wk-act">软删除（不进 wiki）</button>
+          <button id="opsHardDropBtn" class="wk-act-danger">硬删除</button>
+          <button id="opsIgnoredBtn" class="wk-act">查看已忽略</button>
+        </div>
+        <div id="opsPendingList" class="max-h-72 overflow-y-auto scroll-thin"></div>
+      </div>
+
+      <!-- ③ 编译失败 -->
+      <div class="mt-3 rounded-xl border border-border bg-card">
+        <div class="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
+          <i data-lucide="alert-triangle" class="h-3.5 w-3.5 text-warning"></i>
+          <span class="text-xs font-medium text-foreground">编译失败</span>
+          <span id="opsFailMeta" class="text-[11px] text-muted-foreground"></span>
+          <span class="ml-auto"></span>
+          <button id="opsRetryBtn" class="wk-act">定向补跑</button>
+        </div>
+        <div id="opsFailList" class="max-h-56 overflow-y-auto scroll-thin"></div>
+      </div>
+
+      <!-- ④ 触发器规则 -->
+      <div class="mt-3 rounded-xl border border-border bg-card">
+        <div class="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
+          <i data-lucide="zap" class="h-3.5 w-3.5 text-primary"></i>
+          <span class="text-xs font-medium text-foreground">触发器规则</span>
+          <span class="text-[11px] text-muted-foreground">运行时覆盖（写状态文件，不改 yaml）</span>
+          <span class="ml-auto"></span>
+          <button id="opsSaveTriggersBtn" class="wk-act-primary">保存</button>
+        </div>
+        <div id="opsTriggerForm" class="grid gap-2 px-3 py-2.5 text-xs md:grid-cols-4"></div>
+        <div id="opsTriggerState" class="px-3 pb-2.5 text-[11px] text-muted-foreground"></div>
+      </div>
+
+      <!-- ⑤ 离线批处理 -->
+      <div class="mt-3 rounded-xl border border-border bg-card">
+        <div class="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
+          <i data-lucide="package" class="h-3.5 w-3.5 text-primary"></i>
+          <span class="text-xs font-medium text-foreground">离线批处理</span>
+          <span id="opsBatchMeta" class="text-[11px] text-muted-foreground"></span>
+          <span class="ml-auto"></span>
+          <button id="opsBatchRunBtn" class="wk-act">推进一段</button>
+          <button id="opsBatchCancelBtn" class="wk-act-danger">取消在飞</button>
+          <button id="opsBatchResubmitBtn" class="wk-act">重提</button>
+          <button id="opsChecksBtn" class="wk-act">流水</button>
+        </div>
+        <div id="opsBatchBody" class="px-3 py-2.5 text-xs"></div>
+      </div>
+    </div><!-- /wikiOpsPane -->
   </div><!-- /viewWiki -->
 </div>
 
@@ -732,6 +813,31 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   .wiki-dom { display: flex; align-items: center; gap: 6px; width: 100%; border-radius: 6px; padding: 5px 7px; text-align: left; }
   .wiki-dom:hover { background: color-mix(in srgb, var(--as-primary) 7%, transparent); }
   .wiki-dom.on { background: color-mix(in srgb, var(--as-primary) 12%, transparent); color: var(--as-primary); font-weight: 600; }
+  /* ---- wiki知识库：二级切换（浏览 / 运维）与运维控件 ---- */
+  .wk-subtab { padding: 6px 12px; font-size: 12px; font-weight: 500;
+               color: var(--as-muted-foreground); border-bottom: 2px solid transparent; }
+  .wk-subtab:hover { color: var(--as-foreground); }
+  .wk-subtab.active { color: var(--as-primary); border-color: var(--as-primary); }
+  .wk-act { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--as-border);
+            border-radius: 6px; padding: 3px 8px; font-size: 11px; color: var(--as-foreground); background: transparent; }
+  .wk-act:hover { background: color-mix(in srgb, var(--as-foreground) 6%, transparent); }
+  .wk-act:disabled { opacity: .45; cursor: not-allowed; }
+  .wk-act-primary { display: inline-flex; align-items: center; gap: 4px; border-radius: 6px;
+                    padding: 3px 8px; font-size: 11px; font-weight: 500;
+                    background: var(--as-primary); color: var(--primary-foreground, #fff); }
+  .wk-act-primary:hover { opacity: .88; }
+  .wk-act-primary:disabled { opacity: .45; cursor: not-allowed; }
+  .wk-act-danger { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--as-border);
+                   border-radius: 6px; padding: 3px 8px; font-size: 11px; color: var(--state-error); background: transparent; }
+  .wk-act-danger:hover { background: color-mix(in srgb, var(--state-error) 10%, transparent); }
+  .wk-act-danger:disabled { opacity: .45; cursor: not-allowed; }
+  .wk-stat { border: 1px solid var(--as-border); border-radius: 8px; padding: 7px 9px; }
+  .wk-stat .lbl { font-size: 10px; color: var(--as-muted-foreground); }
+  .wk-stat .val { font-size: 13px; font-weight: 600; margin-top: 1px; }
+  .wk-row { display: flex; align-items: flex-start; gap: 8px; padding: 6px 10px;
+            border-bottom: 1px solid color-mix(in srgb, var(--as-border) 60%, transparent); }
+  .wk-row:last-child { border-bottom: 0; }
+  .wk-row:hover { background: color-mix(in srgb, var(--as-primary) 4%, transparent); }
 </style>
 
 <!-- ============ LOGIC（v2: 数据全部来自本机 API，事件按需加载）============ -->
@@ -1179,6 +1285,384 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     }
   }
 
+  // ==================================================================
+  // 运维（wiki知识库页的二级视图）：健康概览 / 待更新记忆 / 编译失败 /
+  // 触发器 / 离线批次。
+  //
+  // 数据：/api/wiki/{align,triggers,batch/status,pending,failures}
+  // 动作：增量更新、补跑、批次推进/取消/重提、待更新记忆的软/硬删除 ——
+  //       带长任务的复用全局进度条（`adminPoll`），不长任务的同步返回。
+  // ==================================================================
+  const OPS = { loaded:false, health:null, triggers:null, batch:null,
+                pending:null, failures:null, ignored:false, sel:new Set(),
+                afterJob:null, checksOpen:false };
+
+  async function opsFetch(path, opts){
+    const r = await fetchWithTimeout(path, opts||{}, 60000);
+    const d = await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(typeof d.detail==='string' ? d.detail : ('HTTP '+r.status));
+    return d;
+  }
+
+  async function loadOps(){
+    $('#opsUpdatedAt').textContent = '加载中…';
+    try{
+      // 先拿 triggers：失败清单要用它给的**产出目录**（failures 的 out 是必填）
+      const trig = await opsFetch('/api/wiki/triggers');
+      const outL1 = ((trig.targets||{}).l1) || '';
+      const [align, batch, pend, fails] = await Promise.all([
+        opsFetch('/api/wiki/align'),
+        opsFetch('/api/wiki/batch/status'),
+        opsFetch('/api/wiki/pending'),
+        opsFetch('/api/wiki/failures?out=' + encodeURIComponent(outL1)).catch(()=>null),
+      ]);
+      OPS.health = align; OPS.triggers = trig; OPS.batch = batch;
+      OPS.pending = pend; OPS.failures = fails; OPS.loaded = true;
+      OPS.ignored = false;
+      renderOpsHealth(); renderOpsPending(); renderOpsFailures();
+      renderOpsTriggers(); renderOpsBatch();
+      $('#opsUpdatedAt').textContent = '更新于 ' + new Date().toLocaleTimeString();
+      updateOpsBadge();
+      reicons();
+    }catch(e){
+      $('#opsUpdatedAt').textContent = '加载失败：' + e.message;
+    }
+  }
+
+  function updateOpsBadge(){
+    const pend = (OPS.pending && OPS.pending.count) || 0;
+    const fail = (OPS.failures && OPS.failures.total) || 0;
+    const parts = [];
+    if(pend) parts.push('待更新 ' + pend);
+    if(fail) parts.push('失败 ' + fail);
+    const b = $('#wkOpsBadge');
+    b.textContent = parts.join(' · ');
+    b.classList.toggle('hidden', !parts.length);
+  }
+
+  function renderOpsHealth(){
+    const a = OPS.health || {}, t = OPS.triggers || {}, b = OPS.batch || {};
+    const con = a.consistency || {}, cov = a.coverage || {}, refs = a.invalid_refs || {};
+    const st = t.state || {}, ip = t.in_progress || {}, cfg = t.config || {};
+    const verdict = con.verdict || '';
+    const verdictText = verdict==='l1_ahead' ? 'L2 落后'
+                      : verdict==='in_sync' ? '两级同步' : (verdict || '—');
+    const pk = OPS.pending || {};
+    const f = OPS.failures || {};
+    const cells = [
+      ['两级一致性', verdictText,
+       verdict==='l1_ahead' ? ('差 ' + (con.inputs_delta ?? '?') + ' 个输入') : ''],
+      ['覆盖率', (cov.covered ?? '—') + '/' + (cov.current_inputs ?? '—'),
+       cov.uncovered ? ('未覆盖 ' + cov.uncovered + ' 条') : '全部覆盖'],
+      ['死链', String((refs.missing_total||0) + (refs.not_input_total||0)), ''],
+      ['编译失败', String(f.total ?? '—'), f.needs_manual ? '需人工处理' : ''],
+      ['待更新记忆', String(pk.count ?? '—'),
+       (pk.added_total != null) ? ('新增 ' + pk.added_total + ' / 变更 ' + (pk.changed_total||0)) : ''],
+      ['触发器', cfg.enabled ? '已启用' : '已关闭',
+       '阈值 ' + (cfg.dirty_memories ?? '—') + ' · 时点 ' + ((cfg.schedule||[]).join('、') || '无')],
+      ['上次更新', (st.last_update_at || '—'), ''],
+      ['离线批次', (b.n ? (b.n + ' 个在飞') : '无在飞'), ''],
+    ];
+    $('#opsHealth').innerHTML = cells.map(([lbl, val, sub])=>`
+      <div class="wk-stat">
+        <div class="lbl">${wikiEsc(lbl)}</div>
+        <div class="val">${wikiEsc(val)}</div>
+        ${sub ? `<div class="text-[10px] text-muted-foreground">${wikiEsc(sub)}</div>` : ''}
+      </div>`).join('');
+
+    const warns = [];
+    if(ip.running){
+      const hrs = Math.round((ip.elapsed_seconds || 0) / 3600);
+      warns.push('有一轮 wiki 更新显示「进行中」，已 ' + hrs + ' 小时（起于 ' + (ip.started_at || '?')
+        + '）。**若长期不变说明上轮异常退出、锁没释放** —— 后续增量更新会被拒。'
+        + '处置：检查 ' + (t.state_file || '状态文件') + ' 的 in_progress 段，确认没有进程在跑后清掉再重试。');
+    }
+    if(verdict === 'l1_ahead'){
+      warns.push('L2 落后 L1 ' + (con.inputs_delta ?? '?') + ' 个输入（L1 于 '
+        + (con.l1_at || '?') + '，L2 于 ' + (con.l2_at || '?') + '）→ 建议点「增量更新」');
+    }
+    if((cov.uncovered||0) > 0){
+      warns.push(cov.uncovered + ' 条输入没有被任何 wiki 页面引用（可看「对齐审计」的 id 列表；'
+        + '这类条目告警但不触发重编）');
+    }
+    if(st.last_error){ warns.push('上次错误（' + (st.last_error_at||'') + '）：' + st.last_error); }
+    const w = $('#opsWarn');
+    w.innerHTML = warns.map(x=>'<div class="mb-0.5">• '+wikiEsc(x)+'</div>').join('');
+    w.classList.toggle('hidden', !warns.length);
+  }
+
+  function renderOpsPending(){
+    const p = OPS.pending || {};
+    const items = p.items || [];
+    opsSyncIgnoreUI();
+    $('#opsPendingMeta').textContent = OPS.ignored
+      ? `已忽略 ${items.length} 条（不进 wiki，但仍能被召回）`
+      : `${p.count ?? items.length} 条 · 新增 ${p.added_total ?? 0} / 变更 ${p.changed_total ?? 0}`;
+    if(!items.length){
+      $('#opsPendingList').innerHTML = '<div class="px-3 py-6 text-center text-[11px] text-muted-foreground">'
+        + (OPS.ignored ? '没有已忽略的记忆' : '没有待更新的记忆 —— wiki 已是最新')
+        + '</div>';
+      return;
+    }
+    $('#opsPendingList').innerHTML = items.map(it=>{
+      const on = OPS.sel.has(it.id) ? 'checked' : '';
+      return `<label class="wk-row cursor-pointer">
+        <input type="checkbox" class="ops-chk mt-0.5" data-id="${it.id}" ${on}>
+        <div class="min-w-0 flex-1">
+          <div class="flex flex-wrap items-center gap-1.5">
+            <span class="chip bg-muted text-muted-foreground">#${it.id}</span>
+            <span class="chip bg-info-soft text-info">${wikiEsc(it.type||'')}</span>
+            <span class="text-[10px] text-muted-foreground">${wikiEsc(it.source||'')}/${wikiEsc(it.conversation_id||'')}
+              · ${wikiEsc(it.confidence||'')} · ${it.chars||0} 字 · ${it.created_at?fmtDate(it.created_at):''}</span>
+          </div>
+          <div class="mt-0.5 text-[11px] text-muted-foreground line-clamp-2">${wikiEsc(it.summary||'')}</div>
+        </div>
+      </label>`;
+    }).join('');
+  }
+
+  function renderOpsFailures(){
+    const f = OPS.failures;
+    if(!f){
+      $('#opsFailMeta').textContent = '（读取失败，或产出目录未配置）';
+      $('#opsFailList').innerHTML = '';
+      return;
+    }
+    const items = f.items || [];
+    $('#opsFailMeta').textContent = `${f.total ?? items.length} 项`
+      + (f.needs_manual ? ' · ⚠️ 含需人工处理的错误（配额/鉴权/模型）' : '');
+    $('#opsFailList').innerHTML = items.length
+      ? items.slice(0, 100).map(i=>`
+        <div class="wk-row text-[11px]">
+          <span class="chip bg-warning-soft text-warning">${wikiEsc(i.stage||'')}</span>
+          <div class="min-w-0 flex-1">
+            <div class="truncate text-foreground">${wikiEsc(i.target||'')}</div>
+            <div class="truncate text-[10px] text-muted-foreground">${wikiEsc(i.kind||'')}
+              · 尝试 ${i.attempts||0} 次 · ${wikiEsc(i.error||'')}</div>
+          </div>
+        </div>`).join('')
+      : '<div class="px-3 py-4 text-center text-[11px] text-muted-foreground">没有编译失败</div>';
+  }
+
+  function renderOpsTriggers(){
+    const t = OPS.triggers || {}, c = t.config || {}, st = t.state || {};
+    $('#opsTriggerForm').innerHTML = `
+      <label class="flex items-center gap-1.5">
+        <input id="opsTrigEnabled" type="checkbox" ${c.enabled?'checked':''}> 启用自动触发
+      </label>
+      <label class="flex flex-col gap-0.5">
+        <span class="text-[10px] text-muted-foreground">时点（HH:MM，逗号分隔）</span>
+        <input id="opsTrigSchedule" class="rounded border border-input bg-background px-2 py-1 text-xs"
+               value="${wikiEsc((c.schedule||[]).join(','))}" placeholder="09:00,18:00">
+      </label>
+      <label class="flex flex-col gap-0.5">
+        <span class="text-[10px] text-muted-foreground">脏记忆阈值（达到就触发）</span>
+        <input id="opsTrigDirty" type="number" min="1" class="rounded border border-input bg-background px-2 py-1 text-xs"
+               value="${c.dirty_memories ?? 30}">
+      </label>
+      <label class="flex items-center gap-1.5">
+        <input id="opsTrigFirst" type="checkbox" ${c.first_write_daily?'checked':''}> 每日首次写入即触发
+      </label>`;
+    $('#opsTriggerState').textContent = [
+      '上次更新：' + (st.last_update_at || '—'),
+      '今日已触发：' + ((st.fired_today||[]).join('、') || '无'),
+      st.last_error ? ('上次错误：' + (st.last_error_at||'') + ' ' + st.last_error) : '',
+      '目标：L1 ' + ((t.targets||{}).l1 || '—') + ' · L2 ' + ((t.targets||{}).l2 || '—'),
+    ].filter(Boolean).join('  ·  ');
+  }
+
+  function renderOpsBatch(checks){
+    const b = OPS.batch || {};
+    const n = b.n || 0;
+    $('#opsBatchMeta').textContent = n ? (n + ' 个在飞') : '无在飞任务';
+    const rows = (b.inflight || []).map(w=>`
+      <div class="wk-row text-[11px]">
+        <span class="chip bg-info-soft text-info">${wikiEsc(w.domain || w.id || '?')}</span>
+        <span class="text-muted-foreground">${wikiEsc(w.status || '')} · ${wikiEsc(w.batch_id || '')}</span>
+      </div>`).join('');
+    let html = rows || '<div class="text-[11px] text-muted-foreground">没有在飞的离线批次。'
+      + '点「推进一段」让状态机自己判断该提交还是该收割（幂等，不会重复付费）。</div>';
+    if(OPS.checksOpen){
+      const list = (checks || []).map(c=>`
+        <div class="wk-row text-[11px]">
+          <span class="text-[10px] text-muted-foreground">${c.ts?new Date(c.ts*1000).toLocaleString():''}</span>
+          <span class="chip ${c.action==='error'?'bg-error-soft text-error':'bg-muted text-muted-foreground'}">${wikiEsc(c.action||'')}</span>
+          <span class="min-w-0 flex-1 truncate text-muted-foreground">待处理 ${c.pending ?? 0}
+            · ${wikiEsc(c.reason || c.error || '')}</span>
+        </div>`).join('');
+      html += '<div class="mt-2 border-t border-border pt-1"><div class="mb-1 text-[10px] font-medium text-muted-foreground">最近检测流水（最多 30 条）</div>'
+        + (list || '<div class="text-[11px] text-muted-foreground">（空）</div>') + '</div>';
+    }
+    $('#opsBatchBody').innerHTML = html;
+  }
+
+  function wkSwitchSub(which){
+    const ops = (which === 'ops');
+    $('#wikiBrowsePane').classList.toggle('hidden', ops);
+    $('#wikiOpsPane').classList.toggle('hidden', !ops);
+    $('#wkTabBrowse').classList.toggle('active', !ops);
+    $('#wkTabOps').classList.toggle('active', ops);
+    if(ops && !OPS.loaded) loadOps();
+    reicons();
+  }
+
+  // ---- 动作 ----
+  async function opsSubmitJob(url, opts){
+    try{
+      const r = await fetchWithTimeout(url, Object.assign({method:'POST'}, opts||{}), 20000);
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok){
+        toast(typeof d.detail==='string' ? d.detail : ('HTTP ' + r.status));
+        return false;
+      }
+      toast('任务已提交');
+      OPS.afterJob = () => loadOps();     // 任务结束（adminPoll 到终态）后刷新运维面板
+      adminPoll();                        // 复用全局进度条
+      return true;
+    }catch(e){ toast('提交失败：' + (e.message||e)); return false; }
+  }
+
+  function opsDirs(){
+    const tg = (OPS.triggers||{}).targets || {};
+    return { l1: tg.l1 || '', l2: tg.l2 || '' };
+  }
+
+  async function opsUpdate(){
+    const d = opsDirs();
+    if(!d.l1 || !d.l2){ toast('缺少产出目录（先刷新一次）'); return; }
+    const ok = await confirmModal('增量更新 wiki',
+      '只重编**脏会话**的 L1 页与受影响的 L2 域（需要两级都有编译清单）。'
+      + '这是长任务，后台执行，进度看顶部进度条。');
+    if(!ok) return;
+    opsSubmitJob('/api/wiki/update?l1=' + encodeURIComponent(d.l1)
+      + '&l2=' + encodeURIComponent(d.l2));
+  }
+
+  async function opsTriggerRun(){
+    const ok = await confirmModal('手动触发一次检测',
+      '立即按规则检测（可强制），命中则执行一次增量更新。**同步执行、分钟级**，'
+      + '期间页面会等待返回。');
+    if(!ok) return;
+    try{
+      $('#opsUpdatedAt').textContent = '检测中（可能要几分钟）…';
+      const d = await opsFetch('/api/wiki/trigger/run');
+      toast('检测完成：' + ((d && (d.action || (d.should_run ? '已触发' : '未命中规则'))) || 'ok'));
+      loadOps();
+    }catch(e){ toast('检测失败：' + e.message); loadOps(); }
+  }
+
+  async function opsRetryFailures(){
+    const d = opsDirs();
+    if(!d.l1){ toast('缺少产出目录'); return; }
+    const ok = await confirmModal('定向补跑失败项',
+      '只重跑**失败的**项，不全量重来（长任务，后台执行）。');
+    if(!ok) return;
+    opsSubmitJob('/api/wiki/retry?out=' + encodeURIComponent(d.l1));
+  }
+
+  function opsSelIds(){
+    return [...OPS.sel].map(Number).filter(n=>!isNaN(n));
+  }
+
+  async function opsDrop(mode){
+    const ids = opsSelIds();
+    if(!ids.length){ toast('先勾选要处理的记忆'); return; }
+    const hard = (mode === 'hard');
+    const ok = await confirmModal(hard ? '硬删除待更新记忆' : '软删除待更新记忆',
+      hard
+        ? `将**真删** ${ids.length} 条记忆（蒸馏表 + 召回投影 + 向量），**不可恢复**。`
+        : `将 ${ids.length} 条标记为「不进 wiki」—— 记忆仍存在、仍能被召回，可随时恢复。`,
+      {danger: hard});
+    if(!ok) return;
+    try{
+      const d = await opsFetch('/api/wiki/pending/drop', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ids, mode, confirm: hard, out: opsDirs().l1})});
+      toast(d && d.ok === false ? ('未处理：' + (d.error || '未知')) : `已处理 ${ids.length} 条`);
+      OPS.sel.clear();
+      loadOps();
+    }catch(e){ toast('处理失败：' + e.message); }
+  }
+
+  async function opsShowIgnored(){
+    try{
+      const d = await opsFetch('/api/wiki/pending/ignored?out=' + encodeURIComponent(opsDirs().l1 || ''));
+      OPS.ignored = true;
+      OPS.pending = { items: d.items || [], count: (d.items||[]).length,
+                      added_total: 0, changed_total: 0 };
+      OPS.sel.clear();
+      renderOpsPending();
+      toast('已切到「已忽略」；勾选后点「恢复勾选」');
+    }catch(e){ toast('读取失败：' + e.message); }
+  }
+  function opsExitIgnored(){ OPS.ignored = false; OPS.sel.clear(); loadOps(); }
+  function opsSyncIgnoreUI(){
+    const ig = OPS.ignored;
+    $('#opsIgnoredBtn').textContent = ig ? '返回待更新' : '查看已忽略';
+    $('#opsSoftDropBtn').textContent = ig ? '恢复勾选' : '软删除（不进 wiki）';
+    $('#opsHardDropBtn').classList.toggle('hidden', ig);
+  }
+
+  async function opsRestoreIgnored(){
+    const ids = opsSelIds();
+    if(!ids.length){ toast('先勾选要恢复的记忆'); return; }
+    try{
+      const d = await opsFetch('/api/wiki/pending/restore', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ids, out: opsDirs().l1})});
+      toast(d && d.ok === false ? ('未恢复：' + (d.error || '未知')) : `已恢复 ${ids.length} 条`);
+      opsExitIgnored();
+    }catch(e){ toast('恢复失败：' + e.message); }
+  }
+
+  async function opsBatchRun(){
+    const ok = await confirmModal('推进一段离线批处理',
+      '状态机自己判断该做哪一段（提交 / 收割 / 落盘），可反复调用、不会重复付费。长任务，后台执行。');
+    if(!ok) return;
+    opsSubmitJob('/api/wiki/batch/run');
+  }
+
+  async function opsBatchCancel(){
+    const ok = await confirmModal('取消在飞的离线批次',
+      '会取消厂商侧任务并作废本地标记，覆盖的域回到待更新池。', {danger: true});
+    if(!ok) return;
+    try{ const d = await opsFetch('/api/wiki/batch/cancel', {method:'POST'});
+         toast('已取消：' + JSON.stringify(d).slice(0,120)); loadOps(); }
+    catch(e){ toast('取消失败：' + e.message); }
+  }
+
+  async function opsBatchResubmit(){
+    try{ const d = await opsFetch('/api/wiki/batch/resubmit', {method:'POST'});
+         toast('重提：' + JSON.stringify(d).slice(0,120)); loadOps(); }
+    catch(e){ toast('重提失败：' + e.message); }
+  }
+
+  async function opsToggleChecks(){
+    OPS.checksOpen = !OPS.checksOpen;
+    if(!OPS.checksOpen){ renderOpsBatch(); return; }
+    try{
+      const d = await opsFetch('/api/wiki/batch/checks?limit=30');
+      renderOpsBatch(d.checks || []);
+    }catch(e){ toast('读取流水失败：' + e.message); OPS.checksOpen = false; renderOpsBatch(); }
+  }
+
+  async function opsSaveTriggers(){
+    const patch = {
+      enabled: !!$('#opsTrigEnabled').checked,
+      schedule: ($('#opsTrigSchedule').value || '').split(',').map(s=>s.trim()).filter(Boolean),
+      dirty_memories: Math.max(1, parseInt($('#opsTrigDirty').value, 10) || 30),
+      first_write_daily: !!$('#opsTrigFirst').checked,
+    };
+    try{
+      const d = await opsFetch('/api/wiki/triggers', {
+        method:'PUT', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(patch)});
+      OPS.triggers = Object.assign({}, OPS.triggers || {}, {config: d.config || patch});
+      renderOpsTriggers(); renderOpsHealth();
+      toast('已保存（运行时覆盖，不改 yaml）');
+    }catch(e){ toast('保存失败：' + e.message); }
+  }
+
   function initWikiTab(){
     if(WIKI.bound) return;
     WIKI.bound = true;
@@ -1217,6 +1701,37 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       t = setTimeout(()=>{ WIKI.q = v.trim(); WIKI.page = 1; loadWiki(); }, 250);
     });
     $('#wikiBack').onclick = () => showWikiPage(false);
+
+    // ---- 二级切换（浏览 / 运维）与运维动作 ----
+    $('#wkTabBrowse').onclick = () => wkSwitchSub('browse');
+    $('#wkTabOps').onclick = () => wkSwitchSub('ops');
+    $('#opsRefreshBtn').onclick = () => loadOps();
+    $('#opsUpdateBtn').onclick = () => opsUpdate();
+    $('#opsTriggerBtn').onclick = () => opsTriggerRun();
+    $('#opsRetryBtn').onclick = () => opsRetryFailures();
+    $('#opsSaveTriggersBtn').onclick = () => opsSaveTriggers();
+    // 忽略视图里「软删除」按钮变「恢复勾选」—— 用一个按钮承载两态，少一个入口
+    $('#opsSoftDropBtn').onclick = () => OPS.ignored ? opsRestoreIgnored() : opsDrop('soft');
+    $('#opsHardDropBtn').onclick = () => opsDrop('hard');
+    $('#opsIgnoredBtn').onclick = () => OPS.ignored ? opsExitIgnored() : opsShowIgnored();
+    $('#opsSelectAll').onclick = () => {
+      const boxes = $$('.ops-chk');
+      const all = boxes.length && boxes.every(b => b.checked);
+      boxes.forEach(b => {
+        b.checked = !all;
+        const id = Number(b.dataset.id);
+        if(!all) OPS.sel.add(id); else OPS.sel.delete(id);
+      });
+    };
+    $('#opsPendingList').addEventListener('change', e => {
+      const b = e.target.closest('.ops-chk'); if(!b) return;
+      const id = Number(b.dataset.id);
+      if(b.checked) OPS.sel.add(id); else OPS.sel.delete(id);
+    });
+    $('#opsBatchRunBtn').onclick = () => opsBatchRun();
+    $('#opsBatchCancelBtn').onclick = () => opsBatchCancel();
+    $('#opsBatchResubmitBtn').onclick = () => opsBatchResubmit();
+    $('#opsChecksBtn').onclick = () => opsToggleChecks();
   }
 
   // ==================================================================
@@ -1696,6 +2211,8 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         if(j && (j.name||'').includes('提取') && j.status==='done'){
           refreshData().catch(()=>{}); // 入库完成 → 自动刷新列表/统计（失败不阻塞）
         }
+        // wiki 运维任务（增量更新/补跑/批次推进）结束后刷新运维面板
+        if(OPS.afterJob){ const fn=OPS.afterJob; OPS.afterJob=null; try{ fn(); }catch(e){} }
         return;
       }
       // 运行中：显示已运行时长；超 10 分钟提醒可能卡住；请求异常提示重试中
@@ -2366,18 +2883,36 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   function closeDrawer(){ $('#drawer').classList.add('hidden'); $('#drawer').classList.remove('flex'); $('#drawerScrim').classList.add('hidden'); curConv=null; curEvts=[]; }
 
   // ---- modal ----
-  let modalCb=null;
-  function showModal({title,msg,icon='alert-triangle',iconColor='error',body='',confirmText='确认',confirmClass='bg-primary',onConfirm}){
+  let modalCb=null, modalCancelCb=null;
+  function showModal({title,msg,icon='alert-triangle',iconColor='error',body='',confirmText='确认',confirmClass='bg-primary',onConfirm,onCancel}){
     $('#modalTitle').textContent=title; $('#modalMsg').innerHTML=msg; $('#modalBody').innerHTML=body;
     const ic=$('#modalIcon'); const map={error:['alert-triangle','var(--state-error)'],info:['info','var(--state-info)'],edit:['pencil','var(--as-primary)'],export:['download','var(--state-info)']};
     const [icn,col]=map[iconColor]||map.error;
     ic.style.background=`color-mix(in srgb, ${col} 12%, transparent)`; ic.style.color=col; ic.innerHTML=`<i data-lucide="${icn}" class="h-5 w-5"></i>`;
     const cb=$('#modalConfirm'); cb.textContent=confirmText; cb.className=`rounded-md px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 ${confirmClass}`;
-    modalCb=onConfirm; $('#modalRoot').classList.remove('hidden'); $('#modalRoot').classList.add('flex'); reicons();
+    modalCb=onConfirm; modalCancelCb=onCancel||null;
+    $('#modalRoot').classList.remove('hidden'); $('#modalRoot').classList.add('flex'); reicons();
   }
-  function closeModal(){ $('#modalRoot').classList.add('hidden'); $('#modalRoot').classList.remove('flex'); modalCb=null; }
-  $('#modalCancel').onclick=closeModal;
+  function closeModal(){ $('#modalRoot').classList.add('hidden'); $('#modalRoot').classList.remove('flex'); modalCb=null; modalCancelCb=null; }
+  $('#modalCancel').onclick=()=>{ const cb=modalCancelCb; closeModal(); if(cb)cb(); };
   $('#modalConfirm').onclick=()=>{ const cb=modalCb; closeModal(); if(cb)cb(); };
+
+  // Promise 版确认框 —— `showModal` 是回调式，`await` 起来别扭；运维动作都要"确认/取消"两态。
+  function confirmModal(title, msg, opts){
+    const o = opts || {};
+    return new Promise(resolve=>{
+      showModal({
+        title, msg,
+        icon: o.danger ? 'alert-triangle' : 'info',
+        iconColor: o.danger ? 'error' : 'info',
+        body: o.body || '',
+        confirmText: o.confirmText || '确认',
+        confirmClass: o.danger ? 'bg-error-solid' : 'bg-primary',
+        onConfirm: () => resolve(true),
+        onCancel: () => resolve(false),
+      });
+    });
+  }
 
   // ---- edit（真实写库）----
   function openEdit(c){
