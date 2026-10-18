@@ -1373,9 +1373,13 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     const warns = [];
     if(ip.running){
       const hrs = Math.round((ip.elapsed_seconds || 0) / 3600);
-      warns.push('有一轮 wiki 更新显示「进行中」，已 ' + hrs + ' 小时（起于 ' + (ip.started_at || '?')
-        + '）。**若长期不变说明上轮异常退出、锁没释放** —— 后续增量更新会被拒。'
-        + '处置：检查 ' + (t.state_file || '状态文件') + ' 的 in_progress 段，确认没有进程在跑后清掉再重试。');
+      // ⚠️ 这里**不能**说"锁没释放、后续更新会被拒" —— `update_started_at` 只是
+      // **展示标记**，真正的互斥是 `logs/wiki_update.lock`（文件锁，3 小时自动视为
+      // 过期可抢）。说成"被锁住"就是假告警，而"假告警比漏报更伤"（本项目踩过多次）。
+      warns.push('上一轮 wiki 更新没有正常收尾（标记停在 ' + (ip.started_at || '?')
+        + '，已 ' + hrs + ' 小时）。**这不是锁、不会阻塞新更新** —— 真正的互斥是 '
+        + 'logs/wiki_update.lock（3 小时自动过期）。它只说明上轮可能被中断：'
+        + '请结合上面的「两级一致性」判断 L2 是否落后、是否需要补跑。');
     }
     if(verdict === 'l1_ahead'){
       warns.push('L2 落后 L1 ' + (con.inputs_delta ?? '?') + ' 个输入（L1 于 '
