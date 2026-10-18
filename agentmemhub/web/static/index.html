@@ -623,6 +623,11 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
           <button id="opsTriggerBtn" class="wk-act">手动触发检测</button>
         </div>
         <div id="opsHealth" class="mt-3 grid grid-cols-2 gap-2 text-xs lg:grid-cols-4"></div>
+        <!-- 任务进行中：明确"数据是更新前快照"，否则会误读成「L2 还落后」 -->
+        <div id="opsJobState" class="mt-2 hidden items-center gap-1.5 rounded-md bg-info-soft px-2.5 py-1.5 text-[11px] text-info">
+          <i data-lucide="loader-circle" class="h-3 w-3 shrink-0 animate-spin"></i>
+          <span id="opsJobText"></span>
+        </div>
         <div id="opsWarn" class="mt-2 hidden rounded-md bg-warning-soft px-2.5 py-1.5 text-[11px] text-warning"></div>
       </div>
 
@@ -939,6 +944,10 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     bindTrendDrag();
     updateSummary();
     initMemTab();                       // 记忆报表页：索引状态 + 筛选 chips + 事件 + 首次加载
+    // **刷新页面后要能接上"正在跑的任务"**：否则用户刷新一次就再也看不到进度
+    // （进度条只在 adminSubmit 后才开始轮询；2026-10-18 实测反馈）。
+    // 没有运行中的任务时 adminPoll 会立刻返回，无副作用。
+    adminPoll();
     switchTab(location.hash==='#wiki' ? 'wiki'
               : (location.hash==='#memories' ? 'memories' : 'convs'));
     reicons();
@@ -1508,6 +1517,33 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     $('#wkTabOps').classList.toggle('active', ops);
     if(ops && !OPS.loaded) loadOps();
     reicons();
+  }
+
+  // 任务状态同步到运维页：运行中 → 顶部状态条 + 数据区降透明 + 禁用启动类按钮。
+  // 为什么需要它：运维页的数据是**任务开始前**的快照，不标注的话"L2 落后 / 待更新
+  // N 条"会被误读成"点了没效果"（2026-10-18 用户实测反馈）。
+  function opsSyncJob(j){
+    OPS.job = j || null;
+    const running = !!(j && j.status === 'running');
+    ['#opsUpdateBtn','#opsRetryBtn','#opsBatchRunBtn','#opsTriggerBtn'].forEach(sel=>{
+      const b = $(sel); if(b) b.disabled = running;
+    });
+    const box = $('#opsJobState');
+    if(box){
+      if(!running){
+        box.classList.add('hidden'); box.classList.remove('flex');
+      }else{
+        const secs = Math.max(0, Math.round(Date.now()/1000 - (j.startedAt || Date.now()/1000)));
+        $('#opsJobText').textContent = (j.name || '任务') + ' 进行中 · 已 ' + secs
+          + ' 秒 —— 下方数据是更新开始前的快照，完成后会自动刷新；'
+          + '实时日志见页面顶部那条进度条';
+        box.classList.remove('hidden'); box.classList.add('flex');
+      }
+    }
+    const h = $('#opsHealth');
+    if(h) h.classList.toggle('opacity-60', running);
+    const p = $('#opsPendingList');
+    if(p) p.classList.toggle('opacity-60', running);
   }
 
   // ---- 动作 ----
@@ -2210,6 +2246,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       }catch(e){ err=e.message||'网络异常'; }
       if(seq!==pollSeq) return;
       try{ adminRender(j); }catch(e){ /* 渲染异常不中断轮询（自愈到终态） */ }
+      try{ opsSyncJob(j); }catch(e){ /* 同步到运维页失败不中断轮询 */ }
       if(!j || j.status!=='running'){  // 无任务或已到终态（done/error）
         if(!err) $('#adminJobWarn').classList.add('hidden');
         if(j && (j.name||'').includes('提取') && j.status==='done'){

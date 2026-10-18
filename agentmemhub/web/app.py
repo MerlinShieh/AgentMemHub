@@ -464,6 +464,60 @@ def _logged_task(name: str, fn) -> Any:
     return _do
 
 
+def _tail_wiki_log(emit, stop) -> None:
+    """把 `logs/wiki.log` 的新增进度事件实时 emit 出去（供长任务显示日志）。
+
+    为什么用 tail 而不是给下层加回调（2026-10-18 实测确认）：
+      · `wiki_compile` / `wiki_aggregate` 的进度**只写审计流**（`logs/wiki.log` 的
+        `progress` / `run_start` / `run_end` 事件），没有 `on_progress` 参数；
+      · `wiki.update(on_progress=...)` 这个参数**收了却从没调用过**（签名有、体内零调用点）。
+    与其为"一次展示"去改两个核心脚本模块，不如读它们**本来就在写的**权威流水 ——
+    日志是既有的事实来源，任务日志与它同源也不会出现两套进度口径。
+
+    `stop` 是 `threading.Event`：任务结束后置位，tail 线程自己退出。
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    from agentmemhub.logs import log_dir
+
+    p = _Path(log_dir()) / "wiki.log"
+    try:
+        off = p.stat().st_size if p.exists() else 0
+    except OSError:
+        off = 0
+    while not stop.wait(1.0):
+        try:
+            if not p.exists():
+                continue
+            if p.stat().st_size <= off:
+                continue
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(off)
+                chunk = f.read()
+                off = f.tell()
+        except OSError:
+            continue
+        for line in chunk.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = _json.loads(line)
+            except ValueError:
+                continue
+            ev = str(d.get("event") or "")
+            if ev == "progress":
+                msg = str(d.get("message") or "").strip()
+                if msg:
+                    emit(msg)
+            elif ev in ("run_start", "run_end", "run_aborted"):
+                emit("[%s] %s" % (ev, _json.dumps(
+                    {k: v for k, v in d.items()
+                     if k not in ("ts", "event", "module", "line", "level")},
+                    ensure_ascii=False)[:200]))
+
+
 def _conv_to_dict(c: Any, *, excl_map: Optional[dict] = None) -> dict[str, Any]:
     """conversations row → 前端 camelCase 契约字段。
 
@@ -1481,7 +1535,18 @@ def create_app(db_path: Path | None = None):
         # （此前前端没接，这条路径从没被真实调用过，测试也覆盖不到）。
         def _run(emit, _meta):
             import json as _json
-            r = wiki.update(l1_dir=l1, l2_dir=l2, db=db, workers=workers)
+            import threading
+            emit("[i] 开始增量更新：L1=%s / L2=%s" % (l1, l2))
+            # 进度来自 `logs/wiki.log`（下层只写审计流、没有回调参数，见 `_tail_wiki_log`）
+            stop = threading.Event()
+            th = threading.Thread(target=_tail_wiki_log, args=(emit, stop),
+                                  daemon=True)
+            th.start()
+            try:
+                r = wiki.update(l1_dir=l1, l2_dir=l2, db=db, workers=workers)
+            finally:
+                stop.set()
+                th.join(timeout=2)
             emit(_json.dumps(r, ensure_ascii=False, default=str))
             return "增量更新结束"
 
@@ -1558,7 +1623,17 @@ def create_app(db_path: Path | None = None):
 
         def _run(emit, _meta):      # 同 `api_wiki_update`：tasks.submit 契约是 (emit, meta)
             import json as _json
-            r = batch_ops.run(deadline_s=deadline, offline_plan=offline_plan)
+            import threading
+            emit("[i] 推进离线批处理（状态机自判段位）…")
+            stop = threading.Event()
+            th = threading.Thread(target=_tail_wiki_log, args=(emit, stop),
+                                  daemon=True)
+            th.start()
+            try:
+                r = batch_ops.run(deadline_s=deadline, offline_plan=offline_plan)
+            finally:
+                stop.set()
+                th.join(timeout=2)
             emit(_json.dumps(r, ensure_ascii=False, default=str))
             return "离线批处理推进结束"
 

@@ -89,3 +89,75 @@ def test_任务函数签名不对时_接口会把它暴露出来(client, monkeyp
     r = c.post("/api/wiki/update?l1=A&l2=B")
     # 签名正确 ⇒ 200；写错的话这里会是 500（TestClient 默认不抛，看状态码）
     assert r.status_code == 200, r.text
+
+
+# ---------------------------------------------------------------------------
+# 任务必须有可见输出（2026-10-18 用户反馈："一直 loading，看不到运行日志"）
+# ---------------------------------------------------------------------------
+
+def test_增量更新_任务一开始就emit可见行(tmp_path, monkeypatch):
+    """任务不能"提交完就静默" —— 至少要有"开始"与最终结果两行。
+
+    背景：`wiki.update(on_progress=…)` 这个参数**收了却从没调用**，下层
+    （`wiki_compile` / `wiki_aggregate`）的进度只写 `logs/wiki.log`、没有回调参数。
+    所以任务输出一度为 0 行 —— 用户只能看到一个转圈的"任务运行中"。
+    """
+    from agentmemhub import wiki
+    from agentmemhub.web import tasks as t
+    from agentmemhub.web.app import create_app
+
+    got: list = []
+
+    def _submit(name, fn):
+        buf: list = []
+        fn(buf.append, {"id": "j", "name": name})
+        got.extend(str(x) for x in buf)
+        return {"id": "j", "name": name, "status": "done"}
+
+    monkeypatch.setattr(t, "submit", _submit)
+    monkeypatch.setattr(wiki, "update", lambda **kw: {"updated": True})
+    c = TestClient(create_app(tmp_path / "admin.db"))
+    r = c.post("/api/wiki/update?l1=A&l2=B")
+    assert r.status_code == 200, r.text
+    assert any("开始增量更新" in x for x in got), got
+    assert any('"updated"' in x for x in got), got
+
+
+def test_tail_wiki_log_把progress事件转成任务输出(tmp_path, monkeypatch):
+    """`_tail_wiki_log`：把 `logs/wiki.log` 的新增进度实时 emit 出去。
+
+    这正是"看不到日志"的解法 —— 下层本来就在写权威流水，读它即可，
+    不必为展示去改两个核心脚本模块。
+    """
+    import json as _json
+    import threading
+    import time
+
+    from agentmemhub import logs as logs_mod
+    from agentmemhub.web.app import _tail_wiki_log
+
+    monkeypatch.setattr(logs_mod, "log_dir", lambda: tmp_path)
+    p = tmp_path / "wiki.log"
+    p.write_text("", encoding="utf-8")
+
+    got: list = []
+    stop = threading.Event()
+    th = threading.Thread(target=_tail_wiki_log, args=(got.append, stop), daemon=True)
+    th.start()
+    time.sleep(0.2)                     # 让 tail 先记下初始 offset
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(_json.dumps({"event": "progress",
+                             "message": "   [分批 2/6] 40 条…"},
+                            ensure_ascii=False) + "\n")
+        f.write(_json.dumps({"event": "run_start", "script": "wiki_compile"},
+                            ensure_ascii=False) + "\n")
+    for _ in range(40):
+        if len(got) >= 2:
+            break
+        time.sleep(0.1)
+    stop.set()
+    th.join(timeout=3)
+    joined = "\n".join(str(x) for x in got)
+    assert "分批 2/6" in joined, got
+    assert "[run_start]" in joined, got
+
