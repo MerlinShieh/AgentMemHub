@@ -1449,7 +1449,12 @@ def finalize_outputs(out: Path, by_domain_pages: dict[str, list[dict]], *,
         scope_pages=scope_pages)
     if status is not None:
         status["written_domains"] = [n for n, _ in results]
+        # `pages_by_domain` 是**合并后的域总页数**（页级增量下保留页也算在内）——
+        # manifest 与顶层索引要的是这个口径。
         status["pages_by_domain"] = {n: len(ps) for n, ps in results}
+        # **本轮真正编译了多少页**：页级增量下它与"域总页数"不再相等，混用会把
+        # "只编 2 页"报成"重编 203 页"（2026-10-19 实测，会让人以为优化没生效）。
+        status["recompiled_pages"] = sum(len(v) for v in by_domain_pages.values())
         status["skipped_domains"] = list(skipped_names)
     if skipped_names:
         print("  共跳过 %d 个域（保持上一轮产物、下轮自动重试）：%s"
@@ -2038,7 +2043,10 @@ def run(args) -> None:
                                partial=partial, fl=fl, dom_file=dom_file,
                                args=args, pages=pages, status=status,
                                scope_pages=getattr(args, "scope_pages", None))
-    n_pages = sum(len(p) for _, p in results)
+    # 报**本轮真正编译的页数**，不是合并后的域总页数：页级增量下两者不同
+    # （2026-10-19 实测：只编 2 页，却因合并结果报成 203 页）。
+    # 域总页数看 `status["pages_by_domain"]`。
+    n_pages = sum(len(v) for v in by_domain_pages.values())
     print("\n完成：%d 域 / %d 页，用时 %.0fs" % (len(results), n_pages, time.time() - t0))
     print(_usage_report("第二级"))
     print()
