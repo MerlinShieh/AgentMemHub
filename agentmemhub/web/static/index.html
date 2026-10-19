@@ -1380,7 +1380,15 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       </div>`).join('');
 
     const warns = [];
-    if(ip.running){
+    if(ip.stale){
+      // 陈旧标记（进程被强杀留下的）—— **不是正在跑**。2026-10-19 实测：标记从
+      // 10-15 挂到 10-19（3.8 天），面板一直显示"更新进行中"，用户以为还在跑。
+      const hrs = Math.round((ip.elapsed_seconds || 0) / 3600);
+      warns.push('上次 wiki 更新**异常退出**（开始于 ' + (ip.started_at || '?')
+        + '，已 ' + hrs + ' 小时没收尾）—— 这不是正在运行，也不会阻塞新更新'
+        + '（互斥是 logs/wiki_update.lock，3 小时自动过期）。请结合上面的'
+        + '「两级一致性」判断是否需要补跑；下一次更新会自动清掉这个标记。');
+    } else if(ip.running){
       const hrs = Math.round((ip.elapsed_seconds || 0) / 3600);
       // ⚠️ 这里**不能**说"锁没释放、后续更新会被拒" —— `update_started_at` 只是
       // **展示标记**，真正的互斥是 `logs/wiki_update.lock`（文件锁，3 小时自动视为

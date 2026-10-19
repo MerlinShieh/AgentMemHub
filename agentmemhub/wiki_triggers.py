@@ -57,6 +57,15 @@ _RUN_LOCK = threading.Lock()
 #: 超过即视为失效锁 —— 崩溃残留不能永久挡住 wiki 更新。
 _LOCK_MAX_AGE = 3 * 3600
 
+#: 「更新进行中」标记的**陈旧阈值**（秒）：超过它就判定为"上一轮异常退出"。
+#: 为什么需要：`update_started_at` 是**展示标记**，进程被强杀 / 断电时收尾代码
+#: 没机会跑，标记会一直留着 —— 面板就永远显示"更新进行中"。2026-10-19 实测：
+#: 标记从 10-15 挂到 10-19（**3.8 天**），用户以为还在跑。
+#: 取 6 小时：正常一轮最长也就几小时（实测含睡眠的极端轮 9.9 小时，但那是机器
+#: 休眠、`elapsed_seconds` 按墙钟算 —— 这种情况宁可误判成"异常退出"，也不该让
+#: 面板一直说"正在更新"）。
+_STALE_UPDATE_SECONDS = 6 * 3600
+
 
 #: 触发状态文件与单飞锁的**真实路径**：惰性派生自 `logs.log_dir()`。
 #:
@@ -787,7 +796,7 @@ def status() -> dict[str, Any]:
     # （实测 4.5 分钟），期间标记还没打上。没有这一项，外部看到 `run_end` 就查
     # 状态只会看到上一轮的标记，极易误判成"标记没打上/卡住了"（2026-09-26 实测）。
     started = state.get("update_started_at")
-    in_progress: dict[str, Any] = {"running": False}
+    in_progress: dict[str, Any] = {"running": False, "stale": False}
     if started:
         elapsed = None
         try:
@@ -795,11 +804,21 @@ def status() -> dict[str, Any]:
                              - datetime.fromisoformat(str(started))).total_seconds(), 1)
         except Exception:                   # noqa: BLE001 —— 格式坏就当算不出
             pass
+        # **陈旧标记不算「正在跑」**：进程被强杀 / 断电时收尾代码没机会执行，
+        # 标记会一直留着 —— 面板就永远显示"更新进行中"。2026-10-19 实测：标记从
+        # 10-15 挂到 10-19（3.8 天），用户一直以为还在更新。判据见
+        # `_STALE_UPDATE_SECONDS`。
+        stale = bool(elapsed is not None and elapsed > _STALE_UPDATE_SECONDS)
         in_progress = {
-            "running": True, "started_at": started, "hook": state.get("last_hook"),
+            "running": not stale,
+            "stale": stale,
+            "started_at": started, "hook": state.get("last_hook"),
             "elapsed_seconds": elapsed,
-            "note": ("更新进行中（含最后的页面投影）；若该值长期不变，说明上一轮"
-                     "异常退出，见 last_error"),
+            "note": (("上一轮更新**异常退出**（开始于 %s，已 %.1f 小时没收尾）—— "
+                      "这不是正在运行；结果以 last_update_at 与 logs/wiki.log 为准"
+                      % (started, (elapsed or 0) / 3600)) if stale else
+                     ("更新进行中（含最后的页面投影）；若该值长期不变，说明上一轮"
+                      "异常退出，见 last_error")),
         }
     return {
         "config": get_effective_config(),

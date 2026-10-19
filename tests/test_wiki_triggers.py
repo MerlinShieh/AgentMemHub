@@ -591,3 +591,32 @@ def test_mark_update_failed_留痕并清进行中(_tmp_state):
     st = json.loads(_tmp_state.read_text(encoding="utf-8"))
     assert "update_started_at" not in st, "失败不能留下「进行中」（否则面板永远显示在跑）"
     assert st.get("last_error_at") and "编译炸了" in (st.get("last_error") or "")
+
+
+def test_status_陈旧进行中标记判为异常退出(_tmp_state, monkeypatch):
+    """进程被强杀会留下 `update_started_at` —— 不能让面板永远显示"正在更新"。
+
+    2026-10-19 实测：标记从 10-15 挂到 10-19（**3.8 天**），用户一直以为还在跑。
+    """
+    from datetime import timedelta
+
+    monkeypatch.setattr(wiki_triggers, "_configured", lambda: False)
+    old = (datetime.now() - timedelta(hours=8)).isoformat(timespec="seconds")
+    wiki_triggers._save_state({"update_started_at": old, "last_hook": "write"})
+
+    ip = wiki_triggers.status()["in_progress"]
+    assert ip["stale"] is True
+    assert ip["running"] is False, "陈旧标记不能算「正在跑」"
+    assert "异常退出" in ip["note"]
+
+
+def test_status_新鲜进行中标记仍判为在跑(_tmp_state, monkeypatch):
+    """阈值内（6 小时）的标记照旧算"进行中" —— 别把正常长任务误判成崩溃残留。"""
+    from datetime import timedelta
+
+    monkeypatch.setattr(wiki_triggers, "_configured", lambda: False)
+    fresh = (datetime.now() - timedelta(minutes=5)).isoformat(timespec="seconds")
+    wiki_triggers._save_state({"update_started_at": fresh, "last_hook": "manual"})
+
+    ip = wiki_triggers.status()["in_progress"]
+    assert ip["running"] is True and ip["stale"] is False
