@@ -456,11 +456,19 @@ def _verify_links(l2: Path | str) -> dict[str, Any]:
         r = {"ok": False, "available": False, "total_targets": 0,
              "total_links": 0, "items": [],
              "error": "%s: %s" % (type(e).__name__, str(e)[:160])}
-    _audit({"event": "link_check", "ok": bool(r.get("ok")),
-            "available": bool(r.get("available")),
+    avail = bool(r.get("available"))
+    # **「没验成」不是「失败」，日志等级也不能变 error**：`available=False`（Obsidian
+    # 没运行 / CLI 没注册）时若把 `error` 字段填上，标准头会自动判成 error 级 ——
+    # 于是每轮更新都刷一条 `link_check error: Obsidian 未在运行`（2026-10-19 实测），
+    # 是**假告警**。项目教训：假告警比漏报更伤（见 AGENTS.md 的"四次僵尸键"）。
+    _audit({"event": "link_check",
+            "ok": bool(r.get("ok")) if avail else True,
+            "available": avail,
             "unresolved_targets": r.get("total_targets"),
             "unresolved_links": r.get("total_links"),
-            "error": r.get("error", "")})
+            "error": (r.get("error") or "") if avail else "",
+            "note": ("" if avail else
+                     "未验成（Obsidian 未运行 / CLI 不可用），不是失败")})
     return r
 
 

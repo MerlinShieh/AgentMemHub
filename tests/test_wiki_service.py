@@ -1114,3 +1114,32 @@ def test_全量离线不该被没有脏域挡住(tmp_path, monkeypatch):
     assert seen.get("called"), \
         "全量 + 离线必须走到聚合层（不能被'没有脏域'挡住）"
 
+
+def test_链接验收未验成不算失败_日志不判error(tmp_path, monkeypatch):
+    """`available=False`（Obsidian 没运行）是「**没验成**」不是「失败」。
+
+    2026-10-19 实测：每轮更新都在 `logs/wiki.log` 里留一条
+    `link_check error: Obsidian 未在运行` —— 这是**假告警**。项目教训是
+    "假告警比漏报更伤"（见 AGENTS.md 四次僵尸键），所以等级必须是 info：
+    把 unavailable 的信息放 `note`、`error` 留空，标准头就不会判 error。
+    """
+    import json as _json
+
+    from agentmemhub import logs
+    monkeypatch.setattr(
+        "agentmemhub.obsidian.verify",
+        lambda **kw: {"ok": False, "available": False, "total_targets": 0,
+                      "total_links": 0, "items": [],
+                      "error": "Obsidian 未在运行（不自动启动它）"})
+
+    r = wiki._verify_links(tmp_path)
+
+    assert r["available"] is False and "Obsidian" in r["error"], \
+        "返回值保持原样（对外契约不变）"
+    p = logs.log_dir() / "wiki.log"
+    rows = [_json.loads(x) for x in p.read_text(encoding="utf-8").splitlines()
+            if x.strip()]
+    last = [x for x in rows if x.get("event") == "link_check"][-1]
+    assert last["level"] != "error", "没验成不该判 error（假告警比漏报更伤）"
+    assert last.get("note"), "要说明『未验成』，别留空让人猜"
+

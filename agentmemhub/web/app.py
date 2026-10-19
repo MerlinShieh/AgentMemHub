@@ -1564,6 +1564,8 @@ def create_app(db_path: Path | None = None):
         def _run(emit, _meta):
             import json as _json
             import threading
+
+            from agentmemhub import wiki_triggers
             emit("[i] 开始增量更新：L1=%s / L2=%s" % (l1, l2))
             # 进度来自 `logs/wiki.log`（下层只写审计流、没有回调参数，见 `_tail_wiki_log`）
             stop = threading.Event()
@@ -1572,11 +1574,23 @@ def create_app(db_path: Path | None = None):
                 args=(emit, stop, (_meta or {}).get("id", "")),
                 daemon=True)
             th.start()
+            # 状态文件留痕：此前面板/CLI 直调 `wiki.update()` **完全不留痕**，
+            # 「上次更新」一直显示上一轮（2026-10-19 实测：当天跑过，仍是 10-15）。
+            # 标记与触发器路径共用同一套函数（`wiki_triggers.mark_update_*`）。
+            wiki_triggers.mark_update_started("manual")
+            r: dict = {}
             try:
                 r = wiki.update(l1_dir=l1, l2_dir=l2, db=db, workers=workers)
+            except Exception as e:              # noqa: BLE001 —— 留痕后原样抛给任务层
+                wiki_triggers.mark_update_failed(e)
+                raise
             finally:
                 stop.set()
                 th.join(timeout=2)
+            # 只有**真的更新了**才刷新 `last_update_at`（空跑不算，否则触发器
+            # 会误判"今天已经更新过"而跳过当天真正需要的更新）
+            wiki_triggers.mark_update_finished(
+                hook="manual", updated=bool((r or {}).get("updated")))
             emit(_json.dumps(r, ensure_ascii=False, default=str))
             return "增量更新结束"
 

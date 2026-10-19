@@ -158,7 +158,7 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 | `run_aborted` | wiki.log | `script="wiki_aggregate"`、`stage="l2"`、`reason`、`degraded`、`tasks`、`missing`、`domains` | 写盘前的中止闸触发 → **本轮完全不写盘**（`level=error`，属错误事件表）。`reason` 两个取值：`degrade_ratio`（降级页占比超阈值）/ `domain_missing`（全量重建时**有域整域没产出**，见 `_domain_missing_abort`） | 上游 LLM 故障或不完整的判据；旧产物与旧基线都保留，下次写入自动重试 |
 | `run_end` | wiki.log | `script`、`ok` / `failed`（L1）或 `domains`（L2）、`pages`、`skipped`、`seconds`、`call_seconds`、`usage` | 一轮结束汇总 | 花了多少 token / 钱；`seconds` 是**墙钟**（机器休眠会撑大）、`call_seconds` 是**累计调用耗时**（真实在等 LLM 的时间），两者并列防误判 |
 | `manifest` | wiki.log | `script`、`stage`（`l1` / `l2`）、`n_inputs`、`domains`（L2） | 编译清单（`manifest_l1.json` / `manifest_l2.json`）已写 | 与 `align` 的 diff 锚点；没有它，"库改了什么"无从得知 |
-| `link_check` | wiki.log | `ok`、`available`、`unresolved_targets`、`unresolved_links`、`error` | Obsidian 权威口径的产物链接验收 | `[[…]]` 是否点得开；`available=False` 表示**没法验**（不是失败），`ok=True` 才是唯一通过标准 |
+| `link_check` | wiki.log | `ok`、`available`、`unresolved_targets`、`unresolved_links`、`error`、`note` | Obsidian 权威口径的产物链接验收 | `[[…]]` 是否点得开；`available=False` 表示**没法验**（不是失败），`ok=True` 才是唯一通过标准。**未验成时 `error` 留空、原因放 `note`、`ok=True`** —— 否则标准头自动判 `error` 级，每轮更新都刷一条假告警（2026-10-19 修） |
 | `page_index` | wiki.log | `ok`、`seconds`、`pages`、`inserted`、`updated`、`removed`、`skipped_empty`、`error` | 页面层投影进召回面（L2 知识页 → `units`） | 收尾那段长空窗期的判断依据（实测 466 页要投 4.5 分钟，此前误判成"卡住/标记没打上"） |
 | `trigger_check` | wiki.log | `hook`（`write` / `manual`）、`should_run`、`reasons[]`、`due_slots[]`、`dirty`、`last_update_at` | 触发器判定结果，**不跑也记** | 回答"某次为什么触发 / 为什么没触发"，不必靠 `fired` 记录反推 |
 | `trigger_skip` | wiki.log | `hook`、`message` | 单飞行锁没拿到（可能来自其它进程），本次跳过 | 区分"没触发"与"被跳过"（并发时"本次没跑"此前完全查不到） |

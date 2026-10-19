@@ -389,6 +389,38 @@ def _mark_fired(state: dict[str, Any], now: datetime, due_slots: list[str],
     _save_state(state)
 
 
+# ── 给「不经触发器、直接调 `wiki.update()`」的入口用（面板 / CLI）──────────
+# 此前两个标记只打在触发器路径上，直调 `wiki.update()` 的入口**完全不留痕**：
+# 状态文件里的 `update_started_at` / `last_update_at` 停在上一轮，面板「上次更新」
+# 显示的是很久以前的时间（2026-10-19 实测：当天明明跑过一轮，文件里还是 10-15）。
+# 标记必须与触发路径**共用同一套函数**，否则就是"状态说没跑过、产物刚更新"。
+
+
+def mark_update_started(hook: str = "manual") -> None:
+    """直接调用 `wiki.update()` 的入口：标记「更新已开始」。"""
+    _mark_started(datetime.now(), hook)
+
+
+def mark_update_finished(*, hook: str = "manual", updated: bool = True) -> None:
+    """直接调用 `wiki.update()` 的入口：标记收工。
+
+    `updated=False`（库未变化 / 没有可定位的脏会话）时**只清「进行中」，绝不
+    刷新 `last_update_at`** —— 那个字段是触发器判「今天是否已经更新过」的依据，
+    点一次空跑就写上，会让当天真正需要的更新被跳过。
+    """
+    if updated:
+        _mark_fired(_load_state(), datetime.now(), [], hook)
+        return
+    st = _load_state()
+    st.pop("update_started_at", None)
+    _save_state(st)
+
+
+def mark_update_failed(err: object) -> None:
+    """直接调用 `wiki.update()` 的入口：失败留痕 + 清「进行中」。"""
+    _mark_failed(str(err))
+
+
 # ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------

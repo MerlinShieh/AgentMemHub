@@ -547,3 +547,47 @@ def test_wiki总开关能真正拦住自动更新(monkeypatch):
     except Exception:                       # noqa: BLE001
         pass
     assert called == [1], "--force 是手动补跑通道，必须绕过总开关"
+
+
+# ---------------------------------------------------------------------------
+# 直调入口的标记（面板 / CLI 不经触发器时也要留痕）
+#
+# 2026-10-19 实测：当天明明跑过一轮增量，状态文件里的 `update_started_at` /
+# `last_update_at` 还停在 10-15 —— 因为标记只打在触发器路径上，面板和 CLI
+# 直调 `wiki.update()` **完全不留痕**，面板「上次更新」一直显示旧时间。
+# 修法是让三个入口共用同一套 mark 函数（`wiki_triggers.mark_update_*`）。
+# ---------------------------------------------------------------------------
+
+def test_mark_update_started_直调入口也留痕(_tmp_state):
+    wiki_triggers.mark_update_started("manual")
+    st = json.loads(_tmp_state.read_text(encoding="utf-8"))
+    assert st.get("update_started_at"), "直调也要标「进行中」"
+    assert st.get("last_hook") == "manual"
+
+
+def test_mark_update_finished_空跑不刷last_update_at(_tmp_state):
+    """库未变化 / 没有可定位的脏会话时**只清「进行中」**，不写 last_update_at。
+
+    写上的话触发器会以为"今天已经更新过"，导致当天真正需要的更新被跳过。
+    """
+    wiki_triggers.mark_update_started("manual")
+    wiki_triggers.mark_update_finished(hook="manual", updated=False)
+    st = json.loads(_tmp_state.read_text(encoding="utf-8"))
+    assert "update_started_at" not in st, "空跑也要清掉「进行中」"
+    assert "last_update_at" not in st, "空跑不能冒充『今天已更新』"
+
+
+def test_mark_update_finished_真更新才刷last_update_at(_tmp_state):
+    wiki_triggers.mark_update_started("manual")
+    wiki_triggers.mark_update_finished(hook="manual", updated=True)
+    st = json.loads(_tmp_state.read_text(encoding="utf-8"))
+    assert "update_started_at" not in st
+    assert st.get("last_update_at"), "真更新要刷新「上次更新」"
+
+
+def test_mark_update_failed_留痕并清进行中(_tmp_state):
+    wiki_triggers.mark_update_started("manual")
+    wiki_triggers.mark_update_failed(RuntimeError("编译炸了"))
+    st = json.loads(_tmp_state.read_text(encoding="utf-8"))
+    assert "update_started_at" not in st, "失败不能留下「进行中」（否则面板永远显示在跑）"
+    assert st.get("last_error_at") and "编译炸了" in (st.get("last_error") or "")

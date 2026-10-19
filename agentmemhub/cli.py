@@ -1068,8 +1068,19 @@ def cmd_wiki(args) -> int:
             print("增量更新需要 --l1（第一级产出目录）与 --l2（第二级产出目录）")
             return 2
         import json as _j
-        res = wiki.update(l1_dir=args.l1, l2_dir=args.l2, db=args.db,
-                          workers=args.workers)
+
+        from agentmemhub import wiki_triggers
+        # 状态文件留痕：CLI 直调与面板、触发器共用同一套标记（详见
+        # `wiki_triggers.mark_update_started` 的注释）
+        wiki_triggers.mark_update_started("manual")
+        try:
+            res = wiki.update(l1_dir=args.l1, l2_dir=args.l2, db=args.db,
+                              workers=args.workers)
+        except Exception as e:                  # noqa: BLE001 —— 留痕后原样抛出
+            wiki_triggers.mark_update_failed(e)
+            raise
+        wiki_triggers.mark_update_finished(
+            hook="manual", updated=bool((res or {}).get("updated")))
         print(_j.dumps(res, ensure_ascii=False, indent=2, default=str))
         return 0
 
