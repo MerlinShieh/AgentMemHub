@@ -514,10 +514,16 @@ def _l2_page_scope(*, l2: Path | str, dir_of: dict[str, str],
             if frm & touched:
                 affected.add(mf.name)
                 members |= frm
-        if not affected or not members:
-            continue                        # 定位不到 → 该域整域重编（保守）
         # 该域的新 L1 文件也参与本轮，否则新页无处安置、下轮又得重来
-        members |= (new_files & set(domain_map.get(n) or []))
+        new_here = new_files & set(domain_map.get(n) or [])
+        if not affected and not new_here:
+            continue                        # 定位不到 → 该域整域重编（保守）
+        members |= new_here
+        if not members:
+            continue
+        # `affected` **可以是空集**：本域只有新页、没有旧页要替换 —— 写盘侧会保留
+        # 全部旧页、只追加新页。**分桶后的第一轮正是这种情形**（新桶文件是全新的，
+        # 任何旧页都还没引用它）；漏掉这条就会退回整域重编，等于没优化。
         scope_pages[n] = affected
         scope_members[n] = members
     return scope_pages, scope_members

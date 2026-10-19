@@ -98,3 +98,23 @@ def test_域索引文件不算页(tmp_path):
         domain_map={"域A": ["mcp__a.md"]})
 
     assert sp == {"域A": {"001-甲.md"}}
+
+
+def test_只有新L1文件时也收该域_scope为空集只新增(tmp_path):
+    """分桶后的第一轮：新桶文件是全新的，任何旧页都还没引用它。
+
+    若这里判成"定位不到"而退回整域重编，分桶带来的收益会被整域重编吃掉。
+    正确行为是：**收下该域、scope 为空集** —— 写盘侧保留全部旧页、只追加新页。
+    """
+    d = tmp_path / "01-域A"
+    d.mkdir()
+    _mk_page(d, "001-甲.md", ["mcp__a.md"])
+
+    sp, sm = _l2_page_scope(
+        l2=tmp_path, dir_of={"域A": "01-域A"},
+        touched={"mcp__direct-2026-10-19.md"},
+        new_files={"mcp__direct-2026-10-19.md"},
+        domain_map={"域A": ["mcp__a.md", "mcp__direct-2026-10-19.md"]})
+
+    assert sp == {"域A": set()}, "没有旧页要替换 → scope 是空集（只追加）"
+    assert sm == {"域A": {"mcp__direct-2026-10-19.md"}}
