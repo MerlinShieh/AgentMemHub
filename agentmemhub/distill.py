@@ -763,11 +763,52 @@ def save_memories(idx: sqlite3.Connection, sl: Slice, result: DistillResult,
     return {"inserted": inserted, "sanitized": sanitized, "dropped": dropped}
 
 
+#: Agent 直写记忆的默认分桶策略（`distillation.direct_bucket` 可覆盖）
+DIRECT_BUCKET_DEFAULT = "daily"
+
+#: 分桶关闭时的固定会话名（历史口径，仅排障/回退用）
+DIRECT_SESSION_SINGLE = "direct"
+
+
+def _direct_bucket(ts: float, bucket: str | None = None) -> str:
+    """Agent 直写记忆的虚拟会话名 —— **按自然日分桶**。
+
+    背景（2026-10-19 实测）：`memory_save` 直写的记忆此前全部归入固定的
+    `direct` 会话，已积累 210 条 / **84 个 L1 页**。而 L1 编译的**脏单位是
+    会话**：任何一条新记忆都会让整个 `direct` 变脏 → 每轮增量都要重编全部
+    84 页，再连带触发 3 个域共 **270 个 L2 页**重编。12 条新增记忆跑近 1 小时，
+    放大近 30 倍，且开销随记忆总量**线性增长**（越用越慢）。
+
+    分桶后新记忆进 `direct-YYYY-MM-DD`，一轮增量只重编当天那个桶（几十条 →
+    3~5 页）。**编译逻辑一字未改**（仍是整会话重编），只是会话说小了；跨天的
+    同主题记忆仍会在 L2 域聚合时合并到同一页，因此**不损失合并机会**。
+
+    取值：`daily`（默认）/ `none`（回退单一 `direct` 会话）。未知值一律按
+    默认处理 —— 配置写错不该让记忆写不进去（写入路径必须 fail-open）。
+    """
+    pol = str(bucket or DIRECT_BUCKET_DEFAULT).strip().lower()
+    if pol in ("none", "single", "off", "false", "0"):
+        return DIRECT_SESSION_SINGLE
+    return "%s-%s" % (DIRECT_SESSION_SINGLE,
+                      time.strftime("%Y-%m-%d", time.localtime(ts)))
+
+
+def _direct_bucket_policy() -> str:
+    """从配置读分桶策略（读不到就用默认值，绝不抛 —— 写入路径 fail-open）。"""
+    try:
+        from agentmemhub import config as _hub
+        return str((_hub.config().distillation or {}).get("direct_bucket")
+                   or DIRECT_BUCKET_DEFAULT)
+    except Exception:                           # noqa: BLE001
+        return DIRECT_BUCKET_DEFAULT
+
+
 def save_direct_memory(idx: sqlite3.Connection, *, content: str,
                        type_: str = "fact", confidence: str = "medium",
                        topic: str | None = None, model: str = "",
-                       source: str = "mcp", conversation_id: str = "direct",
+                       source: str = "mcp", conversation_id: str = "",
                        slice_key: str = "", created_at: int | None = None,
+                       bucket: str | None = None,
                        audit_extra: dict | None = None) -> str:
     """Agent 直写记忆落蒸馏表（`memory_save` 的 wiki/报表可见性缺口修复）。
 
@@ -775,10 +816,15 @@ def save_direct_memory(idx: sqlite3.Connection, *, content: str,
     投影），**不进 `distilled_memories`** —— 记忆报表看不见它，wiki 编译输入
     （`status IN ('new','similar')`）更是完全不可见：直写的记忆永远进不了 wiki。
 
-    规格：与 `save_memories` 同口径 —— 脱敏兜底、内容指纹幂等
-    （UNIQUE(source, conversation_id, content_hash)）、归档条目复活。
-    会话语义：全部直写归入一个固定会话（source='mcp' / conversation_id='direct'），
-    wiki L1 按"Agent 主动记忆"这一个会话编译，slice_key 携带 trace_id 可溯源。
+    规格：与 `save_memories` 同口径 —— 脱敏兜底、内容指纹幂等、归档条目复活。
+    会话语义：直写记忆**按自然日分桶**（`direct-YYYY-MM-DD`，见 `_direct_bucket()`），
+    wiki L1 按"当天那个桶"编译，slice_key 携带 trace_id 可溯源。分桶只影响
+    **会话归属**，不影响入库与召回 —— 同一内容仍全局去重一次（见下）。
+
+    幂等：查重范围是 **(source, content_hash)**，**跨分桶**生效。为什么必须跨桶：
+    分桶让同一内容在不同日期落到不同 `conversation_id`，若仍按
+    (source, conversation_id, content_hash) 查，同一条结论隔天再写就会**重复入库**
+    （库里两行、wiki 两处引用）。唯一索引仍是三列（历史口径不动），查重前移即可。
 
     返回 "inserted" | "revived" | "duplicate"；投影不在此处做（units 向量由
     下一次蒸馏的 S4 阶段统一补齐，`_pending_projection` 会捞到 status='new'）。
@@ -797,11 +843,16 @@ def save_direct_memory(idx: sqlite3.Connection, *, content: str,
     ensure_distill_schema(idx)
     h = fingerprint(content)
     ts = int(created_at or time.time())
+    # 会话归属：显式指定优先；否则按 `bucket` 策略分桶（默认按自然日）
+    cid = conversation_id or _direct_bucket(ts, bucket if bucket is not None
+                                            else _direct_bucket_policy())
     with idx:
+        # **跨分桶查重**（理由见 docstring）：只在同会话内查的话，隔天重写同一条
+        # 结论会插第二行 —— 分桶把"同一内容"分散到不同 cid，必须前移到全局口径。
         exist = idx.execute(
             "SELECT id, status FROM distilled_memories"
-            " WHERE source=? AND conversation_id=? AND content_hash=?",
-            (source, conversation_id, h)).fetchone()
+            " WHERE source=? AND content_hash=? ORDER BY id LIMIT 1",
+            (source, h)).fetchone()
         if exist:
             if exist[1] in ("merged", "duplicate"):
                 idx.execute(
@@ -810,13 +861,13 @@ def save_direct_memory(idx: sqlite3.Connection, *, content: str,
                     (type_, confidence, ts, exist[0]))
                 _audit_memory_write(
                     memory_id=exist[0], content=content, content_hash=h,
-                    source=source, conversation_id=conversation_id,
+                    source=source, conversation_id=cid,
                     type_=type_, confidence=confidence, result="revived",
                     slice_key=slice_key, topic=topic, extra=audit_extra)
                 return "revived"
             _audit_memory_write(
                 memory_id=exist[0], content=content, content_hash=h,
-                source=source, conversation_id=conversation_id,
+                source=source, conversation_id=cid,
                 type_=type_, confidence=confidence, result="duplicate",
                 slice_key=slice_key, topic=topic, extra=audit_extra)
             return "duplicate"
@@ -825,11 +876,11 @@ def save_direct_memory(idx: sqlite3.Connection, *, content: str,
             "(source, conversation_id, slice_key, turn_key, type, topic,"
             " content, confidence, status, content_hash, prompt_ver, model,"
             " created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (source, conversation_id, slice_key, None, type_, topic, content,
+            (source, cid, slice_key, None, type_, topic, content,
              confidence, "new", h, PROMPT_VER, model, ts))
         _audit_memory_write(
             memory_id=cur.lastrowid, content=content, content_hash=h,
-            source=source, conversation_id=conversation_id, type_=type_,
+            source=source, conversation_id=cid, type_=type_,
             confidence=confidence, result="inserted", slice_key=slice_key,
             topic=topic, extra=audit_extra)
         return "inserted"

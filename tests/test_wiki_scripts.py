@@ -1071,6 +1071,111 @@ def test_页数崩塌仍走同一条跳过通路(tmp_path, monkeypatch):
     assert "域A" in set(fl.targets("l2-write"))
 
 
+# ---------------------------------------------------------------------------
+# 页级增量（scope_pages）：只替换"输入变了"的 L2 页，其余页原样保留
+#
+# 2026-10-19 动机：12 条新记忆触发 3 个域共 270 个 L2 页重编、单轮近 1 小时。
+# 页级模式把重编量压到"受影响的那几页"，且**未重编的页零漂移**
+# （文件原文搬运、文件名不变、序号不重排 —— 重排会打断已有的 `[[链接]]`）。
+# ---------------------------------------------------------------------------
+
+def _mk_l2_page(d, fname: str, title: str, frm=()) -> None:
+    """造一个"上一轮产物"形态的 L2 页：md + json（json 带 from_files）。"""
+    import json as _json
+    (d / fname).write_text("# %s\n\n正文\n" % title, encoding="utf-8")
+    (d / fname.replace(".md", ".json")).write_text(_json.dumps(
+        {"title": title, "summary": "摘要-%s" % title,
+         "from_files": sorted(frm)}, ensure_ascii=False), encoding="utf-8")
+
+
+def test_页级增量_只替换范围内页_其余原样保留(tmp_path):
+    from agentmemhub.failures import FailureLog
+
+    import wiki_aggregate as wa
+
+    d = tmp_path / "01-域A"
+    d.mkdir()
+    _mk_l2_page(d, "001-旧A.md", "旧A", ["mcp__a.md"])
+    _mk_l2_page(d, "002-旧B.md", "旧B", ["mcp__b.md"])
+    _mk_l2_page(d, "003-旧C.md", "旧C", ["mcp__c.md"])
+    old_a = (d / "001-旧A.md").read_text(encoding="utf-8")
+
+    fl = FailureLog(tmp_path / "failures.jsonl")
+    results, skipped, _ = wa._write_domain_outputs(
+        tmp_path, {"域A": [_write_test_page("新B", "001-新B.md")]},
+        {"域A": "01-域A"}, fl, scope_pages={"域A": {"002-旧B.md"}})
+
+    assert skipped == [] and [n for n, _ in results] == ["域A"]
+    names = sorted(f.name for f in d.glob("*.md"))
+    assert "001-旧A.md" in names, "范围外的旧页不得消失"
+    assert "003-旧C.md" in names
+    assert "002-旧B.md" not in names, "范围内的旧页被本轮产物替换掉"
+    assert (d / "001-旧A.md").read_text(encoding="utf-8") == old_a, \
+        "未重编页必须零漂移（直接搬原文，不重新渲染）"
+    assert len(results[0][1]) == 3, \
+        "要返回合并后的完整页列表（顶层索引与页数都靠它）"
+    idx = (d / "index.md").read_text(encoding="utf-8")
+    assert "旧A" in idx and "旧C" in idx and "新B" in idx, "域索引要涵盖合并后的全部页"
+
+
+def test_页级增量_新页只填空闲序号_不重命名保留页(tmp_path):
+    from agentmemhub.failures import FailureLog
+
+    import wiki_aggregate as wa
+
+    d = tmp_path / "01-域A"
+    d.mkdir()
+    _mk_l2_page(d, "001-旧A.md", "旧A", ["mcp__a.md"])
+    _mk_l2_page(d, "003-旧C.md", "旧C", ["mcp__c.md"])
+
+    fl = FailureLog(tmp_path / "failures.jsonl")
+    results, _, _ = wa._write_domain_outputs(
+        tmp_path, {"域A": [_write_test_page("新B", "001-新B.md")]},
+        {"域A": "01-域A"}, fl, scope_pages={"域A": {"002-旧B.md"}})
+
+    names = sorted(f.name for f in d.glob("*.md") if f.name != "index.md")
+    assert "001-旧A.md" in names and "003-旧C.md" in names, "保留页文件名不变"
+    assert any(n.startswith("002-") for n in names), "新页填 002 这个空闲序号"
+    assert len(results[0][1]) == 3
+
+
+def test_页级增量_页数崩塌按本轮范围判而非整域(tmp_path):
+    from agentmemhub.failures import FailureLog
+
+    import wiki_aggregate as wa
+
+    d = tmp_path / "01-域A"
+    d.mkdir()
+    for i in range(1, 6):
+        _mk_l2_page(d, "%03d-旧%d.md" % (i, i), "旧%d" % i, ["mcp__%d.md" % i])
+
+    before = sorted(f.name for f in d.iterdir())
+    fl = FailureLog(tmp_path / "failures.jsonl")
+    # 范围内 4 页（>= COLLAPSE_MIN_OLD）却只产出 1 页 → 判崩塌、整域不写
+    results, skipped, _ = wa._write_domain_outputs(
+        tmp_path, {"域A": [_write_test_page("仅剩一页", "001-x.md")]},
+        {"域A": "01-域A"}, fl,
+        scope_pages={"域A": {"001-旧1.md", "002-旧2.md",
+                             "003-旧3.md", "004-旧4.md"}})
+
+    assert results == [] and skipped == ["域A"]
+    assert sorted(f.name for f in d.iterdir()) == before, "跳过时磁盘必须完全不动"
+    assert "域A" in set(fl.targets("l2-write"))
+
+
+def test_页级增量_保留页元数据从磁盘json读(tmp_path):
+    import wiki_aggregate as wa
+
+    d = tmp_path / "01-域A"
+    d.mkdir()
+    _mk_l2_page(d, "001-旧A.md", "旧A", ["mcp__a.md"])
+
+    files, pages, used, scope_old = wa._read_kept_pages(d, {"002-旧B.md"})
+    assert files["001-旧A.md"].startswith("# 旧A")
+    assert pages[0]["title"] == "旧A" and pages[0]["summary"] == "摘要-旧A"
+    assert used == {1} and scope_old == 0
+
+
 def test_换入失败不留下tmp与bak垃圾(tmp_path, monkeypatch):
     """失败路径也要收干净：`.tmp_<域>` 就躺在 Obsidian vault 里（实测残留过 153 个文件）。"""
     import wiki_aggregate as wa

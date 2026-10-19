@@ -227,6 +227,57 @@ rag 六路通道召回（kind=page；两阶段召回的第二阶段按 wiki_path
 
 > A2 改动点：第 1、2、3、4 条闸门与剔除逻辑都必须覆盖离线提交路径——提交轮不得刷 manifest、不得跑 linkfix，回读轮才写盘；中止判定要能区分"上游降级"与"结果还没回来"（`PendingError`）。
 
+13. **页级增量绝不改写范围外的页。**`scope_pages` 给出后，写盘只替换那几页，其余页**原样搬运**（`_read_kept_pages()` 读文件原文，不重新 `render_page()`）—— 重新渲染会把没打算动的页顺手改一遍，渲染函数一改就全库漂移。新页只用**空闲序号**，绝不重命名保留页（重命名会打断已有的 `[[链接]]`）。页数崩塌判据在 scope 模式按**本轮范围**算，而不是整域页数（整域数会因为"只编了一部分"必然塌，属于误杀）。
+
+### 3.3 增量粒度：两级收窄（2026-10-19）
+
+增量的**脏单位**决定了单轮成本。这一版把两级都收窄了，背景是实测：**12 条新记忆
+→ L1 重编 84 页 → L2 重编 270 页**，单轮近 1 小时，且开销随知识库规模线性增长
+（越用越慢）。
+
+**第一级：会话分桶（L1）**
+
+`memory_save` 的直写记忆原先全部归入一个固定的虚拟会话 `direct`，实测积累 210 条 /
+84 个 L1 页。L1 的脏单位是**会话**，所以任何一条新记忆都让整会话变脏。现改为按自然日
+分桶 `direct-YYYY-MM-DD`（配置 `distillation.direct_bucket`，`none` 可回退）：
+
+- 新记忆只脏当天那个桶（几十条 → 3~5 页）；
+- **编译逻辑一字未改**（仍是整会话重编），只是会话变小；
+- 查重范围前移到 `(source, content_hash)` —— 否则同一结论隔天再写会因 cid 不同而
+  **重复入库**（唯一索引仍是三列，历史口径不动，查重前移即可）；
+- 跨天的同主题记忆仍由 L2 域聚合合并 ⇒ 这是分桶**不降质量**的关键。
+
+**第二级：页级重编（L2）**
+
+L2 原先把"脏域"整域重编。现在按磁盘页面 json 的 `from_files`（这页由哪些 L1 页合成）
+反查「L1 文件 → L2 页」，**只重编引用了变动 L1 页的那些页**：
+
+- `wiki._l2_page_scope()` 算出 `{域名: {可替换的旧页}}` 与各页的 L1 来源；
+- 聚合层 `_write_domain_outputs(scope_pages=...)` 做**合并写盘**：范围内的旧页被替换，
+  范围外的页原样搬过去（文件原文、文件名、序号都不动），新页只填空闲序号；
+- **定位不到就退回整域重编**（老产物没写 `from_files`、或该域输入已全失效）——
+  宁可多编，不可漏页。
+
+**顺带修掉一个静默缺陷**：manifest 的 `domains[].l1_files` 是"上一次归域"的记录，会与
+磁盘页面的 `from_files` 漂移。实测 `mcp__direct.md` 在 manifest 里只记了 **3 个域**，
+磁盘上却有 **11 个域**引用它 —— 那 8 个域的页面永远进不了增量范围、内容静默过时。
+`_l2_page_scope()` 因此**扫描全部域**（以磁盘为准），并把结果并回 `dirty_domains`。
+
+**量化（真实产物实测）**：
+
+| 变动的 L1 文件 | 受影响 L2 页 |
+| --- | --- |
+| 普通会话（`zcode__opencode-import-…`，13 处引用） | 13 页 / 4 个域 |
+| `mcp__direct.md`（210 条记忆合成的一个巨型文件） | **170 页 / 11 个域** |
+
+分桶后新记忆的 L1 产物是**新文件**，只被少数页引用 ⇒ 日常增量落在"个位数到十几页"，
+而不是整域 270 页。
+
+**质量风险与守门**：页级重编不丢内容（每条记忆仍进某个页；manifest 的 `drop_ids` 仍
+剔除失败输入），但会**少做跨页合并** → 页更多、更碎。守门指标：
+`align.coverage.uncovered` 必须为 0、`manifest.n_inputs` 与库一致、页数增长与新增记忆
+成比例；周期性全量重跑（`--full`）用来压实长期积累的碎片。
+
 ## 4. 配置项
 
 键的合并规则：内置默认（`config.DEFAULT_WIKI`）< `agentmemhub.yaml`；触发规则再多一层 `logs/wiki_trigger_state.json` 的 `overrides`（`get_effective_config()`）。`wiki` 与 `wiki.l2` 的 `llm` 子段是**各自相对顶层 `llm` 的覆盖，互不牵连**（不级联继承）。
@@ -340,7 +391,8 @@ rg '"event": "trigger_check"' logs/wiki.log
 | 测试文件 | 覆盖 |
 | --- | --- |
 | [tests/test_wiki_service.py](../../tests/test_wiki_service.py)（39 个） | `wiki.py`：失败摘要 / 补跑 / `align` 引用反推与 manifest diff / `consistency` 六个分支 / `update` 主流程（脏会话、脏域、L1 全失败跳过 L2、组级失败剔除新基线、空会话删产物、`_l2_skip_ids`） |
-| [tests/test_wiki_scripts.py](../../tests/test_wiki_scripts.py)（51 个） | 两个脚本 + linkfix：`_slug`、`load_pages` 页面识别与序号提升、linkfix 五步解析顺序、分组分批映射、并发与结果重排、`_limits()` / `_l2_cfg()` 配置优先、顶层索引指向 md、`aliases` 渲染、页数崩塌与整轮降级判据、域目录整体换入与失败还原、细分 runner 接缝与 `custom_id` |
+| [tests/test_wiki_scripts.py](../../tests/test_wiki_scripts.py)（55 个） | 两个脚本 + linkfix：`_slug`、`load_pages` 页面识别与序号提升、linkfix 五步解析顺序、分组分批映射、并发与结果重排、`_limits()` / `_l2_cfg()` 配置优先、顶层索引指向 md、`aliases` 渲染、页数崩塌与整轮降级判据、域目录整体换入与失败还原、细分 runner 接缝与 `custom_id`、**页级增量合并写盘**（`scope_pages`）与 `_read_kept_pages()` |
+| [tests/test_wiki_page_scope.py](../../tests/test_wiki_page_scope.py)（5 个） | `_l2_page_scope()`：只收引用变动 L1 文件的页、新 L1 文件并入成员、定位不到退回整域、坏 json 容错、index.md 不算页 |
 | [tests/test_wiki_manifest.py](../../tests/test_wiki_manifest.py)（11 个） | 输入快照口径、指纹走 md5 现算、manifest 读写、diff 的新增/变更/removed 细分/脏会话归属 |
 | [tests/test_wiki_triggers.py](../../tests/test_wiki_triggers.py)（27 个） | 三条规则判定、`overrides` 校验与持久化、写入钩子与手动触发、L1 部分失败不打标记、单飞行（进程内 / 跨进程 / 锁文件异常）、更新起止留痕、`_configured()` 总开关、沙箱熔断 |
 | [tests/test_wiki_index.py](../../tests/test_wiki_index.py)（15 个） | 页面解析、整页投影与全量对齐收敛、幂等、召回层级、来源维度（native/external）、空页面与点目录不入召回面、`aliases` 兼容 |
@@ -356,6 +408,7 @@ rg '"event": "trigger_check"' logs/wiki.log
 | --- | --- |
 | `agentmemhub/wiki.py`（align / update / 闸门 / 投影收尾） | `test_wiki_service.py` + `test_wiki_manifest.py` + `test_snapshot.py` |
 | `scripts/wiki_aggregate.py`（归域/细分/编译/写盘闸） | `test_wiki_scripts.py` |
+| 页级增量（`_l2_page_scope` / `scope_pages` 合并写盘） | `test_wiki_page_scope.py` + `test_wiki_scripts.py` + `test_wiki_service.py` |
 | `scripts/wiki_compile.py`（两段式 / 分批 / `_limits`） | `test_wiki_scripts.py` |
 | `scripts/wiki_linkfix.py` | `test_wiki_scripts.py` + `test_obsidian_cli.py` |
 | `agentmemhub/obsidian.py` | `test_obsidian_cli.py` |

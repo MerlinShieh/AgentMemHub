@@ -1243,9 +1243,65 @@ def _write_domain(out: Path, ddir: Path, files: dict[str, str]) -> str:
         return "%s: %s" % (type(e).__name__, str(e)[:160])
 
 
+def _read_kept_pages(ddir: Path, scope: set[str]) -> tuple[dict[str, str], list[dict],
+                                                           set[int], int]:
+    """读出一个域里**本轮不重编**的旧页（文件原文 + 索引元数据）。
+
+    为什么要读原文而不是重新 `render_page`：保留页的产物就是磁盘上那份，重新渲染
+    会把它**顺手改一遍**（渲染函数一改就全库漂移），而本轮根本没打算动它。
+    原样搬运 = 零漂移。
+
+    返回 `(文件原文, 索引元数据, 已占用的页序号, 实际存在的 scope 旧页数)`。
+    """
+    files: dict[str, str] = {}
+    pages: list[dict] = []
+    used: set[int] = set()
+    scope_exist = 0
+    if not ddir.is_dir():
+        return files, pages, used, scope_exist
+    for mf in sorted(ddir.glob("*.md")):
+        if mf.name == "index.md":
+            continue
+        if mf.name in scope:
+            scope_exist += 1
+            continue
+        try:
+            text = mf.read_text(encoding="utf-8")
+        except Exception:                   # noqa: BLE001 —— 读不到就当没有
+            continue
+        files[mf.name] = text
+        jf = mf.with_suffix(".json")
+        jtext = ""
+        if jf.exists():
+            try:
+                jtext = jf.read_text(encoding="utf-8")
+                files[jf.name] = jtext
+            except Exception:               # noqa: BLE001
+                jtext = ""
+        title = summary = ""
+        if jtext:
+            try:
+                j = json.loads(jtext)
+                title = str(j.get("title") or "").strip()
+                summary = str(j.get("summary") or "").strip()
+            except Exception:               # noqa: BLE001 —— 坏 json 回落 md
+                pass
+        if not title or not summary:
+            md_t, md_s = _page_meta_from_md(mf)
+            title = title or md_t
+            summary = summary or md_s
+        pages.append({"_file": mf.name, "_dir": ddir.name,
+                      "title": title or "(无标题)", "summary": summary})
+        head = mf.name.split("-", 1)[0]
+        if head.isdigit():
+            used.add(int(head))
+    return files, pages, used, scope_exist
+
+
 def _write_domain_outputs(out: Path, by_domain_pages: dict[str, list[dict]],
                           dir_of: dict[str, str], fl: FailureLog, *,
-                          strict_collapse: bool = True
+                          strict_collapse: bool = True,
+                          scope_pages: "dict[str, set[str]] | None" = None
                           ) -> tuple[list[tuple[str, list[dict]]], list[str],
                                      list[str]]:
     """逐域写盘（整域原子换入），返回 `(成功域, 被跳过的域, 跳过原因)`。
@@ -1264,15 +1320,42 @@ def _write_domain_outputs(out: Path, by_domain_pages: dict[str, list[dict]],
     2026-10-08 实测：10-04 14:32 增量轮跳过的 4 个域，在当晚 17:14 全量轮
     **完整写入 396 页、零跳过**之后仍然一条都没销，一直挂到 4 天后人工清账，
     根因就是销账只发生在 `--retry-failed` 路径。
+
+    **页级增量（`scope_pages`，2026-10-19）**：形如 `{域名: {可替换的旧页文件名}}`。
+    给了它，这个域就**只换掉 scope 内那几页**，其余旧页**原样搬过去**（文件原文
+    不动、序号不动）。这样一次真正变动的量从"整域 N 页"降到"受影响的那几页" ——
+    实测动机：12 条新记忆触发 3 个域共 270 页 L2 重编、单轮近 1 小时。
+    两条硬约束：
+      · **保留页绝不重命名** —— 重命名会打断已有的 `[[标题]]` 互链；
+      · **新页只用空闲序号** —— 按"当前已占用序号"往后填空，而不是从 1 重排。
+    页数崩塌判据在 scope 模式下按**该域本轮范围**算（`scope` 旧页数 → 新产出页数），
+    而不是整域页数（整域数会因为"只编了一部分"必然塌，误杀）。
     """
     results: list[tuple[str, list[dict]]] = []
     skipped: list[str] = []
     details: list[str] = []
+    scope_map = scope_pages or {}
     for name in sorted(by_domain_pages):
         pages_out = sorted(by_domain_pages[name], key=lambda p: p["_file"])
         ddir = out / dir_of[name]
-        old_n = _count_domain_pages(ddir)
-        new_n = len(pages_out)
+        scope = scope_map.get(name)
+        kept_files: dict[str, str] = {}
+        kept_pages: list[dict] = []
+        if scope is not None:
+            # 页级增量：留住的旧页原样搬，只有 scope 内那几页被本轮产物替换
+            kept_files, kept_pages, used_idx, scope_old = _read_kept_pages(ddir, scope)
+            nxt = 1
+            for p in pages_out:
+                while nxt in used_idx:
+                    nxt += 1
+                used_idx.add(nxt)
+                p["_file"] = "%03d-%s.md" % (nxt, _slug(p["title"]))
+                nxt += 1
+            old_n = scope_old
+            new_n = len(pages_out)
+        else:
+            old_n = _count_domain_pages(ddir)
+            new_n = len(pages_out)
         # 页数崩塌保护：写盘是**整域替换**，降级结果一旦写下就不可逆。
         # 实测 2026-09-25：LLM 上游全程 524 → 域内细分退化成"一域一页"，
         # 33 页的域被写成 1 页，整轮丢 73 页、334 处链接悬空。
@@ -1287,13 +1370,16 @@ def _write_domain_outputs(out: Path, by_domain_pages: dict[str, list[dict]],
                       error="页数崩塌 %d→%d，已保留旧产物" % (old_n, new_n))
             continue
         # 先全量渲染到内存，再整体换入 —— 不再原地"删旧写新"
-        files: dict[str, str] = {}
+        files: dict[str, str] = dict(kept_files)
         for p in pages_out:
             p["_dir"] = ddir.name
             files[p["_file"]] = render_page(p, name)
             files[p["_file"].replace(".md", ".json")] = json.dumps(
                 p, ensure_ascii=False, indent=2)
-        files["index.md"] = render_domain_index(name, pages_out)
+        merged = kept_pages + pages_out
+        # 域索引必须涵盖**合并后的全部页** —— 只列本轮新页的话，页级增量会让
+        # 该域索引凭空少掉没重编的那些页（点开就是从索引消失的知识页）。
+        files["index.md"] = render_domain_index(name, merged)
         err = _write_domain(out, ddir, files)
         if err:
             skipped.append(name)
@@ -1310,7 +1396,7 @@ def _write_domain_outputs(out: Path, by_domain_pages: dict[str, list[dict]],
         # `resolve()` 是追加 tombstone（不改历史行），跨进程并发安全；只影响
         # (stage="l2-write", target=name) 这一个域，别的域不受牵连。
         fl.resolve("l2-write", name)
-        results.append((name, pages_out))
+        results.append((name, merged))
     return results, skipped, details
 
 
@@ -1318,7 +1404,8 @@ def finalize_outputs(out: Path, by_domain_pages: dict[str, list[dict]], *,
                      dir_of: dict[str, str], partial: bool, fl: FailureLog,
                      dom_file: "Path | None" = None, args=None,
                      pages: "list[dict] | None" = None,
-                     status: "dict[str, Any] | None" = None
+                     status: "dict[str, Any] | None" = None,
+                     scope_pages: "dict[str, set[str]] | None" = None
                      ) -> list[tuple[str, list[dict]]]:
     """**落盘收尾**：清旧域目录 → 逐域原子换入 → 顶层索引 → 域成员刷新。
 
@@ -1358,7 +1445,8 @@ def finalize_outputs(out: Path, by_domain_pages: dict[str, list[dict]], *,
         print("  销账 %d 条随域消失而失效的失败记录：%s"
               % (len(resolved), "、".join(resolved[:5])))
     results, skipped_names, _details = _write_domain_outputs(
-        out, by_domain_pages, dir_of, fl, strict_collapse=partial)
+        out, by_domain_pages, dir_of, fl, strict_collapse=partial,
+        scope_pages=scope_pages)
     if status is not None:
         status["written_domains"] = [n for n, _ in results]
         status["pages_by_domain"] = {n: len(ps) for n, ps in results}
@@ -1948,7 +2036,8 @@ def run(args) -> None:
     # 同一条跳过通路，该域保留旧产物、不进新基线 → 下轮自动重试。
     results = finalize_outputs(out, by_domain_pages, dir_of=dir_of,
                                partial=partial, fl=fl, dom_file=dom_file,
-                               args=args, pages=pages, status=status)
+                               args=args, pages=pages, status=status,
+                               scope_pages=getattr(args, "scope_pages", None))
     n_pages = sum(len(p) for _, p in results)
     print("\n完成：%d 域 / %d 页，用时 %.0fs" % (len(results), n_pages, time.time() - t0))
     print(_usage_report("第二级"))

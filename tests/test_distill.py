@@ -1561,10 +1561,44 @@ def test_save_direct_memory_落表且字段规格正确(conn):
     row = conn.execute(
         "SELECT source, conversation_id, slice_key, type, confidence, status,"
         " content_hash FROM distilled_memories").fetchone()
-    assert row[0] == "mcp" and row[1] == "direct"
+    # 会话按自然日分桶（`direct-YYYY-MM-DD`），不再固定为 `direct`
+    assert row[0] == "mcp" and row[1].startswith("direct")
     assert row[2] == "mcp:mcp_abc" and row[3] == "fact"
     assert row[5] == "new"                                   # wiki 编译输入口径
     assert row[6] == fingerprint("直写的记忆内容")
+
+
+def test_save_direct_memory_按日分桶_避免单会话膨胀(conn):
+    """直写记忆按自然日分桶 —— L1 的脏单位是**会话**，单会话会线性膨胀。"""
+    import time as _t
+    from agentmemhub.distill import save_direct_memory
+    d1 = int(_t.mktime((2026, 10, 18, 12, 0, 0, 0, 0, -1)))
+    d2 = int(_t.mktime((2026, 10, 19, 12, 0, 0, 0, 0, -1)))
+    save_direct_memory(conn, content="第一天的结论", created_at=d1)
+    save_direct_memory(conn, content="第二天的结论", created_at=d2)
+    cids = [r[0] for r in conn.execute(
+        "SELECT conversation_id FROM distilled_memories ORDER BY created_at")]
+    assert cids == ["direct-%s" % _t.strftime("%Y-%m-%d", _t.localtime(d1)),
+                    "direct-%s" % _t.strftime("%Y-%m-%d", _t.localtime(d2))]
+
+
+def test_save_direct_memory_分桶可回退单会话(conn):
+    """`bucket='none'` 回退历史口径（单一 `direct` 会话，仅排障用）。"""
+    from agentmemhub.distill import save_direct_memory
+    save_direct_memory(conn, content="回退口径的记忆", bucket="none")
+    assert conn.execute("SELECT conversation_id FROM distilled_memories"
+                        ).fetchone()[0] == "direct"
+
+
+def test_save_direct_memory_跨分桶同内容仍去重(conn):
+    """分桶把同一内容分散到不同 cid —— 查重必须跨桶，否则隔天重写就重复入库。"""
+    import time as _t
+    from agentmemhub.distill import save_direct_memory
+    d1 = int(_t.mktime((2026, 10, 18, 12, 0, 0, 0, 0, -1)))
+    d2 = int(_t.mktime((2026, 10, 19, 12, 0, 0, 0, 0, -1)))
+    assert save_direct_memory(conn, content="同一条结论", created_at=d1) == "inserted"
+    assert save_direct_memory(conn, content="同一条结论", created_at=d2) == "duplicate"
+    assert conn.execute("SELECT COUNT(*) FROM distilled_memories").fetchone()[0] == 1
 
 
 def test_save_direct_memory_幂等_同内容不重复(conn):

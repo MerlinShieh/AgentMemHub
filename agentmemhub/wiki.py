@@ -464,6 +464,65 @@ def _verify_links(l2: Path | str) -> dict[str, Any]:
     return r
 
 
+def _l2_page_scope(*, l2: Path | str, dir_of: dict[str, str],
+                   touched: set[str], new_files: set[str],
+                   domain_map: dict[str, list[str]]
+                   ) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """算出「本轮只重编哪些 L2 页」以及它们各自的 L1 来源（**页级增量**）。
+
+    返回 `(scope_pages, scope_members)`：
+
+      · `scope_pages`   —— `{域名: {可替换的旧 L2 页文件名}}`
+      · `scope_members` —— `{域名: {这些页的 L1 来源} ∪ 该域的新 L1 文件}`
+
+    为什么需要它（2026-10-19 实测）：12 条新记忆让 3 个域共 **270 个 L2 页**全部
+    重编，单轮近 1 小时，且开销随知识库规模**线性增长**。L2 页的 json 里有
+    `from_files`（这页由哪些 L1 页合成）—— 正好是"L1 文件 → L2 页"的反向映射：
+    只把**引用了本轮变动 L1 页**的那些 L2 页拿去重编，其余页原样保留。
+
+    **扫描的是 `dir_of` 里的全部域，不是 manifest 报的"脏域"** —— 这一步同时
+    修掉一个静默缺陷：manifest 的 `domains[].l1_files` 是"上一次归域"的记录，
+    与磁盘页面的 `from_files` 会漂移（2026-10-19 实测：manifest 只记了 3 个域
+    含 `mcp__direct.md`，磁盘上却有 **11 个域**引用它 → 那 8 个域的页面永远
+    不会被增量更新触及，内容静默过时）。归域记录可以过时，**页面里的来源不会**。
+
+    **定位不到就不收该域**（调用方据此退回整域重编）：老产物可能没写
+    `from_files`、或该域输入已全部失效 —— 页级模式只替换 scope 内那几页，
+    scope 算错会留下"该删没删、该并没并"的旧页，**比多编几页贵得多**。
+    宁可多编，不可漏页。
+    """
+    root = Path(l2)
+    scope_pages: dict[str, set[str]] = {}
+    scope_members: dict[str, set[str]] = {}
+    for n, dn in dir_of.items():
+        d = root / dn
+        if not dn or not d.is_dir():
+            continue
+        affected: set[str] = set()
+        members: set[str] = set()
+        for mf in d.glob("*.md"):
+            if mf.name == "index.md":
+                continue
+            frm: set[str] = set()
+            jf = mf.with_suffix(".json")
+            if jf.exists():
+                try:
+                    j = json.loads(jf.read_text(encoding="utf-8"))
+                    frm = {str(x) for x in (j.get("from_files") or []) if x}
+                except Exception:           # noqa: BLE001 —— 坏 json 当作无来源
+                    frm = set()
+            if frm & touched:
+                affected.add(mf.name)
+                members |= frm
+        if not affected or not members:
+            continue                        # 定位不到 → 该域整域重编（保守）
+        # 该域的新 L1 文件也参与本轮，否则新页无处安置、下轮又得重来
+        members |= (new_files & set(domain_map.get(n) or []))
+        scope_pages[n] = affected
+        scope_members[n] = members
+    return scope_pages, scope_members
+
+
 def _l2_skip_ids(dom_out: dict[str, Any], dirty_domains: list[str],
                  written: set[str], skipped: list[str]) -> set[int]:
     """算出「**没真正写出来**的脏域」覆盖的记忆 id —— 它们必须被剔除出 L2 新基线。
@@ -859,10 +918,35 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
                 return dn
         return "99-" + slug
 
+    # ---- 4a. 页级增量范围：只重编「输入变了」的 L2 页，而不是整个域 ----
+    # 动机（2026-10-19 实测）：12 条新记忆让 3 个域共 **270 个 L2 页**全部重编，
+    # 单轮近 1 小时；而开销随知识库规模**线性增长**（越用越慢）。
+    # L2 页的 json 里有 `from_files`（这页由哪些 L1 页合成），正好是
+    # "L1 文件 → L2 页"的反向映射：只把**引用了本轮变动 L1 页**的那些 L2 页
+    # 拿去重编，其余页原样保留（写盘侧见 `_write_domain_outputs(scope_pages=)`）。
+    #
+    # **定位不到就退回整域重编**（宁可多编，不可漏页）：老产物可能没写
+    # `from_files`、或该域输入已全部失效 —— 页级模式只替换 scope 内那几页，
+    # scope 算错会留下"该删没删、该并没并"的旧页，比多编几页贵得多。
+    # **离线模式不启用**：范围要跨多次调用保存，而离线的瓶颈本来也不是重编量。
+    scope_pages: dict[str, set[str]] = {}
+    scope_members: dict[str, set[str]] = {}
+    if not full and offline_runner is None:
+        scope_pages, scope_members = _l2_page_scope(
+            l2=l2, dir_of={n: _dir_for(n) for n in domain_map},
+            touched=touched, new_files=new_files, domain_map=domain_map)
+        # **用磁盘真相补全脏域**（详见 `_l2_page_scope()` 的 docstring）：
+        # manifest 的归域记录会漂移，只按它算脏域会漏掉"页面仍引用着变动 L1
+        # 文件"的域 —— 那些域的页面再也不会更新。实测 2026-10-19：manifest 只记
+        # 3 个域含 `mcp__direct.md`，磁盘上却有 11 个域引用它，8 个域静默过时。
+        dirty_domains = sorted(set(dirty_domains) | set(scope_pages))
+
     preset = []
     for n in dirty_domains:
         fs = set(domain_map[n])
-        members = [p for p in pages if p["file"] in fs]
+        # 页级增量：成员只取"受影响 L2 页的 L1 来源"，而不是整域
+        pick = scope_members.get(n) or fs
+        members = [p for p in pages if p["file"] in pick]
         preset.append((n, _dir_for(n), members))
     # **离线模式下没有脏域就别往下走**：`preset` 为空时聚合层会回退到"全量归域 +
     # 全库重编"（实测 449 页，极贵）。而走到这里说明 L2 基线确实落后
@@ -884,6 +968,9 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
         recompile_single=False, thinking="", no_resume=full, resume=not full,
         retry_failed=False, partial=not full, preset_domains=preset,
         domain_map=domain_map,
+        # **页级增量范围**（`{域名: {可替换的旧 L2 页文件名}}`）：空 dict 时聚合层
+        # 走原来的"整域替换"；给了它则只换这几页、其余旧页原样保留（见 `4a` 段）。
+        scope_pages=scope_pages,
         # **细分离线**（默认关）：细分只有「域数 × 批数」条（实测 3 个域 = 11 条），
         # 实时跑是分钟级；离线省下的绝对值很小，却要多付**一整轮排队延迟**
         # （实测细分段排了 24 小时）。要两段都离线就传 `offline_plan=True`。

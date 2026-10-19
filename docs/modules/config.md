@@ -171,8 +171,17 @@
 
 | 段 | 关键键 | 示例 |
 |---|---|---|
-| `distillation` | `enabled`；`prompt_ver`（留空 = 跟随代码常量）；`llm`（留空继承顶层）；`slice.max_chars` / `max_turns` / `topic_boundary` / `boundary_window` / `per_message_cap`；`merge.enabled` / `max_chars` / `max_rounds`；`dedup.cosine_duplicate` / `cosine_similar`；`sanitize.enabled`；`runtime.max_concurrent` / `timeout` / `dry_run` | `prompt_ver` 留空；`slice.max_chars: 24000`；`dedup.cosine_duplicate: 0.92` |
+| `distillation` | `enabled`；`prompt_ver`（留空 = 跟随代码常量）；`direct_bucket`；`llm`（留空继承顶层）；`slice.max_chars` / `max_turns` / `topic_boundary` / `boundary_window` / `per_message_cap`；`merge.enabled` / `max_chars` / `max_rounds`；`dedup.cosine_duplicate` / `cosine_similar`；`sanitize.enabled`；`runtime.max_concurrent` / `timeout` / `dry_run` | `prompt_ver` 留空；`slice.max_chars: 24000`；`dedup.cosine_duplicate: 0.92` |
 | `snapshot` | `keep`（最多保留份数，超出删最旧；非法值回退默认） | `keep: 5` |
+
+**`distillation.direct_bucket`（2026-10-19 新增，取 `daily` 默认 / `none`）**：MCP
+`memory_save` 直写记忆的**虚拟会话分桶**。直写记忆不来自真实会话，原先全塞进一个
+固定的 `direct`；而 L1 的脏单位是会话 ⇒ 每加一条就要重编整个 84 页的会话。取值
+`daily` 时落成 `direct-YYYY-MM-DD`（新记忆只脏当天那桶），`none` 回退单一 `direct`
+会话（仅排障用）。读取点是 `agentmemhub/distill.py::_direct_bucket_policy()`，
+**未知值一律按 `daily` 处理** —— 配置写错不该让记忆写不进去（写入路径必须 fail-open）。
+配套改动：查重范围从 `(source, conversation_id, content_hash)` 前移到
+`(source, content_hash)`，否则同一结论隔天再写会因 cid 不同而重复入库。
 
 ### 4.6 `logs`：滚动与归档
 
