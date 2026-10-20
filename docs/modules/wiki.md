@@ -219,6 +219,9 @@ rag 六路通道召回（kind=page；两阶段召回的第二阶段按 wiki_path
 5. **L1 全部失败时跳过 L2。**`l1_all_failed = bool(dirty_sessions) and not l1_ok and not removed_files` 成立时，L2 不会拿磁盘上的旧 L1 重跑同样的域（实测白烧 1290 秒 / 42 万 prompt token，产出只是同义改写）。
 6. **`pending` 只比 L1 的 manifest，看不见"L1 已重编、L2 没跟上"。**这个中间态由 `align()` 的 `consistency` 显式回答：两级 manifest 的 `generated_at` 差值绝对值 `<= SKEW_TOL(60)` 秒判 `ok`，`> 0` 判 `l1_ahead`（**L2 落后，页面里还是旧知识**），`< 0` 判 `l2_ahead`；缺任一级 manifest 或时间解析不了则 `comparable=False`。当前产出目录正是这种状态：`manifest_l1.json` 比 `manifest_l2.json` 新两天以上，`align` 会判 `l1_ahead`。
 7. **页面层投影是原子的全量对齐。**`project_pages()` 扫 L2 目录 → upsert → 删掉 `units` 里 `source='wiki'` 但磁盘已不存在的行，保证"投影集合与磁盘目录精确一致"，不会新旧两版共存。锚点必须由**路径**派生（`src_id='wiki_<crc32(相对路径)>'`、`seq` 为负数固定区间）：用内容指纹会在页面重编后走 INSERT 撞 `UNIQUE(source, conversation_id, seq)`，用位置序号会在页面增删后漂移。
+   - **但只重算「变化页」的向量**（2026-10-20）：先按 `src_id` 比对 `text` **与元数据**、再查各模型向量表是否缺行，只有「新页 / 内容或元数据变 / 向量缺失」三类才处理。**对齐语义不变**（照样全量扫盘、全量比对、照样清掉磁盘上已不存在的行），省掉的只是重复的编码与 UPDATE —— 实测 626 页 **188 秒 → 0.4 秒**。
+   - ⚠️ **元数据必须一起比**：同一路径的外部投喂换了版本（`doc_id` 变）时正文可能一字未动，只比 `text` 会漏掉这次更新（写测试时抓到的反例）。
+   - ⚠️ **向量缺失必须单独判**：换模型 / 新建向量表后旧页在新表里没有行，若只看正文就会永远跳过，召回静默失效。
 8. **空页面与点目录绝不进召回面。**正文为空的 md（Obsidian 点击死链会在原地自动新建 0 字节笔记）、`.obsidian/` 与 `.tmp_*` / `.bak_*` 残留目录下的 md，都在 `project_pages()` 里被跳过（计入 `skipped_empty`）。
 9. **跨进程单飞行。**`on_memories_written()` / `run_manual()` 都要过 `_single_flight()`：进程内 `threading.Lock` + 跨进程 `logs/wiki_update.lock`（`O_CREAT|O_EXCL` 原子创建，内容写 PID 与时间戳，超过 `_LOCK_MAX_AGE(3h)` 或持锁进程已死则抢占）。取不到锁不是静默跳过——记 `event="trigger_skip"`。
 10. **域目录名要稳定。**增量更新优先沿用 `manifest_l2.json` 里记录的 `dir`，缺失时按 `_slug(域名)` 在磁盘找同名域目录，仍找不到才新建 `99-<slug>`（早期直接兜底 `99-` 曾导致 L2 目录里躺着 9 个 `99-*` 残留）。全量模式下 `_prune_stale_domain_dirs()` 只清"非隐藏目录 + `%02d-` 数字前缀"的域目录，**partial 模式一个目录都不清**。
@@ -284,12 +287,23 @@ L2 原先把"脏域"整域重编。现在按磁盘页面 json 的 `from_files`�
 | L1 | 1 会话 / 2 条 → **2 页**，**51 s** | 分桶后的新会话，单次编译（≤ 阈值 12） |
 | 增量归类 | **103 s** | 1 次 LLM 调用，把新 L1 文件归入现有域 —— **固定成本**（有新文件就要归类） |
 | L2 | 2 域 / **2 页**，78 s | 只重编排入了变动 L1 页的那两页 |
-| 页面投影 | **188 s**（626 页） | `page_index` 全量 upsert —— **新瓶颈**，见下 |
+| 页面投影 | **188 s**（626 页）→ 优化后 **0.4 s** | `page_index` 全量 upsert —— 原最大瓶颈，见下 |
 | 总计 | **425 s（7.1 分钟）** | 对比上一轮 12 条新增 → 270 页 → 近 1 小时实际计算 |
 
-**下一个瓶颈是页面投影**（`wiki_index.project_pages()` 全量对齐：本轮 `updated: 624`，
-几乎每页都 UPDATE 一遍）。它现在是总耗时的 44%，但只影响召回面、不影响产物正确性；
-要再快就得改成"只更新变化页"，那是独立的一次改造。
+**页面投影已改为「只重算变化页」（2026-10-20）**：此前 `project_pages()` 每轮把
+**整库页面**重新 encode 向量并 UPDATE 全部行（实测 626 页 180+ 秒、`updated: 624`），
+占一轮增量总耗时 44%，而一轮通常只改 1~2 页。现在先按 `src_id` 比对 `text`
+**与元数据**、再检查各模型向量表是否缺行，只有三类才处理：
+
+1. **新页**（库里没有这一行）；
+2. **内容或元数据变化** —— 元数据必须一起比：同一路径的外部投喂换了版本
+   （`doc_id` 变）时正文可能一字未动，只比 `text` 会漏掉这次更新
+   （写测试时抓到的反例，见 `tests/test_wiki_index.py::test_溯源_doc变化时更新既有行`）；
+3. **向量缺失**（换模型 / 新建向量表后旧页在新表里没有行）—— 漏掉这条会让换模型
+   后旧页永远没有新向量，**召回静默失效**。
+
+真实库实测：**188 秒 → 0.4 秒**（626 页全跳过）。未变的页连 UPDATE 都不做，
+`updated_at` 因此保持"上次真正变化"的时间（比原来每轮刷新更准）。
 
 **报数口径**：`run_end` / 返回值的 `pages` 是**本轮真正编译的页数**
 （`status["recompiled_pages"]`）；`pages_by_domain` 是**合并后的域总页数**（manifest 与
@@ -350,7 +364,7 @@ L2 原先把"脏域"整域重编。现在按磁盘页面 json 的 `from_files`�
 | `trigger_fired_skipped` | 触发器 | L1 有会话失败 → 不消耗触发额度 |
 | `trigger_error` | 触发器 / MCP 钩子 | `hook`、`error` |
 | `link_check` | `wiki._verify_links()` | `ok`、`available`、`unresolved_targets`、`unresolved_links`、`error` |
-| `page_index` | `wiki.update()` 收尾 | `ok`、`seconds`（实测 466 页约 4.5 分钟）、`pages`、`inserted`、`updated`、`removed`、`skipped_empty` |
+| `page_index` | `wiki.update()` 收尾 | `ok`、`seconds`（**只编码变化页**：实测 626 页从 188 秒降到 0.4 秒）、`pages`、`inserted`、`updated`、`unchanged`（内容未变而跳过的页数）、`removed`、`skipped_empty` |
 
 程序侧读取：`agentmemhub.logs.read_wiki_audit(limit=N)`。标准头（`ts` / `level` / `module` / `line` / `msg`）由 `logs.standardize()` 统一补齐，调用方只写业务字段。
 
@@ -418,7 +432,8 @@ rg '"event": "trigger_check"' logs/wiki.log
 | [tests/test_wiki_page_scope.py](../../tests/test_wiki_page_scope.py)（5 个） | `_l2_page_scope()`：只收引用变动 L1 文件的页、新 L1 文件并入成员、定位不到退回整域、坏 json 容错、index.md 不算页 |
 | [tests/test_wiki_manifest.py](../../tests/test_wiki_manifest.py)（11 个） | 输入快照口径、指纹走 md5 现算、manifest 读写、diff 的新增/变更/removed 细分/脏会话归属 |
 | [tests/test_wiki_triggers.py](../../tests/test_wiki_triggers.py)（27 个） | 三条规则判定、`overrides` 校验与持久化、写入钩子与手动触发、L1 部分失败不打标记、单飞行（进程内 / 跨进程 / 锁文件异常）、更新起止留痕、`_configured()` 总开关、沙箱熔断 |
-| [tests/test_wiki_index.py](../../tests/test_wiki_index.py)（15 个） | 页面解析、整页投影与全量对齐收敛、幂等、召回层级、来源维度（native/external）、空页面与点目录不入召回面、`aliases` 兼容 |
+| [tests/test_wiki_index.py](../../tests/test_wiki_index.py)（22 个） | 页面解析、整页投影与全量对齐收敛、幂等、召回层级、来源维度（native/external）、空页面与点目录不入召回面、`aliases` 兼容、**投影只重算变化页**（未变不编码 / 变了才编码 / 向量缺失要补算） |
+| [tests/test_feed_projection.py](../../tests/test_feed_projection.py)（10 个） | 多根投影：根内页面删除仍会清掉、**某根临时不存在时该根投影必须保留**（不能把"根不在"当成"页没了"） |
 | [tests/test_wiki_pending.py](../../tests/test_wiki_pending.py)（10 个） | 待更新明细、软删除不触发重编、`restore`、硬删除清两份投影并重建 manifest、只允许删待更新 id、`confirm` 校验 |
 | [tests/test_obsidian_cli.py](../../tests/test_obsidian_cli.py)（9 个） | CLI 路径优先级、vault 名归一、BOM / 英文句兜底、`available=False` 不算失败、通过标准是未解析为 0、不自动启动 Obsidian |
 | [tests/test_failures.py](../../tests/test_failures.py)（17 个） | `FailureLog`：分类、累积、坏行容错、`resolve` 销账、目标去重、汇总与致命提示 |
@@ -437,7 +452,7 @@ rg '"event": "trigger_check"' logs/wiki.log
 | `agentmemhub/obsidian.py` | `test_obsidian_cli.py` |
 | `agentmemhub/wiki_manifest.py`（快照口径 / diff） | `test_wiki_manifest.py` + `test_wiki_service.py` |
 | `agentmemhub/wiki_triggers.py`（规则 / 锁 / 标记） | `test_wiki_triggers.py` + `test_mcp_server.py`（写入钩子入口） |
-| `agentmemhub/wiki_index.py`（投影 / 召回面） | `test_wiki_index.py` |
+| `agentmemhub/wiki_index.py`（投影 / 召回面） | `test_wiki_index.py` + `test_feed_projection.py` |
 | `agentmemhub/wiki_pending.py` | `test_wiki_pending.py` + `test_wiki_manifest.py` |
 | 增删配置键（`DEFAULT_WIKI` 或 yaml 的 `wiki` 段） | `test_config.py` + `test_config_audit.py` + `scripts/check_config_keys.py` |
 | 新增日志事件 | `test_logs_format.py` |

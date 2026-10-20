@@ -178,10 +178,13 @@ def test_多根_某个根不存在时其投影保留(env, monkeypatch):
     left = {x[0] for x in conn.execute("SELECT title FROM units WHERE source='wiki'")}
     assert left == {"自有页", "投喂页"}, "投喂页必须留着，等根回来继续对齐"
 
-    # 根回来 → 继续正常对齐，且不重复
+    # 根回来 → 继续正常对齐，且不重复。
+    # 两页内容都没变 ⇒ 现在既不重插也不 UPDATE（2026-10-20 起只重算变化页；
+    # 此前口径是 updated=2，因为旧实现每轮无条件 UPDATE 全部行）
     moved.rename(feed)
     r2 = _project(conn, [l2, feed])
-    assert r2["inserted"] == 0 and r2["updated"] == 2
+    assert r2["inserted"] == 0 and r2["updated"] == 0
+    assert r2["unchanged"] == 2
     assert conn.execute("SELECT COUNT(*) FROM units WHERE source='wiki'"
                         ).fetchone()[0] == 2
 

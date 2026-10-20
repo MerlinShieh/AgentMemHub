@@ -236,6 +236,12 @@ def project_pages(idx: sqlite3.Connection, roots,
     幂等且原子：投影后 units 里 source='wiki' 的集合与磁盘目录**精确一致**
     （页面重编/改名/删除都能自动收敛），不会出现新旧版本共存。
 
+    **增量友好（2026-10-20）**：先按 `src_id` 与库里已有 `text` 比对，**内容没变的
+    页面不重算向量、也不 UPDATE**（`updated_at` 因此保持"上次真正变化"的时间）。
+    此前是每轮把整库重 encode 一遍 —— 实测 626 页要 **180+ 秒**、占一轮增量总耗时
+    44%，而一轮通常只改 1~2 页。新页 / 正文变化 / **某模型向量表里缺该行**（换模型、
+    新建表）三类才处理；缺第三类判据会在换模型后让旧页永远没有新向量。
+
     `roots` 可传单个路径或路径列表（**向后兼容单根调用**）。多根的两个要点：
 
     · **身份不能撞**：`src_id`/`seq` 由 `<根标签>::<根内相对路径>` 派生
@@ -293,22 +299,70 @@ def project_pages(idx: sqlite3.Connection, roots,
                 "roots": [str(d) for d in live],
                 "message": "未找到页面（检查页面根目录）"}
 
-    # 向量用**整页正文**（含标题与摘要）：实测比"仅标题+摘要"更好——摘要虽聚焦，
-    # 却丢了正文里的关键词（查询"容错语义"时，核心页从 0.826 掉出榜单）。
-    # 全文进 FTS 与向量、摘要单独返回，各司其职。
-    multi = _encode_pages(
-        idx, st, [("%s\n\n%s" % (p["title"], p["body"]))[:6000] for p in pages],
-        embedder)
+    # 写入 units 的正文（标题 + 摘要 + 正文）：与库里 `text` 比对要用它，先算好。
+    for p in pages:
+        p["_text"] = (p["title"] + "\n\n"
+                      + (f"摘要：{p['summary']}\n\n" if p["summary"] else "")
+                      + p["body"])
+
+    # **只重算「变化页」的向量**（2026-10-20 优化）。
+    #
+    # 此前是每轮把**整库页面**重新 encode 一遍：实测 626 页要 **180+ 秒**，占一轮
+    # 增量总耗时的 44%，而一轮增量通常只改 1~2 页（实测 2026-10-19：只编 2 页，
+    # 投影仍跑了 188 秒）。编码是本函数唯一的重量级开销，其余都是毫秒级 SQL。
+    #
+    # 判据三条，**任一成立**才处理（缺一不可）：
+    #   · 库里没有这一行 —— 新页；
+    #   · 正文 `text` 或**元数据**（domain/title/路径/origin/doc_id）不一致 ——
+    #     内容变了。**元数据必须一起比**：实测 2026-10-20 写测试时抓到反例 ——
+    #     外部投喂的同一个页面路径换了一版（`doc_id` 变），正文一字未动，只比
+    #     `text` 就会漏掉这次更新；
+    #   · 某个模型名下的向量表里**缺**该 rowid —— 换模型 / 新建向量表时必须补算。
+    # 只看正文会漏掉"换了模型、新表是空的"与"元数据变了"；只看向量会漏掉内容更新。
+    existing_rows = list(idx.execute(
+        "SELECT id, src_id, text, wiki_path, conversation_id, title, origin,"
+        " doc_id FROM units WHERE source='wiki'"))
+    uid_of = {str(r[1]): int(r[0]) for r in existing_rows}
+    text_of = {str(r[1]): (r[2] or "") for r in existing_rows}
+    # 元数据指纹：字段顺序必须与下面 `_needs()` 里构造的元组一致
+    meta_of = {str(r[1]): (r[4], r[5], r[3], r[6], r[7]) for r in existing_rows}
+    have_vec: dict[str, set[int]] = {}
+    for mid in st.write_order:
+        try:
+            have_vec[mid] = {int(r[0]) for r in idx.execute(
+                f"SELECT rowid FROM {st.model(mid).vec_table}")}
+        except Exception:                   # noqa: BLE001 —— 表还没建（首次投影）
+            have_vec[mid] = set()
+
+    def _needs(p: dict[str, Any]) -> bool:
+        uid = uid_of.get(p["src_id"])
+        if uid is None:
+            return True
+        if text_of.get(p["src_id"]) != p["_text"]:
+            return True
+        if meta_of.get(p["src_id"]) != (p["domain"], p["title"], p["abs"],
+                                        p["origin"], p["doc"]):
+            return True
+        return any(uid not in have_vec[mid] for mid in st.write_order)
+
+    changed = [p for p in pages if _needs(p)]
+    unchanged = len(pages) - len(changed)
+    # 向量仍用**标题 + 正文**（不含摘要，与原口径一致）：实测比"仅标题+摘要"更好
+    # —— 摘要虽聚焦，却丢了正文里的关键词（查询"容错语义"时核心页从 0.826 掉出
+    # 榜单）。全文进 FTS 与向量、摘要单独返回，各司其职。
+    multi = (_encode_pages(
+        idx, st,
+        [("%s\n\n%s" % (p["title"], p["body"]))[:6000] for p in changed],
+        embedder) if changed else [])
 
     inserted = updated = 0
-    seen: set[str] = set()
+    # `seen` 必须是**全部页面**（含本轮跳过的未变页），否则后面的清扫逻辑
+    # 会把它们当成"磁盘上已不存在"而删掉投影。
+    seen: set[str] = {p["src_id"] for p in pages}
     t_now = int(time.time())
     with idx:
-        for i, p in enumerate(pages):
-            seen.add(p["src_id"])
-            body_text = (p["title"] + "\n\n"
-                         + (f"摘要：{p['summary']}\n\n" if p["summary"] else "")
-                         + p["body"])
+        for i, p in enumerate(changed):
+            body_text = p["_text"]
             row = idx.execute("SELECT id FROM units WHERE src_id=?",
                               (p["src_id"],)).fetchone()
             if row:
@@ -353,11 +407,10 @@ def project_pages(idx: sqlite3.Connection, roots,
         #  · 空路径或**相对**路径 = 多根改造前的老数据（当时只有 L2 一个根）⇒ 可清；
         #  · 绝对路径但不在任何已扫根下 = 那个根这轮不存在（被移走/配置临时变化）
         #    ⇒ **留着**，否则"某个根暂时不可用"会把它的投影全删光，等它回来再重建。
-        existing = [(r[0], r[1]) for r in idx.execute(
-            "SELECT src_id, wiki_path FROM units WHERE source='wiki'")]
+        # 复用上面那次全表查询（`existing_rows`）—— 省掉重复扫一遍。
         scanned = [str(d.resolve()) for d in live]
         gone: list[str] = []
-        for src_id, wiki_path in existing:
+        for _uid, src_id, _text, wiki_path, *_meta in existing_rows:
             if src_id in seen:
                 continue
             wp = str(wiki_path or "")
@@ -375,10 +428,11 @@ def project_pages(idx: sqlite3.Connection, roots,
                 idx.execute("DELETE FROM units WHERE id=?", (int(row[0]),))
     roots_txt = "、".join(d.name for d in live)
     log(f"页面层投影：{len(pages)} 页（新增 {inserted} / 更新 {updated} / "
-        f"清理 {len(gone)}）｜根：{roots_txt}"
+        f"未变跳过 {unchanged} / 清理 {len(gone)}）｜根：{roots_txt}"
         + (f"；跳过 {skipped_empty} 个空页面" if skipped_empty else ""))
     return {"pages": len(pages), "inserted": inserted, "updated": updated,
-            "removed": len(gone), "skipped_empty": skipped_empty,
+            "unchanged": unchanged, "removed": len(gone),
+            "skipped_empty": skipped_empty,
             "roots": [str(d) for d in live]}
 
 

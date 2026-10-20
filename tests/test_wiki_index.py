@@ -156,9 +156,84 @@ def test_投影_幂等_重复投影不重复插入(env, monkeypatch):
     _page(d, "01-域A", "001-页A.md", "页A", "摘要A", "正文A")
     _project(conn, d)
     r2 = _project(conn, d)
-    assert r2["inserted"] == 0 and r2["updated"] == 1
+    # 内容没变 → 不 UPDATE、也不重算向量（2026-10-20 起；此前口径是 updated=1）
+    assert r2["inserted"] == 0 and r2["updated"] == 0
+    assert r2["unchanged"] == 1
     assert conn.execute("SELECT COUNT(*) FROM units WHERE source='wiki'"
                         ).fetchone()[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# 增量友好：只重算「变化页」的向量
+#
+# 2026-10-20 优化背景：此前每轮把**整库页面**重新 encode —— 实测 626 页 180+ 秒，
+# 占一轮增量总耗时 44%，而一轮通常只改 1~2 页。判据三条：新页 / 正文变 /
+# **某模型向量表里缺该行**（换模型、新建表）。
+# ---------------------------------------------------------------------------
+
+def _patch_vectors_counting(monkeypatch):
+    """与 `_patch_vectors` 相同，但统计送进 encode 的文本条数。"""
+    import numpy as np
+
+    calls = {"texts": 0}
+
+    def _fake_encode(conn, st, texts, embedder=None):
+        calls["texts"] += len(texts)
+        return [(_FakeSpec(), [np.zeros(8, dtype=np.float32) for _ in texts])]
+
+    monkeypatch.setattr(wiki_index, "_encode_pages", _fake_encode)
+    return calls
+
+
+def test_投影_未变页不重算向量(env, monkeypatch):
+    conn, tmp_path = env
+    d = tmp_path / "l2"
+    _page(d, "01-域A", "001-页A.md", "页A", "摘要A", "正文A")
+    _page(d, "01-域A", "002-页B.md", "页B", "摘要B", "正文B")
+    calls = _patch_vectors_counting(monkeypatch)
+
+    _project(conn, d)
+    assert calls["texts"] == 2, "首次投影：两页都要编码"
+
+    calls["texts"] = 0
+    r = _project(conn, d)
+    assert calls["texts"] == 0, "内容没变 → 一页都不该重算向量"
+    assert r["unchanged"] == 2 and r["updated"] == 0 and r["inserted"] == 0
+
+
+def test_投影_内容变化才重算该页(env, monkeypatch):
+    conn, tmp_path = env
+    d = tmp_path / "l2"
+    _page(d, "01-域A", "001-页A.md", "页A", "摘要A", "正文A")
+    _page(d, "01-域A", "002-页B.md", "页B", "摘要B", "正文B")
+    calls = _patch_vectors_counting(monkeypatch)
+    _project(conn, d)
+
+    _page(d, "01-域A", "001-页A.md", "页A", "摘要A", "正文A 改过了")
+    calls["texts"] = 0
+    r = _project(conn, d)
+    assert calls["texts"] == 1, "只有变化那一页要重算"
+    assert r["updated"] == 1 and r["unchanged"] == 1
+
+
+def test_投影_向量缺失时补算(env, monkeypatch):
+    """换模型 / 新建向量表后旧页在表里没有行 —— 必须补算，不能被"内容没变"跳过。
+
+    这是三条判据里最容易被漏掉的一条：只看正文会以为"什么都没变"，
+    结果新表的向量永远是空的，召回静默失效。
+    """
+    conn, tmp_path = env
+    d = tmp_path / "l2"
+    _page(d, "01-域A", "001-页A.md", "页A", "摘要A", "正文A")
+    calls = _patch_vectors_counting(monkeypatch)
+    _project(conn, d)
+
+    conn.execute("DELETE FROM vec_test")      # 模拟"新表还是空的"
+    conn.commit()
+    calls["texts"] = 0
+    r = _project(conn, d)
+    assert calls["texts"] == 1, "向量缺失必须补算"
+    assert r["unchanged"] == 0
 
 
 # ---------------------------------------------------------------------------
