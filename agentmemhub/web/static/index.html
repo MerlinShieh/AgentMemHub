@@ -562,10 +562,12 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   <!-- 与「统一会话」零耦合：展示的是**页面产物**（L2 蒸馏 + 外部投喂），不是会话。
        数据以磁盘为准（不查投影表），见 app.py /api/wiki/pages 的说明。 -->
   <div id="viewWiki" class="hidden">
-    <!-- 二级切换：浏览（只读页面）/ 运维（补跑·待更新记忆·触发器·离线批次） -->
+    <!-- 二级切换：浏览（只读页面）/ 运维（补跑·待更新记忆·触发器·离线批次）/
+         投喂（素材登记：状态·质量·告警·体检 —— 与"转换后的知识页"是两层东西） -->
     <div class="flex items-center gap-1 border-b border-border px-5 pt-3">
       <button id="wkTabBrowse" class="wk-subtab active">浏览</button>
       <button id="wkTabOps" class="wk-subtab">运维</button>
+      <button id="wkTabFeed" class="wk-subtab">投喂</button>
       <span id="wkOpsBadge" class="ml-2 hidden text-[11px] font-medium text-warning"></span>
     </div>
     <div id="wikiBrowsePane">
@@ -686,6 +688,66 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         <div id="opsBatchBody" class="px-3 py-2.5 text-xs"></div>
       </div>
     </div><!-- /wikiOpsPane -->
+
+    <!-- ============ 投喂：素材登记（第一期只读）============
+         与「浏览」的分工：浏览看的是**转换后的知识页**（origin=external）；
+         这里看的是**转换前的素材**（状态 / 质量 / 告警 / 原件路径）。
+         两者是不同层次 —— "页面有问题"和"源有问题"必须能分开判断，
+         混在一起会让人分不清该修哪一边。 -->
+    <div id="wikiFeedPane" class="hidden px-5 py-3">
+      <!-- ① 概览与筛选 -->
+      <div class="rounded-xl border border-border bg-card p-3.5 shadow-sm">
+        <div class="flex flex-wrap items-center gap-2">
+          <i data-lucide="package" class="h-4 w-4 text-primary"></i>
+          <span class="text-xs font-medium text-foreground">投喂素材</span>
+          <span id="feedStat" class="tnum text-[11px] text-muted-foreground">加载中…</span>
+          <span class="ml-auto"></span>
+          <select id="feedStatus"
+                  class="rounded-md border border-input bg-background px-2 py-1 text-[11px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring">
+            <option value="">全部状态</option>
+            <option value="published">已发布</option>
+            <option value="converted">已转换</option>
+            <option value="received">已接收</option>
+            <option value="failed">失败</option>
+            <option value="retracted">已撤下</option>
+          </select>
+          <label class="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+            <input id="feedLowQ" type="checkbox" class="h-3 w-3"> 只看低质量/告警
+          </label>
+          <button id="feedRefreshBtn" class="wk-act">刷新</button>
+          <button id="feedLintBtn" class="wk-act">体检</button>
+        </div>
+        <!-- 格式白名单：接口返回「生效清单 + 来源 + 三层原始值」，这里显示是谁定的 -->
+        <div id="feedFormats" class="mt-2 text-[11px] text-muted-foreground">格式白名单加载中…</div>
+      </div>
+
+      <!-- ② 清单 ⇄ 详情 -->
+      <div class="mt-3" style="height:calc(100vh - 300px);min-height:340px">
+        <div class="h-full overflow-hidden rounded-xl border border-border bg-card">
+          <div id="feedListPane" class="h-full overflow-y-auto scroll-thin"></div>
+          <div id="feedDetailPane" class="hidden h-full flex-col">
+            <div class="flex items-center gap-2 border-b border-border px-3 py-2">
+              <button id="feedBack" class="wk-act">返回列表</button>
+              <span id="feedDetailTitle" class="min-w-0 flex-1 truncate text-xs font-medium text-foreground"></span>
+              <button id="feedOpenKbBtn" class="wk-act hidden">在浏览中打开</button>
+            </div>
+            <div id="feedDetailBody" class="flex-1 overflow-y-auto scroll-thin px-4 py-3 text-xs"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ③ 体检结果（点「体检」才出现） -->
+      <div id="feedLintBox" class="mt-3 hidden rounded-xl border border-border bg-card">
+        <div class="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
+          <i data-lucide="activity" class="h-3.5 w-3.5 text-primary"></i>
+          <span class="text-xs font-medium text-foreground">投喂体检</span>
+          <span id="feedLintMeta" class="text-[11px] text-muted-foreground"></span>
+          <span class="ml-auto"></span>
+          <button id="feedLintClose" class="wk-act">收起</button>
+        </div>
+        <div id="feedLintList" class="max-h-56 overflow-y-auto scroll-thin px-3 py-2 text-xs"></div>
+      </div>
+    </div><!-- /wikiFeedPane -->
   </div><!-- /viewWiki -->
 </div>
 
@@ -1517,13 +1579,241 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     $('#opsBatchBody').innerHTML = html;
   }
 
+  // ===== 投喂素材（第一期：只读）=====
+  // 数据源：/api/feed/list（清单：状态/质量/告警）、/api/feed/show（详情）、
+  //         /api/feed/formats（白名单 + 来源 + 三层原始值）、/api/feed/lint（体检）。
+  // 这一期**只读**：投喂/重转/撤下/清除留到第二期 —— 先把"看得见"做扎实，
+  // 没有它们也能回答"这条素材什么状态、质量如何、卡在哪一步"。
+  const FEED = { loaded:false, items:[], detail:null, status:'', lowQuality:false,
+                 formats:null, lint:null };
+  const FEED_STATUS = { received:'已接收', converted:'已转换', published:'已发布',
+                        failed:'失败', retracted:'已撤下' };
+  const FEED_SOURCE = { override:'运行时覆盖（面板）', config:'yaml 配置',
+                        registry:'内置默认' };
+  // 低质量口径**必须与后端 `MaterialsDB.list(low_quality=True)` 一致**：
+  // `quality < 0.5 OR warnings != '[]'`。两处口径不同的话，列表里标黄的条数
+  // 会和勾选「只看低质量」筛出来的条数对不上 —— 那种"数字对不上"最难解释。
+  function feedLowQuality(it){
+    return ((it.quality != null) && Number(it.quality) < 0.5)
+        || (it.warnings || []).length > 0;
+  }
+
+  function feedStatusChip(st){
+    const cls = st === 'published' ? 'bg-success-soft text-success'
+              : st === 'failed'    ? 'bg-error-soft text-error'
+              : st === 'retracted' ? 'bg-muted text-muted-foreground'
+                                   : 'bg-info-soft text-info';
+    return `<span class="shrink-0 rounded px-1.5 py-0.5 text-[10px] ${cls}">`
+      + `${wikiEsc(FEED_STATUS[st] || st || '?')}</span>`;
+  }
+
+  async function loadFeed(){
+    $('#feedStat').textContent = '加载中…';
+    const qs = new URLSearchParams();
+    if(FEED.status) qs.set('status', FEED.status);
+    if(FEED.lowQuality) qs.set('low_quality', 'true');
+    qs.set('limit', '500');
+    try{
+      const r = await fetch('/api/feed/list?' + qs.toString());
+      const d = await r.json();
+      if(!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+      FEED.items = d.items || [];
+      FEED.loaded = true;
+      renderFeedList();
+      showFeedDetail(false);
+      const by = {};
+      FEED.items.forEach(x => { by[x.status] = (by[x.status] || 0) + 1; });
+      const bad = FEED.items.filter(feedLowQuality).length;
+      $('#feedStat').textContent = `${FEED.items.length} 条`
+        + (by.published ? ` · 已发布 ${by.published}` : '')
+        + (by.failed ? ` · 失败 ${by.failed}` : '')
+        + (bad ? ` · ⚠️ 低质量/告警 ${bad}` : '');
+    }catch(e){
+      FEED.items = [];
+      $('#feedStat').textContent = '加载失败';
+      $('#feedListPane').innerHTML =
+        `<div class="p-4 text-[11px] text-error">${wikiEsc(e.message)}</div>`;
+    }
+    loadFeedFormats();
+    reicons();
+  }
+
+  function renderFeedList(){
+    const list = FEED.items;
+    if(!list.length){
+      $('#feedListPane').innerHTML = '<div class="p-4 text-[11px] text-muted-foreground">'
+        + (FEED.loaded ? '没有符合条件的素材。' : '') + '</div>';
+      return;
+    }
+    $('#feedListPane').innerHTML = list.map(it=>{
+      const warns = it.warnings || [];
+      const low = feedLowQuality(it);
+      const q = (it.quality == null) ? '' : Number(it.quality).toFixed(2);
+      const when = it.doc_time ? new Date(it.doc_time * 1000).toLocaleDateString() : '';
+      return `<div class="feed-row flex cursor-pointer items-center gap-2 border-b border-border px-3 py-2 text-xs hover:bg-muted"
+                   data-doc="${wikiEsc(it.doc_id || '')}" title="${wikiEsc(it.source_ref || '')}">
+        <span class="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase text-muted-foreground">${wikiEsc(it.kind || '?')}</span>
+        <span class="min-w-0 flex-1 truncate text-foreground">${wikiEsc(it.title || '(无标题)')}</span>
+        ${q ? `<span class="shrink-0 tnum text-[10px] ${low ? 'text-warning' : 'text-muted-foreground'}">质量 ${q}</span>` : ''}
+        ${warns.length ? `<span class="shrink-0 text-[10px] text-warning" title="${wikiEsc(warns.join(' / '))}">⚠️ ${warns.length}</span>` : ''}
+        <span class="shrink-0 tnum text-[10px] text-muted-foreground">${wikiEsc(when)}</span>
+        ${feedStatusChip(it.status)}
+      </div>`;
+    }).join('');
+  }
+
+  function showFeedDetail(on){
+    $('#feedListPane').classList.toggle('hidden', on);
+    $('#feedDetailPane').classList.toggle('hidden', !on);
+    $('#feedDetailPane').classList.toggle('flex', on);
+  }
+
+  async function openFeedDetail(docId){
+    if(!docId) return;
+    showFeedDetail(true);
+    $('#feedDetailTitle').textContent = '加载中…';
+    $('#feedDetailBody').innerHTML = '<div class="text-[11px] text-muted-foreground">加载中…</div>';
+    $('#feedOpenKbBtn').classList.add('hidden');
+    try{
+      const r = await fetch('/api/feed/show/' + encodeURIComponent(docId));
+      const d = await r.json();
+      if(!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+      FEED.detail = d;
+      renderFeedDetail();
+    }catch(e){
+      $('#feedDetailTitle').textContent = '加载失败';
+      $('#feedDetailBody').innerHTML =
+        `<div class="text-[11px] text-error">${wikiEsc(e.message)}</div>`;
+    }
+    reicons();
+  }
+
+  function renderFeedDetail(){
+    const d = FEED.detail || {};
+    $('#feedDetailTitle').textContent = d.title || '(无标题)';
+    // 仅当素材有交付物时才给「在浏览中打开」—— 失败/未转换的没有知识页可跳
+    $('#feedOpenKbBtn').classList.toggle('hidden', !d.kb_path);
+    const rows = [
+      ['类型', d.kind],
+      ['状态', FEED_STATUS[d.status] || d.status],
+      ['转换器', d.converter],
+      ['质量', (d.quality == null) ? '' : Number(d.quality).toFixed(2)],
+      ['原件', d.source_ref],
+      ['知识页', d.kb_path],
+      ['文档时间', d.doc_time ? new Date(d.doc_time * 1000).toLocaleString() : ''],
+      ['入库时间', d.created_at ? new Date(d.created_at * 1000).toLocaleString() : ''],
+      ['条目 id', d.doc_id],
+    ].filter(([, v]) => v);
+    let html = '<table class="w-full text-[11px]"><tbody>'
+      + rows.map(([k, v]) => `<tr class="border-b border-border/60">
+          <td class="w-20 shrink-0 py-1 pr-2 align-top text-muted-foreground">${wikiEsc(k)}</td>
+          <td class="break-all py-1 text-foreground">${wikiEsc(String(v))}</td></tr>`).join('')
+      + '</tbody></table>';
+    if(d.error){
+      html += '<div class="mt-3 rounded-md bg-error-soft px-2.5 py-1.5 text-[11px] text-error">'
+        + `转换/发布失败（${wikiEsc(d.error_kind || 'unknown')}）：${wikiEsc(d.error)}</div>`;
+    }
+    const warns = d.warnings || [];
+    if(warns.length){
+      html += '<div class="mt-3"><div class="mb-1 text-[11px] font-medium text-warning">'
+        + `告警（${warns.length}）</div><ul class="list-disc pl-4 text-[11px] text-muted-foreground">`
+        + warns.map(w => `<li class="mb-0.5">${wikiEsc(w)}</li>`).join('') + '</ul></div>';
+    }else if(!d.error){
+      html += '<div class="mt-3 text-[11px] text-success">无告警。</div>';
+    }
+    $('#feedDetailBody').innerHTML = html;
+  }
+
+  async function loadFeedFormats(){
+    try{
+      const r = await fetch('/api/feed/formats');
+      const d = await r.json();
+      if(!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+      FEED.formats = d;
+      const src = FEED_SOURCE[d.source] || d.source || '';
+      const exts = (d.allowed || []).map(x =>
+        `<code class="rounded bg-muted px-1 py-0.5 text-[10px] text-foreground">${wikiEsc(x)}</code>`
+      ).join(' ');
+      let html = `允许投稿的格式（来源：<span class="text-foreground">${wikiEsc(src)}</span>）：`
+        + (exts || '（无）');
+      if(Array.isArray(d.override)){
+        html += ` · 运行时覆盖 ${d.override.length} 项`;
+      }
+      $('#feedFormats').innerHTML = html;
+    }catch(e){
+      $('#feedFormats').innerHTML =
+        `<span class="text-error">格式白名单读取失败：${wikiEsc(e.message)}</span>`;
+    }
+  }
+
+  async function loadFeedLint(){
+    $('#feedLintBtn').disabled = true;
+    $('#feedLintBtn').textContent = '体检中…';
+    try{
+      const r = await fetch('/api/feed/lint');
+      const d = await r.json();
+      if(!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+      FEED.lint = d;
+      renderFeedLint();
+    }catch(e){
+      $('#feedLintBox').classList.remove('hidden');
+      $('#feedLintMeta').textContent = '';
+      $('#feedLintList').innerHTML =
+        `<div class="text-[11px] text-error">体检失败：${wikiEsc(e.message)}</div>`;
+    }finally{
+      $('#feedLintBtn').disabled = false;
+      $('#feedLintBtn').textContent = '体检';
+    }
+    reicons();
+  }
+
+  function renderFeedLint(){
+    const d = FEED.lint || {};
+    const issues = d.issues || [];
+    const p0 = d.p0 || 0;
+    const meta = $('#feedLintMeta');
+    $('#feedLintBox').classList.remove('hidden');
+    // `ok=True` 只代表"没有 P0"（数据不一致）；P1 提示通常仍有一堆，
+    // 只写"通过"会让人以为全好了 —— 所以即便通过也把提示条数带上。
+    meta.textContent = d.ok
+      ? ('通过（无 P0）' + (issues.length ? ` · ${issues.length} 项提示` : ''))
+      : `P0 ${p0} 项 / 共 ${issues.length} 项`;
+    meta.className = 'text-[11px] ' + (p0 ? 'text-error' : 'text-success');
+    if(!issues.length){
+      $('#feedLintList').innerHTML = '<div class="text-[11px] text-success">没有发现问题。</div>';
+      return;
+    }
+    const order = { P0: 0, P1: 1, P2: 2 };
+    $('#feedLintList').innerHTML = issues
+      .slice().sort((a, b) => (order[a.level] ?? 9) - (order[b.level] ?? 9))
+      .map(it => `<div class="flex items-start gap-2 border-b border-border/60 py-1">
+        <span class="shrink-0 rounded px-1.5 py-0.5 text-[10px] ${it.level === 'P0' ? 'bg-error-soft text-error' : 'bg-warning-soft text-warning'}">${wikiEsc(it.level)}</span>
+        <span class="shrink-0 text-[10px] text-muted-foreground">${wikiEsc(it.kind)}</span>
+        <span class="min-w-0 flex-1 break-all text-foreground">${wikiEsc(it.target)}</span>
+        <span class="w-2/5 shrink-0 break-all text-[10px] text-muted-foreground">${wikiEsc(it.detail || '')}</span>
+      </div>`).join('');
+  }
+
+  // 素材 → 知识页：`kb_path` 与浏览页的 `path` 是同一个绝对路径，直接跳过去。
+  // 这是"源有问题"与"页有问题"之间的桥梁 —— 看到告警能立刻翻到成品长什么样。
+  function feedOpenKbPage(){
+    const p = FEED.detail && FEED.detail.kb_path;
+    if(!p) return;
+    wkSwitchSub('browse');
+    openWikiPage(p);
+  }
+
+  // 二级切换：浏览（页面）/ 运维（补跑·触发器·批次）/ 投喂（素材登记）
   function wkSwitchSub(which){
-    const ops = (which === 'ops');
-    $('#wikiBrowsePane').classList.toggle('hidden', ops);
-    $('#wikiOpsPane').classList.toggle('hidden', !ops);
-    $('#wkTabBrowse').classList.toggle('active', !ops);
-    $('#wkTabOps').classList.toggle('active', ops);
-    if(ops && !OPS.loaded) loadOps();
+    const cur = (which === 'ops' || which === 'feed') ? which : 'browse';
+    $('#wikiBrowsePane').classList.toggle('hidden', cur !== 'browse');
+    $('#wikiOpsPane').classList.toggle('hidden', cur !== 'ops');
+    $('#wikiFeedPane').classList.toggle('hidden', cur !== 'feed');
+    $('#wkTabBrowse').classList.toggle('active', cur === 'browse');
+    $('#wkTabOps').classList.toggle('active', cur === 'ops');
+    $('#wkTabFeed').classList.toggle('active', cur === 'feed');
+    if(cur === 'ops' && !OPS.loaded) loadOps();
+    if(cur === 'feed' && !FEED.loaded) loadFeed();
     reicons();
   }
 
@@ -1750,9 +2040,22 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     });
     $('#wikiBack').onclick = () => showWikiPage(false);
 
-    // ---- 二级切换（浏览 / 运维）与运维动作 ----
+    // ---- 二级切换（浏览 / 运维 / 投喂）与运维动作 ----
     $('#wkTabBrowse').onclick = () => wkSwitchSub('browse');
     $('#wkTabOps').onclick = () => wkSwitchSub('ops');
+    $('#wkTabFeed').onclick = () => wkSwitchSub('feed');
+    // 投喂视图（第一期只读）：筛选 / 详情 / 格式白名单 / 体检
+    $('#feedRefreshBtn').onclick = () => { loadFeed(); if(FEED.lint) loadFeedLint(); };
+    $('#feedLintBtn').onclick = () => loadFeedLint();
+    $('#feedLintClose').onclick = () => $('#feedLintBox').classList.add('hidden');
+    $('#feedStatus').onchange = e => { FEED.status = e.target.value || ''; loadFeed(); };
+    $('#feedLowQ').onchange = e => { FEED.lowQuality = !!e.target.checked; loadFeed(); };
+    $('#feedListPane').addEventListener('click', e => {
+      const row = e.target.closest('.feed-row');
+      if(row) openFeedDetail(row.dataset.doc);
+    });
+    $('#feedBack').onclick = () => showFeedDetail(false);
+    $('#feedOpenKbBtn').onclick = () => feedOpenKbPage();
     $('#opsRefreshBtn').onclick = () => loadOps();
     $('#opsUpdateBtn').onclick = () => opsUpdate();
     $('#opsTriggerBtn').onclick = () => opsTriggerRun();
