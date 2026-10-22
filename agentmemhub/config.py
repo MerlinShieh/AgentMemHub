@@ -447,7 +447,8 @@ class Config:
     #: **新增 provider 开关时务必加到这里** —— 本段是白名单过滤，漏加会让配置
     #: 静默失效（实测踩过：`thinking` / `reasoning_effort` 写进了 yaml 却读不到，
     #: 表现为"开关不生效"，排查成本很高）。
-    _LLM_SCALAR_KEYS = ("timeout", "max_tokens", "temperature",
+    _LLM_SCALAR_KEYS = ("timeout", "max_total_seconds", "max_retries",
+                        "backoff_base", "max_tokens", "temperature",
                         "thinking", "reasoning_effort", "repair_model")
 
     @property

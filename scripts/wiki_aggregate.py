@@ -406,8 +406,13 @@ def call_json(client, system: str, user: str, max_tokens: int,
     client 内部的重试只覆盖 HTTP 层瞬态错误；实测 provider 会**偶发返回空 content**
     （`ValueError: 模型返回空内容`），它不算瞬态错误、不会触发内部重试，却会让
     整批归域白跑。这层把它兜住——重试通常立刻就好。
+
+    **但瞬态错误不在这里再重试一遍**（2026-10-20 修）：`complete_json` 内部已按
+    `max_retries` 退避重试过一轮，两层叠加就是 `tries × (max_retries+1)` 次**长调用**。
+    实测一次 L2 编译调用跑了 975 秒，这个嵌套结构会把最坏情况放大到几十分钟。
+    瞬态错误（超时 / 5xx / 网络）交给内层——它的退避策略与限流闸门是配套的。
     """
-    from agentmemhub.llm import usage_snapshot
+    from agentmemhub.llm import LLMTransientError, usage_snapshot
     last = None
     for i in range(tries):
         before = usage_snapshot()
@@ -419,6 +424,16 @@ def call_json(client, system: str, user: str, max_tokens: int,
                   seconds=round(time.time() - t0, 1),
                   usage=_usage_delta(before, usage_snapshot()))
             return r
+        except LLMTransientError as e:
+            # 内层已重试过 → 这里只留痕、不叠加。**必须留痕**：否则"重试了多久"
+            # 在日志里完全看不见，只剩一段没有 call 事件的空白时间。
+            print("     %s 瞬态错误（内层已重试，不再叠加）：%s"
+                  % (tag, str(e)[:90]), flush=True)
+            _wlog(event="call", tag=tag, ok=False, attempt=i + 1,
+                  seconds=round(time.time() - t0, 1),
+                  error="%s: %s" % (type(e).__name__, str(e)[:200]),
+                  usage=_usage_delta(before, usage_snapshot()))
+            raise
         except Exception as e:
             last = e
             print("     %s调用失败（第 %d/%d 次）：%s"

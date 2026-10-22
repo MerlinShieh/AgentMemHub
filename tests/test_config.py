@@ -257,3 +257,29 @@ def test_distillation_headers_merge_child_wins(tmp_path):
     h = c.distillation["llm"]["headers"]
     assert h["User-Agent"] == "top-ua"          # 顶层独有 → 保留
     assert h["x-opencode-session"] == "child"   # 子段覆盖
+
+def test_llm_白名单要透传控制超时与重试的键(tmp_path):
+    """`_merge_llm` 是**白名单过滤** —— 漏加的键会静默失效（yaml 写了读不到）。
+
+    实测踩过两次：`thinking` / `reasoning_effort`。2026-10-22 加
+    `max_total_seconds`（单次调用总时长上限）时又差点漏 —— 漏了的话看门狗
+    永远不会启用，而配置看起来"已经配好"，排查成本极高。
+    `max_retries` / `backoff_base` 同批补上（它们也是 `LLMConfig` 的字段）。
+    """
+    p = tmp_path / "agentmemhub.yaml"
+    p.write_text(
+        "llm:\n"
+        "  max_total_seconds: 600\n"
+        "  max_retries: 1\n"
+        "  backoff_base: 2.5\n"
+        "wiki:\n"
+        "  l2:\n"
+        "    llm:\n"
+        "      max_total_seconds: 300\n", encoding="utf-8")
+    c = _cfg(path=p)
+    assert c.llm["max_total_seconds"] == 600
+    assert c.llm["max_retries"] == 1
+    assert c.llm["backoff_base"] == 2.5
+    # 子段（wiki.l2.llm）覆盖顶层，其余字段仍继承
+    assert c.wiki_l2["llm"]["max_total_seconds"] == 300
+    assert c.wiki_l2["llm"]["max_retries"] == 1

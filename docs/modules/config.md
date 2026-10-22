@@ -144,10 +144,12 @@
 | `llm.reasoning_effort` | 思考强度 `low` / `medium` / `high` / `xhigh` / `max`（仅思考模式生效；provider 接受档位不同） | `reasoning_effort: "low"` |
 | `llm.repair_model` | 格式修复模型：主模型返回内容但 JSON 解析失败时，把原始输出交给它转成规范 JSON；留空 = 关闭（直接抛错） | `repair_model: "deepseek/deepseek-v4.1-flash"` |
 | `llm.timeout` / `max_tokens` / `temperature` | 透传超参 | `timeout: 900` |
+| `llm.max_total_seconds` | **单次调用总时长上限**（秒；`0` = 不限，默认）。⚠️ 与 `timeout` **不是一回事**：`timeout` 是 socket **空闲**超时（非流式接口在服务端"算"的时候一个字节都不发 → 全程不触发）；本项是"这次最多等多久"，到点直接放弃等待并按瞬态错误重试。实测一次 L2 调用跑了 975 秒而 `timeout` 配的是 900 | `wiki.l2.llm.max_total_seconds: 600` |
+| `llm.max_retries` / `backoff_base` | 瞬态错误（429 / 5xx / 网络）的重试次数与指数退避基数 | `max_retries: 2` |
 
 **使用方**：记忆蒸馏（`distillation.llm` 继承本段）与批量评分（`scoring.read_engine_llm()` 直读本段）。Wiki 两级各有自己的 `.llm`，见 §3.2 形态③。
 
-**改这段要注意白名单**：`Config.llm` 与 `Config._merge_llm` 只透传 `_LLM_SCALAR_KEYS`（`timeout` / `max_tokens` / `temperature` / `thinking` / `reasoning_effort` / `repair_model`）加 `endpoint` / `api_key` / `model` / `headers`。**新增 provider 开关时必须同步加进白名单**，否则 yaml 写了也读不到（实测踩过 `thinking` / `reasoning_effort`）。
+**改这段要注意白名单**：`Config.llm` 与 `Config._merge_llm` 只透传 `_LLM_SCALAR_KEYS`（`timeout` / `max_total_seconds` / `max_retries` / `backoff_base` / `max_tokens` / `temperature` / `thinking` / `reasoning_effort` / `repair_model`）加 `endpoint` / `api_key` / `model` / `headers`。**新增 provider 开关时必须同步加进白名单**，否则 yaml 写了也读不到（实测踩过 `thinking` / `reasoning_effort`；2026-10-22 加 `max_total_seconds` 时又差点漏，靠 `tests/test_config.py` 的守护测试拦住）。
 
 ### 4.4 `wiki`：两级编译
 

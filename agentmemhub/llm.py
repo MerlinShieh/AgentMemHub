@@ -19,6 +19,7 @@ import json
 import http.client
 import logging
 import re
+import socket
 import threading
 import time
 import unicodedata
@@ -289,6 +290,16 @@ class LLMConfig:
     api_key: str = ""
     model: str = ""
     timeout: float = 60.0
+    #: **单次调用总时长上限**（秒）：`0` = 不限（默认，保持既有行为）。
+    #:
+    #: 为什么需要它、而不能只靠 `timeout`：`timeout` 传到底层是 **socket 空闲
+    #: 超时** —— 它只管"多久没有数据流动"。而 OpenAI 兼容接口是**非流式**的：
+    #: 服务端在算的时候**一个字节都不发**，于是这个超时**完全不触发**。
+    #: 实测 2026-10-20：一次 L2 编译调用跑了 **975.3 秒**才返回（`ok=True`、
+    #: `attempt=1`），`timeout=900` 全程没用上，一轮增量因此白等十几分钟。
+    #: 设了本项就到点**强行断开底层 socket**（见 `_kill_watchdog()`），阻塞在
+    #: `recv` 上的调用立刻抛异常 → 按瞬态错误重试。
+    max_total_seconds: float = 0.0
     max_retries: int = 2          # 仅对瞬态错误生效
     backoff_base: float = 1.5     # 退避基数（秒）：base * 2^attempt
     max_tokens: int = 16384
@@ -350,6 +361,7 @@ class LLMConfig:
             api_key=str(d.get("api_key") or ""),
             model=str(d.get("model") or ""),
             timeout=float(d.get("timeout") or 60.0),
+            max_total_seconds=float(d.get("max_total_seconds") or 0.0),
             max_retries=int(d.get("max_retries") if d.get("max_retries") is not None else 2),
             backoff_base=float(d.get("backoff_base") or 1.5),
             max_tokens=int(d.get("max_tokens") or 16384),
@@ -378,6 +390,57 @@ class LLMClient:
     # -- 单次请求 --------------------------------------------------------
 
     def _post(self, body: dict, timeout: float) -> dict:
+        """发一次请求并解析 JSON —— **含「总时长上限」**。
+
+        两种超时是**两件事**，别混：
+
+        · `timeout` 传到底层是 **socket 空闲超时**：只管"多久没有数据流动"；
+        · `max_total_seconds` 是"这一次调用最多等多久"，由本方法实现。
+
+        为什么必须用「工作线程 + join」而不是装个看门狗去关 socket：
+        OpenAI 兼容接口是**非流式**的，服务端在算的时候**一个字节都不发** ——
+        空闲超时全程不触发（实测 2026-10-20：一次 L2 编译调用跑了 **975.3 秒**
+        才返回，而 `timeout` 配的是 900）。而**在 Windows 上 `socket.shutdown()`
+        无法中断已经在阻塞的 `recv`**（实测：0.5 秒时 shutdown 已成功返回，
+        `read()` 仍等到服务端 3 秒后才抛 BrokenPipeError）。把请求放进工作线程、
+        主线程只 `join` 到点，是唯一可靠的做法。
+
+        代价：被放弃的调用线程会**滞留到 socket 超时**才结束（daemon，不阻塞
+        进程退出）；数量受 `max_retries` 约束，可接受。
+        """
+        total_limit = float(getattr(self.cfg, "max_total_seconds", 0.0) or 0.0)
+        if total_limit <= 0:
+            return self._post_once(body, timeout)
+        box: dict[str, Any] = {}
+        th = threading.Thread(target=self._post_once_into,
+                              args=(body, timeout, box), daemon=True)
+        th.start()
+        th.join(total_limit)
+        if th.is_alive():
+            raise LLMTransientError(
+                "单次调用总时长超过 %.0fs 上限，已放弃等待（配置 "
+                "llm.max_total_seconds）—— 别指望 `timeout` 兜住它：那是 socket "
+                "空闲超时，对非流式调用无效。上游可能仍在执行这次请求。"
+                % total_limit)
+        err = box.get("error")
+        if err is not None:
+            raise err
+        return box.get("data") or {}
+
+    def _post_once_into(self, body: dict, timeout: float,
+                        box: dict[str, Any]) -> None:
+        """工作线程体：把结果或异常放进 box。
+
+        异常**原样保留类型**：`LLMTransientError` / `ContentFilterRejected` /
+        `LLMError` 的分类不能被降级成通用异常，否则上层的重试与中止策略全乱。
+        """
+        try:
+            box["data"] = self._post_once(body, timeout)
+        except BaseException as e:          # noqa: BLE001 —— 类型要原样传给上层
+            box["error"] = e
+
+    def _post_once(self, body: dict, timeout: float) -> dict:
+        """真正发一次请求并解析 JSON（不含总时长控制）。"""
         _rate_wait()                      # 全局限流闸门（429 后所有线程一起等）
         headers = {"Content-Type": "application/json",
                    "Authorization": f"Bearer {self.cfg.api_key}"}
@@ -395,15 +458,16 @@ class LLMClient:
         # 计时用 perf_counter（高精度）：Windows 上 monotonic() 基于
         # GetTickCount64，精度只有约 15.6ms —— 短请求会测出 0.0（实测踩到）
         t0 = time.perf_counter()
+        resp = None
         try:
-            with self._opener.open(req, timeout=timeout) as r:
-                data = json.loads(r.read().decode("utf-8"))
-                # 成本可见性：累计用量 + **累计调用耗时**
-                # （任务汇总里的时长是墙钟，机器休眠会严重失真；这个口径才是
-                #   真实工作量）
-                _record_usage(data.get("usage"),
-                              elapsed=time.perf_counter() - t0)
-                return data
+            resp = self._opener.open(req, timeout=timeout)
+            data = json.loads(resp.read().decode("utf-8"))
+            # 成本可见性：累计用量 + **累计调用耗时**
+            # （任务汇总里的时长是墙钟，机器休眠会严重失真；这个口径才是
+            #   真实工作量）
+            _record_usage(data.get("usage"),
+                          elapsed=time.perf_counter() - t0)
+            return data
         except urllib.error.HTTPError as e:
             detail = ""
             try:
@@ -431,6 +495,12 @@ class LLMClient:
             # 继承自它而**不是** OSError —— 漏掉的话网络抖一下就直接判失败、
             # 一次都不重试（实测切网时因此丢了好几组）。
             raise LLMTransientError(f"{type(e).__name__}: {e}") from None
+        finally:
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:           # noqa: BLE001 —— 关闭失败无关紧要
+                    pass
 
     # -- 对外：取结构化 JSON ---------------------------------------------
 
