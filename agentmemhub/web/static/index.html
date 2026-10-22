@@ -718,7 +718,98 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
           <button id="feedLintBtn" class="wk-act">体检</button>
         </div>
         <!-- 格式白名单：接口返回「生效清单 + 来源 + 三层原始值」，这里显示是谁定的 -->
-        <div id="feedFormats" class="mt-2 text-[11px] text-muted-foreground">格式白名单加载中…</div>
+        <div class="mt-2 flex flex-wrap items-center gap-2">
+          <div id="feedFormats" class="text-[11px] text-muted-foreground">格式白名单加载中…</div>
+          <button id="feedFormatsToggle" class="wk-act ml-auto">改白名单</button>
+        </div>
+        <div id="feedFormatsEdit" class="mt-1 hidden flex-wrap items-center gap-2 text-[11px]">
+          <input id="feedFormatsInput" type="text" placeholder=".pdf .docx .md（空格或逗号分隔）"
+                 class="min-w-[240px] flex-1 rounded-md border border-input bg-background px-2 py-1 text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring">
+          <button id="feedFormatsSave" class="wk-act-primary">保存覆盖</button>
+          <button id="feedFormatsReset" class="wk-act">恢复默认</button>
+          <span class="w-full text-muted-foreground">运行时覆盖：写状态文件、不改 yaml，**对所有投喂入口生效**</span>
+        </div>
+      </div>
+
+      <!-- ①b 投喂入口（可折叠）：上传 / 本机路径 / 网页链接 / 纯文本 -->
+      <div class="mt-3 rounded-xl border border-border bg-card">
+        <div class="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
+          <i data-lucide="plus" class="h-3.5 w-3.5 text-primary"></i>
+          <span class="text-xs font-medium text-foreground">投喂新素材</span>
+          <span class="text-[11px] text-muted-foreground">上传文件 / 本机路径 / 网页链接 / 纯文本</span>
+          <span class="ml-auto"></span>
+          <button id="feedAddToggle" class="wk-act">展开</button>
+        </div>
+        <div id="feedAddBody" class="hidden px-3 py-2.5">
+          <div class="mb-2 flex flex-wrap items-center gap-2 text-[11px]">
+            <span class="text-muted-foreground">方式</span>
+            <div id="feedModeSeg" class="flex overflow-hidden rounded-md border border-border">
+              <button data-mode="upload" class="feed-mode bg-primary px-2 py-1 font-medium text-primary-foreground">上传文件</button>
+              <button data-mode="path" class="feed-mode border-l border-border px-2 py-1 text-muted-foreground hover:bg-muted">本机路径</button>
+              <button data-mode="url" class="feed-mode border-l border-border px-2 py-1 text-muted-foreground hover:bg-muted">网页链接</button>
+              <button data-mode="text" class="feed-mode border-l border-border px-2 py-1 text-muted-foreground hover:bg-muted">纯文本</button>
+            </div>
+          </div>
+          <div id="feedModeUpload" class="text-[11px]">
+            <input id="feedFiles" type="file" multiple
+                   class="w-full text-[11px] text-foreground file:mr-2 file:rounded-md file:border-0 file:bg-muted file:px-2 file:py-1 file:text-[11px] file:text-foreground">
+            <span class="mt-1 block text-muted-foreground">可多选；逐个上传（走 multipart，不经过 base64）</span>
+          </div>
+          <div id="feedModePath" class="hidden text-[11px]">
+            <textarea id="feedPathInput" rows="2" placeholder="服务器本机的文件路径，每行一个"
+                      class="w-full rounded-md border border-input bg-background px-2 py-1.5 text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"></textarea>
+          </div>
+          <div id="feedModeUrl" class="hidden text-[11px]">
+            <input id="feedUrlInput" type="url" placeholder="https://…（取回层出网抓取）"
+                   class="w-full rounded-md border border-input bg-background px-2 py-1.5 text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring">
+          </div>
+          <div id="feedModeText" class="hidden text-[11px]">
+            <input id="feedTextTitle" type="text" placeholder="标题（可选，兼作文件名）"
+                   class="mb-1 w-full rounded-md border border-input bg-background px-2 py-1.5 text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring">
+            <textarea id="feedTextBody" rows="4" placeholder="直接粘贴正文内容"
+                      class="w-full rounded-md border border-input bg-background px-2 py-1.5 text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"></textarea>
+          </div>
+          <div class="mt-2 flex flex-wrap items-center gap-3 text-[11px]">
+            <label class="inline-flex items-center gap-1 text-muted-foreground">
+              <input id="feedForce" type="checkbox" class="h-3 w-3"> 强制重投（忽略幂等）
+            </label>
+            <label class="inline-flex items-center gap-1 text-muted-foreground">
+              <input id="feedDryRun" type="checkbox" class="h-3 w-3"> 只看效果不落库（dry-run）
+            </label>
+            <span class="ml-auto"></span>
+            <button id="feedSubmitBtn" class="wk-act-primary">投喂</button>
+          </div>
+          <div id="feedAddResult" class="mt-2 hidden max-h-40 overflow-y-auto scroll-thin rounded-md bg-muted px-2.5 py-1.5 text-[11px]"></div>
+        </div>
+      </div>
+
+      <!-- ①c 批量投喂：先扫描看"哪些能进"，确认后再投（接口刻意分成两步） -->
+      <div class="mt-3 rounded-xl border border-border bg-card">
+        <div class="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
+          <i data-lucide="folder" class="h-3.5 w-3.5 text-primary"></i>
+          <span class="text-xs font-medium text-foreground">批量投喂</span>
+          <span class="text-[11px] text-muted-foreground">扫目录 → 预览能进/被挡 → 确认投喂</span>
+          <span class="ml-auto"></span>
+          <button id="feedScanToggle" class="wk-act">展开</button>
+        </div>
+        <div id="feedScanBody" class="hidden px-3 py-2.5">
+          <div class="flex flex-wrap items-start gap-2 text-[11px]">
+            <textarea id="feedScanRoots" rows="2" placeholder="目录或文件路径，每行一个（目录会按格式白名单筛）"
+                      class="min-w-[260px] flex-1 rounded-md border border-input bg-background px-2 py-1.5 text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"></textarea>
+            <label class="inline-flex items-center gap-1 pt-1 text-muted-foreground">
+              <input id="feedScanRecursive" type="checkbox" checked class="h-3 w-3"> 递归
+            </label>
+            <button id="feedScanBtn" class="wk-act mt-0.5">扫描</button>
+          </div>
+          <div id="feedScanResult" class="mt-2 hidden">
+            <div id="feedScanMeta" class="text-[11px] text-muted-foreground"></div>
+            <div id="feedScanList" class="mt-1 max-h-48 overflow-y-auto scroll-thin rounded-md bg-muted px-2 py-1 text-[11px]"></div>
+            <div class="mt-2 flex items-center gap-2">
+              <button id="feedBatchRunBtn" class="wk-act-primary">确认投喂</button>
+              <span id="feedBatchHint" class="text-[11px] text-muted-foreground"></span>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- ② 清单 ⇄ 详情 -->
@@ -730,6 +821,9 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
               <button id="feedBack" class="wk-act">返回列表</button>
               <span id="feedDetailTitle" class="min-w-0 flex-1 truncate text-xs font-medium text-foreground"></span>
               <button id="feedOpenKbBtn" class="wk-act hidden">在浏览中打开</button>
+              <button id="feedRetryBtn" class="wk-act">重转</button>
+              <button id="feedRetractBtn" class="wk-act">撤下</button>
+              <button id="feedDeleteBtn" class="wk-act-danger">删除</button>
             </div>
             <div id="feedDetailBody" class="flex-1 overflow-y-auto scroll-thin px-4 py-3 text-xs"></div>
           </div>
@@ -1585,7 +1679,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   // 这一期**只读**：投喂/重转/撤下/清除留到第二期 —— 先把"看得见"做扎实，
   // 没有它们也能回答"这条素材什么状态、质量如何、卡在哪一步"。
   const FEED = { loaded:false, items:[], detail:null, status:'', lowQuality:false,
-                 formats:null, lint:null };
+                 formats:null, lint:null, mode:'upload', scan:null, busy:false };
   const FEED_STATUS = { received:'已接收', converted:'已转换', published:'已发布',
                         failed:'失败', retracted:'已撤下' };
   const FEED_SOURCE = { override:'运行时覆盖（面板）', config:'yaml 配置',
@@ -1794,6 +1888,281 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       </div>`).join('');
   }
 
+  // ---- 投喂写入与操作（第二期）----
+  // 口径说明：`/api/feed/add` 失败也是 HTTP 200 + `ok:false` + `error_kind`
+  // （业务失败不是传输错误），所以这里一律看 `ok`/`error_kind`，不看状态码。
+  function feedToggleBox(bodySel, btnSel){
+    const box = $(bodySel), btn = $(btnSel);
+    const show = box.classList.contains('hidden');
+    box.classList.toggle('hidden', !show);
+    btn.textContent = show ? '收起' : '展开';
+    reicons();
+  }
+
+  function feedSetMode(m){
+    FEED.mode = m;
+    $$('.feed-mode').forEach(b=>{
+      const on = b.dataset.mode === m;
+      b.classList.toggle('bg-primary', on);
+      b.classList.toggle('text-primary-foreground', on);
+      b.classList.toggle('font-medium', on);
+      b.classList.toggle('text-muted-foreground', !on);
+    });
+    [['upload','#feedModeUpload'],['path','#feedModePath'],
+     ['url','#feedModeUrl'],['text','#feedModeText']]
+      .forEach(([k, sel]) => $(sel).classList.toggle('hidden', k !== m));
+  }
+
+  async function feedAdd(payload){
+    try{
+      const r = await fetch('/api/feed/add', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload)});
+      return await r.json().catch(()=>({ok:false, error:'响应不是 JSON'}));
+    }catch(e){ return {ok:false, error:String(e), error_kind:'network'}; }
+  }
+
+  function feedShowAddResult(rows){
+    const box = $('#feedAddResult');
+    if(!rows || !rows.length){ box.classList.add('hidden'); return; }
+    box.classList.remove('hidden');
+    box.innerHTML = rows.map(r=>{
+      const ok = !!r.ok;
+      const name = r._name || r.ref || r.doc_id || '(未命名)';
+      // `skipped` 有两种语义，别混：`dry_run` 是"只校验没写盘"，其余（幂等命中）
+      // 才是"这条以前投过"。都写成"幂等跳过"会让人以为 dry-run 也把数据写进去了。
+      const extra = ok
+        ? (r.skipped === 'dry_run'
+            ? '（dry-run：只校验，未写盘）'
+            : (r.skipped ? `（跳过：${wikiEsc(r.skipped)}）`
+                         : `→ ${wikiEsc(r.doc_id || '')}`))
+        : `✗ ${wikiEsc(r.error_kind || 'error')}：${wikiEsc(r.error || '')}`;
+      return `<div class="flex items-start gap-1.5 py-0.5 ${ok ? 'text-success' : 'text-error'}">
+        <span class="shrink-0">${ok ? '✓' : '✗'}</span>
+        <span class="min-w-0 flex-1 break-all">${wikiEsc(String(name))}
+          <span class="text-muted-foreground">${extra}</span></span>
+      </div>`;
+    }).join('');
+  }
+
+  async function feedSubmit(){
+    if(FEED.busy) return;
+    const force = !!($('#feedForce') || {}).checked;
+    const dry = !!($('#feedDryRun') || {}).checked;
+    const mode = FEED.mode;
+    const res = [];
+    FEED.busy = true;
+    $('#feedSubmitBtn').disabled = true;
+    $('#feedSubmitBtn').textContent = '投喂中…';
+    try{
+      if(mode === 'upload'){
+        const files = Array.from(($('#feedFiles') || {}).files || []);
+        if(!files.length){ toast('先选文件'); return; }
+        for(const f of files){
+          const fd = new FormData();
+          fd.append('file', f);
+          if(force) fd.append('force', 'true');
+          if(dry) fd.append('dry_run', 'true');
+          try{
+            const r = await fetch('/api/feed/upload', {method:'POST', body:fd});
+            const d = await r.json().catch(()=>({ok:false, error:'响应不是 JSON'}));
+            res.push(Object.assign({_name: f.name}, d));
+          }catch(e){ res.push({_name: f.name, ok:false, error:String(e), error_kind:'network'}); }
+        }
+      }else if(mode === 'path'){
+        const lines = String(($('#feedPathInput') || {}).value || '')
+          .split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+        if(!lines.length){ toast('先填路径'); return; }
+        for(const p of lines){
+          res.push(Object.assign({_name: p}, await feedAdd({input:'path', value:p, force, dry_run:dry})));
+        }
+      }else if(mode === 'url'){
+        const u = String(($('#feedUrlInput') || {}).value || '').trim();
+        if(!u){ toast('先填链接'); return; }
+        res.push(Object.assign({_name: u}, await feedAdd({input:'url', value:u, force, dry_run:dry})));
+      }else{
+        const body = String(($('#feedTextBody') || {}).value || '').trim();
+        const title = String(($('#feedTextTitle') || {}).value || '').trim();
+        if(!body){ toast('先填正文'); return; }
+        res.push(Object.assign({_name: title || '(纯文本)'},
+          await feedAdd({input:'text', value:body, filename:title, force, dry_run:dry})));
+      }
+      feedShowAddResult(res);
+      // dry-run 不落库，刷新清单没意义；有成功项才刷新
+      if(!dry && res.some(x=>x.ok)) await loadFeed();
+    }finally{
+      FEED.busy = false;
+      $('#feedSubmitBtn').disabled = false;
+      $('#feedSubmitBtn').textContent = '投喂';
+    }
+  }
+
+  async function feedScan(){
+    const roots = String(($('#feedScanRoots') || {}).value || '')
+      .split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+    if(!roots.length){ toast('先填目录'); return; }
+    $('#feedScanBtn').disabled = true;
+    $('#feedScanBtn').textContent = '扫描中…';
+    try{
+      const r = await fetch('/api/feed/scan', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({roots, recursive: !!($('#feedScanRecursive') || {}).checked})});
+      const d = await r.json();
+      if(!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+      FEED.scan = d;
+      renderFeedScan();
+    }catch(e){ toast('扫描失败：' + (e.message || e)); }
+    finally{
+      $('#feedScanBtn').disabled = false;
+      $('#feedScanBtn').textContent = '扫描';
+    }
+  }
+
+  function renderFeedScan(){
+    const d = FEED.scan || {};
+    const allowed = d.allowed || [], skipped = d.skipped || [];
+    $('#feedScanResult').classList.remove('hidden');
+    $('#feedScanMeta').textContent =
+      `可投喂 ${allowed.length} 项 · 被格式挡掉 ${skipped.length} 项`
+      + (d.truncated ? ' · 已达上限（未列完）' : '');
+    const rows = allowed.map(p =>
+        `<div class="py-0.5 break-all text-foreground">✓ ${wikiEsc(p)}</div>`)
+      .concat(skipped.map(s =>
+        `<div class="py-0.5 break-all text-muted-foreground">✗ ${wikiEsc(s.path)}
+           <span class="text-warning">（${wikiEsc(s.reason || '')}）</span></div>`));
+    $('#feedScanList').innerHTML = rows.length ? rows.join('')
+      : '<div class="text-muted-foreground">（没有可投喂项）</div>';
+    $('#feedBatchRunBtn').disabled = !allowed.length;
+    $('#feedBatchHint').textContent = allowed.length
+      ? `将投喂 ${allowed.length} 项（长任务，完成后清单自动刷新）`
+      : '没有可投喂项';
+  }
+
+  async function feedBatchRun(){
+    const allowed = (FEED.scan || {}).allowed || [];
+    if(!allowed.length){ toast('没有可投喂项'); return; }
+    const ok = await confirmModal('批量投喂',
+      `将投喂 <b>${allowed.length}</b> 项（已在预览里按格式白名单筛过）。<br><br>`
+      + '长任务：提交后可在顶部进度条看进度，完成后清单会自动刷新。',
+      {confirmText:'开始投喂'});
+    if(!ok) return;
+    // 用**预览里的显式清单**（paths）而不是再扫一遍目录 —— 人看到的就是这些
+    const submitted = await opsSubmitJob('/api/feed/batch', {
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({paths: allowed,
+                            force: !!($('#feedForce') || {}).checked,
+                            dry_run: !!($('#feedDryRun') || {}).checked}),
+    }, () => { loadFeed(); if(FEED.lint) loadFeedLint(); });
+    if(submitted) $('#feedBatchHint').textContent = '任务已提交，进度见顶部';
+  }
+
+  async function feedCall(url, payload, okText){
+    try{
+      const r = await fetch(url, {method:'POST',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+      const d = await r.json().catch(()=>({ok:false}));
+      const bad = (d && d.ok === false);
+      toast(bad ? ('操作失败：' + (d.error || ('HTTP ' + r.status))) : (okText || '操作完成'));
+    }catch(e){ toast('操作失败：' + (e.message || e)); }
+    await loadFeed();
+    showFeedDetail(false);
+  }
+
+  async function feedAction(kind){
+    const d = FEED.detail;
+    if(!d || !d.doc_id) return;
+    const title = d.title || d.doc_id;
+    if(kind === 'retry'){
+      const ok = await confirmModal('重转',
+        `将重新转换并发布：<br><br><b>${esc(title)}</b><br><br>`
+        + '来源不可达时会自动回落原件；耗时取决于转换器。', {confirmText:'重转'});
+      if(!ok) return;
+      $('#feedRetryBtn').disabled = true;
+      await feedCall('/api/feed/retry', {doc_id: d.doc_id}, '重转完成');
+      $('#feedRetryBtn').disabled = false;
+      return;
+    }
+    if(kind === 'retract'){
+      const ok = await confirmModal('撤下素材',
+        `从知识库移除交付物、状态改为「已撤下」。<br><br><b>${esc(title)}</b><br><br>`
+        + '**原件保留**，之后可以重转恢复。', {confirmText:'撤下'});
+      if(!ok) return;
+      await feedCall('/api/feed/retract', {doc_id: d.doc_id}, '已撤下');
+      return;
+    }
+    if(kind === 'forget'){
+      // 用户明确要求"可以随时删除"，所以 purge 也放出来 —— 但必须是**显式勾选**。
+      // 不采用"取消=只清登记"那种反直觉语义：取消就是取消，什么都不做。
+      let purge = false;
+      const ok = await new Promise(resolve=>{
+        showModal({
+          title: '删除素材',
+          msg: `将删除<b>登记记录与知识页交付物</b>，该素材从投喂清单与知识库中消失。`
+             + `<br><br><b>${esc(title)}</b>`,
+          body: '<label class="inline-flex items-start gap-2 text-xs text-foreground">'
+              + '<input id="feedPurgeChk" type="checkbox" class="mt-0.5 h-3.5 w-3.5">'
+              + '<span>同时删除<b>原件</b>（raw/ 里的本地副本）—— 勾选后<b>不可恢复</b></span>'
+              + '</label>',
+          iconColor: 'error', confirmText: '删除', confirmClass: 'bg-error-solid',
+          onConfirm: () => {
+            const c = document.getElementById('feedPurgeChk');
+            purge = !!(c && c.checked);
+            resolve(true);
+          },
+          onCancel: () => resolve(false),
+        });
+      });
+      if(!ok) return;
+      await feedCall('/api/feed/forget', {doc_id: d.doc_id, purge},
+                     purge ? '已删除（含原件）' : '已删除（原件保留）');
+      return;
+    }
+  }
+
+  function feedFormatsToggle(){
+    const box = $('#feedFormatsEdit');
+    const show = box.classList.contains('hidden');
+    box.classList.toggle('hidden', !show);
+    box.classList.toggle('flex', show);
+    if(show){
+      const cur = (FEED.formats && FEED.formats.allowed) || [];
+      $('#feedFormatsInput').value = cur.join(' ');
+      $('#feedFormatsInput').focus();
+    }
+  }
+
+  async function feedPutFormats(exts){
+    try{
+      const r = await fetch('/api/feed/formats', {method:'PUT',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify({exts})});
+      const d = await r.json();
+      if(!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+      FEED.formats = d;
+      await loadFeedFormats();
+      toast(exts ? '白名单已覆盖' : '已恢复默认');
+    }catch(e){ toast('修改失败：' + (e.message || e)); }
+  }
+
+  async function feedFormatsSave(){
+    const raw = String(($('#feedFormatsInput') || {}).value || '');
+    const exts = raw.split(/[\s,，]+/).map(s=>s.trim()).filter(Boolean)
+      .map(s => (s.startsWith('.') ? s : '.' + s));
+    if(!exts.length){ toast('至少给一个后缀'); return; }
+    const ok = await confirmModal('修改格式白名单',
+      `允许格式将改为 <b>${exts.length}</b> 项：<br>`
+      + `<code class="break-all text-[11px]">${esc(exts.join(' '))}</code><br><br>`
+      + '这是<b>运行时覆盖</b>，对所有投喂入口生效（不改 yaml）。', {confirmText:'保存'});
+    if(!ok) return;
+    await feedPutFormats(exts);
+  }
+
+  async function feedFormatsReset(){
+    const ok = await confirmModal('恢复默认白名单',
+      '将清除运行时覆盖，回到 yaml 配置（或内置默认）。', {confirmText:'恢复'});
+    if(!ok) return;
+    await feedPutFormats(null);
+  }
+
   // 素材 → 知识页：`kb_path` 与浏览页的 `path` 是同一个绝对路径，直接跳过去。
   // 这是"源有问题"与"页有问题"之间的桥梁 —— 看到告警能立刻翻到成品长什么样。
   function feedOpenKbPage(){
@@ -1845,7 +2214,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   }
 
   // ---- 动作 ----
-  async function opsSubmitJob(url, opts){
+  async function opsSubmitJob(url, opts, afterJob){
     try{
       const r = await fetchWithTimeout(url, Object.assign({method:'POST'}, opts||{}), 20000);
       const d = await r.json().catch(()=>({}));
@@ -1854,7 +2223,9 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         return false;
       }
       toast('任务已提交');
-      OPS.afterJob = () => loadOps();     // 任务结束（adminPoll 到终态）后刷新运维面板
+      // 任务结束（adminPoll 到终态）后刷新哪个面板 —— 默认运维页；
+      // 投喂页的批量任务传自己的刷新函数进来（2026-10-22 加该参数）
+      OPS.afterJob = afterJob || (() => loadOps());
       adminPoll();                        // 复用全局进度条
       return true;
     }catch(e){ toast('提交失败：' + (e.message||e)); return false; }
@@ -2056,6 +2427,19 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     });
     $('#feedBack').onclick = () => showFeedDetail(false);
     $('#feedOpenKbBtn').onclick = () => feedOpenKbPage();
+    // 投喂写入与操作（第二期）
+    $('#feedAddToggle').onclick = () => feedToggleBox('#feedAddBody', '#feedAddToggle');
+    $('#feedScanToggle').onclick = () => feedToggleBox('#feedScanBody', '#feedScanToggle');
+    $$('.feed-mode').forEach(b => { b.onclick = () => feedSetMode(b.dataset.mode); });
+    $('#feedSubmitBtn').onclick = () => feedSubmit();
+    $('#feedScanBtn').onclick = () => feedScan();
+    $('#feedBatchRunBtn').onclick = () => feedBatchRun();
+    $('#feedRetryBtn').onclick = () => feedAction('retry');
+    $('#feedRetractBtn').onclick = () => feedAction('retract');
+    $('#feedDeleteBtn').onclick = () => feedAction('forget');
+    $('#feedFormatsToggle').onclick = () => feedFormatsToggle();
+    $('#feedFormatsSave').onclick = () => feedFormatsSave();
+    $('#feedFormatsReset').onclick = () => feedFormatsReset();
     $('#opsRefreshBtn').onclick = () => loadOps();
     $('#opsUpdateBtn').onclick = () => opsUpdate();
     $('#opsTriggerBtn').onclick = () => opsTriggerRun();

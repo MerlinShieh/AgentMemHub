@@ -2,8 +2,8 @@
 
 > 设计文档：[`../feed-adapter-plan.md`](../feed-adapter-plan.md)（v2.2 + 六轮实施记录，**为什么这么设计**）
 > 本文是**模块文档**：职责边界 / 数据形态 / 怎么用 / 怎么排查（**改代码前先读它**）
-> 状态：**M0–M5 全部落地**（2026-10-16，tag `feed-m5`）。这条线只剩两件事：
-> **T4 图片 OCR**（用户指定放后）与**面板入口**（遵守"UI 统一重做放最后"；后端已就绪）
+> 状态：**M0–M5 全部落地**（2026-10-16，tag `feed-m5`）；**面板入口已落地**（2026-10-22，
+> 分两期：只读视图 + 写入/删除）。这条线只剩 **T4 图片 OCR**（用户指定放后）
 
 > **30 秒速览**：把外部素材（文件 / 网址 / 正文）转译成统一 markdown，发布到**与自有
 > wiki 并列**的知识库页面层（`origin=external`），**不进**记忆 / 蒸馏 / wiki 编译。
@@ -467,24 +467,31 @@ agentmemhub wiki --action index-pages    # 投影**所有页面根**（L2 自有
 ⚠️ **批量只推一条汇总** —— 一次几百份若逐条通知，标题各不相同、去重窗口失效，
 用户手机会被刷爆（`test_feed_notify.py` 里有一条专门守它）。
 
-**面板入口不做**（遵守"面板 UI 统一重做放最后"的既有约定），但后端 11 个 HTTP
-接口已就绪（见 `docs/API.md` §3.7），届时只差前端。
+**面板入口已落地**（2026-10-22，分支 `feat/kb-ui`）：知识库页的第三个子视图「投喂」。
+第一期只读（清单 / 详情 / 格式白名单 / 体检），第二期写入与操作（四形态投喂含
+multipart 上传、扫目录批量、重转 / 撤下 / 删除、格式白名单热改）。11 个 HTTP 接口
+至此**全部有了前端**。
+
+⚠️ **面板能删（含 `purge` 连原件删），MCP 仍然不能删** —— 两者约束不同，别混：
+MCP 是给 Agent 的接口（低门槛、无人值守，所以只给写入与查看）；面板是人工操作，
+勾选 + 二次确认之后由人负责。**不要拿 MCP 的约束去砍面板的能力。**
 
 ### 功能与入口总览（时间长了忘了就来对一遍）
 
-| 能力 | CLI | HTTP | MCP |
-|---|---|---|---|
-| 投喂一项 | `feed add <路径>` · `feed add --stdin` | `POST /api/feed/add`（四形态）· `/api/feed/upload`（multipart 直传） | `feed_add` |
-| 看投过什么 | `feed list [--status X] [--low-quality]` | `GET /api/feed/list` | `feed_list` |
-| 看单条详情 | `feed show <doc_id>` | `GET /api/feed/show/{doc_id}` | `feed_status`（传 `doc_id`） |
-| 看整体健康 | `feed lint [--json]` | `GET /api/feed/lint` | `feed_status`（**`with_index=False`**） |
-| 目录批量 | `feed scan <目录>`（只读）· `feed batch <目录> [--apply]` | `POST /api/feed/scan` · `/api/feed/batch`（长任务） | **不给** |
-| 格式白名单 | `feed formats [--set-formats …]` | `GET`/`PUT /api/feed/formats` | 只在 `feed_status` 里显示 |
-| 重转 | `feed retry <doc_id> [--from-raw]` | `POST /api/feed/retry` | **不给** |
-| 撤下 / 清除 | `feed retract` · `feed forget [--purge]` | `POST /api/feed/retract` · `/forget` | **不给** |
+| 能力 | CLI | HTTP | MCP | 面板 |
+|---|---|---|---|---|
+| 投喂一项 | `feed add <路径>` · `feed add --stdin` | `POST /api/feed/add`（四形态）· `/api/feed/upload`（multipart 直传） | `feed_add` | ✅ 四形态 + 多文件上传 + dry-run |
+| 看投过什么 | `feed list [--status X] [--low-quality]` | `GET /api/feed/list` | `feed_list` | ✅ 清单 + 状态/低质量筛选 |
+| 看单条详情 | `feed show <doc_id>` | `GET /api/feed/show/{doc_id}` | `feed_status`（传 `doc_id`） | ✅ 详情 + 跳到对应知识页 |
+| 看整体健康 | `feed lint [--json]` | `GET /api/feed/lint` | `feed_status`（**`with_index=False`**） | ✅ 体检（P0/P1 分级） |
+| 目录批量 | `feed scan <目录>`（只读）· `feed batch <目录> [--apply]` | `POST /api/feed/scan` · `/api/feed/batch`（长任务） | **不给** | ✅ 扫描→预览→确认投喂（接全局进度条） |
+| 格式白名单 | `feed formats [--set-formats …]` | `GET`/`PUT /api/feed/formats` | 只在 `feed_status` 里显示 | ✅ 查看来源 + 热改 + 恢复默认 |
+| 重转 | `feed retry <doc_id> [--from-raw]` | `POST /api/feed/retry` | **不给** | ✅ |
+| 撤下 / 清除 | `feed retract` · `feed forget [--purge]` | `POST /api/feed/retract` · `/forget` | **不给** | ✅ 撤下 / 删除（勾选才连原件删） |
 
 **MCP 为什么只给三个**：低门槛写入 + 随时自查。批量与删除影响面大
-（`forget --purge` 删的是**不可再生**的原件），留在 CLI / 看板由人把关。
+（`forget --purge` 删的是**不可再生**的原件），Agent 无人值守时不该有这种能力；
+人工操作走 CLI 或面板。
 
 ### 配置项（`agentmemhub.yaml` 的 `feed` 段）
 
