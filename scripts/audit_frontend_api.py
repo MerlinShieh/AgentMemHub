@@ -38,6 +38,11 @@ HTML = ROOT / "agentmemhub" / "web" / "static" / "index.html"
 #: 前端抓路径用的字符集（模板串已归一成 `{}`，所以只留 `{}` 两个花括号）
 _PATH_RE = re.compile(r"/api/[A-Za-z0-9_\-/{}.]{1,}")
 _TEMPLATE_RE = re.compile(r"\$\{[^}]*\}")
+#: 字符串拼接写法：`'/api/feed/show/' + encodeURIComponent(id)`。
+#: 不归一的话抓到的是 `/api/feed/show/'`—— 停在闭合引号上、末尾斜杠被 rstrip 掉，
+#: 段数比路由少一段，于是**明明在用也被报成未用**（2026-10-23 实测踩到 feed 详情那条）。
+#: 连闭合引号一起吃掉，替换成 `{}` 后才和模板串同一形态。
+_CONCAT_RE = re.compile(r"[\"']\s*\+\s*encodeURIComponent\([^)]*\)\s*")
 _ROUTE_RE = re.compile(r"@app\.(get|post|put|delete|patch)\(\s*[\"']([^\"']+)")
 
 
@@ -53,9 +58,10 @@ def routes() -> list[tuple[str, str]]:
 
 
 def front_paths() -> list[str]:
-    """前端出现过的 `/api/...` 路径（模板串已归一）。"""
+    """前端出现过的 `/api/...` 路径（模板串与 `+ encodeURIComponent` 拼接已归一）。"""
     html = HTML.read_text(encoding="utf-8")
     html = _TEMPLATE_RE.sub("{}", html)
+    html = _CONCAT_RE.sub("{}", html)
     out = {c.rstrip("/") for c in _PATH_RE.findall(html) if len(c) > 4}
     return sorted(out)
 

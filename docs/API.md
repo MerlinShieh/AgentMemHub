@@ -326,8 +326,8 @@ python -m agentmemhub llm-config [--json]                       # 各 LLM 使用
 
 ## 六、接口使用现状（面板未调用的接口）
 
-**2026-10-22 实测**：后端 **62 个 HTTP 路由**，面板前端调用了 **47 个**，
-**15 个未接**。复跑一条命令即可对账：
+**2026-10-23 实测**：后端 **62 个 HTTP 路由**，面板前端调用了 **51 个**，
+**11 个未接**。复跑一条命令即可对账：
 
 ```powershell
 python scripts/audit_frontend_api.py        # 或 --used 连已用的一起列 / --json 给机器读
@@ -337,7 +337,7 @@ python scripts/audit_frontend_api.py        # 或 --used 连已用的一起列 /
 |---|---|---|
 | **Wiki** | ✅ **全部接上** | 浏览（页面清单/正文）+ 运维（对齐审计 / 待更新记忆 / 失败补跑 / 触发器热改 / 离线批次 / 增量更新），2026-10-18~19 |
 | **外部投喂** | ✅ **全部接上** | 投喂视图：清单 / 详情 / 四形态投喂 / 上传 / 扫描批量 / 重转 / 撤下 / 删除 / 体检 / 格式白名单，2026-10-22 |
-| **快照** | ⬜ **未接** | 列表 / 创建 / 回滚 —— 计划做（知识库迭代第三期） |
+| **快照** | ✅ **全部接上** | 运维页「快照与回滚」卡：列表 / 立即快照 / 分范围回滚（执行前自动存保护快照），2026-10-23 |
 | 会话 + 记忆排除 | 部分未接 | 记忆排除 UI 已下线（整会话 / 部分轮次 + `exclusions/summary`）；面板改标题等仍在用 |
 | 运维 | 部分未接 | `admin/score`（入口已隐藏）/ `admin/exclude` / `admin/rebuild` |
 | 记忆 | 部分未接 | `GET /api/memos/traces`（时间线明细） |
@@ -346,7 +346,7 @@ python scripts/audit_frontend_api.py        # 或 --used 连已用的一起列 /
 > 逐域的路由数**不写死**（写死就一定会漂 —— 这份表 2026-10-16 那版的结构数字
 > 到 10-22 已经全错）。要精确分组时跑审计脚本的 `--json`。
 
-未接的 15 个**不是缺陷**，而是设计选择（或"等前端统一重做"）—— 但必须写清楚，
+未接的 11 个**不是缺陷**，而是设计选择（或"等前端统一重做"）—— 但必须写清楚，
 否则下次排查又会当成"未完成"。
 
 > ⚠️ **静态扫描一定有漏网**：URL 写在变量里（`` const u = `/api/…`; fetch(u) ``）、
@@ -373,28 +373,29 @@ python scripts/audit_frontend_api.py        # 或 --used 连已用的一起列 /
 表被 `ingest` 与 `distill` 读取，用于跳过不写入记忆的会话/轮次）。
 **UI 下线 ≠ 能力下线**，且它随时可能重新上架。
 
-### 6.3 **整块未接的三个域**（后端完整可用，只差前端）
+### 6.3 曾经**整块未接的三个域**（2026-10-22/23 已全部接上）
 
-三块能力**一个接口都没被前端调用**，且各自完整（后端 + CLI + 部分 MCP 都在）：
+这三块曾经**一个接口都没被前端调用**（后端 + CLI + 部分 MCP 都完整）。
+留在这里是为了说明"后端先做、前端后补"的那段历史 —— **别再照着它判断现状**。
 
-| 域 | 接口 | 能做什么 | 备注 |
+| 域 | 接口 | 能做什么 | 现状 |
 |---|---|---|---|
-| **外部投喂** `/api/feed/*` | 12 个（见 §3.7） | 投喂文件 / 链接 / 正文、批量扫描与投喂、格式白名单点选、素材列表与详情、重转 / 撤下 / 清除、产物体检 | 用户明确要求"通过数据看板直接控制"；**MCP 侧已有 `feed_add`/`feed_list`/`feed_status`**（Agent 可用，人不方便） |
-| **LLM Wiki** `/api/wiki/*` | 16 个 | 失败清单与定向补跑、待更新记忆的查看 / 丢弃 / 恢复、触发器状态**热改**、对齐审计、增量更新、离线批次（状态 / 推进 / 取消 / 重提 / 预检） | v2.1/A2 陆续加的后端；目前全靠 CLI（`wiki --action …`） |
-| **快照** `/api/snapshots*` | 3 个 | 列出 / 创建 / 回滚（索引库 + wiki 产物整包） | 回滚是**破坏性操作**，做 UI 时要二次确认 |
+| **外部投喂** `/api/feed/*` | 12 个（见 §3.7） | 投喂文件 / 链接 / 正文、批量扫描与投喂、格式白名单热改、素材列表与详情、重转 / 撤下 / 删除、产物体检 | ✅ 投喂子视图（2026-10-22） |
+| **LLM Wiki** `/api/wiki/*` | 16 个 | 失败清单与定向补跑、待更新记忆的查看 / 丢弃 / 恢复、触发器状态**热改**、对齐审计、增量更新、离线批次 | ✅ 运维子视图（2026-10-18~19） |
+| **快照** `/api/snapshots*` | 3 个 | 列出 / 创建 / 回滚（索引库 + wiki 产物整包） | ✅ 运维子视图「快照与回滚」（2026-10-23） |
 
-### 6.3.1 v2.1 之后新增、前端未接的接口（逐个）
+### 6.3.1 v2.1 之后新增接口的接入情况（逐个）
 
-| 接口 | 说明 |
-|---|---|
-| `GET /api/wiki/failures`、`POST /api/wiki/retry` | 编译失败清单与**定向补跑**（只跑失败的，不全量重来） |
-| `GET /api/wiki/pending`、`POST /api/wiki/pending/drop`、`GET /api/wiki/pending/ignored`、`POST /api/wiki/pending/restore` | **待更新记忆**的查看 / 丢弃 / 恢复 —— 丢弃分 soft（不进 wiki、仍可召回）与 hard（真删，需 `--confirm` 语义） |
-| `GET`/`PUT /api/wiki/triggers`、`POST /api/wiki/trigger/run` | 触发器状态查询 / **热改**（写 overrides，不用重启）/ 手动触发一次 |
-| `GET /api/wiki/align` | 对齐审计（只读）：库里变了但 wiki 没跟上的输入 |
-| `POST /api/wiki/update` | 增量更新 wiki |
-| `GET /api/wiki/batch/status`、`run`、`cancel`、`resubmit`、`checks` | 离线批处理（Batch API，官方价 5 折）的推进与预检 |
-| `GET /api/snapshots`、`POST /api/snapshots/create`、`POST /api/snapshots/restore` | 快照与回滚 |
-| `GET /api/memos/traces` | 记忆**时间线明细**（原始的逐条轨迹）。面板"记忆报表"目前走 `/api/memories` + 搜索，没用它 |
+| 接口 | 说明 | 状态 |
+|---|---|---|
+| `GET /api/wiki/failures`、`POST /api/wiki/retry` | 编译失败清单与**定向补跑**（只跑失败的，不全量重来） | ✅ 运维·失败补跑 |
+| `GET /api/wiki/pending`、`POST /api/wiki/pending/drop`、`GET /api/wiki/pending/ignored`、`POST /api/wiki/pending/restore` | **待更新记忆**的查看 / 丢弃 / 恢复 —— 丢弃分 soft（不进 wiki、仍可召回）与 hard（真删，需 `--confirm` 语义） | ✅ 运维·待更新记忆 |
+| `GET`/`PUT /api/wiki/triggers`、`POST /api/wiki/trigger/run` | 触发器状态查询 / **热改**（写 overrides，不用重启）/ 手动触发一次 | ✅ 运维·更新触发器 |
+| `GET /api/wiki/align` | 对齐审计（只读）：库里变了但 wiki 没跟上的输入 | ✅ 运维·对齐审计 |
+| `POST /api/wiki/update` | 增量更新 wiki | ✅ 运维·增量更新 |
+| `GET /api/wiki/batch/status`、`run`、`cancel`、`resubmit`、`checks` | 离线批处理（Batch API，官方价 5 折）的推进与预检 | ✅ 运维·离线批处理 |
+| `GET /api/snapshots`、`POST /api/snapshots/create`、`POST /api/snapshots/restore` | 快照与回滚（列表 / 立即快照 / 分范围回滚） | ✅ 运维·快照与回滚 |
+| `GET /api/memos/traces` | 记忆**时间线明细**（原始的逐条轨迹）。面板"记忆报表"目前走 `/api/memories` + 搜索，没用它 | ⬜ 仍未接（见 §6.1） |
 
 ---
 

@@ -687,6 +687,24 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         </div>
         <div id="opsBatchBody" class="px-3 py-2.5 text-xs"></div>
       </div>
+
+      <!-- ⑥ 快照与回滚（后悔药） -->
+      <div class="mt-3 rounded-xl border border-border bg-card">
+        <div class="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
+          <i data-lucide="archive" class="h-3.5 w-3.5 text-primary"></i>
+          <span class="text-xs font-medium text-foreground">快照与回滚</span>
+          <span id="opsSnapMeta" class="text-[11px] text-muted-foreground"></span>
+          <span class="ml-auto"></span>
+          <button id="opsSnapRefreshBtn" class="wk-act">刷新</button>
+          <button id="opsSnapCreateBtn" class="wk-act-primary">立即快照</button>
+        </div>
+        <div id="opsSnapList" class="max-h-56 overflow-y-auto scroll-thin"></div>
+        <div class="border-t border-border px-3 py-2 text-[11px] text-muted-foreground">
+          快照包含<b>索引库 + 两级 wiki 产物</b>两部分；增量更新前会自动创建一份，这里是手动兜底。
+          回滚会覆盖产物，但执行前会先把当前状态存成保护快照，可以再滚回来。
+          超过保留上限（默认 5 份）时自动删最旧的一份。
+        </div>
+      </div>
     </div><!-- /wikiOpsPane -->
 
     <!-- ============ 投喂：素材登记（第一期只读）============
@@ -1460,7 +1478,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   // ==================================================================
   const OPS = { loaded:false, health:null, triggers:null, batch:null,
                 pending:null, failures:null, ignored:false, sel:new Set(),
-                afterJob:null, checksOpen:false };
+                snapshots:null, afterJob:null, checksOpen:false };
 
   async function opsFetch(path, opts){
     const r = await fetchWithTimeout(path, opts||{}, 60000);
@@ -1486,6 +1504,8 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       OPS.ignored = false;
       renderOpsHealth(); renderOpsPending(); renderOpsFailures();
       renderOpsTriggers(); renderOpsBatch();
+      // 快照单独加载：它只是"后悔药"清单，失败不该拖垮整个运维面板
+      loadOpsSnapshots();
       $('#opsUpdatedAt').textContent = '更新于 ' + new Date().toLocaleTimeString();
       updateOpsBadge();
       reicons();
@@ -1671,6 +1691,97 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         + (list || '<div class="text-[11px] text-muted-foreground">（空）</div>') + '</div>';
     }
     $('#opsBatchBody').innerHTML = html;
+  }
+
+  // ===== 快照与回滚（后悔药）=====
+  // 数据源：GET /api/snapshots（列表）、POST /api/snapshots/create（同步，秒级）、
+  //         POST /api/snapshots/restore（长任务，接全局进度条）。
+  // 回滚是危险操作：会覆盖索引库 / wiki 产物，所以确认框里把范围拆成三个单选，
+  // 并明确说「执行前会自动存保护快照」—— 让人知道滚错了还能回来。
+  async function loadOpsSnapshots(){
+    $('#opsSnapMeta').textContent = '加载中…';
+    try{
+      const d = await opsFetch('/api/snapshots');
+      OPS.snapshots = d;
+      renderOpsSnapshots();
+    }catch(e){
+      $('#opsSnapMeta').textContent = '加载失败';
+      $('#opsSnapList').innerHTML =
+        `<div class="px-3 py-2 text-[11px] text-error">${wikiEsc(e.message || e)}</div>`;
+    }
+  }
+
+  function renderOpsSnapshots(){
+    const d = OPS.snapshots || {};
+    const list = d.snapshots || [];
+    $('#opsSnapMeta').textContent = `${list.length} 份（保留上限 ${d.keep ?? '?'}）`;
+    if(!list.length){
+      $('#opsSnapList').innerHTML =
+        '<div class="px-3 py-2 text-[11px] text-muted-foreground">还没有快照。</div>';
+      return;
+    }
+    $('#opsSnapList').innerHTML = list.map(s=>{
+      const parts = (s.parts || []).join(' + ');
+      const size = (s.size_mb != null) ? (Number(s.size_mb).toFixed(1) + ' MB') : '';
+      return `<div class="flex flex-wrap items-center gap-2 border-b border-border px-3 py-1.5 text-[11px]">
+        <span class="shrink-0 tnum text-foreground">${wikiEsc(s.created_at || '')}</span>
+        <span class="min-w-0 flex-1 truncate text-muted-foreground" title="${wikiEsc(s.reason || '')}">${wikiEsc(s.reason || '')}</span>
+        <span class="shrink-0 tnum text-[10px] text-muted-foreground">${wikiEsc(size)}</span>
+        <span class="shrink-0 text-[10px] text-muted-foreground">${wikiEsc(parts)}</span>
+        <button class="wk-act shrink-0 ops-snap-restore" data-id="${wikiEsc(s.id || '')}">回滚</button>
+      </div>`;
+    }).join('');
+  }
+
+  async function opsSnapCreate(){
+    const ok = await confirmModal('立即创建快照',
+      '将对<b>索引库 + 两级 wiki 产物</b>做一份完整快照（秒级完成）。<br><br>'
+      + '增量更新前会自动创建，这里是手动兜底 —— 做危险操作前建议先来一份。',
+      { confirmText:'创建' });
+    if(!ok) return;
+    $('#opsSnapCreateBtn').disabled = true;
+    try{
+      const d = await opsFetch('/api/snapshots/create?reason=' +
+        encodeURIComponent('手动（面板）'), { method:'POST' });
+      toast('快照已创建：' + (d.id || ''));
+      await loadOpsSnapshots();
+    }catch(e){
+      toast('创建失败：' + (e.message || e));
+    }finally{
+      $('#opsSnapCreateBtn').disabled = false;
+    }
+  }
+
+  async function opsSnapRestore(id, label){
+    if(!id) return;
+    let scope = 'all';
+    const ok = await new Promise(resolve=>{
+      showModal({
+        title:'回滚到这个快照？',
+        msg:`将把产物恢复到 <b>${wikiEsc(label || id)}</b> 那一刻的状态。<br><br>`
+          + '<b class="text-error">这会覆盖当前的索引库与/或 wiki 产物</b>，不方便撤销；'
+          + '不过执行前会自动把当前状态存成保护快照，滚错了还能再滚回来。',
+        body:`<div class="space-y-1.5 text-xs text-foreground">
+            <label class="flex items-center gap-2"><input type="radio" name="opsSnapScope" value="all" checked> 全部（索引库 + wiki 产物）</label>
+            <label class="flex items-center gap-2"><input type="radio" name="opsSnapScope" value="wiki"> 仅 wiki 产物</label>
+            <label class="flex items-center gap-2"><input type="radio" name="opsSnapScope" value="db"> 仅索引库</label>
+            <div class="pt-1 text-[11px] text-muted-foreground">回滚期间请确保没有别的进程在写库（比如 MCP 服务）。</div>
+          </div>`,
+        iconColor:'error', confirmText:'回滚', confirmClass:'bg-error-solid',
+        onConfirm: ()=>{
+          const elv = document.querySelector('input[name="opsSnapScope"]:checked');
+          scope = (elv && elv.value) || 'all';
+          resolve(true);
+        },
+        onCancel: ()=> resolve(false),
+      });
+    });
+    if(!ok) return;
+    const qs = new URLSearchParams({ snapshot_id: id });
+    if(scope === 'wiki') qs.set('wiki_only', 'true');
+    else if(scope === 'db') qs.set('db_only', 'true');
+    await opsSubmitJob('/api/snapshots/restore?' + qs.toString(), {},
+      ()=> { loadOps(); });
   }
 
   // ===== 投喂素材（第一期：只读）=====
@@ -2467,6 +2578,15 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     $('#opsBatchCancelBtn').onclick = () => opsBatchCancel();
     $('#opsBatchResubmitBtn').onclick = () => opsBatchResubmit();
     $('#opsChecksBtn').onclick = () => opsToggleChecks();
+    $('#opsSnapRefreshBtn').onclick = () => loadOpsSnapshots();
+    $('#opsSnapCreateBtn').onclick = () => opsSnapCreate();
+    $('#opsSnapList').addEventListener('click', e => {
+      const b = e.target.closest('.ops-snap-restore'); if(!b) return;
+      // 确认框里带上时间与原因，避免"手滑点了哪一行还在猜"
+      const row = b.parentElement;
+      const sp = row ? row.querySelector('.truncate') : null;
+      opsSnapRestore(b.dataset.id, sp ? sp.getAttribute('title') : '');
+    });
   }
 
   // ==================================================================
