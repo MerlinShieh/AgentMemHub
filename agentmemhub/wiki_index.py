@@ -20,7 +20,7 @@ L2 页面本身就是 LLM 提炼后的"一个主题一页"——它已经是最�
   不会新旧两版共存（投影是原子的：扫目录 → upsert → 删目录中已不存在的）
 · text=标题+摘要+正文（供向量与 FTS）；wiki_path=页面相对路径（两阶段召回的
   第二阶段：需要细节时按路径读全文）
-· 向量按 write_order 多模型写入（与 ingest/import_bundle 同语义）
+· 向量按 write_order 多模型写入（与 ingest/save_memory_trace 同语义）
 """
 
 from __future__ import annotations
@@ -213,7 +213,7 @@ def _encode_pages(conn: sqlite3.Connection, st, texts: list[str],
                   embedder=None) -> list[tuple[Any, Any]]:
     """按 write_order 逐模型编码页面文本（多写一份消除换模型风险）。
 
-    与 ingest / import_bundle 同语义。抽成独立函数是为了可注入替身——
+    与 ingest / save_memory_trace 同语义。抽成独立函数是为了可注入替身——
     测试不必加载真实 embedding 模型。
     """
     from agentmemhub.rag.ingest import ensure_vec_table

@@ -92,7 +92,7 @@ MCP memory_save(content="…", importance="high", type="lesson")
   │
   ├─ tid = _trace_id(content, ts)          ← AgentMemHub 计算：'mcp_<hash>'
   │    ├─ 返回给调用方（trace_id）           ← memory_score 靠它定位
-  │    ├─ bundle.traces[0].id = tid ──→ 引擎 import_bundle：
+  │    ├─ tid ─────────────────────→ 引擎 save_memory_trace：
   │    │     units.legacy_id = tid        ★ 引擎存储的 trace id（去重/feedback 锚）
   │    │     units.src_id = content_anchor(text)   ← 内容锚 'mcp_<sha256(原始内容)[:16]>'
   │    │       （与 tid 是两套 hash！src_id 用于引擎幂等，不用作跨表关联；
@@ -115,7 +115,7 @@ MCP memory_save(content="…", importance="high", type="lesson")
 | `conversation_id` | 各 harness | 源库 + 蒸馏表 + units | 会话标识 | 直写记忆固定为 `'direct'`（source='mcp'） |
 | `tid`（trace id） | `_trace_id(content, ts)` | 返回值；引擎 **legacy_id**；蒸馏表 slice_key 前缀 | memory_score 定位；面板去重关联 | **引擎的 units.src_id 不是 tid**，是内容锚 |
 | `units.src_id`（手写层） | `content_anchor(text)` | units.src_id（`'mcp_<sha256(原始内容)[:16]>'`） | 引擎幂等（同内容不重投影）；**召回侧的双投影去重也用它** | **不能假定它与 `content_hash` 相同**——它用**原始**内容算哈希，而 `content_hash`（`fingerprint`）用**规范化后**内容（去空行 + 每行 strip）。两者只在"入库未改动内容"时一致（实测 114 条直写单元里 **11 条因 `sanitize.redact` 改动内容而分叉**）|
-| `units.legacy_id` | import_bundle（存传入 tid） | units.legacy_id | trace id 的引擎侧真身 | **面板去重 / 直写关联的唯一正确锚** |
+| `units.legacy_id` | save_memory_trace（存传入 tid） | units.legacy_id | trace id 的引擎侧真身 | **面板去重 / 直写关联的唯一正确锚** |
 | `dst_<content_hash>` | 蒸馏表 content_hash | units.src_id（记忆层投影） | 记忆的检索分身；面板 unit_id/value | 锚不含会话——同 hash 跨会话共享一个投影行 |
 | `content_hash` | `fingerprint(content)`（**sha256[:16]**，规范化后） | distilled_memories.content_hash | 内容指纹；幂等；dst_ 锚；manifest 指纹 | 直写经 sanitize 后的文本才计入——与原始 trace 文本可能不一致（**这正是 `mcp_` 与 `dst_` 锚偶尔分叉的原因**）|
 | `slice_key` | 蒸馏：切片键；直写：`mcp:<tid>` | distilled_memories.slice_key | 溯源；面板去重键 | **必须与去重 SQL 的口径逐字一致**（见 §7.4） |
@@ -957,7 +957,7 @@ GET  /api/wiki/pending/ignored  POST /api/wiki/pending/restore
     判 `is_external`、把 id 丢了** ⇒ 召回命中一个投喂页后无法反查是哪份外部素材（只能靠
     `wiki_path` 读文件再抠 frontmatter，页面一重编就断）。现 `units.doc_id` 补列，投影的
     **INSERT 与 UPDATE 两条路径**都写入（非投喂页为 NULL，便于 `IS NOT NULL` 查询）；
-    ③ **直写通路可声明来源**：`import_bundle` 逐条接受 `origin`（非法值回落 native），
+    ③ **直写通路可声明来源**：`save_memory_trace` 逐条接受 `origin`（非法值回落 native），
     供 Agent 用 Read 工具读完 PDF/图片后写回外部知识（原先硬编码 `source='memory'` 且不写 origin）。
     顺带修一处**潜在崩溃**：`run_ingest` 写桥接列却**不保证列存在** —— 全新索引库上只跑
     ingest 会报 `table units has no column named origin`；现在它自己调 `ensure_bridge_schema()`

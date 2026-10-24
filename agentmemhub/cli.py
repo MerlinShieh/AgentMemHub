@@ -373,7 +373,7 @@ def run_sync(*, source: str = "", vectorize: bool = True,
 
 
 def cmd_sync(args) -> None:
-    run_sync(source=args.source, vectorize=not args.ingest_only, full=args.full)
+    run_sync(source=args.source, vectorize=not args.skip_vectorize, full=args.full)
 
 
 def run_clean(store, *, source: str = "", apply: bool = False,
@@ -1126,7 +1126,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     psy = sub.add_parser("sync", help="增量同步：ingest 增量 → 清洗变更会话 → 向量化写入记忆索引")
     psy.add_argument("--source", default="")
-    psy.add_argument("--ingest-only", dest="ingest_only", action="store_true",
+    psy.add_argument("--skip-vectorize", dest="skip_vectorize", action="store_true",
                      help="只采集入库并清洗系统注入事件，跳过向量化阶段")
     psy.add_argument("--full", action="store_true",
                      help="强制全量同步（默认按 watermarks 变更集增量处理）")

@@ -599,7 +599,7 @@ FeedDocument.warnings: list[str]     # 人可读的具体问题（不达标原�
 ### M0 · 地基（0.5 天）✅ **已完成（2026-10-10，commit `c3836ee`）**
 - ✅ `units` 幂等补 `doc_id` 列；`wiki_index.parse_page` 返回 `doc`，
   `project_pages` **INSERT 与 UPDATE 两条路径都写**（非投喂页 NULL，便于 `IS NOT NULL` 查询）
-- ✅ `import_bundle` **逐条**可声明 `origin`（缺省/非法值回落 `native`）
+- ✅ `save_memory_trace`（原 `import_bundle`）**逐条**可声明 `origin`（缺省/非法值回落 `native`）
 - ✅ `data-architecture.md` 口径统一（以代码的 `source=="feed"` 为准）+ 时间线第 22 条
 - ✅ `rag/ingest.py` 的 INSERT 补 origin —— **并抽成单点函数 `origin_of()`，
   与 `distill._project_one` 共用**（消除两处漂移，这次的缺口正是漂移的产物）
