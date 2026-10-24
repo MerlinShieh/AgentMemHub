@@ -91,3 +91,7 @@ agentmemhub.yaml.bak*
 # 私有评测集与基线（含个人会话主题，不入库；仓库只带 queries.example.yaml）
 eval/queries.yaml
 eval/*.json
+
+# 本地临时运行记录与一次性探查脚本（无复用价值，不入库）
+_fullrun*.txt
+_probe*.py
