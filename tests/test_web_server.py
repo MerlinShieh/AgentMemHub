@@ -202,3 +202,30 @@ def test_health_reclaim_shape(client):
     d = r.json()
     assert d["reclaimed"] == 0
     assert "health" in d and isinstance(d["health"]["issues"], list)
+
+
+def test_config_view_带体检结果(client):
+    """`/api/config` 是只读视图：条目 + 环境变量覆盖 + example 对比。
+
+    体检（`drift`）是这一版新增的 —— 它只**报告**升级后没跟上的配置键，
+    绝不写文件。所以这里除了形状，还要确认调用前后配置文件没被动过。
+    """
+    from agentmemhub.config import PROJECT_ROOT
+    p = PROJECT_ROOT / "agentmemhub.yaml"
+    before = p.read_bytes()
+
+    r = client.get("/api/config")
+    assert r.status_code == 200
+    d = r.json()
+    assert d["exists"] is True
+    assert d["file"].endswith("agentmemhub.yaml")
+    assert d["entries"], "解析不出配置项，设置页会是空的"
+
+    leaf = next(e for e in d["entries"] if not e["is_section"])
+    assert {"path", "key", "depth", "value_raw", "comment", "line"} <= set(leaf)
+
+    dr = d["drift"]
+    assert dr["example_exists"] is True
+    assert set(dr["counts"]) == {"missing", "obsolete", "changed"}
+
+    assert p.read_bytes() == before, "只读接口不能改动配置文件"

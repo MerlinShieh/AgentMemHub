@@ -43,8 +43,10 @@ def _inline(text: str) -> str:
     # 链接**只放行 http/https**（`javascript:` 之类一律不生成 a 标签）
     t = re.sub(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)",
                r'<a href="\2" target="_blank" rel="noopener noreferrer">\1</a>', t)
-    # 引用标记 `[m3236]` → 小徽章（L2 页面的溯源锚，读者一眼能看出处）
-    t = re.sub(r"\[(m\d+)\]", r'<span class="md-cite">\1</span>', t)
+    # 引用标记 `[m3236]` → 小徽章（L2 页面的溯源锚，读者一眼能看出处）。
+    # `data-mid` 是 `distilled_memories.id`：面板据此把徽章做成**可点**（点开看原记忆），
+    # 而 `m3236` 这段文本仍原样保留 —— 没有 JS 时它依旧是可读的溯源标记，不会变成空壳。
+    t = re.sub(r"\[(m(\d+))\]", r'<span class="md-cite" data-mid="\2">\1</span>', t)
     return t
 
 

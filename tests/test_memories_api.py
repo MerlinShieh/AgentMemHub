@@ -243,3 +243,62 @@ def test_memories_conversation_flag_and_feedback_state(memories_env, monkeypatch
     m3 = {i["content"]: i for i in d3["items"]}["会话一的蒸馏结论"]
     assert m3["fb_polarity"] is None
     assert m3["value"] == 0.3, "取消后回蒸馏来源初始分"
+
+
+# ----------------------------------------------------------------------
+# 单条记忆详情（/api/memories/{mid}）：wiki 正文里的 [mNNN] 点开看的就是它
+# ----------------------------------------------------------------------
+
+def test_memory_detail_带完整溯源(memories_env):
+    """能落回"哪条会话、第几轮、索引侧哪个 unit" —— 这是可点引用的全部意义。"""
+    client, _ = memories_env
+    d = client.get("/api/memories/1").json()
+    assert d["id"] == 1
+    assert d["content"] == "会话一的蒸馏结论"
+    assert d["source"] == "zcode"
+    assert d["type"] == "decision" and d["topic"] == "主题0"
+    # 采集库里确有 c1 → 会话标题可如实给前端
+    assert d["has_conversation"] is True
+    assert d["conversation_title"] == "会话甲"
+    # 字段存在即可（fixture 的 replace_source 不一定写 session_uid）
+    assert "session_uid" in d
+    # 索引侧：h0 已投影成 dst_h0，应能定位到 unit 与价值分
+    assert d["unit_id"] is not None
+    assert abs(d["value"] - 0.3) < 1e-9
+    # 未被归并 → 不该冒出 merged_into
+    assert d["merged_into"] is None
+
+
+def test_memory_detail_无会话记忆(memories_env):
+    """c2 不在采集库（MCP 直写同理）→ has_conversation=False。
+
+    前端据此外**不渲染**会话链接：`mcp` / `direct-*` 这类 conversation_id
+    是占位值，点进去只会 404，比不给链接更让人困惑。
+    """
+    client, _ = memories_env
+    d = client.get("/api/memories/3").json()
+    assert d["has_conversation"] is False
+    assert d["conversation_title"] == ""
+    # h2 没有投影行 → 索引侧字段全空，但接口照样 200（不能因缺投影就 500）
+    assert d["unit_id"] is None and d["value"] is None
+
+
+def test_memory_detail_不存在404(memories_env):
+    client, _ = memories_env
+    r = client.get("/api/memories/99999")
+    assert r.status_code == 404
+    assert "不存在" in r.json()["detail"]
+
+
+def test_memory_detail_归并给出主记忆(memories_env):
+    """被归并的行要指回主记忆：否则读者点开一条"已并走"的记忆会以为内容丢了。"""
+    client, paths = memories_env
+    conn = sqlite3.connect(paths["idx"])
+    conn.execute("UPDATE distilled_memories SET status='merged', dedup_of=1 WHERE id=3")
+    conn.commit()
+    conn.close()
+
+    d = client.get("/api/memories/3").json()
+    assert d["status"] == "merged"
+    assert d["merged_into"] == 1
+

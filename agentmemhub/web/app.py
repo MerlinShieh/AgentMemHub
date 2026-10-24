@@ -1220,6 +1220,89 @@ def create_app(db_path: Path | None = None):
         return JSONResponse({"items": items, "total": total, "page": page,
                              "pageSize": page_size, "stats": stats})
 
+    @app.get("/api/config", summary="统一配置只读视图（含 yaml 注释与生效覆盖）")
+    def api_config_view():
+        """把 `agentmemhub.yaml` 连同它的注释一起读给面板看。
+
+        设计取舍（2026-10-23）：
+        - **只读**。写 yaml 会丢注释（`yaml.safe_dump` 整篇重写），而本项目的
+          注释恰好承载了"为什么这么配、改了会怎样"；要写就得做文本级定点替换，
+          风险与收益不成比例 —— 面板给「看 + 体检」，改配置仍走编辑器。
+        - 因此也**不拆** `config/` 目录：拆分要动加载路径、全部 `_get` 调用点、
+          文档与测试；而唯一真实痛点（注释丢失）只在「面板写 yaml」时出现，
+          不写就没有该痛点。
+        - `env_overrides` 里标出运行期会被环境变量顶掉的键（`active=True` 时
+          文件里的值**不生效**），避免用户改完发现"没生效"被误判成 bug。
+        - `drift` 是 **example ↔ 本地** 的键集对比（`config_doc.diff_example`）：
+          升级后新增的键、本地已过时的键、以及两边值不同的键。同样只报告、
+          不写文件 —— 拆 `config/` 目录解决不了"人来合并配置"这件事，但这份
+          对比能把它从"手工对照"降级成"按清单确认"。
+        """
+        import os as _os
+
+        from agentmemhub import config_doc
+        d = config_doc.load_annotated()
+        for o in d.get("env_overrides", []):
+            v = _os.environ.get(o["env"], "")
+            o["active"] = bool(v.strip())
+            o["value"] = v
+        d["config_env"] = _os.environ.get("AGENTMEMHUB_CONFIG", "")
+        # 体检：example ↔ 本地。只报告不改文件 —— 升级后"哪些新键没跟上"
+        # 靠人整篇覆盖/手工对照很容易漏，漏了还不报错（键安静地取默认值）。
+        d["drift"] = config_doc.diff_example()
+        return JSONResponse(d)
+
+    @app.get("/api/memories/{mid}", summary="单条记忆详情（含溯源，供 wiki 引用与时间线跳转）")
+    def api_memory_detail(mid: int):
+        """按 `distilled_memories.id` 取单条记忆的全文与完整溯源。
+
+        wiki 页面正文里的 `[m<id>]` 就是这张表的主键 —— 面板据此把引用做成可点，
+        读者从知识页一眼能落回"这条说法来自哪条记忆、哪次会话、哪一轮"。
+
+        附加字段：
+        - `session_uid` / `conversation_title` / `has_conversation`：来自采集库。
+          MCP 直写的记忆 `conversation_id` 是占位值（`mcp`/`direct-*`），
+          `has_conversation=false` —— 前端**不得**把它渲染成可点会话链接（会 404）
+        - `unit_id` / `value` / `manual_value`：记忆索引侧定位与分值，与记忆报表
+          同一套锚（`unit:<id>` 是稳定引用）
+        - `merged_into`：`status != 'new'` 时指向被归并进的主记忆 id，让读者知道
+          "你点的这条其实已经并到另一条了"，而不是以为它凭空消失
+        """
+        import sqlite3 as _sq
+
+        from agentmemhub import rag_bridge
+        from agentmemhub.distill import DISTILLED_SRC_PREFIX
+        st = rag_bridge.settings()
+        idx = _sq.connect(f"file:{Path(st.index_db).as_posix()}?mode=ro", uri=True)
+        idx.row_factory = _sq.Row
+        src = _sq.connect(f"file:{Path(store.db_path).as_posix()}?mode=ro", uri=True)
+        src.row_factory = _sq.Row
+        try:
+            row = idx.execute(
+                "SELECT m.id, m.source, m.conversation_id, m.slice_key, m.turn_key,"
+                " m.type, m.topic, m.content, m.confidence, m.status, m.dedup_of,"
+                " m.content_hash, m.model, m.created_at, m.wiki_ignore_at,"
+                " u.id AS unit_id, v.value AS value, v.manual_value AS manual_value"
+                " FROM distilled_memories m"
+                f" LEFT JOIN units u ON u.src_id = ('{DISTILLED_SRC_PREFIX}' || m.content_hash)"
+                " LEFT JOIN unit_values v ON v.unit_id = u.id"
+                " WHERE m.id = ?", (mid,)).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail=f"记忆 #{mid} 不存在")
+            out = dict(row)
+            meta = src.execute(
+                "SELECT session_uid, title FROM conversations"
+                " WHERE source = ? AND id = ?",
+                (out["source"], out["conversation_id"])).fetchone()
+            out["session_uid"] = meta["session_uid"] if meta else None
+            out["conversation_title"] = (meta["title"] or "") if meta else ""
+            out["has_conversation"] = meta is not None
+            out["merged_into"] = out["dedup_of"] if out["status"] != "new" else None
+        finally:
+            idx.close()
+            src.close()
+        return JSONResponse(out)
+
     @app.post("/api/memos/weight", summary="记忆手动加权 ⭐（锁定不衰减）")
     def api_memos_weight(traceId: str = Query(..., description="记忆 id"),
                          value: float | None = Query(default=None,

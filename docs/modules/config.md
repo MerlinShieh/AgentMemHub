@@ -270,6 +270,7 @@
 | `tests/test_llm_repair.py` | `repair_model` 未配时行为完全不变；配置后走修复路径 |
 | `tests/test_distill.py` | `distillation.prompt_ver` 显式配置覆盖默认行为 |
 | `tests/rag/test_rag_multi_model.py` / `tests/test_rag_bridge.py` | `rag.write.order` / `retrieval.models` 多模型写入与召回、档位对召回结果的影响 |
+| `tests/test_config_doc.py` | 面板配置页的数据源：点分路径与缩进一致、行尾/整行注释归属、空行不串味、`value_raw` 原样、**真实 `agentmemhub.yaml` 与 `yaml.safe_load` 叶子键一一对上**（防止行扫描器漏键/多键）、注释覆盖率 ≥ 50%、文件不存在时返回空、`env_overrides` 指向的键必须真实存在；体检侧另守：三类差异各自归位、引号与 `~`/`null` 归一后不算差异、真差异保留两侧原文、example 缺失不抛、真实文件上 `missing` 与 `obsolete` 无交集且 `missing` 带 example 注释 |
 
 **改动配置体系的回归清单**
 
@@ -307,3 +308,65 @@
 | 审计 | 配置修改写入通知（谁在何时把哪个键从什么改成什么），类别 `config` |
 
 落地时本文档需要补齐：override 的加载顺序图、白名单全表、`config get/set` 用法与错误语义。
+
+## 8. 面板配置体验页（只读）
+
+### 8.1 它解决什么
+
+`agentmemhub.yaml` 的每一个键都有中文注释，但**注释只对人有用**——直接 `open` 一个
+280 行的 yaml 找 `wiki.l2.llm.max_total_seconds`，要翻十几屏。配置体验页把这层
+"人读"信息搬进面板：**按模块分组、带原注释、可搜索**。
+
+数据源是 `agentmemhub/config_doc.py`（行扫描，非 `yaml.safe_load`）：
+
+- 保留**每个键自己的注释**（行尾 `# ...` 与上方紧邻的整行注释都归给它），
+  这正是 `yaml.safe_load` 拿不到的东西；
+- `value_raw` 保留 yaml 原文（`'8000'` 引号、`[...]` 行内列表都不改写），
+  面板上看到的就是文件里写的；
+- 层级靠缩进算点分 `path`，与 `Config.get("wiki.l2.llm.model")` 的路径**同一套**。
+
+接口：`GET /api/config` → `{file, exists, lines, entries[], env_overrides[], config_env, drift}`
+（`env_overrides` 标出环境变量正在覆盖哪几个键并给出当前值，见 §3.1；
+`config_env` 说明本次实际读的是哪个文件）。
+
+`drift` 来自 `config_doc.diff_example()`：把 `agentmemhub.yaml.example` 与本地配置
+做**键集对比**，返回 `{example_exists, local_exists, missing[], obsolete[], changed[], counts}`。
+
+| 类别 | 含义 | 怎么用 |
+|---|---|---|
+| `missing` | example 有、本地没有 | 升级新增的键多在这里；**但不等于错** —— example 里有些键本就是可选项，本地不配也正常。每项带 `comment`，取自 example |
+| `obsolete` | 本地有、example 已无 | 可能是被改名/删除，也可能是本地自加只对自己有用的键；报出来让人判断，**不自动清理** |
+| `changed` | 两边都有但值不同 | **多数是本机定制**（端口、路径、密钥、模型名），属正常差异，不要理解成"要照抄 example" |
+
+比较前用 `_norm_value()` 归一引号与 `~`/`null` —— 否则 `port: "8080"` 与 `port: 8080`
+会被报成"值不同"，一堆引号噪音把真问题淹掉。面板侧再对值统一脱敏（键名含
+`api_key`/`token`/`secret`/`password` 时显示 `***`），因为 `changed.local_raw` / `obsolete[].value_raw`
+里就是本地真实密钥。
+
+体检针对的是另一件事：**人**手工更新配置时容易漏键，而漏掉的键**不会报错**（安静地
+取默认值，行为却变了）。它把"逐段手工对照"降级成"按清单确认"，与"拆不拆目录"无关 ——
+拆目录同样不会替人合并 example 的新键，那是两回事。
+
+**只读是刻意的**：`PUT /api/config` 至今**不存在**，`config_doc` 也不提供写回。
+现在没有任何代码路径会把配置写回 `agentmemhub.yaml`（唯一的 yaml 写入是
+memos 引擎自己的 `config.yaml`，见 §7），所以**注释不可能被程序冲掉**。
+面板加写入口前，必须先解决"写回不丢注释"，做法见 §8.3。
+
+### 8.2 为什么不把全局 yaml 拆成 `config/` 多文件
+
+结论：**不拆**。理由是收益已被面板覆盖、成本却牵连加载语义。
+
+| 维度 | 现状 |
+|---|---|
+| 体量 | 280 行，82 个叶子键 + 22 个分组；单文件仍在"一次搜索就能定位"的范围 |
+| 注释丢失的真实风险 | **零**——没有程序会写它；只有人手工编辑，人不会删注释 |
+| 拆分能带来什么 | 「按模块看」+「注释贴着模块」；而面板 §8.1 已提供**按模块分组的只读视图**，同一目的、无需动磁盘布局 |
+| 拆分要改什么 | `Config.__init__` 从单文件变多文件合并（`_deep_merge` 已有，可复用）；还要动 `AGENTMEMHUB_CONFIG` / `--config` 的**指向语义**（现在指"一个文件"，拆后指"一个目录"）、`config_doc` 的行号与文件归属、测试 fixture 路径、README/AGENTS/部署文档里的全部路径引用 |
+| 拆分工作量 | 约 0.5–1 天（含回归与文档），期间**所有读配置的路径都处于风险中**——收益却只是文档体验 |
+
+真要做"面板能改配置"，正确做法不是拆目录，而是**文本级定点替换**：
+按 `config_doc` 给的 `line` 定位到那一行，只改 `value` 部分，注释与其余格式原样保留。
+这条路不新增依赖（不需要 `ruamel.yaml`）、不碰加载语义、也不影响任何现有功能。
+它是 §7 那张表里"文件级覆盖层"的另一条实现路径，**尚未实现**；落地前 `PUT /api/config`
+保持不存在，面板配置页保持只读。
+

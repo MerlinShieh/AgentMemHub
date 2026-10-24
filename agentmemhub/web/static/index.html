@@ -187,6 +187,12 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         <i data-lucide="library" class="h-3.5 w-3.5"></i>wiki知识库
         <span id="tabWikiCount" class="tnum rounded bg-muted px-1 text-[10px] font-semibold text-muted-foreground"></span>
       </button>
+      <!-- 设置：统一配置的**只读**视图（连 yaml 注释一起看）。与数据页解耦：
+           配置不随筛选条件变，也不该被误当成"可以点点就改"的地方 -->
+      <button id="tabSettings" data-tab="settings"
+              class="tab-btn -mb-px inline-flex items-center gap-1.5 border-b-2 border-transparent px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground">
+        <i data-lucide="settings" class="h-3.5 w-3.5"></i>设置
+      </button>
     </div>
     <!-- Filter bar：统一会话 -->
     <div id="convFilterBar" class="flex flex-wrap items-center gap-2 border-t border-border bg-card/60 px-5 py-2.5">
@@ -516,6 +522,11 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
           <i data-lucide="brain" class="h-4 w-4 text-primary"></i>
           <span class="text-xs font-medium text-foreground">记忆列表</span>
           <span id="memStatsChips" class="flex flex-wrap items-center gap-1 text-[10px]"></span>
+          <span class="ml-auto"></span>
+          <button id="memTimelineBtn" title="按产生时间回顾「这段时间我记住了什么」（按天分组，点条目看原文与溯源）"
+                  class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-[11px] font-medium text-foreground hover:bg-muted transition-colors">
+            <i data-lucide="history" class="h-3.5 w-3.5 text-primary"></i>时间线
+          </button>
         </div>
         <div class="overflow-x-auto scroll-thin">
           <table id="memTable" class="zebra w-full text-left text-xs">
@@ -861,7 +872,49 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       </div>
     </div><!-- /wikiFeedPane -->
   </div><!-- /viewWiki -->
-</div>
+
+<!-- ============ 设置（统一配置只读视图） ============
+     为什么只读：写 yaml 会丢注释（`yaml.safe_dump` 整篇重写），而本项目的注释
+     正是"为什么这么配、改了会怎样"的载体。要写就得做文本级定点替换，
+     风险与收益不成比例 —— 面板负责**看懂**（值 + 注释 + 生效覆盖），改仍走编辑器。 -->
+<div id="viewSettings" class="hidden">
+  <section class="px-5 py-4">
+    <div class="rounded-xl border border-border bg-card p-3.5 shadow-sm">
+      <div class="flex flex-wrap items-center gap-2">
+        <i data-lucide="file-cog" class="h-4 w-4 text-primary"></i>
+        <span class="text-xs font-medium text-foreground">统一配置</span>
+        <span id="cfgFile" class="truncate font-mono text-[11px] text-muted-foreground"></span>
+        <span id="cfgStats" class="text-[11px] text-muted-foreground"></span>
+        <span class="ml-auto flex items-center gap-1.5">
+          <input id="cfgSearch" type="text" placeholder="筛配置项（键名 / 值 / 注释）"
+                 class="w-60 rounded-md border border-input bg-background px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring">
+          <button id="cfgRefreshBtn" class="wk-act">重新读取</button>
+        </span>
+      </div>
+      <div id="cfgEnvNote" class="mt-2 hidden rounded-lg border border-border bg-warning-soft/40 px-3 py-2 text-[11px] text-warning"></div>
+      <div id="cfgDrift" class="mt-2 hidden rounded-lg border border-border px-3 py-2 text-[11px]">
+        <div class="flex flex-wrap items-center gap-2">
+          <i data-lucide="git-compare" class="h-3.5 w-3.5 shrink-0 text-primary"></i>
+          <span class="font-medium text-foreground">配置体检</span>
+          <span id="cfgDriftSum" class="text-muted-foreground"></span>
+          <button id="cfgDriftToggle" class="wk-act ml-auto">展开明细</button>
+        </div>
+        <div id="cfgDriftBody" class="mt-2 hidden max-h-80 overflow-y-auto scroll-thin"></div>
+      </div>
+      <div class="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+        本页<b>只读</b>：直接改 <span class="font-mono">agentmemhub.yaml</span> 后点「重新读取」。
+        优先级：环境变量 &gt; 配置文件 &gt; 内置默认值。面板不写配置是有意为之 ——
+        程序整篇重写 yaml 会把注释（"为什么这么配"）一起冲掉。
+      </div>
+    </div>
+  </section>
+  <section class="px-5 pb-8">
+    <div id="cfgList" class="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+      <div class="px-4 py-6 text-center text-xs text-muted-foreground">尚未读取</div>
+    </div>
+  </section>
+</div><!-- /viewSettings -->
+</div><!-- /app -->
 
 <!-- Detail Drawer -->
 <aside id="drawer" class="fixed inset-y-0 right-0 z-40 hidden w-full max-w-[60%] flex-col border-l border-border bg-card shadow-lg">
@@ -920,6 +973,39 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       <button id="modalCancel" class="rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted">取消</button>
       <button id="modalConfirm" class="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90">确认</button>
     </div>
+  </div>
+</div>
+
+<!-- 记忆速览（点 wiki 正文里的 [mNNN] 徽章落这里）——
+     刻意不复用确认框：那里有「取消/确认」两态，而这里纯只读查看，
+     带两个按钮反而让人以为要点什么才能关掉。不跳页是为了**不打断阅读**：
+     读知识页时想知道"这句依据哪条记忆"，看完了还要能立刻回到原处。 -->
+<div id="memoPeek" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/40 p-4">
+  <div class="flex max-h-[82vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-border bg-popover shadow-lg">
+    <div class="flex items-center gap-2 border-b border-border px-4 py-2.5">
+      <i data-lucide="bookmark" class="h-4 w-4 text-primary"></i>
+      <span id="memoPeekTitle" class="text-sm font-semibold text-foreground">记忆速览</span>
+      <span class="ml-auto"></span>
+      <button id="memoPeekClose" class="wk-act">关闭</button>
+    </div>
+    <div id="memoPeekBody" class="flex-1 overflow-y-auto scroll-thin px-4 py-3"></div>
+  </div>
+</div>
+
+<!-- 记忆时间线：按产生时间回顾"这段时间我记住了什么"。
+     与记忆列表共用 `/api/memories`（`sort=time&order=desc`），只是换一种读法：
+     列表回答"有哪些记忆"，时间线回答"记忆是怎么一天天长出来的" ——
+     按天分组、时刻对齐，能一眼看出某天集中学到了什么。 -->
+<div id="memTimeline" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/40 p-4">
+  <div class="flex max-h-[85vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-border bg-popover shadow-lg">
+    <div class="flex items-center gap-2 border-b border-border px-4 py-2.5">
+      <i data-lucide="history" class="h-4 w-4 text-primary"></i>
+      <span class="text-sm font-semibold text-foreground">记忆时间线</span>
+      <span id="memTimelineMeta" class="text-[11px] text-muted-foreground"></span>
+      <span class="ml-auto"></span>
+      <button id="memTimelineClose" class="wk-act">关闭</button>
+    </div>
+    <div id="memTimelineBody" class="flex-1 overflow-y-auto scroll-thin px-5 py-4"></div>
   </div>
 </div>
 
@@ -988,6 +1074,10 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   .md-body a { color: var(--as-primary); text-decoration: underline; }
   .md-body hr { border: 0; border-top: 1px solid var(--as-border); margin: 1.1em 0; }
   .md-body .md-cite { font-size: .76em; font-weight: 600; background: var(--as-primary); color: #fff; border-radius: 3px; padding: 0 .28em; vertical-align: super; opacity: .85; }
+  /* 带 data-mid 的徽章可点（点开看原记忆）：不给 a 标签，因为它是页内浮层而非跳转，
+     hover 只加下划线不动颜色 —— 太像链接会让读者以为会离开当前页。 */
+  .md-body .md-cite[data-mid] { cursor: pointer; }
+  .md-body .md-cite[data-mid]:hover { opacity: 1; text-decoration: underline; }
   /* 知识库域列表项 */
   .wiki-dom { display: flex; align-items: center; gap: 6px; width: 100%; border-radius: 6px; padding: 5px 7px; text-align: left; }
   .wiki-dom:hover { background: color-mix(in srgb, var(--as-primary) 7%, transparent); }
@@ -1123,7 +1213,8 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     // 没有运行中的任务时 adminPoll 会立刻返回，无副作用。
     adminPoll();
     switchTab(location.hash==='#wiki' ? 'wiki'
-              : (location.hash==='#memories' ? 'memories' : 'convs'));
+              : (location.hash==='#settings' ? 'settings'
+              : (location.hash==='#memories' ? 'memories' : 'convs')));
     reicons();
     return true;
   }
@@ -1133,6 +1224,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     buildMemFilters();                  // 状态下拉 + 来源下拉（含 MCP）+ 类型/置信 chips
     bindMemEvents();                    // 事件绑定 + 索引状态轮询（含按钮置灰）
     bindHealthEvents();                 // 健康卡片：刷新 / 回收滞留投影
+    $('#memTimelineBtn').onclick = () => openMemTimeline();   // 记忆时间线浮层
     loadMemories().catch(()=>{});       // 首次加载记忆列表
     loadHealth().catch(()=>{});         // 首次采集一致性指标
   }
@@ -1466,6 +1558,341 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       $('#wikiPageTitle').textContent = '读取失败';
       $('#wikiPageBody').innerHTML = `<div class="text-xs text-error">${wikiEsc(e.message)}</div>`;
     }
+  }
+
+  // 记忆速览：wiki 正文里的 [mNNN] 徽章点开 → 原记忆全文与溯源。
+  // 用浮层而不是新页面：读知识页时想知道"这句依据哪条记忆"，
+  // 看完要能立刻回到原处；跳走再后退会丢滚动位置、也断了上下文。
+  async function openMemoPeek(mid){
+    const box = $('#memoPeek');
+    box.classList.remove('hidden');
+    box.classList.add('flex');
+    $('#memoPeekTitle').textContent = '记忆 #' + mid;
+    $('#memoPeekBody').innerHTML = '<div class="py-6 text-center text-xs text-muted-foreground">加载中…</div>';
+    reicons();
+    try{
+      const r = await fetch('/api/memories/' + encodeURIComponent(mid));
+      const d = await r.json().catch(() => ({}));
+      if(!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+      renderMemoPeek(d);
+    }catch(e){
+      $('#memoPeekBody').innerHTML =
+        `<div class="py-6 text-center text-xs text-error">加载失败：${wikiEsc(e.message)}</div>`;
+    }
+  }
+
+  function closeMemoPeek(){
+    const box = $('#memoPeek');
+    box.classList.add('hidden');
+    box.classList.remove('flex');
+  }
+
+  function renderMemoPeek(m){
+    $('#memoPeekTitle').textContent = '记忆 #' + m.id;
+    const kv = (k, v) =>
+      `<div class="flex gap-2 py-0.5"><span class="w-[4.5rem] shrink-0 text-muted-foreground">${k}</span>` +
+      `<span class="min-w-0 flex-1 break-words">${v}</span></div>`;
+    const out = [];
+    const chips = [];
+    if(m.type) chips.push(`<span class="chip bg-info-soft text-info">${wikiEsc(m.type)}</span>`);
+    if(m.topic) chips.push(`<span class="chip bg-muted text-muted-foreground">${wikiEsc(m.topic)}</span>`);
+    if(m.status && m.status !== 'new') chips.push(`<span class="chip bg-warning-soft text-warning">${wikiEsc(m.status)}</span>`);
+    if(m.wiki_ignore_at) chips.push('<span class="chip bg-error-soft text-error">已移出 wiki</span>');
+    if(chips.length) out.push(`<div class="mb-2 flex flex-wrap items-center gap-1.5">${chips.join('')}</div>`);
+
+    // 来源块：MCP 直写的 conversation_id 是占位值（mcp / direct-*），
+    // 渲染成"会话"会让人以为点得进去 —— 这里如实写成"无会话上下文"。
+    out.push('<div class="mb-3 rounded-lg border border-border bg-muted/30 px-3 py-2 text-[11px]">');
+    out.push(kv('来源', `<span class="font-mono">${wikiEsc(m.source || '')}</span>`));
+    out.push(kv('会话', m.has_conversation
+      ? `<span class="text-foreground">${wikiEsc(m.conversation_title || m.conversation_id || '')}</span>`
+      : '<span class="text-muted-foreground">Agent 直写（无会话上下文）</span>'));
+    const pos = [m.slice_key, m.turn_key].filter(Boolean).join(' / ');
+    if(pos) out.push(kv('位置', `<span class="font-mono">${wikiEsc(pos)}</span>`));
+    out.push(kv('时间', `<span class="font-mono">${wikiEsc(m.created_at || '')}</span>`));
+    if(m.confidence != null) out.push(kv('置信度', String(m.confidence)));
+    if(m.unit_id) out.push(kv('记忆索引', `<span class="font-mono">unit:${m.unit_id}</span>`));
+    if(m.value != null || m.manual_value != null){
+      const v = m.value != null ? Number(m.value).toFixed(2) : '—';
+      const mv = m.manual_value != null ? ' · 手动 ' + Number(m.manual_value).toFixed(2) : '';
+      out.push(kv('价值分', v + mv));
+    }
+    out.push('</div>');
+
+    if(m.merged_into){
+      out.push(`<div class="mb-3 rounded-lg border border-border bg-warning-soft/40 px-3 py-2 text-[11px] text-warning">` +
+        `这条已归并进 <b>#${m.merged_into}</b> —— 内容仍在，但检索与编译以主记忆为准。</div>`);
+    }
+
+    out.push('<div class="text-[11px] font-medium text-muted-foreground">正文</div>');
+    out.push(`<div class="mt-1 whitespace-pre-wrap break-words rounded-lg border border-border bg-card px-3 py-2 text-[12.5px] leading-relaxed">${wikiEsc(m.content || '')}</div>`);
+    const body = $('#memoPeekBody');
+    body.innerHTML = out.join('');
+    body.scrollTop = 0;
+    reicons();
+  }
+
+  // ===== 记忆时间线（按产生时间回顾；与记忆列表同源不同读法）=====
+  const MEM_TL = { items: [], page: 0, total: 0, loading: false, done: false, bound: false };
+
+  function tlDay(ts){
+    if(!ts) return '未知时间';
+    const d = new Date(ts * 1000), p = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  }
+  function tlClock(ts){
+    if(!ts) return '--:--';
+    const d = new Date(ts * 1000), p = n => String(n).padStart(2, '0');
+    return `${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+
+  async function openMemTimeline(){
+    const box = $('#memTimeline');
+    box.classList.remove('hidden');
+    box.classList.add('flex');
+    reicons();
+    if(!MEM_TL.bound){
+      MEM_TL.bound = true;
+      $('#memTimelineClose').onclick = closeMemTimeline;
+      $('#memTimeline').addEventListener('click', e => {
+        if(e.target.id === 'memTimeline') closeMemTimeline();
+      });
+      document.addEventListener('keydown', e => {
+        if(e.key === 'Escape' && !$('#memTimeline').classList.contains('hidden')) closeMemTimeline();
+      });
+    }
+    if(!MEM_TL.items.length){
+      $('#memTimelineBody').innerHTML = '<div class="py-6 text-center text-xs text-muted-foreground">加载中…</div>';
+      loadMemTimeline(true);
+    }
+  }
+
+  function closeMemTimeline(){
+    const box = $('#memTimeline');
+    box.classList.add('hidden');
+    box.classList.remove('flex');
+  }
+
+  async function loadMemTimeline(reset){
+    if(MEM_TL.loading) return;
+    if(!reset && MEM_TL.done) return;
+    MEM_TL.loading = true;
+    const next = reset ? 1 : MEM_TL.page + 1;
+    try{
+      const qs = new URLSearchParams({ status: 'all', sort: 'time', order: 'desc',
+                                       page: String(next), page_size: '50' });
+      const r = await fetch('/api/memories?' + qs.toString());
+      const d = await r.json().catch(() => ({}));
+      if(!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+      if(reset){ MEM_TL.items = []; MEM_TL.page = 0; }
+      MEM_TL.items = MEM_TL.items.concat(d.items || []);
+      MEM_TL.page = next;
+      MEM_TL.total = d.total || 0;
+      MEM_TL.done = MEM_TL.items.length >= MEM_TL.total;
+      renderMemTimeline();
+    }catch(e){
+      $('#memTimelineBody').innerHTML =
+        `<div class="py-6 text-center text-xs text-error">加载失败：${wikiEsc(e.message)}</div>`;
+    }finally{
+      MEM_TL.loading = false;
+    }
+  }
+
+  function renderMemTimeline(){
+    $('#memTimelineMeta').textContent =
+      `共 ${MEM_TL.total} 条 · 已载 ${MEM_TL.items.length}`;
+    const out = [];
+    let day = null;
+    MEM_TL.items.forEach(it => {
+      const d = tlDay(it.created_at);
+      if(d !== day){
+        day = d;
+        out.push(`<div class="sticky top-0 z-10 -mx-1 mb-1.5 mt-3 flex items-center gap-2 bg-popover/95 px-1 py-1 backdrop-blur first:mt-0">`
+          + `<span class="chip bg-muted text-muted-foreground">${wikiEsc(d)}</span>`
+          + `<span class="h-px flex-1 bg-border"></span></div>`);
+      }
+      const merged = (it.status && it.status !== 'new' && it.dedup_of)
+        ? `<span class="chip bg-warning-soft text-warning" title="已归并进 #${it.dedup_of}">归并</span>`
+        : '';
+      const clickable = it.id != null;
+      const txt = it.content || '';
+      const shown = txt.length > 220 ? txt.slice(0, 220) + '…' : txt;
+      out.push(`<div class="group flex gap-3 ${clickable ? 'cursor-pointer' : ''}"${clickable ? ` data-mid="${it.id}"` : ''}>`
+        + `<div class="w-11 shrink-0 pt-0.5 text-right text-[10px] tnum text-muted-foreground">${tlClock(it.created_at)}</div>`
+        + `<div class="w-px shrink-0 bg-border"></div>`
+        + `<div class="min-w-0 flex-1 pb-3">`
+        +   `<div class="mb-1 flex flex-wrap items-center gap-1">`
+        +     (it.type ? `<span class="chip bg-info-soft text-info">${wikiEsc(it.type)}</span>` : '')
+        +     `<span class="chip bg-muted text-muted-foreground">${wikiEsc(it.source || '')}</span>`
+        +     merged
+        +     (it.value != null ? `<span class="text-[10px] text-muted-foreground">分值 ${Number(it.value).toFixed(2)}</span>` : '')
+        +     (clickable ? '<span class="ml-auto text-[10px] text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100">查看详情</span>' : '')
+        +   `</div>`
+        +   `<div class="break-words text-[12px] leading-relaxed text-foreground">${wikiEsc(shown)}</div>`
+        + `</div></div>`);
+    });
+    if(!MEM_TL.items.length){
+      out.push('<div class="py-6 text-center text-xs text-muted-foreground">暂无记忆</div>');
+    }else if(!MEM_TL.done){
+      out.push(`<div class="pt-2 text-center"><button id="memTlMore" class="wk-act">加载更多（还有 ${MEM_TL.total - MEM_TL.items.length} 条）</button></div>`);
+    }else{
+      out.push('<div class="pt-2 text-center text-[11px] text-muted-foreground">已到底</div>');
+    }
+    const body = $('#memTimelineBody');
+    body.innerHTML = out.join('');
+    // 每次重绘都要重设 onclick —— 直接赋值会覆盖上一个，不会累积重复监听（比 addEventListener 安全）
+    body.onclick = e => {
+      if(e.target.closest('#memTlMore')){ loadMemTimeline(false); return; }
+      const row = e.target.closest('[data-mid]');
+      if(row) openMemoPeek(row.dataset.mid);
+    };
+  }
+
+  // ===== 设置页：统一配置只读视图 =====
+  const CFG = { data: null, q: '', bound: false };
+
+  function cfgHit(e, q){
+    if(!q) return true;
+    return `${e.path} ${e.key} ${e.value_raw || ''} ${e.comment || ''}`
+      .toLowerCase().includes(q);
+  }
+
+  async function loadConfig(){
+    $('#cfgList').innerHTML = '<div class="px-4 py-6 text-center text-xs text-muted-foreground">读取中…</div>';
+    try{
+      const r = await fetch('/api/config');
+      const d = await r.json().catch(() => ({}));
+      if(!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+      CFG.data = d;
+      renderConfig();
+      renderDrift(d.drift || null);
+    }catch(e){
+      $('#cfgList').innerHTML = `<div class="px-4 py-6 text-center text-xs text-error">读取失败：${wikiEsc(e.message)}</div>`;
+    }
+  }
+
+  // 配置体检：agentmemhub.yaml.example ↔ 本地配置的键集对比。
+  // 解决的是"人做配置更新"的痛点 —— 整篇覆盖会把注释（"为什么这么配"）冲掉，
+  // 手工逐段对照又容易漏，而漏掉的键**不会报错**，它安静地取默认值。
+  // 这里只报告、一个字都不写文件；值里可能含密钥，必须脱敏后才上屏。
+  const CFG_SENSITIVE = /(api_key|token|secret|password|passwd|access_key)/i;
+  function cfgMask(path, val){
+    if(CFG_SENSITIVE.test(path || '')) return '***';
+    return val == null ? '' : String(val);
+  }
+
+  function renderDrift(dr){
+    const box = $('#cfgDrift'), body = $('#cfgDriftBody'), sum = $('#cfgDriftSum');
+    if(!box) return;
+    if(!dr || !dr.example_exists){ box.classList.add('hidden'); return; }
+    box.classList.remove('hidden');
+    const c = dr.counts || {};
+    const n = (c.missing || 0) + (c.obsolete || 0) + (c.changed || 0);
+    sum.textContent = n
+      ? `example 比本地多 ${c.missing || 0} 项 · 本地多 ${c.obsolete || 0} 项 · 值不同 ${c.changed || 0} 项`
+      : '与 example 一致';
+    sum.className = n ? 'text-muted-foreground' : 'text-success';
+
+    const row = (path, val, note) => `<div class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 border-l-2 border-border/60 pl-2">
+        <span class="font-mono text-foreground">${wikiEsc(path)}</span>
+        <span class="font-mono text-muted-foreground truncate">${wikiEsc(val)}</span>
+        ${note ? `<span class="text-muted-foreground/70"># ${wikiEsc(note)}</span>` : ''}
+      </div>`;
+    const grp = (title, hint, items, fmt) => (!items || !items.length) ? '' : `<div class="mt-2">
+        <div class="mb-1 text-foreground">${title} <span class="text-muted-foreground">${hint}</span></div>
+        <div class="space-y-0.5">${items.map(fmt).join('')}</div>
+      </div>`;
+
+    body.innerHTML =
+      grp('未跟上', '（example 有、本地没有；升级新增的键多在这里，可选项不配也正常）',
+          dr.missing, m => row(m.path, cfgMask(m.path, m.value_raw), m.comment)) +
+      grp('本地多出', '（example 已无；可能是改名/删除，也可能是本地自加，需人判断）',
+          dr.obsolete, o => row(o.path, cfgMask(o.path, o.value_raw), '')) +
+      grp('值不同', '（多数是本机定制：端口/路径/模型名，正常差异，不要照抄 example）',
+          dr.changed, ch => row(ch.path, `${cfgMask(ch.path, ch.local_raw)} → ${cfgMask(ch.path, ch.example_raw)}`, ch.comment)) ||
+      '<div class="mt-2 text-muted-foreground">没有差异。</div>';
+    body.classList.toggle('hidden', !CFG.driftOpen);
+    $('#cfgDriftToggle').textContent = CFG.driftOpen ? '收起明细' : '展开明细';
+  }
+
+  function renderConfig(){
+    const d = CFG.data || {};
+    const entries = d.entries || [];
+    const leaves = entries.filter(e => !e.is_section);
+    const documented = leaves.filter(e => e.comment).length;
+    $('#cfgFile').textContent = d.file || '';
+    $('#cfgFile').title = d.file || '';
+    $('#cfgStats').textContent = `共 ${leaves.length} 项 · ${documented} 项带注释 · ${d.lines || 0} 行`;
+
+    // 环境变量覆盖提示：生效值 ≠ 文件值。不标出来的话，用户改完 yaml 发现
+    // "没生效"会当成 bug 追（本项目这三个键确实会被 env 顶掉）。
+    const act = (d.env_overrides || []).filter(o => o.active);
+    const note = $('#cfgEnvNote');
+    if(act.length){
+      note.classList.remove('hidden');
+      note.innerHTML = '环境变量正在覆盖这些键（文件里的值<b>不生效</b>）：'
+        + act.map(o => `<span class="font-mono">${wikiEsc(o.env)}</span> → ${wikiEsc(o.path)} = ${wikiEsc(o.value)}`).join('；');
+    }else{
+      note.classList.add('hidden');
+    }
+
+    const q = (CFG.q || '').trim().toLowerCase();
+    // 搜索时只保留命中的叶子及其**祖先分组** —— 否则分组标题会满屏都是，
+    // 反而看不出"命中在哪一节"。
+    const keepSections = new Set();
+    if(q){
+      leaves.forEach(e => {
+        if(!cfgHit(e, q)) return;
+        const parts = e.path.split('.');
+        for(let k = 1; k < parts.length; k++) keepSections.add(parts.slice(0, k).join('.'));
+      });
+    }
+
+    const out = [];
+    entries.forEach(e => {
+      if(e.is_section){
+        if(q && !keepSections.has(e.path)) return;
+        out.push(`<div class="flex items-start gap-2 border-t border-border bg-muted/40 px-4 py-1.5">`
+          + `<i data-lucide="folder-tree" class="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground"></i>`
+          + `<div class="min-w-0 flex-1">`
+          +   `<div class="font-mono text-[11px] font-semibold text-foreground" title="第 ${e.line} 行">${wikiEsc(e.path)}</div>`
+          +   (e.comment ? `<div class="text-[10px] leading-snug text-muted-foreground">${wikiEsc(e.comment)}</div>` : '')
+          + `</div></div>`);
+        return;
+      }
+      if(!cfgHit(e, q)) return;
+      const over = (d.env_overrides || []).find(o => o.path === e.path && o.active);
+      const val = e.value_raw
+        ? wikiEsc(e.value_raw)
+        : '<span class="text-muted-foreground">—</span>';
+      out.push(`<div class="flex items-start gap-3 px-4 py-1.5 hover:bg-muted/30">`
+        + `<span class="shrink-0 truncate font-mono text-[11px] text-foreground" style="width:14rem;padding-left:${e.depth * 1.1}rem"`
+        +   ` title="${wikiEsc(e.path)}（第 ${e.line} 行）">${wikiEsc(e.key)}</span>`
+        + `<span class="w-56 shrink-0 truncate font-mono text-[11px] text-primary" title="${wikiEsc(e.value_raw)}">${val}</span>`
+        + `<span class="min-w-0 flex-1 text-[11px] leading-snug text-muted-foreground">${wikiEsc(e.comment || '')}`
+        +   (over ? ` <span class="chip bg-warning-soft text-warning">被 ${wikiEsc(over.env)} 覆盖</span>` : '')
+        + `</span></div>`);
+    });
+    if(!out.length) out.push('<div class="px-4 py-6 text-center text-xs text-muted-foreground">没有匹配的配置项</div>');
+    $('#cfgList').innerHTML = out.join('');
+    reicons();
+  }
+
+  function initSettingsTab(){
+    if(CFG.bound) return;
+    CFG.bound = true;
+    $('#cfgRefreshBtn').onclick = () => loadConfig();
+    $('#cfgDriftToggle').onclick = () => {
+      CFG.driftOpen = !CFG.driftOpen;
+      $('#cfgDriftBody').classList.toggle('hidden', !CFG.driftOpen);
+      $('#cfgDriftToggle').textContent = CFG.driftOpen ? '收起明细' : '展开明细';
+    };
+    let t;
+    $('#cfgSearch').addEventListener('input', e => {
+      clearTimeout(t);
+      const v = e.target.value;
+      t = setTimeout(() => { CFG.q = v; if(CFG.data) renderConfig(); }, 200);
+    });
   }
 
   // ==================================================================
@@ -2521,6 +2948,19 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       t = setTimeout(()=>{ WIKI.q = v.trim(); WIKI.page = 1; loadWiki(); }, 250);
     });
     $('#wikiBack').onclick = () => showWikiPage(false);
+    // 正文是整块 innerHTML 重绘的，所以委托到容器 —— 逐徽章绑会在每次翻页后失效
+    $('#wikiPageBody').addEventListener('click', e => {
+      const cite = e.target.closest('.md-cite[data-mid]');
+      if(cite){ e.preventDefault(); openMemoPeek(cite.dataset.mid); }
+    });
+    $('#memoPeekClose').onclick = closeMemoPeek;
+    $('#memoPeek').addEventListener('click', e => {
+      // 只有点遮罩本身才关；点卡片内部不关（否则选正文时会误关）
+      if(e.target.id === 'memoPeek') closeMemoPeek();
+    });
+    document.addEventListener('keydown', e => {
+      if(e.key === 'Escape' && !$('#memoPeek').classList.contains('hidden')) closeMemoPeek();
+    });
 
     // ---- 二级切换（浏览 / 运维 / 投喂）与运维动作 ----
     $('#wkTabBrowse').onclick = () => wkSwitchSub('browse');
@@ -2593,27 +3033,31 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   // 记忆报表页（Tab 2）：筛选 chips + 记忆列表 + ⭐加权/反馈 + 双向跳转
   // ==================================================================
   function switchTab(tab, opts){
-    curTab = (tab==='memories'||tab==='wiki') ? tab : 'convs';
-    const isMem = curTab==='memories', isWiki = curTab==='wiki';
+    curTab = (tab==='memories'||tab==='wiki'||tab==='settings') ? tab : 'convs';
+    const isMem = curTab==='memories', isWiki = curTab==='wiki', isSet = curTab==='settings';
+    const isData = isMem || isWiki || isSet;      // 非会话页：会话页的筛选条 / 摘要条都收起
     closeDrawer();                       // 切页收起详情抽屉（避免遮罩挡住另一页）
-    $('#viewConvs').classList.toggle('hidden', isMem||isWiki);
+    $('#viewConvs').classList.toggle('hidden', isData);
     $('#viewMemories').classList.toggle('hidden', !isMem);
     $('#viewWiki').classList.toggle('hidden', !isWiki);
-    $('#convFilterBar').classList.toggle('hidden', isMem||isWiki);
-    $('#convFilterBar').classList.toggle('flex', !isMem && !isWiki);
+    $('#viewSettings').classList.toggle('hidden', !isSet);
+    $('#convFilterBar').classList.toggle('hidden', isData);
+    $('#convFilterBar').classList.toggle('flex', !isData);
     $('#memFilterBar').classList.toggle('hidden', !isMem);
     $('#memFilterBar').classList.toggle('flex', isMem);
-    if(isMem||isWiki){
+    if(isData){
       $('#filterSummary').classList.add('hidden');
       $('#filterSummary').classList.remove('flex');
     }else if($('#summaryChips').innerHTML){
       updateSummary();                     // 回到会话页恢复摘要条
     }
     $$('.tab-btn').forEach(b=>b.classList.toggle('active', b.dataset.tab===curTab));
-    try{ history.replaceState(null,'', isWiki?'#wiki':(isMem?'#memories':'#convs')); }catch(e){}
+    try{ history.replaceState(null,'', isWiki?'#wiki':(isSet?'#settings':(isMem?'#memories':'#convs'))); }catch(e){}
     if(isMem && !(opts && opts.silent)) loadMemories().catch(()=>{});
     // 知识库页**懒加载**：首次切过去才拉数据（不拖慢首屏）
     if(isWiki){ initWikiTab(); if(!WIKI.loaded) loadWiki(); }
+    // 设置页同理懒加载：只在首次切过去时读一次配置文件
+    if(isSet){ initSettingsTab(); if(!CFG.data) loadConfig(); }
     reicons();
   }
   // 会话 → 记忆报表：按该会话筛选（sessionUid 优先，回退 conversationId）
@@ -3284,6 +3728,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     $('#tabConvs').onclick=()=>switchTab('convs');       // 标签页：统一会话
     $('#tabMems').onclick=()=>switchTab('memories');     // 标签页：记忆报表
     $('#tabWiki').onclick=()=>switchTab('wiki');         // 标签页：wiki知识库
+  $('#tabSettings').onclick=()=>switchTab('settings'); // 标签页：设置（只读配置）
     $('#agentOptions').addEventListener('change',e=>{ if(e.target.classList.contains('src-chk')){ const v=e.target.value; if(e.target.checked)F.sources.delete(v); else F.sources.add(v); updateFilterChips(); markDirty(); } });
     $('#wsOptions').addEventListener('change',e=>{ if(e.target.classList.contains('ws-chk')){ const v=e.target.value; if(e.target.checked)F.cwds.delete(v); else F.cwds.add(v); updateFilterChips(); markDirty(); } });
     $('[data-act="agent-all"]').onclick=()=>{ $$('.src-chk').forEach(c=>{c.checked=true;});F.sources.clear();updateFilterChips();markDirty(); };

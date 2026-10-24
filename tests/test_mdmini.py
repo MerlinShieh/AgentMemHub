@@ -76,9 +76,22 @@ def test_链接只放行http与https():
 
 
 def test_引用标记变成徽章():
-    """L2 页面里的 `[m3236]` 是溯源锚，渲染成小徽章便于阅读。"""
+    """L2 页面里的 `[m3236]` 是溯源锚：渲染成小徽章，并把记忆 id 放进 `data-mid`。
+
+    `data-mid` 是面板把徽章做成**可点**（点开看原记忆）的唯一依据；
+    同时徽章文本仍保留 `m3236` 原文 —— 没有 JS 时它依旧是可读的溯源标记，
+    不会退化成一个点不动也读不懂的空壳。
+    """
     html = mdmini.render_body("见 [m3236] 的结论")
-    assert '<span class="md-cite">m3236</span>' in html
+    assert '<span class="md-cite" data-mid="3236">m3236</span>' in html
+
+
+def test_多个引用逐一带id():
+    """一段里多个引用各带各的 id（正则不能把 `[m1] [m22]` 合并成一个）。"""
+    html = mdmini.render_body("先 [m1] 后 [m22]")
+    assert 'data-mid="1"' in html
+    assert 'data-mid="22"' in html
+    assert html.count('class="md-cite"') == 2
 
 
 def test_空内容不炸():

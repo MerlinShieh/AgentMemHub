@@ -86,11 +86,29 @@ GET  /api/admin/job  →  轮询进度
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/api/memories` | 记忆报表（筛选 + 分页 + 溯源）|
+| `GET` | `/api/memories/{mid}` | 单条记忆详情（wiki 引用点开看来源用）|
 | `GET` | `/api/memos/search` | 语义检索（混合召回）|
 | `POST` | `/api/memos/feedback` | 👍/👎 反馈（状态式，可撤销）|
 | `POST` | `/api/memos/weight` | ⭐ 手动加权（锁定不衰减）|
 | `GET` | `/api/memos/traces` | 近期记忆轨迹 |
 | `GET` | `/api/memos/status` | 记忆引擎状态 |
+
+**`GET /api/memories/{mid}` 返回**
+
+`mid` 就是 wiki 页里 `[m3711]` 那个数字（= `distilled_memories.id`）。200 返回：
+
+| 字段 | 说明 |
+|---|---|
+| `id` / `origin` / `source` / `conversation_id` | `origin` 为 `native`（本库蒸馏）/ `mcp`（Agent 直写）等 |
+| `type` / `topic` / `content` | 类型、主题、正文 |
+| `confidence` / `status` / `model` | 置信度、状态（`new` / `similar` / `merged` / `duplicate`）、产出模型 |
+| `created_at` | 记忆产生时间 |
+| `turn_key` / `slice_key` | 溯源到会话具体轮次 |
+| `dedup_of` / `merged_into` | 相似去重链：`merged_into` 仅在 `status != new` 时有值 |
+| `unit_id` / `value` / `manual_value` / `fb_polarity` | 记忆引擎侧打分与反馈 |
+| `conversation_title` / `session_uid` / `has_conversation` | 回跳会话用；`has_conversation=false` 表示采集库已无该会话（**不要给出能点的回跳**）|
+
+不存在返回 **404** `{"detail": "记忆 3711 不存在"}`。
 
 **`GET /api/memories` 参数**
 
@@ -326,7 +344,7 @@ python -m agentmemhub llm-config [--json]                       # 各 LLM 使用
 
 ## 六、接口使用现状（面板未调用的接口）
 
-**2026-10-23 实测**：后端 **62 个 HTTP 路由**，面板前端调用了 **51 个**，
+**2026-10-23 实测**：后端 **64 个 HTTP 路由**，面板前端调用了 **53 个**，
 **11 个未接**。复跑一条命令即可对账：
 
 ```powershell
@@ -339,8 +357,9 @@ python scripts/audit_frontend_api.py        # 或 --used 连已用的一起列 /
 | **外部投喂** | ✅ **全部接上** | 投喂视图：清单 / 详情 / 四形态投喂 / 上传 / 扫描批量 / 重转 / 撤下 / 删除 / 体检 / 格式白名单，2026-10-22 |
 | **快照** | ✅ **全部接上** | 运维页「快照与回滚」卡：列表 / 立即快照 / 分范围回滚（执行前自动存保护快照），2026-10-23 |
 | 会话 + 记忆排除 | 部分未接 | 记忆排除 UI 已下线（整会话 / 部分轮次 + `exclusions/summary`）；面板改标题等仍在用 |
+| **记忆** | ✅ **全部接上** | 报表 + 单条详情（wiki 溯源浮层）+ 时间线明细（`/api/memos/traces`），2026-10-23 |
+| **配置** | ✅ **已接（只读）** | 设置页：按模块分组、带原注释、标出环境变量覆盖；**无写接口**（见 §3.8）|
 | 运维 | 部分未接 | `admin/score`（入口已隐藏）/ `admin/exclude` / `admin/rebuild` |
-| 记忆 | 部分未接 | `GET /api/memos/traces`（时间线明细） |
 | 引导与统计 | 部分未接 | 面板走 `/api/bootstrap`（**已含统计**），`stats`/`facets`/`folders` 供外部调用 |
 
 > 逐域的路由数**不写死**（写死就一定会漂 —— 这份表 2026-10-16 那版的结构数字
@@ -395,7 +414,9 @@ python scripts/audit_frontend_api.py        # 或 --used 连已用的一起列 /
 | `POST /api/wiki/update` | 增量更新 wiki | ✅ 运维·增量更新 |
 | `GET /api/wiki/batch/status`、`run`、`cancel`、`resubmit`、`checks` | 离线批处理（Batch API，官方价 5 折）的推进与预检 | ✅ 运维·离线批处理 |
 | `GET /api/snapshots`、`POST /api/snapshots/create`、`POST /api/snapshots/restore` | 快照与回滚（列表 / 立即快照 / 分范围回滚） | ✅ 运维·快照与回滚 |
-| `GET /api/memos/traces` | 记忆**时间线明细**（原始的逐条轨迹）。面板"记忆报表"目前走 `/api/memories` + 搜索，没用它 | ⬜ 仍未接（见 §6.1） |
+| `GET /api/memos/traces` | 记忆**时间线明细**（原始逐条轨迹，含 user/agent 摘要与分值）。面板「记忆报表」头部的**时间线**弹层用它：按天分组、滚动加载 | ✅ 记忆·时间线（2026-10-23）|
+| `GET /api/memories/{mid}` | **单条记忆详情**。wiki 页里 `[m3711]` 点击后的速览浮层用它（含去重链与回跳会话所需的 `has_conversation`）| ✅ wiki 溯源（本轮新增）|
+| `GET /api/config` | **配置只读视图**：带原注释、按模块分组、标出被环境变量覆盖的键、与 `agentmemhub.yaml.example` 做键集体检。故意不提供写接口 | ✅ 设置页（本轮新增）|
 
 ---
 
@@ -483,6 +504,41 @@ PUT /api/feed/formats  {}
 
 **先扫描再投喂**（用户强调"先筛选再落库"）：`POST /api/feed/scan` 是**只读**的，
 返回"可投喂 N / 被格式挡掉 M + 按后缀分布 + 被挡原因"，人确认后再开 `batch`。
+
+### 3.8 配置（只读）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/config` | 配置只读视图：带原注释、按模块分组、标出被环境变量覆盖的键、与 `agentmemhub.yaml.example` 做键集体检 |
+
+| 返回字段 | 说明 |
+|---|---|
+| `file` | 实际读取的 yaml 绝对路径（可能是 `AGENTMEMHUB_CONFIG` 指向的）|
+| `exists` / `lines` | 文件是否存在、行数 |
+| `entries[]` | `{path, key, depth, value_raw, comment, line, is_section}`；`path` 与 `Config.get()` 的点分路径一致，`value_raw` 是 yaml 原文（不反序列化）|
+| `env_overrides[]` | 正在生效的环境变量覆盖：`{path, env, value, active}` |
+| `config_env` | 说明本次实际读的是哪个文件（含"未设置"时的默认值）|
+| `drift` | 与 `agentmemhub.yaml.example` 的键集对比，见下 |
+
+`drift` 结构：`{example_exists, local_exists, missing[], obsolete[], changed[], counts}`。
+
+| 字段 | 含义 |
+|---|---|
+| `missing[]` | **example 有、本地没有** —— 升级新增的键多落在这里。每项保留 `path/key/value_raw/comment/line`，`comment` 取自 example |
+| `obsolete[]` | **本地有、example 已无** —— 可能是改名/删除，也可能是本地自加 |
+| `changed[]` | 两边都有但值不同：`{path, local_raw, example_raw, comment, line}`；**多数是本机定制**（端口/路径/模型名），属正常差异 |
+| `counts` | 三类各自的条数 |
+
+它解决的是**人做配置更新**的痛点（不是程序写回）：项目加新键 → example 更新 → 而本地
+yaml 是手写维护的；整篇覆盖会连注释一起丢，逐段手工对照又容易漏，**漏掉的键还不报错**
+（安静地取默认值）。这份对比把"手工对照"降级成"按清单确认"，一个字都不写用户的文件。
+比较前会归一引号与 `~`/`null`，避免把 `8080` 与 `"8080"` 报成差异把真问题淹掉。
+面板侧对这些值统一脱敏（键名含 `api_key`/`token`/`secret`/`password` 时显示 `***`）。
+
+**只读是刻意的**：`PUT /api/config` **不存在**，也没有任何代码路径会把配置写回
+`agentmemhub.yaml`，所以中文注释不可能被程序冲掉。要加写入口必须先有"文本级定点替换"
+（按 `entries[].line` 改值、注释原样保留），理由与拆分 `config/` 目录的成本对比见
+[modules/config.md §8](modules/config.md)。
 
 ---
 

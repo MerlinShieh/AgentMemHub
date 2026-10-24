@@ -1,6 +1,6 @@
 # AgentMemHub
 
-统一提取你电脑上所有 AI Agent Harness 的对话历史 → 归一为**全量事件流**（含工具链、思维链、Shell 执行、代码补丁）→ 本地 SQLite 存储可搜索 → **记忆蒸馏**（LLM 离线提炼为结构化记忆）→ **内置记忆引擎 `agentmemhub.rag`**（向量化 + 混合召回 + 价值评分，进程内直调、无独立服务）→ 面板**三标签页**浏览（统一会话 / 记忆报表 / **wiki知识库**：L2 蒸馏产物 + 外部投喂页面）。
+统一提取你电脑上所有 AI Agent Harness 的对话历史 → 归一为**全量事件流**（含工具链、思维链、Shell 执行、代码补丁）→ 本地 SQLite 存储可搜索 → **记忆蒸馏**（LLM 离线提炼为结构化记忆）→ **内置记忆引擎 `agentmemhub.rag`**（向量化 + 混合召回 + 价值评分，进程内直调、无独立服务）→ 面板**四标签页**浏览（统一会话 / 记忆报表 / **wiki知识库**：L2 蒸馏产物 + 外部投喂页面 / **设置**：只读配置视图）。
 
 **让任何 Agent 的会话经验，变成可检索、可迁移、可复用的统一记忆资产。**
 
@@ -861,7 +861,7 @@ uv run python -m agentmemhub llm-config --json   # 机器读
 | 职责域 | 代码 | 模块文档 | 状态 |
 |---|---|---|---|
 | LLM Wiki 编译链 | `wiki.py`、`wiki_index.py`、`wiki_manifest.py`、`wiki_pending.py`、`wiki_triggers.py`、`scripts/wiki_*.py`、`obsidian.py` | [docs/modules/wiki.md](docs/modules/wiki.md) | 已写 |
-| 配置体系 | `config.py`、`scripts/check_config_keys.py`、`scripts/sync_llm_*.py` | [docs/modules/config.md](docs/modules/config.md) | 已写 |
+| 配置体系 | `config.py`、`config_doc.py`、`scripts/check_config_keys.py`、`scripts/sync_llm_*.py` | [docs/modules/config.md](docs/modules/config.md) | 已写 |
 | 日志与可观测性 | `logs.py`、`failures.py`、`snapshot.py`、`notify.py` | [docs/logging.md](docs/logging.md)（**事件字典 + 排查剧本**） | 已写 |
 | 离线批处理（Batch API） | `llm_batch.py`、`batch_client.py`、`wiki_batch.py`、`task_queue.py`（通用惰性收割）、`batch_ops.py`（CLI/HTTP 共用动作层） | [docs/modules/batch-offline.md](docs/modules/batch-offline.md) | 已落地（M0–M3 + M4/M5 核心；剩 M6 收尾，见 [计划](docs/batch-offline-plan.md)） |
 | 通知与推送 | `notify.py`（**通道可插拔**）、`logs.py`（`audit_notify`） | [docs/modules/notify.md](docs/modules/notify.md) | 已写（2026-10-04） |
@@ -894,7 +894,7 @@ uv run python -m agentmemhub serve
 uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentmemhub.db
 ```
 
-功能：**三标签页**——「统一会话」「记忆报表」「wiki知识库」分开呈现，互不混排。
+功能：**四标签页**——「统一会话」「记忆报表」「wiki知识库」「设置」分开呈现，互不混排。
 
 **统一会话页**：Agent/工作空间多选筛选 · 服务端分页列表 · 全文搜索（FTS5+LIKE）· 统计卡与图表 ·
 会话详情抽屉（用户消息/思维链/工具调用/代码补丁 全渲染，按记忆轮次分组）· 标题编辑与会话删除（真实写库）。
@@ -922,6 +922,9 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 - 来源列区分 **`MCP`**（Agent 主动写入的原子记忆，无原始会话、会话列不可点）与采集来源；
   每行标注「召回单元」与「有无原始会话」，避免误点失效链接
 - **语义检索**框（向量+全文混合评分召回，结果可点开原始会话）
+- **记忆时间线**（2026-10-23）：表头的「时间线」按钮弹出明细层，**按天分组倒序**展示原始轨迹
+  （用户输入 / Agent 输出摘要 + 分值 + 轮次锚），滚到底自动加载下一页；
+  适合回答"最近到底记了什么"（报表是**蒸馏后**的终稿，时间线是**原始**输入，两者口径不同）
 - 「记忆操作」工具栏：**提取会话入库 → 清洗数据 → 蒸馏记忆 → 写入记忆**，
   （自动评分按钮已隐藏——蒸馏置信度 + 👍/👎 已覆盖质量把关）
   全部为后台任务；**全局进度条**（两页可见，按百分比分级配色、结果实时回显、同一时刻只允许一个任务）
@@ -938,9 +941,12 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 - 数据**以磁盘为准**（不查投影表）：投影（`index-pages`）是运维动作、会滞后 ——
   实测磁盘 424 页 / 投影 399 行；面板要看的是**知识库本身**，"能否被召回"是另一件事
 - 正文渲染走 `agentmemhub/mdmini.py`（**先转义再套结构**：内容里的 `<script>` 只会显示成文本，
-  链接只放行 http/https；`[m3236]` 这类溯源标记渲染成小徽章）
+  链接只放行 http/https）
+- **溯源可点**（2026-10-23）：正文里的 `[m3236]` 就是 `distilled_memories.id`，渲染成可点徽章；
+  点开是速览浮层（正文 / 类型 / 置信 / 来源会话 / 轮次锚 / 去重链），可一键跳到**记忆报表**或
+  **原始会话**。采集库已无该会话时**不给回跳按钮**（给了就是死链）
 
-**运维（同一页的二级视图，2026-10-18）**：`浏览 / 运维` 两态切换，运维页五块 ——
+**运维（同一页的二级视图，2026-10-18）**：`浏览 / 运维 / 投喂` 三态切换，运维页六块 ——
 
 - **健康概览**：两级一致性（`l1_ahead` 时直接提示更新）、覆盖率、死链、待更新/失败计数、
   触发器状态；**卡住的更新锁**会单独告警（`in_progress` 长期不变 ⇒ 上轮异常退出，
@@ -950,9 +956,32 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 - **编译失败**：清单（stage / target / kind / attempts / error）+ **定向补跑**（只跑失败的）
 - **触发器规则**：启用 / 时点 / 脏记忆阈值 / 每日首次 —— **写运行时覆盖，不改 yaml**
 - **离线批处理**：在飞状态 + 推进一段 / 取消 / 重提 + 检测流水
+- **快照与回滚**（2026-10-23）：现有快照列表（时间 / 原因 / 大小）· 立即快照 ·
+  分范围回滚（全部 / 只 wiki 产物 / 只数据库；回滚前自动存保护快照）。超过保留上限时自动删最旧
 
 ⚠️ 运维页里的长任务（增量更新 / 补跑 / 批次推进）复用**全局进度条**（`/api/admin/job`），
 任务结束后自动刷新本页；**所有有副作用的动作都走二次确认**。
+
+**投喂视图（2026-10-22）**：素材**登记层**的写入与管理。它与「浏览」是**两层东西** ——
+浏览看"转换后的知识页"，投喂看"转换前的素材"，混在一起就分不清"页面有问题"还是"源有问题"。
+
+- 清单（状态 / 格式 / 质量 / 告警，可只看低质量）+ 详情（三段路径 / 转换器 / 失败原因）
+- **四形态投喂**：本地路径 / 网页链接 / 上传文件（可多选）/ 直接正文
+- **扫目录批量**：先 `scan` **只读预览**（可投喂 N / 被格式挡掉 M + 按后缀分布 + 被挡原因），
+  人确认后再跑
+- 素材级操作：重转 / 撤下（`retract`）/ 删除（可勾选 `purge` 连原件一起删）
+- 体检（P0/P1 分级）与**格式白名单热改**
+- ⚠️ **面板可以删素材，MCP 侧仍然不给删除** —— 那是给 Agent 的接口约束（只给写入与查看），
+  人工勾选 + 二次确认是另一回事，别拿 MCP 的约束去砍面板的能力
+
+**设置页（2026-10-23）**：`agentmemhub.yaml` 的**只读**视图 —— 按模块分组、带原注释、可搜索，
+并标出哪些键正被环境变量覆盖（`AGENTMEMHUB_CONFIG` 等）。
+
+- 数据源是 `agentmemhub/config_doc.py`（**行扫描**，不是 `yaml.safe_load`）：保留每个键自己的注释，
+  `value_raw` 保留 yaml 原文（`'8000'` 的引号、`[...]` 行内列表都不改写）
+- **只读是刻意的**：`PUT /api/config` 不存在，也没有任何代码路径会把配置写回 yaml，
+  所以中文注释**不可能被程序冲掉**。真要做"面板改配置"，正确做法是"按行号文本级定点替换"，
+  而不是把配置拆成 `config/` 多个文件（成本与收益对比见 [`docs/modules/config.md`](docs/modules/config.md) §8）
 
 ![AgentMemHub 主看板 — 筛选栏、统计卡、趋势/占比图与会话列表](./docs/images/dashboard.png)
 
