@@ -36,7 +36,7 @@ v2.0 起这个项目自带记忆引擎（`agentmemhub.rag`），进程内直调�
 | 入口 | 位置 | 说明 |
 |---|---|---|
 | 引擎 CLI | `python -m agentmemhub.rag.cli` | 子命令 `ingest` / `stats` / `reembed` / `eval` / `search` / `bench` |
-| 上层 CLI | `python -m agentmemhub memos` / `search` / `weight` / `rebuild` | 经 `cli.py` 转调，多一层参数整理与日志 |
+| 上层 CLI | `python -m agentmemhub search` / `weight` / `rebuild` | 经 `cli.py` 转调，多一层参数整理与日志 |
 | MCP 工具 | `memory_stats` / `memory_search` / `memory_save` / `memory_score` / `memory_recent` | `mcp_server.py` 里 5 个，**给 Agent 的语义接口** |
 | HTTP | `/api/memos/{status,search,weight,feedback,traces}`、`/api/memories` | 面板用；契约见 [API.md](../API.md) |
 | Python | `agentmemhub.rag.ingest.run_ingest(...)`、`search.hybrid_search(...)`、`memstore.save_memory(...)` | 测试与脚本直接调，是**最稳定的入口** |
@@ -161,7 +161,6 @@ rel = max(该 unit 在所有通道的原始分) + rrf_weight * Σ 1/(rrf_k + ran
 | 文件 | 守住什么 |
 |---|---|
 | `tests/test_rag_bridge.py`（514 行） | 三库桥接：只读打开的源库、`ATTACH` 只读、schema 校验、切片与 `src_id` 前缀 |
-| `tests/test_memos.py`（243 行） | 引擎对外语义：写入、检索、状态 |
 | `tests/test_scoring.py`（619 行） | 价值分数值演化：base / manual / feedback 合分、衰减、锁定不衰减 |
 | `tests/test_incremental.py`（503 行） | 增量：水位线推进后 `units` 的增删一致 |
 | `tests/test_health.py`（147 行） | 一致性断言（`units.updated_at` 覆盖、投影一致、FTS 与向量一致）与回收 |
@@ -170,6 +169,6 @@ rel = max(该 unit 在所有通道的原始分) + rrf_weight * Σ 1/(rrf_k + ran
 改引擎时的最小自检：
 
 ```powershell
-.venv\Scripts\python.exe -m pytest tests/test_rag_bridge.py tests/test_memos.py tests/test_scoring.py -q
+.venv\Scripts\python.exe -m pytest tests/test_rag_bridge.py tests/test_scoring.py -q
 .venv\Scripts\python.exe -m agentmemhub.rag.cli stats      # 行数对账
 ```

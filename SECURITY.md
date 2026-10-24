@@ -7,7 +7,7 @@ AgentMemHub 是一个**本地运行**的工具，会被推送到公开仓库的�
 - 所有 Agent 对话历史**只在本机读取**，写入本地 SQLite（默认 `<项目根>/database/agentmemhub.db`，
   可用 `AGENTMEM_HUB_DATA_DIR` 或 yaml 的 `data_dir` 改到别处）。
 - 工具不会将任何会话数据上传云端；也无遥测。
-- 只有你显式执行的 `export` / `memos --push` 才会把**脱敏后的结构化数据**写到本地文件或你本机运行的 MemOS 服务。
+- 只有你显式执行的 `export` 才会把**脱敏后的结构化数据**写到本地文件。
 
 ## 公开仓库脱敏规则
 

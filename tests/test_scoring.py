@@ -334,24 +334,6 @@ def test_run_score_all_only_ids_targeted_no_full_scan():
     assert r["evaluated"] == 1 and r["missing"] == 1     # ghost 库中无 → 计入 missing
 
 
-def test_list_traces_by_ids_subset_and_missing(tmp_path):
-    """定点读：命中子集按 ts 升序返回；不存在的 id 静默缺失（由调用方 diff missing）。"""
-    import sqlite3
-    from agentmemhub import scoring
-    db = tmp_path / "memos.db"
-    conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE traces (id TEXT PRIMARY KEY, user_text TEXT, "
-                 "agent_text TEXT, ts INTEGER)")
-    conn.executemany("INSERT INTO traces VALUES (?,?,?,?)",
-                     [("a", "A用", "A答", 1), ("b", "B用", "B答", 2),
-                      ("c", "C用", "C答", 3)])
-    conn.commit()
-    conn.close()
-    with mock.patch("agentmemhub.scoring._engine_db_path", return_value=db):
-        rows = scoring.list_traces_by_ids({"c", "a", "nope"})
-        assert [r["id"] for r in rows] == ["a", "c"]      # ts 升序，nope 缺失
-        assert rows[0]["userText"] == "A用"
-        assert scoring.list_trace_ids() == ["a", "b", "c"]
 
 
 def _incr_cfg(tmp_path, monkeypatch):
@@ -491,23 +473,6 @@ def test_run_score_all_concurrent_workers():
     assert len(fb) == 4
 
 
-def test_lists_all_traces_from_engine_db(tmp_path):
-    """只读枚举全部 trace（绕开 listTraces 500 窗口）——列名/内容正确。"""
-    import sqlite3
-    from agentmemhub import scoring
-    db = tmp_path / "memos.db"
-    conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE traces (id TEXT PRIMARY KEY, user_text TEXT, "
-                 "agent_text TEXT, ts INTEGER)")
-    conn.executemany("INSERT INTO traces VALUES (?,?,?,?)",
-                     [("t1", "你好", "回复", 1), ("t2", None, "只有助手", 2)])
-    conn.commit()
-    conn.close()
-    with mock.patch("agentmemhub.scoring._engine_db_path", return_value=db):
-        rows = scoring.list_all_traces()
-    assert len(rows) == 2
-    assert rows[0] == {"id": "t1", "userText": "你好", "agentText": "回复"}
-    assert rows[1] == {"id": "t2", "userText": "", "agentText": "只有助手"}   # None → 空串
 
 
 def test_admin_score_offline_503():
@@ -584,24 +549,6 @@ def test_read_engine_llm_prefers_hub_yaml(monkeypatch):
     assert cfg["headers"] == {"User-Agent": "AgentMemHub/1.0"}
 
 
-def test_read_engine_llm_falls_back_to_memos_engine(monkeypatch, tmp_path):
-    """agentmemhub.yaml 的 llm 段为空时，回退 MemOS 引擎 config.yaml（旧环境兼容）。"""
-    from agentmemhub import config as hub_config
-    from agentmemhub import scoring
-
-    class _Empty:
-        llm = {}
-
-    monkeypatch.setattr(hub_config, "config", lambda: _Empty())
-    home = tmp_path / "engine_home"
-    home.mkdir()
-    (home / "config.yaml").write_text(
-        "llm:\n  endpoint: https://engine.example/v1\n  apiKey: ek-test\n  model: em\n",
-        encoding="utf-8")
-    monkeypatch.setattr(scoring.memos_daemon, "engine_home", lambda: home)
-    cfg = scoring.read_engine_llm()
-    assert cfg["endpoint"] == "https://engine.example/v1"
-    assert cfg["api_key"] == "ek-test" and cfg["model"] == "em"
 
 
 def test_read_engine_llm_raises_with_clear_hint_when_unconfigured(monkeypatch):
@@ -614,6 +561,5 @@ def test_read_engine_llm_raises_with_clear_hint_when_unconfigured(monkeypatch):
         llm = {}
 
     monkeypatch.setattr(hub_config, "config", lambda: _Empty())
-    monkeypatch.setattr(scoring.memos_daemon, "engine_home", lambda: None)
     with pytest.raises(RuntimeError, match="agentmemhub.yaml"):
         scoring.read_engine_llm()

@@ -2,7 +2,7 @@
 
 原则：所有路径/端口默认采用官方默认；用户可在配置文件里覆盖（优先最小化配置）。
 优先级（高 → 低）：
-    1. 环境变量（临时覆盖，命名 AGENTMEMHUB_* / MEMOS_*）
+    1. 环境变量（临时覆盖，命名 AGENTMEMHUB_*）
     2. 配置文件：AGENTMEMHUB_CONFIG 指定 > 项目根 agentmemhub.yaml > 数据目录 config.yaml
     3. 内置默认值
 
@@ -363,83 +363,6 @@ class Config:
         if not raw:
             return None
         return self._resolve(str(raw))
-
-    # -- 记忆后端选择（R3 重构开关）--------------------------------------
-
-    @property
-    def memory_backend(self) -> str:
-        """'rag'（内置 agentmemhub.rag 引擎，默认）| 'memos'（vendored MemOS，回退用）。
-
-        优先级：env AGENTMEMHUB_BACKEND > yaml backend.backend > 默认 'rag'。
-        改回 'memos' 即整体回退旧 HTTP 引擎路径（memOS/ 目录未删，一行回滚）。
-        """
-        raw = (self._env.get("AGENTMEMHUB_BACKEND", "")
-               or str((self._get("backend", {}) or {}).get("backend", "")))
-        v = raw.strip().lower()
-        return v if v in ("rag", "memos") else "rag"
-
-    # -- MemOS 记忆引擎 ---------------------------------------------------
-
-    @property
-    def memos_base_url(self) -> str:
-        return (self._env.get("MEMOS_BASE_URL")
-                or str(self._get("memos", {}).get("base_url", ""))
-                or "http://127.0.0.1:18800").rstrip("/")
-
-    @property
-    def memos_repo_dir(self) -> Path:
-        """MemOS 项目根（含 apps/memos-local-plugin 的完整 repo）。
-
-        默认 <项目根>/memOS —— 用户把 MemOS 平移到项目内后无需任何配置；
-        想放到其他目录时在此指定（或 MEMOS_REPO_DIR 环境变量）。
-        """
-        v = self._env.get("MEMOS_REPO_DIR", "")
-        if not v:
-            v = str(self._get("memos", {}).get("repo_dir", ""))
-        if v:
-            return self._resolve(v)
-        return PROJECT_ROOT / "memOS"
-
-    @property
-    def memos_plugin_dir(self) -> Optional[Path]:
-        """apps/memos-local-plugin 目录：显式配置 > memos.repo_dir 推导。
-
-        返回"应得路径"，存在性由调用方判断（find_plugin_dir 探测）。
-        """
-        v = self._env.get("MEMOS_PLUGIN_DIR", "")
-        if not v:
-            v = str(self._get("memos", {}).get("plugin_dir", ""))
-        if v:
-            return self._resolve(v)
-        return self.memos_repo_dir / "apps" / "memos-local-plugin"
-
-    @property
-    def memos_home(self) -> Optional[Path]:
-        """引擎 home（记忆库 / .auth.json / config.yaml 所在）。
-
-        默认 <repo_dir>/home（MemOS 平移到项目内后自动跟随 repo）；未配置由引擎自行决定。
-        """
-        v = self._env.get("MEMOS_HOME", "")
-        if not v:
-            v = str(self._get("memos", {}).get("home", ""))
-        if v:
-            return self._resolve(v)
-        return self.memos_repo_dir / "home"
-
-    @property
-    def memos_password(self) -> str:
-        return (self._env.get("MEMOS_PASSWORD", "")
-                or str(self._get("memos", {}).get("password", "")))
-
-    @property
-    def memos_lightweight(self) -> Optional[bool]:
-        """true/false 强制托管轻量模式；None=交给引擎自身配置。"""
-        v = self._get("memos", {}).get("lightweight")
-        if v is None and not self._env.get("MEMOS_LIGHTWEIGHT", ""):
-            return None
-        if v is None:
-            return str(self._env.get("MEMOS_LIGHTWEIGHT", "")).lower() in ("1", "true", "on")
-        return bool(v)
 
     # -- LLM（蒸馏 / 评分共用）-------------------------------------------
 

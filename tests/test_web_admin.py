@@ -105,23 +105,19 @@ def test_admin_push_offline_503():
 
 def test_admin_push_online_job():
     c = _client()
-    fake = {"imported": 3, "skipped": 5,
-            "lines": ["[zcode] 推送 ok: imported=3 skipped=5"],
-            "rebuilt": {"done": True}}
-    def fake_push(store, **kw):
-        (kw.get("stdout") or print)("[zcode] 推送 ok: imported=3 skipped=5")
-        (kw.get("stdout") or print)("正在补向量（embedding repair，本地计算可能耗时数分钟）…")
-        (kw.get("stdout") or print)("MemOS 导入汇总: imported=3, skipped=5")
-        return fake
+    def fake_vectorize(*, stdout=None):
+        out = stdout or print
+        out("[zcode] 向量化 ok: embedded=3 skipped=5")
+        out("正在补向量（embedding repair，本地计算可能耗时数分钟）…")
+        return {"failed": 0, "embedded": 3, "skipped_known": 5}
     with mock.patch("agentmemhub.memos_daemon.auth_state", return_value={}), \
-         mock.patch("agentmemhub.cli.push_to_memos", side_effect=fake_push), \
-         mock.patch("agentmemhub.adapters.all_adapters", return_value=[]):
+         mock.patch("agentmemhub.cli._vectorize_stage", side_effect=fake_vectorize):
         r = c.post("/api/admin/push")
         assert r.status_code == 200
         done = _wait_done(c)
         assert done["status"] == "done"
-        assert "imported=3" in done["output"]
-        assert "正在补向量" in done["output"]      # rebuild 进度实时可见
+        assert "embedded=3" in done["output"]
+        assert "正在补向量" in done["output"]      # 多模型补向量进度实时可见
 
 
 def test_admin_task_error_reported():
@@ -189,20 +185,17 @@ def test_task_full_log_persisted_to_file(tmp_path, monkeypatch):
     from agentmemhub import logs
     monkeypatch.setattr("agentmemhub.logs.task_log_dir", lambda: tmp_path / "tasks")
     c = _client()
-    fake = {"imported": 3, "skipped": 5,
-            "lines": ["[zcode] 推送 ok: imported=3 skipped=5"], "rebuilt": None}
-    def fake_push(store, **kw):
-        (kw.get("stdout") or print)("[zcode] 推送 ok: imported=3 skipped=5")
-        return fake
+    def fake_vectorize(*, stdout=None):
+        (stdout or print)("[zcode] 向量化 ok: embedded=3 skipped=5")
+        return {"failed": 0, "embedded": 3}
     with mock.patch("agentmemhub.memos_daemon.auth_state", return_value={}), \
-         mock.patch("agentmemhub.cli.push_to_memos", side_effect=fake_push), \
-         mock.patch("agentmemhub.adapters.all_adapters", return_value=[]):
+         mock.patch("agentmemhub.cli._vectorize_stage", side_effect=fake_vectorize):
         c.post("/api/admin/push")
         done = _wait_done(c)
     p = tmp_path / "tasks" / f"{done['id']}.log"
     assert p.exists()
     text = p.read_text(encoding="utf-8")
-    assert "推送 ok: imported=3" in text
+    assert "向量化 ok: embedded=3" in text
     assert logs.task_log_tail(done["id"]) == text.strip()
 
 
@@ -256,7 +249,7 @@ def test_admin_rebuild_offline_503():
 def test_admin_rebuild_job_runs():
     c = _client()
     with mock.patch("agentmemhub.memos_daemon.auth_state", return_value={}), \
-         mock.patch("agentmemhub.memos.rebuild_embeddings") as re_:
+         mock.patch("agentmemhub.rag_bridge.rebuild_embeddings") as re_:
         re_.return_value = {"done": True, "rounds": 2, "processed": 500, "failed": 0}
         def fake_rebuild(*a, **k):
             k.get("on_progress")("embedding repair: 第 1 轮 processed=500")

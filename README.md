@@ -6,8 +6,11 @@
 
 > **v2.0（2026-09-10）**：记忆后端从上游 MemOS 引擎切换为**自研内置引擎 `agentmemhub.rag`**
 > ——进程内直调，**无独立服务、无端口、无守护进程**，启动面板或跑 `sync` 即完整可用。
-> MCP 五工具与面板契约零改动；如需回退 MemOS，在 `agentmemhub.yaml` 设 `backend.backend: memos`
-> 即可（vendored `memOS/` 保留未删）。召回机制与实测数据见 [docs/recall-fusion.md](docs/recall-fusion.md)。
+> MCP 五工具与面板契约零改动。召回机制与实测数据见 [docs/recall-fusion.md](docs/recall-fusion.md)。
+>
+> **v2.8（2026-10-24）**：MemOS 上游依赖**彻底移除** —— vendored `memOS/` 目录、
+> `agentmemhub.memos` 模块、`/api/v1/import` 端点、`memos` 子命令、`memory_backend`
+> 与 `memos.*` 配置键全部删除，**不再有回退开关**。
 >
 > **v2.1（2026-09-11）**：新增**记忆蒸馏**（离线把会话提炼为结构化记忆，四入口：
 > Python / CLI / start.bat 控制台 / 面板，详见「记忆蒸馏」章节）；**双标签页面板**
@@ -145,7 +148,7 @@ AgentMemHub/
 │   ├── feed/                     # ★ 外部投喂转译层（格式注册表 + 三段物料）
 │   ├── adapters/                 # 8 个 Agent 数据源适配器（src_id/turn_key/注入识别）
 │   ├── web/                      # FastAPI 记忆面板 + 前端 + /api/* 网关
-│   └── memos.py / memos_daemon.py # 回退路径（backend=memos 时启用，默认不参与）
+│   └── memos_daemon.py           # 引擎运行时门面（/api/v1/* 端点派发到进程内 rag_bridge）
 ├── models/                       # 嵌入模型（自带 bge-small 开箱即用）
 ├── agentmemhub.yaml(.example)    # 统一配置（模型/分桶/召回/后端开关；本体 gitignore）
 ├── database/                     # 数据目录（gitignore）：采集库 + 索引库 + 水位 + 评分状态
@@ -166,7 +169,6 @@ AgentMemHub/
 ├── eval/                         # 召回评测示例集（queries.example.yaml；私有集不入库）
 ├── tests/                        # pytest（1370 项通过 / 1 项条件跳过；65 个测试文件）
 ├── docs/                         # 技术文档（架构全景/蒸馏/召回/wiki/模型选型/接口契约）
-├── memOS/                        # 回退用的上游引擎（gitignore，默认不参与运行）
 ├── start.bat                     # 启动控制台（Windows）
 ├── ClearData.bat / ClearTest.bat # 清空数据 / 恢复干净测试环境
 └── AGENTS.md / ARCHITECTURE.md   # 协作约定 / 架构说明
@@ -348,7 +350,6 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 | `sync [--source] [--full]` | **采集 + 向量化写入记忆索引**（增量；小模型先跑完即可检索，大模型后台并发补齐）|
 | `mcp [--http] [--bind H] [--port P]` | MCP 记忆网关：默认 stdio（Agent 拉起）；`--http` 常驻为 Streamable HTTP 供团队共享 |
 | `feed --action add\|list\|show\|retry\|retract\|forget\|lint\|formats\|scan\|batch` | **外部投喂转译层**：把 md / 网页 / PDF / Office / 思维导图 / 表格转译成知识库页面（与自有 wiki **并列**，`origin=external`，不进记忆与 wiki 编译）。`add` 支持"路径 / 二进制 / URL / 正文"**四形态**（CLI 侧是 `feed add <路径>` 或 `feed add --stdin`）；`scan` 只读预览、`batch` **默认不落盘**（`--apply` 才写）；`formats` 控制允许哪些后缀 —— 详见 [docs/modules/feed.md](docs/modules/feed.md) |
-| `memos [--source] [--out]` | 回退路径：生成 MemOS bundle（backend=memos 时用）|
 | `clean [--source x] [--apply]` | 记忆清洗：删除系统注入事件（默认预览，`--apply` 才执行并重建 FTS/计数；sync 会自动只清变更会话）|
 | `score [--pending] [--limit N] [--dry-run] [--workers N] [--ids id1,id2] [--unscored-count] [--sync-episodes]` | ⚠️ **当前不生效**（入口已从控制台/面板隐藏；实测评为 neutral 居多且跑批全跳过，质量把关由蒸馏置信度 + 面板 👍/👎 承担）——命令保留备查。原功能：LLM 批量自动评分历史记忆（**增量优先**：pending_score 队列非空只评队列·定点读零全量枚举，队列空则先筛未评 id 再读正文；`--pending` 仅评队列，`--ids` 只评指定条（写后即评），`--unscored-count` 统计未评条数（只读 id），`--sync-episodes` 回填 episode.r_task；**三档 verdict 均记入跳过清单**——positive/negative 写 value、neutral 不写值但仍标记「已评」避免下次重评（dry-run 一律不记录）；网关**内容审核拒评（如智谱 1301）自动归 neutral 并记账**，不再每次卡该条报错；LLM 调用**强制直连**、不受系统代理影响，确需代理设 `AGENTMEMHUB_LLM_PROXY`）|
 | `rebuild [--mode repair\|rebuild]` | 补向量：给缺向量的记忆补嵌（repair）/ 全量重算（导入记忆后修复语义检索）|
@@ -565,8 +566,8 @@ Skill 与 MCP 强绑定、无降级路径——MCP 不可用时 Skill 会明确�
 
 设计要点：
 
-- **引擎由用户常驻控制**（看板 / `memos-daemon`）；网关只转发请求，引擎离线时所有工具
-  返回明确错误与启动指引（isError），不做启停决策
+- **引擎由调用方进程加载**（v2.0 起进程内直调，无独立服务、无端口）；网关只把请求
+  派发到本进程内的 `rag_bridge`，**不存在「引擎离线」这种状态**
 - **协议层与传输层分离**：stdio 零新依赖；Streamable HTTP 复用 web 依赖
   （fastapi/uvicorn），`POST /mcp` 单端点（GET 405、DELETE 结束会话），
   兼容 MCP 2024-11-05 / 2025-06-18
@@ -604,8 +605,7 @@ Skill 与 MCP 强绑定、无降级路径——MCP 不可用时 Skill 会明确�
 AgentMemHub/
 ├── agentmemhub/
 │   ├── rag/                     ← 内置记忆引擎（向量化 / 混合召回 / 价值评分）
-│   ├── rag_bridge.py            ← 引擎接缝：以原 MemOS 端点语义实现进程内调用
-│   └── memos*.py                ← 回退路径（backend=memos 时启用）
+│   └── rag_bridge.py            ← 引擎接缝：以原 MemOS 端点语义实现进程内调用
 ├── database/                    ← 采集库 agentmemhub.db + 索引库 session_rag.db
 ├── models/                      ← 嵌入模型（自带 bge-small；更大模型按需下载）
 └── agentmemhub.yaml             ← 统一配置（模型/分桶/召回/后端开关）
@@ -629,9 +629,10 @@ uv run python -m agentmemhub serve       # 启动记忆面板 http://127.0.0.1:8
   高精度模型在后台子进程并发补齐，完成后自动生效。
 - **性能优化**：批量嵌入按**文本长度分桶**，避免短文本被长文本 padding 拖累
   （实测 bge-base 从 5.26 → 26 条/秒，全量 51 分钟 → 11.6 分钟）。
-- **回退 MemOS**：改 `agentmemhub.yaml` 的 `backend.backend: memos`（或设环境变量
-  `AGENTMEMHUB_BACKEND=memos`）即可切回 vendored 引擎，此时才需要其独立服务与
-  `memos-daemon` 管理命令。
+- **没有回退开关了**：MemOS 上游已于 2026-10-24 彻底移除（vendored 目录、模块、
+  导入端点、`memos` 子命令、`memory_backend` 配置键全删）。`agentmemhub/memos_daemon.py`
+  名字保留，但它现在只是**进程内引擎的运行时门面**（把 MemOS 时代的 `/api/v1/*`
+  端点语义派发到 `rag_bridge`），没有守护进程可启停。
 
 ## 记忆蒸馏（把会话提炼为结构化记忆）
 
@@ -758,9 +759,6 @@ DeepSeek 官方关推理后，第二级因此丢掉了 Command Code 的凭据。
 data_dir: database                    # 本地状态根目录（采集库/索引/水位/评分）
 db_path: ""                           # 采集库 SQLite（留空 = <data_dir>/agentmemhub.db）
 
-backend:
-  backend: rag                        # rag（内置引擎，默认）| memos（回退）
-
 rag:
   active: bge-small-zh-v1.5           # 检索用模型（随仓库分发，开箱即用）
   write:
@@ -799,10 +797,6 @@ rag:
 agents:
   zcode: ""                           # 各 harness 会话位置；留空=官方默认自动发现
   hermes: ""
-memos:                                # 仅 backend=memos 时参与
-  base_url: "http://127.0.0.1:18800"
-  repo_dir: ""
-
 web:
   port: 8086
 
@@ -1038,10 +1032,10 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 - [x] 8 个 Agent Adapter（含 src_id/turn_key 稳定锚与系统注入识别）
 - [x] Trae 适配器（最小可用：会话清单 + 每轮快照 diff + 项目记忆；对话正文等官方开放接口）
 - [x] 全量检索 + JSONL/Markdown 导出
-- [x] ~~MemOS bundle 桥接~~（v2.0 起退役为回退路径）
+- [x] ~~MemOS bundle 桥接~~（v2.0 起退役；v2.8 起**代码与配置全部移除**）
 - [x] Web 仪表盘（FastAPI + 原生 JS，服务端分页、事件按需加载、真删改）
 - [x] 交互式控制台入口（start.bat / 无参数菜单）
-- [x] ~~记忆引擎一体化管理（MemOS 平移）~~（v2.0 起改为内置引擎）
+- [x] ~~记忆引擎一体化管理（MemOS 平移）~~（v2.0 起改为内置引擎；v2.8 移除上游）
 - [x] 统一配置体系（agentmemhub.yaml：全路径可配置）
 - [x] MCP 记忆网关（stdio / Streamable HTTP 双传输，供 ZCode/OpenCode 等 harness 检索/写入记忆）
 - [x] 记忆清洗（clean：删除系统注入事件，预览→执行并重建 FTS/计数）
@@ -1054,7 +1048,7 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 
 - [x] 内置记忆引擎 `agentmemhub.rag`（向量化 / 六路通道融合召回 / 价值评分，进程内直调、无独立服务）
 - [x] 引擎接缝 `rag_bridge`：原 MemOS 端点语义的进程内实现，MCP 五工具与面板契约零改动
-- [x] 一行配置回退 MemOS（`backend.backend: memos`），vendored `memOS/` 保留
+- [x] ~~一行配置回退 MemOS~~（**v2.8 已移除**：不可能再回退，见模块文档）
 - [x] 存量零丢失迁移（MemOS 2286 traces / 3836 feedback → 新索引）
 - [x] 记忆写入控制：会话级 + 轮次级排除（后端能力保留；面板 UI 自 P3 起下线，改用双标签页报表）
 - [x] 面板改造为「AgentMemHub 记忆面板」：**双标签页（统一会话 / 记忆报表）**、记忆报表（筛选·展开溯源·⭐加权·反馈·语义检索）、会话↔记忆双向跳转、标题修改与删除防 ingest 覆盖

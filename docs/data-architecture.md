@@ -44,9 +44,9 @@
 ```
 
 **唯一引擎事实**：`memory_backend` 默认 `rag`（自研内核，`agentmemhub/rag/`）。
-MCP 五工具虽有 `/api/v1/*` 的 MemOS 端点语义（兼容层），但 `engine_request` 在
-rag 后端下**进程内直调 `rag_bridge`，不发 HTTP**；`memOS/` 目录只是可一行回滚的
-vendored 存货，数据路径上无任何 MemOS 残留。`memory_stats` 里的
+MCP 五工具虽有 `/api/v1/*` 的 MemOS 端点语义（兼容层），但 `engine_request`
+**进程内直调 `rag_bridge`，不发 HTTP**；MemOS 上游已于 v2.8 彻底移除（vendored
+`memOS/` 目录、`agentmemhub.memos` 模块、回退配置键全删），数据路径上无任何残留。`memory_stats` 里的
 `traces/episodes` 是 rag_bridge 对索引库数据的兼容命名视图。
 
 ---

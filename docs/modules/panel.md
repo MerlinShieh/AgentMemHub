@@ -135,7 +135,7 @@ tasks.submit(name: str, fn) -> dict          # fn 必须是 fn(emit, meta) -> st
 | 刷新页面后进度条没了 | 前端只在内网轮询、刷新就丢 | `init()` 里调 `adminPoll()` 重新挂上 |
 | 某标签页整片空白 | 视图容器落在 `#app` 之外 | `test_web_layout.py` 的祖先链断言；改 HTML 时先跑它 |
 | 运维页数字是"更新前"的 | 长任务还没结束，页面拿的是旧快照 | `opsSyncJob()` 在任务结束时重载；期间按钮置灰并显示"数据是更新前快照" |
-| 面板改了 yaml 不生效 | `config()` 单例、进程内缓存 | 重启 `serve`（MCP 进程、memos-daemon 同理） |
+| 面板改了 yaml 不生效 | `config()` 单例、进程内缓存 | 重启 `serve`（MCP 常驻进程同理） |
 
 **日志位置**：`logs/web_stdout.log` / `logs/web_stderr.log`（启动时重定向）、
 `logs/wiki.log`（编译事件流，运维页的进度来源）、`logs/mcp.log`。

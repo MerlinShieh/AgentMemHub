@@ -43,7 +43,7 @@
 4. **价值分基线** —— `memstore.py:243` 按 role 给不同初始分（`BASE_VALUE_DISTILLED`）。
 5. **健康对账** —— `health.py:55` 用 `role='distilled'` 计数校验投影一致性。
 6. **面板统计** —— `web/aggregates.py:115` 按 role 出分布图。
-7. **轮次语义** —— `memos.py:135-141`：只有 `role=='user'` 才**开一个新对话轮**。
+7. **轮次语义** —— 原 `memos.py:135-141`（该文件已随 v2.8 移除 MemOS 一并删除）：只有 `role=='user'` 才**开一个新对话轮**。
 
 **为什么投喂必须关心它**（这就是我问这个问题的原因）：
 

@@ -10,7 +10,7 @@
 |---|---|
 | 提供配置**单一真源**：模型 / 分桶 / 召回 / 写入策略 / 蒸馏 / LLM / 日志 / 面板端口全部经 `agentmemhub.yaml` | `agentmemhub/config.py`、`agentmemhub/rag/config.py` |
 | 分段解析 + 内置默认兜底：`DEFAULT_DISTILL` / `DEFAULT_WIKI` / `DEFAULT_SNAPSHOT` / `DEFAULT_LOGS`，`rag` 段的 `DEFAULT_EMBED` / `DEFAULT_RETRIEVAL` / `DEFAULT_WRITE` / `DEFAULT_PAGE_POLICY` | 同上 |
-| 环境变量临时覆盖（`AGENTMEMHUB_*` / `MEMOS_*` / `AGENTMEM_HUB_DATA_DIR`） | 各属性内逐键读取 |
+| 环境变量临时覆盖（`AGENTMEMHUB_*` / `AGENTMEM_HUB_DATA_DIR`） | 各属性内逐键读取 |
 | 给出「某调用方**最终生效**的 LLM 配置」（继承 / 覆盖标注） | `config.llm_effective()`、CLI `llm-config` |
 | 兜住「定义了却没有任何读取点」的僵尸键 | `scripts/check_config_keys.py` + `tests/test_config_audit.py` |
 | 从别的客户端同步 LLM 接入信息（不手抄密钥） | `scripts/sync_llm_from_zcode.py`、`scripts/sync_llm_from_dsh.py` |
@@ -19,7 +19,7 @@
 
 | 不做 | 当前语义 |
 |---|---|
-| **不做运行时热重载** | `Config.__init__` 只在构造时读一次 yaml（`self._file`），`config()` 是模块级单例（`_instance`）。yaml 改动对**已运行的进程无效**——MCP 常驻进程（`agentmemhub mcp`）、面板（`agentmemhub serve`）、`memos-daemon` 都要重启；CLI 每次是新进程，天然重读 |
+| **不做运行时热重载** | `Config.__init__` 只在构造时读一次 yaml（`self._file`），`config()` 是模块级单例（`_instance`）。yaml 改动对**已运行的进程无效**——MCP 常驻进程（`agentmemhub mcp`）、面板（`agentmemhub serve`）都要重启；CLI 每次是新进程，天然重读 |
 | 不写回主 yaml | 除两个同步脚本（原地改 `llm` 段、保留注释）外，程序不修改 `agentmemhub.yaml` |
 | 不集中托管 `rag` 段 | `rag` 段由 `agentmemhub/rag/config.py` 的 `load_settings()` **自行读同一份 yaml**，不经过 `Config` |
 | 不做跨段语义校验 | `load_settings()` 只校验「`active` 已注册 + 模型文件齐全（`onnx` / `tokenizer.json` / `config.json`）」，不校验档位与阈值是否自相矛盾 |
@@ -30,7 +30,7 @@
 | 入口 | 位置 | 说明 |
 |---|---|---|
 | `agentmemhub.config.config()` | `agentmemhub/config.py` | **模块级单例**（`_instance`）。首次调用时 `Config()` 默认构造；`Config(path=..., env=...)` 可显式注入；`reset()` 清空单例（测试用） |
-| 属性读取 | 同上 | `data_dir` / `db_path` / `web_port` / `memory_backend` / `agent_path(source)` / `llm` / `distillation` / `wiki` / `wiki_l2` / `snapshot` / `logs` / `memos_*`。段属性返回的是**已合并默认值**的字典，调用方不必处理缺键 |
+| 属性读取 | 同上 | `data_dir` / `db_path` / `web_port` / `agent_path(source)` / `llm` / `distillation` / `wiki` / `wiki_l2` / `snapshot` / `logs`。段属性返回的是**已合并默认值**的字典，调用方不必处理缺键 |
 | `agentmemhub.rag.config.load_settings(root=None)` | `agentmemhub/rag/config.py` | 读 `rag` 段；`rag_bridge.settings()` 是它自己的模块级单例（`_SETTINGS`，`configure()` 可注入），`_derive_settings()` 再用 `config().data_dir` / `config().db_path` 覆写 `source_db` / `index_db` / `log_dir` |
 | CLI：查 LLM 生效配置 | `python -m agentmemhub llm-config [--json]` | `cmd_llm_config`（注册于 `_register_llm_config_parser`）。打印四个使用点（记忆蒸馏 / 批量评分 / Wiki 第一级 / Wiki 第二级）的最终值，每项标 `[继承]` 或 `[覆盖]`；`api_key` 只显示「（已设置）/（未设置）」，**绝不回显** |
 | CLI：`config` 子命令 | — | **不存在**。`main()` 的 `handlers` 表与 argparse 都没有 `config`：改配置只能编辑 yaml 或设环境变量（`config get/set` 是 A2/M4 的计划项，见 §7） |
@@ -47,7 +47,7 @@
 
 | 优先级 | 来源 | 细节 |
 |---|---|---|
-| 1（最高） | 环境变量 | 各属性内**每次访问**时读：`data_dir` ← `AGENTMEM_HUB_DATA_DIR`；`db_path` ← `AGENTMEMHUB_DB`；`web_port` ← `AGENTMEMHUB_PORT`；`memory_backend` ← `AGENTMEMHUB_BACKEND`；`llm` 三项 ← `AGENTMEMHUB_LLM_ENDPOINT` / `_API_KEY` / `_MODEL`；`memos.*` ← `MEMOS_BASE_URL` / `MEMOS_REPO_DIR` / `MEMOS_PLUGIN_DIR` / `MEMOS_HOME` / `MEMOS_PASSWORD` / `MEMOS_LIGHTWEIGHT` |
+| 1（最高） | 环境变量 | 各属性内**每次访问**时读：`data_dir` ← `AGENTMEM_HUB_DATA_DIR`；`db_path` ← `AGENTMEMHUB_DB`；`web_port` ← `AGENTMEMHUB_PORT`；`llm` 三项 ← `AGENTMEMHUB_LLM_ENDPOINT` / `_API_KEY` / `_MODEL` |
 | 2 | `AGENTMEMHUB_CONFIG` 指定的文件 | 非空即用，`~` 展开 |
 | 3 | `<项目根>/agentmemhub.yaml` | 两者都没命中时的第一候选 |
 | 4 | `<项目根>/database/config.yaml` | 第二个候选 |
@@ -112,7 +112,6 @@
 |---|---|---|
 | `data_dir` | 可写数据根（db / 水位 / 评分状态 / 备份 / 托管 pid）；默认 `<项目根>/database` | `data_dir: database` |
 | `db_path` | 统一会话库 SQLite；留空 = `<data_dir>/agentmemhub.db` | `db_path: ""` |
-| `backend.backend` | 记忆后端：`rag`（内置引擎，默认）\| `memos`（vendored 回退，需其 daemon）；非法值一律回落 `rag` | `backend: {backend: rag}` |
 | `agents.<source>` | 各 Harness 会话数据位置（`zcode` / `opencode` / `hermes` / `qwen` / `qodercn` / `workbuddy` / `dsh`）；留空 = adapter 走官方默认探测 | `dsh: ""` |
 
 ### 4.2 `rag`：检索与嵌入（`backend=rag` 时生效）
@@ -198,12 +197,11 @@
 
 滚动规则**二选一**：`max_mb > 0` 按大小，否则 `daily` 按自然日，都没有则不滚动。归档落到 `<日志目录>/<archive_dir>/<日志名>/<日志名>.<时间戳>`。生效策略由 `logs.rotate_policy(name)` 解析。
 
-### 4.7 `web` / `memos`
+### 4.7 `web`
 
 | 键 | 作用 | 示例 |
 |---|---|---|
 | `web.port` | 面板端口（`AGENTMEMHUB_PORT` 可覆盖；非法值回落 8086） | `port: 8086` |
-| `memos.base_url` / `repo_dir` / `plugin_dir` / `home` / `password` / `lightweight` | 回退后端 MemOS 的地址、仓库位置、插件目录、引擎 home、viewer 密码、轻量模式（`null` = 交给引擎自管）；`backend=rag` 时这些不参与 | `lightweight: null` |
 
 ## 5. 调试与排障
 
@@ -348,8 +346,8 @@
 拆目录同样不会替人合并 example 的新键，那是两回事。
 
 **只读是刻意的**：`PUT /api/config` 至今**不存在**，`config_doc` 也不提供写回。
-现在没有任何代码路径会把配置写回 `agentmemhub.yaml`（唯一的 yaml 写入是
-memos 引擎自己的 `config.yaml`，见 §7），所以**注释不可能被程序冲掉**。
+现在没有任何代码路径会把配置写回 `agentmemhub.yaml`（唯一的历史写入点是引擎侧
+`config.yaml`，已随 v2.8 移除 MemOS 一并删除），所以**注释不可能被程序冲掉**。
 面板加写入口前，必须先解决"写回不丢注释"，做法见 §8.3。
 
 ### 8.2 为什么不把全局 yaml 拆成 `config/` 多文件

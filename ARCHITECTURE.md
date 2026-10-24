@@ -54,8 +54,7 @@ AgentMemHub/
 │   ├── sanitize.py             # 脱敏（凭据/PII 扫描与剥离；has_substance 门限）
 │   ├── scoring.py              # LLM 三轴评分（入口已隐藏；与蒸馏共用 llm 段）
 │   ├── mcp_server.py           # MCP 记忆网关（stdio / Streamable HTTP；含调用审计）
-│   ├── memos_daemon.py         # 引擎派发层（backend=rag 走 rag_bridge）
-│   ├── memos.py                # [回退] MemOS bundle 生成/推送
+│   ├── memos_daemon.py         # 引擎门面（/api/v1/* 语义 → 进程内 rag_bridge）
 │   ├── rag_bridge.py           # ★ 引擎接缝：MCP/面板/CLI 的统一调用入口
 │   ├── health.py               # 记忆库一致性巡检（面板健康卡片/CLI/测试共用判据）
 │   ├── failures.py             # ★ 长任务失败清单（分类/汇总/单独重跑；wiki 两级共用）
@@ -149,7 +148,7 @@ ZCode / OpenCode 共享 `SqliteConversationAdapter`；新增 Agent = 一个 adap
   权威描述见 `docs/data-architecture.md` §4
 - **价值**：`unit_values.value`（反馈演化）+ `manual_value`（用户 ⭐ 锁定，不衰减，优先）
 - **接缝**：`rag_bridge.py` 以原 MemOS 端点语义实现进程内调用，
-  MCP 五工具 / 面板网关 / CLI 三方契约零改动（`backend.backend: memos` 可整体回退）
+  MCP 五工具 / 面板网关 / CLI 三方契约零改动；MemOS 上游已于 v2.8 移除，无回退开关
 
 ### 5. 记忆蒸馏（distill.py）
 

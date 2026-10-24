@@ -171,7 +171,6 @@ GROUP BY role ORDER BY 2 DESC;
 ```bash
 uv run python -m agentmemhub export --format jsonl    --out exports/
 uv run python -m agentmemhub export --format markdown --out exports_md/
-uv run python -m agentmemhub memos --out exports/memos_bundle.json
 ```
 
 ```python
@@ -194,4 +193,3 @@ export_jsonl(store, "exports/")
 | 按文件夹跨 Agent 统计 | `folders [--source] [--limit]` |
 | 全文搜索 | `search <词> [--source] [--role]` |
 | 导出 JSONL/Markdown | `export --format jsonl\|markdown --out dir` |
-| 生成 MemOS bundle | `memos --out x.json` |

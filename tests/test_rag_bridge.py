@@ -33,21 +33,7 @@ def rag_env(tmp_path, monkeypatch):
 
 # ── backend 开关解析 ───────────────────────────────────────────────────
 
-def test_backend_default_and_overrides():
-    assert Config(env={}).memory_backend == "rag"
-    assert Config(env={"AGENTMEMHUB_BACKEND": "memos"}).memory_backend == "memos"
-    assert Config(env={"AGENTMEMHUB_BACKEND": "RAG"}).memory_backend == "rag"
-    assert Config(env={"AGENTMEMHUB_BACKEND": "nonsense"}).memory_backend == "rag"
 
-
-def test_stub_config_without_attr_is_memos(monkeypatch):
-    class _Stub:
-        pass
-    monkeypatch.setattr("agentmemhub.config.config", lambda: _Stub())
-    assert memos_daemon._backend_is_rag() is False
-
-
-# ── engine_request 路由（派发表全覆盖 + 未知路径炸） ────────────────────
 
 def test_dispatch_routes(rag_env, monkeypatch):
     calls = {}
@@ -58,8 +44,6 @@ def test_dispatch_routes(rag_env, monkeypatch):
     monkeypatch.setattr(rag_bridge, "traces_list",
                         lambda limit, offset: {"traces": [], "limit": limit,
                                                "offset": offset})
-    monkeypatch.setattr(rag_bridge, "import_bundle",
-                        lambda traces: {"imported": len(traces), "skipped": 0})
     monkeypatch.setattr(rag_bridge, "feedback",
                         lambda tid, pol, **k: {"ok": 1, "t": tid})
     monkeypatch.setattr(rag_bridge, "rebuild_embeddings",
@@ -69,8 +53,9 @@ def test_dispatch_routes(rag_env, monkeypatch):
     assert calls["search"] == "问题"
     assert er("GET", "/api/v1/overview")["ok"] is True
     assert er("GET", "/api/v1/traces?limit=5&offset=10")["offset"] == 10
-    assert er("POST", "/api/v1/import",
-              {"traces": [{"id": "x", "userText": "内容"}]})["imported"] == 1
+    # /api/v1/import 随 MemOS 一并移除：直写改走 save_memory_trace，端点须明确报未实现
+    with pytest.raises(RuntimeError, match="未实现"):
+        er("POST", "/api/v1/import", {"traces": []})
     assert er("POST", "/api/v1/feedback",
               {"traceId": "x", "polarity": "positive"})["ok"] == 1
     assert er("POST", "/api/v1/embeddings/rebuild", {"mode": "repair"})["done"] is True
@@ -84,11 +69,10 @@ def test_dispatch_routes(rag_env, monkeypatch):
 
 def test_end_to_end_save_search_score_recent(rag_env):
     er = memos_daemon.engine_request
-    r = er("POST", "/api/v1/import", {"traces": [{
-        "id": "mcp_e2e", "episodeId": "mcp", "sessionId": "mcp",
-        "ts": 1786000000000, "userText": "SQLite WAL 文件膨胀拖慢写入",
-        "agentText": "TRUNCATE checkpoint 归零解决", "value": 0.5}]})
-    assert r == {"imported": 1, "skipped": 0}
+    r = rag_bridge.save_memory_trace(
+        "SQLite WAL 文件膨胀拖慢写入：TRUNCATE checkpoint 归零解决",
+        tid="mcp_e2e", ts=1786000000000, value=0.5)
+    assert r["imported"] == 1 and r["skipped"] == 0
     hits = er("POST", "/api/v1/memory/search",
               {"agent": "a", "query": "数据库日志文件变大写入慢"})["hits"]
     assert hits and hits[0]["refId"] == "mcp_e2e"
@@ -117,8 +101,6 @@ def test_auth_state_and_daemon_status_rag(rag_env, monkeypatch):
     assert ds["online"] is True and ds["backend"] == "rag"
     assert ds["managed"] is False and ds["pid"] is None
     assert ds["summary"]["traces"] >= 0
-    start = memos_daemon.daemon_start()
-    assert start["started"] is False and start["reason"] == "rag-in-process"
 
 
 def test_auth_state_offline_when_bridge_broken(rag_env, monkeypatch):
@@ -132,10 +114,8 @@ def test_auth_state_offline_when_bridge_broken(rag_env, monkeypatch):
 
 def test_scoring_enumeration_via_bridge(rag_env, monkeypatch):
     from agentmemhub import scoring
-    rag_bridge.import_bundle([
-        {"id": "mcp_s1", "userText": "第一条待评记忆", "ts": 1},
-        {"id": "mcp_s2", "userText": "第二条待评记忆", "ts": 2},
-    ])
+    rag_bridge.save_memory_trace("第一条待评记忆", tid="mcp_s1", ts=1)
+    rag_bridge.save_memory_trace("第二条待评记忆", tid="mcp_s2", ts=2)
     assert {t["id"] for t in scoring.list_all_traces()} == {"mcp_s1", "mcp_s2"}
     assert set(scoring.list_trace_ids()) == {"mcp_s1", "mcp_s2"}
     got = scoring.list_traces_by_ids({"mcp_s1"})
@@ -169,9 +149,7 @@ def test_run_sync_rag_vectorize_stage(rag_env, monkeypatch, tmp_path):
     monkeypatch.setattr(watermarks, "save_state", lambda *a: None)
     monkeypatch.setattr(watermarks, "pending_for", lambda s, k: [])
 
-    monkeypatch.setattr(cli, "push_to_memos",
-                        lambda *a, **k: (_ for _ in ()).throw(
-                            AssertionError("rag 下不得走 push_to_memos")))
+    assert not hasattr(cli, "push_to_memos"), "MemOS 推送路径应已整体移除"
     cli.run_sync(push="rag")
     assert vec.get("called") is True
     assert state_calls.get("push") == 1
@@ -205,9 +183,10 @@ def test_search_curate_truncates_by_relevance_not_hard_5(tmp_path, monkeypatch):
         log_dir=tmp_path / "logs",
         retrieval={**base.retrieval, "recall_level": 5}))
     try:
-        rag_bridge.import_bundle([
-            {"id": f"mcp_c{i}", "userText": f"终审验证条目 编号{i} 内容递增一点点{i * 7}",
-             "ts": 100 + i} for i in range(8)])
+        for i in range(8):
+            rag_bridge.save_memory_trace(
+                f"终审验证条目 编号{i} 内容递增一点点{i * 7}",
+                tid=f"mcp_c{i}", ts=100 + i)
         all_hits = rag_bridge.search("h", "终审验证条目", k=8, curate=False)["hits"]
         curated = rag_bridge.search("h", "终审验证条目", k=8, curate=True)["hits"]
         assert len(all_hits) == 8
@@ -244,23 +223,20 @@ def test_search_hits_include_conversation_location(rag_env):
     assert h["source"] and h["conversationId"], "会话定位字段不得为空"
     assert "turnKey" in h and "title" in h
 
-    rag_bridge.import_bundle([{"id": "mcp_loc", "userText": "定位测试原子记忆",
-                              "ts": 1}])
+    rag_bridge.save_memory_trace("定位测试原子记忆", tid="mcp_loc", ts=1)
     res2 = rag_bridge.search("h", "定位测试原子记忆", k=5)
     atomic = [h for h in res2["hits"] if h["atomic"]]
     assert atomic, "原子记忆须标记 atomic=True（无对应会话）"
 
 
-def test_import_bundle_stores_tags(rag_env):
+def test_save_memory_trace_stores_tags(rag_env):
     """MCP memory_save 的 tags 落进 units.tags（JSON 数组文本）；缺省为 NULL。
 
     tags 是纯透传字段（引擎不解释语义），供面板筛选与溯源使用。
     """
-    rag_bridge.import_bundle([
-        {"id": "mcp_tags_a", "userText": "带标签的原子记忆", "ts": 1,
-         "tags": ["dsh", "mcp"]},
-        {"id": "mcp_tags_b", "userText": "无标签的原子记忆", "ts": 2},
-    ])
+    rag_bridge.save_memory_trace("带标签的原子记忆", tid="mcp_tags_a", ts=1,
+                                 tags=["dsh", "mcp"])
+    rag_bridge.save_memory_trace("无标签的原子记忆", tid="mcp_tags_b", ts=2)
     conn = rag_bridge._conn()
     rows = dict(conn.execute(
         "SELECT legacy_id, tags FROM units"
@@ -269,18 +245,16 @@ def test_import_bundle_stores_tags(rag_env):
     assert rows["mcp_tags_b"] is None, "未传 tags 应保持 NULL，而不是空字符串"
 
 
-def test_import_bundle_可声明外部来源(rag_env):
+def test_save_memory_trace_可声明外部来源(rag_env):
     """Agent 直写外部知识时能声明 origin='external'；缺省仍是 native（行为不变）。
 
     为什么需要它：Agent 用 Read 工具读完 PDF/图片后把结论写回时，走的是**直写通路**
-    （`import_bundle`）——而那条路原先硬编码 source='memory' 且**不写 origin**，
+    （`save_memory_trace`）——而那条路原先硬编码 source='memory' 且**不写 origin**，
     于是外部知识会被标成"自有沉淀"（M0 地基的第三处缺口）。
     """
-    rag_bridge.import_bundle([
-        {"id": "mcp_ext_1", "userText": "外部投喂进来的一条结论", "ts": 1,
-         "origin": "external"},
-        {"id": "mcp_nat_1", "userText": "自有沉淀的一条结论", "ts": 2},
-    ])
+    rag_bridge.save_memory_trace("外部投喂进来的一条结论", tid="mcp_ext_1", ts=1,
+                                 origin="external")
+    rag_bridge.save_memory_trace("自有沉淀的一条结论", tid="mcp_nat_1", ts=2)
     conn = rag_bridge._conn()
     rows = dict(conn.execute(
         "SELECT legacy_id, origin FROM units"
@@ -331,7 +305,7 @@ def test_safe_cutoff_hits_页面只受配额约束():
     assert sum(1 for h in kept if h["kind"] == "page") == 3     # 配额 3
 
 
-def test_web_push_button_vectorizes_not_bundles(rag_env, monkeypatch):
+def test_web_push_button_vectorizes_only(rag_env, monkeypatch):
     """面板「推送记忆」按钮在 rag 后端必须转向量化（走 bundle 会重复落 memory 单元）。"""
     from agentmemhub.web import app
 
@@ -359,8 +333,8 @@ def test_llm_availability_probe_honest(rag_env, monkeypatch):
     assert isinstance(v, bool)     # 读不到配置就是 False，不装样子
 
 
-def test_import_bundle_writes_all_write_order_models(rag_env, tmp_path):
-    """import_bundle 按 rag.write.order 逐模型写向量。
+def test_save_memory_trace_writes_all_write_order_models(rag_env, tmp_path):
+    """save_memory_trace 按 rag.write.order 逐模型写向量。
 
     修复前只写 active 一张表 → 写入进程缓存旧 active 时，新记忆会落进
     另一张表在召回侧隐形（2026-09-11 实测：27 条 MCP 记忆因此搜不到）。
@@ -378,8 +352,8 @@ def test_import_bundle_writes_all_write_order_models(rag_env, tmp_path):
         models={**base.models, m2.id: m2},
         write={**base.write, "order": [base.active_model, m2.id]})
     rag_bridge.configure(st)
-    r = rag_bridge.import_bundle(
-        [{"id": "probe-w1", "userText": "多模型写入探针：应同时落两张向量表"}])
+    r = rag_bridge.save_memory_trace(
+        "多模型写入探针：应同时落两张向量表", tid="probe-w1")
     assert r["imported"] == 1
     conn = open_index(st.index_db)
     try:

@@ -52,7 +52,7 @@ def test_http_tools_call_offline(_auth):
     assert r.status_code == 200
     res = r.json()["result"]
     assert res["isError"] is True
-    assert "记忆引擎未运行" in res["content"][0]["text"]
+    assert "记忆索引不可用" in res["content"][0]["text"]
 
 
 @mock.patch.object(memos_daemon, "auth_state", return_value=None)

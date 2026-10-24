@@ -271,148 +271,6 @@ def cmd_adapters(args) -> None:
         _stdout(f"[{d['source']}] {d['label']}: {'✓ ' + (d['path'] or '') if d['located'] else '✗ 未找到'}")
 
 
-def cmd_memos_daemon(args) -> None:
-    """MemOS 记忆引擎 daemon 管理（启动/停止/巡检/日志/配置）。"""
-    import json as _json
-    from agentmemhub import memos_daemon
-    if args.set_dir:
-        try:
-            p = memos_daemon.save_plugin_dir(args.set_dir)
-            _stdout(f"已保存 MemOS 插件目录 → {p}")
-        except Exception as e:
-            _stdout(f"保存失败: {e}")
-        return
-    if args.lightweight is not None:
-        from agentmemhub import memos_daemon as _md
-        p = _md.set_lightweight(args.lightweight == "on")
-        _stdout(f"已写入引擎配置 → {p}（轻量模式={'ON' if args.lightweight=='on' else 'OFF（完整进化链）'}；"
-                f"引擎重启后生效，如引擎在运行请先 [7] 停止再启动）")
-        return
-    if args.set_password:
-        memos_daemon.save_password(args.set_password)
-        ok = memos_daemon._login()
-        _stdout("密码已保存" + ("，登录成功 ✓" if ok else "（暂未能验证登录：引擎可能离线或密码不符）"))
-        return
-    if args.action == "start":
-        r = memos_daemon.daemon_start(agent=args.agent, plugin_dir=args.plugin_dir or None)
-    elif args.action == "stop":
-        r = memos_daemon.daemon_stop()
-    elif args.action == "logs":
-        lf = memos_daemon._log_file()
-        if not lf.exists():
-            _stdout("（暂无日志）")
-            return
-        text = lf.read_text(encoding="utf-8", errors="replace")
-        _stdout("\n".join(text.splitlines()[-int(args.lines):]))
-        return
-    else:  # status
-        r = memos_daemon.daemon_status()
-    _stdout(_json.dumps(r, ensure_ascii=False, indent=1))
-
-
-def push_to_memos(store: Store, *, sources: list[str], base_url: str,
-                  no_rebuild: bool = False, rebuild_mode: str = "repair",
-                  stdout: Any = None,
-                  since_ts: Optional[float] = None,
-                  only: Optional[dict[str, set[str]]] = None) -> dict[str, Any]:
-    """构建并幂等推送 MemOS bundle（按 source 分批，失败批次继续），可选补向量。
-
-    MemOS /api/v1/import 上限 64 MiB——全量 bundle 可能超限（实测 90+MB），
-    因此按 source 分批 POST。trace id 由 src_id 派生 → 幂等（重复=skipped）。
-    since_ts：按会话 updated_at 时间窗过滤（旧增量锚模式）。
-    only：{source: {conversation_id}} —— delta 精确过滤（watermarks 模式），
-    只构建/推送变更会话；与 since_ts 可叠加（交集生效）。
-    每批推送与 rebuild 进度**实时**经 stdout 输出（web 任务据此实时回显，
-    避免"导入汇总已完成"后看起来卡住）；lines 同时收集终态文本供日志。
-    返回 {imported, skipped, lines, rebuilt, failed, pushed_ids}；
-    pushed_ids = 推送成功批次的 trace id（供 score --pending 入队）；
-    rebuilt 失败/跳过时为 None。
-    """
-    from agentmemhub.memos import build_bundle, push_bundle, rebuild_embeddings
-    out = stdout or print
-    lines: list[str] = []
-
-    def emit(s: str) -> None:
-        lines.append(s)
-        try:
-            out(s)
-        except Exception:
-            pass
-
-    total_ok = total_skip = 0
-    failed = 0                                # 失败批次计数（决定增量锚是否可推进）
-    pushed_ids: list[str] = []
-    chunk_size = 200                          # 单批 trace 上限：大 source 整包导入会超引擎
-                                              # HTTP 请求窗口（~300s）被服务端断连（实测 10053）
-    for src in sources:
-        b = build_bundle(store, src, since_ts=since_ts,
-                         only_ids=(only or {}).get(src))
-        traces = b.get("traces") or []
-        if not traces:
-            continue
-        chunks = [traces[i:i + chunk_size] for i in range(0, len(traces), chunk_size)]
-        for ci, chunk in enumerate(chunks):
-            payload = dict(b, traces=chunk)
-            label = f"[{src}]" if len(chunks) == 1 else f"[{src}/{ci + 1}]"
-            try:
-                resp = push_bundle(payload, base_url)
-                total_ok += resp.get("imported", 0)
-                total_skip += resp.get("skipped", 0)
-                pushed_ids.extend(str(t["id"]) for t in chunk if t.get("id"))
-                emit(f"{label} 推送 ok: imported={resp.get('imported')} "
-                     f"skipped={resp.get('skipped')}")
-            except Exception as e:
-                failed += 1
-                emit(f"{label} 推送失败（继续下一批）: {e}")
-    rebuilt = None
-    if total_ok and not no_rebuild:
-        try:
-            # rebuild 是任务最耗时阶段（本地 embedding 计算可数分钟）——
-            # 先提示再逐轮打印进度，杜绝"看起来卡住"
-            emit(f"正在补向量（embedding {rebuild_mode}，本地计算可能耗时数分钟）…")
-            rebuilt = rebuild_embeddings(base_url, mode=rebuild_mode,
-                                         on_progress=lambda s: emit(s))
-            emit(f"已补向量({rebuild_mode}): {rebuilt}")
-        except Exception as e:
-            emit(f"embedding rebuild 失败（可用 --no-rebuild 跳过）: {e}")
-    emit(f"MemOS 导入汇总: imported={total_ok}, skipped={total_skip}"
-         + (f"，{failed} 个批次失败" if failed else ""))
-    return {"imported": total_ok, "skipped": total_skip,
-            "lines": lines, "rebuilt": rebuilt, "failed": failed,
-            "pushed_ids": pushed_ids}
-
-
-def run_memos(*, source: str = "", out: str = "exports/memos_bundle.json",
-              push: str = "", no_rebuild: bool = False,
-              rebuild_mode: str = "repair") -> None:
-    """提取记忆 bundle + 可选推送 MemOS（CLI 与控制台共用）。"""
-    from agentmemhub.memos import build_bundle, write_bundle
-    store = Store()
-    bundle = build_bundle(store, source)
-    _stdout(f"生成 bundle: {len(bundle['traces'])} traces")
-    write_bundle(bundle, Path(out))
-    _stdout(f"已写入 → {out}")
-    if push:
-        try:
-            if source:
-                batches = [source]
-            else:
-                # bundle 从 store 构建——按 store 中实际存在的源推送。
-                # 不能用 adapter.locate() 过滤：恢复/迁移环境下源文件可能已不在
-                # 磁盘，但 store 里的数据必须完整推送（否则整源静默丢失）。
-                batches = sorted({c["source"] for c in store.list_conversations()})
-            # 进展已实时输出（stdout=_stdout），无需再循环打印 lines
-            r = push_to_memos(store, sources=batches, base_url=push,
-                              no_rebuild=no_rebuild, rebuild_mode=rebuild_mode,
-                              stdout=_stdout)
-            _cli_log(f"memos push → imported={r['imported']}, skipped={r['skipped']}")
-        except Exception as e:
-            _stdout(f"推送失败（MemOS 可能在运行?）: {e}")
-            _cli_log(f"memos push 失败 → {e}", level="error")
-    store.close()
-    _cli_log(f"memos bundle 生成 → {out}（{len(bundle['traces'])} traces）")
-
-
 def _vectorize_stage(*, stdout=None) -> dict:
     """rag 后端 sync 终点：源库（agentmemhub.db）→ 引擎索引增量嵌入。
 
@@ -465,12 +323,11 @@ def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
     - ingest：list_sessions 对比库内 updated_at，只重读变化会话并 upsert；
     - clean：只清 delta 会话的系统注入事件（--full / oversized 时跳过，
       手动 `clean --apply` 仍为全库清理）；
-    - push：rag 后端 = 向量化阶段（源库→session_rag.db 增量嵌入，keyset 水位自带幂等）；
-      memos 后端 = 只构建/推送 delta 会话的 traces（trace id 幂等，引擎去重）；
+    - push：向量化阶段（源库→session_rag.db 增量嵌入，keyset 水位自带幂等）；
     - 推送成功的 trace id 入 pending_score 队列，评分入口（score / 面板 / 控制台）
       增量优先消费（sync 不自动评分——LLM 成本由用户显式触发）。
-    delta 缺失/oversized 时推送回退全量（幂等兜底）。引擎离线：ingest 照常
-    完成，推送跳过（delta 保留，下次 sync 补推）。推送有失败批次时 delta
+    delta 缺失/oversized 时回退全量（幂等兜底）。索引不可用：ingest 照常
+    完成，向量化跳过（delta 保留，下次 sync 补做）。向量化有失败时 delta
     不标记消费，下次 sync 重试。
     """
     from agentmemhub import adapters, config, memos_daemon, watermarks
@@ -479,96 +336,38 @@ def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
     run_ingest(sources, full=full)
     if not push:
         return
-    rag_backend = memos_daemon._backend_is_rag()
     if memos_daemon.auth_state() is None:
-        if rag_backend:
-            _stdout("记忆索引不可用（检查 database/session_rag.db 与 models/）——"
-                    "ingest 已完成，跳过向量化。")
-        else:
-            _stdout("外部记忆引擎未运行——ingest 已完成，跳过推送"
-                    "（变更集保留，下次 sync 补做）。")
-        _cli_log("sync 跳过%s（引擎不可用）" % ("向量化" if rag_backend else "推送"),
-                 level="warn")
+        _stdout("记忆索引不可用（检查 database/session_rag.db 与 models/）——"
+                "ingest 已完成，跳过向量化。")
+        _cli_log("sync 跳过向量化（索引不可用）", level="warn")
         return
     data_dir = config.config().data_dir
     state = watermarks.load_state(data_dir)
     pending = watermarks.pending_for(state, "push")
     if full:
-        pending = None                     # --full 强制全量推送
+        pending = None                     # --full 强制全量
 
-    if rag_backend:
-        # rag：清洗变更会话（注入事件不入库）→ keyset 水位向量化（自带幂等，
-        # 不依赖 delta）→ 消费登记；评分不自动跑（LLM 成本用户显式触发）
-        store = Store()
-        try:
-            if pending is not None and not full:
-                pairs = [(c["source"], c["id"]) for c in pending]
-                if pairs:
-                    deleted, convs = store.delete_system_events(conversations=pairs)
-                    if deleted:
-                        _stdout(f"已清洗 {deleted} 条注入事件（{convs} 个会话）")
-            _vectorize_stage(stdout=_stdout)
-            watermarks.mark_consumed(state, "push")
-            if pending is not None:
-                watermarks.mark_consumed(state, "clean")
-            watermarks.save_state(data_dir, state)
-        finally:
-            store.close()
-        return
-
+    # 内置引擎：清洗变更会话（注入事件不入库）→ keyset 水位向量化
+    #（自带幂等，不依赖 delta）→ 消费登记；评分不自动跑（LLM 成本用户显式触发）
     store = Store()
     try:
-        batches = ([source] if source
-                   else sorted({c["source"] for c in store.list_conversations()}))
-        only: Optional[dict[str, set[str]]] = None
         if pending is not None:
-            if not pending:
-                _stdout("增量：无待推送变更，跳过推送（--full 强制全量）")
-                watermarks.mark_consumed(state, "push")
-                watermarks.mark_consumed(state, "clean")
-                watermarks.save_state(data_dir, state)
-                return
-            only = {}
-            for c in pending:
-                if source and c["source"] != source:
-                    continue
-                only.setdefault(c["source"], set()).add(c["id"])
-            only = {k: v for k, v in only.items() if v}
-            if not only:
-                _stdout("增量：无待推送变更，跳过推送")
-                watermarks.mark_consumed(state, "push")
-                watermarks.mark_consumed(state, "clean")
-                watermarks.save_state(data_dir, state)
-                return
-            _stdout(f"增量：{sum(len(v) for v in only.values())} 个变更会话"
-                    f"（清洗注入事件 → 推送）…")
-            # delta 增量清洗：只清变更会话的系统注入事件（不动全库）
-            pairs = [(s, cid) for s, ids in only.items() for cid in ids]
-            deleted, convs = store.delete_system_events(conversations=pairs)
-            if deleted:
-                _stdout(f"已清洗 {deleted} 条注入事件（{convs} 个变更会话）")
-        if memos_daemon._backend_is_rag():
-            r = _vectorize_stage(stdout=_stdout)
-        else:
-            # 进展实时输出（stdout=_stdout），无需再循环打印 lines
-            r = push_to_memos(store, sources=batches, base_url=push,
-                              no_rebuild=no_rebuild, rebuild_mode=rebuild_mode,
-                              stdout=_stdout, only=only)
-        # delta 只在【无失败】时标记消费；有失败保留 → 下次 sync 重试失败批次
+            pairs = [(c["source"], c["id"]) for c in pending]
+            if pairs:
+                deleted, convs = store.delete_system_events(conversations=pairs)
+                if deleted:
+                    _stdout(f"已清洗 {deleted} 条注入事件（{convs} 个会话）")
+        r = _vectorize_stage(stdout=_stdout)
         if r.get("failed", 0) == 0:
             watermarks.mark_consumed(state, "push")
             if pending is not None:        # clean 只在 delta 模式实际执行过
                 watermarks.mark_consumed(state, "clean")
-            watermarks.add_pending_score(state, r.get("pushed_ids") or [])
             watermarks.save_state(data_dir, state)
-            if r.get("pushed_ids"):
-                _stdout(f"已入队 {len(r['pushed_ids'])} 条待评分 trace"
-                        f"（下次评分自动增量优先：score / score --pending / 面板评分）")
         else:
-            _stdout("存在推送失败——变更集未标记消费，下次 sync 会重试失败批次")
-        _cli_log(f"sync → imported={r['imported']}, skipped={r['skipped']}, "
-                 f"failed={r.get('failed', 0)}, "
-                 f"pending_score={len(r.get('pushed_ids') or [])}")
+            _stdout("存在失败——变更集未标记消费，下次 sync 会重试")
+        _cli_log(f"sync → embedded={r.get('embedded', 0)}, "
+                 f"skipped_known={r.get('skipped_known', 0)}, "
+                 f"failed={r.get('failed', 0)}")
     finally:
         store.close()
 
@@ -640,18 +439,15 @@ def cmd_rebuild(args) -> None:
     rag 后端下写入即嵌入，全量重算由 `reembed --model` 负责；rebuild 模式
     在本引擎里等价于 repair（无历史向量需重算）。
     """
-    from agentmemhub import memos_daemon
-    from agentmemhub.memos import rebuild_embeddings
+    from agentmemhub import memos_daemon, rag_bridge
     if memos_daemon.auth_state() is None:
         _stdout("记忆索引不可用——检查 database/session_rag.db 与 models/ 是否就绪")
         return
 
     def _emit(s: str) -> None:
         _stdout(f"  {s}")
-    backend = "内置引擎" if memos_daemon._backend_is_rag() else "外部引擎"
-    _stdout(f"补向量（{args.mode}，{backend}）…")
-    r = rebuild_embeddings(base_url=memos_daemon.base_url(),
-                           mode=args.mode, on_progress=_emit)
+    _stdout(f"补向量（{args.mode}，内置引擎）…")
+    r = rag_bridge.rebuild_embeddings(mode=args.mode, on_progress=_emit)
     _stdout(f"完成: {r}")
     _cli_log(f"rebuild({args.mode}) → {r}")
 
@@ -812,11 +608,6 @@ def cmd_weight(args) -> None:
         _cli_log(f"weight {args.ref} → value={args.value} clear={args.clear}")
     finally:
         conn.close()
-
-
-def cmd_memos(args) -> None:
-    run_memos(source=args.source, out=args.out, push=args.push,
-              no_rebuild=args.no_rebuild, rebuild_mode=args.rebuild_mode)
 
 
 def cmd_mcp(args) -> None:
@@ -1333,15 +1124,6 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--open", action=argparse.BooleanOptionalAction, default=True,
                     help="启动后自动打开浏览器（默认开启；用 --no-open 关闭）")
 
-    pm = sub.add_parser("memos", help="[回退/迁移用] 生成 MemOS 导入 bundle（rag 后端下不需要）")
-    pm.add_argument("--source", default="")
-    pm.add_argument("--out", default="exports/memos_bundle.json")
-    pm.add_argument("--push", default="", help="MemOS base URL，例如 http://127.0.0.1:18800；非空则 POST")
-    pm.add_argument("--no-rebuild", action="store_true",
-                    help="push 后不触发 /api/v1/embeddings/rebuild（默认自动补向量）")
-    pm.add_argument("--rebuild-mode", default="repair", choices=("repair", "rebuild"),
-                    help="embedding rebuild 模式：repair=只补缺失向量（默认），rebuild=全部重算")
-
     pmc = sub.add_parser("mcp", help="启动 MCP 记忆网关（stdio 默认；--http 转 Streamable HTTP 常驻）")
     pmc.add_argument("--http", action="store_true",
                      help="以 Streamable HTTP 模式常驻（默认 stdio 由 Agent 拉起）")
@@ -1771,7 +1553,7 @@ def main() -> None:
     handlers = {
         "ingest": cmd_ingest, "list": cmd_list, "show": cmd_show,
         "search": cmd_search, "export": cmd_export, "stats": cmd_stats,
-        "adapters": cmd_adapters, "memos": cmd_memos, "folders": cmd_folders,
+        "adapters": cmd_adapters, "folders": cmd_folders,
         "serve": cmd_serve, "mcp": cmd_mcp,
         "sync": cmd_sync, "clean": cmd_clean, "score": cmd_score, "rebuild": cmd_rebuild,
         "distill": cmd_distill, "weight": cmd_weight,

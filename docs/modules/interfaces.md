@@ -35,7 +35,7 @@
 | 采集 | `ingest` / `adapters` / `folders` | 入库；列适配器状态；按文件夹统计 |
 | 查看 | `list` / `show` / `search` / `stats` / `export` | 会话清单 / 正文 / 全文检索 / 统计 / 导出 |
 | 同步 | `sync` | **增量**：ingest 增量 → 清洗变更会话 → 向量化写入索引（日常就跑它） |
-| 记忆 | `clean` / `score` / `rebuild` / `weight` / `distill` / `memos` | 删系统注入 / 批量评分 / 补向量 / 手动加权 / 蒸馏 / MemOS 回退包 |
+| 记忆 | `clean` / `score` / `rebuild` / `weight` / `distill` | 删系统注入 / 批量评分 / 补向量 / 手动加权 / 蒸馏 |
 | Wiki | `wiki` | 对齐审计 / 增量更新 / 失败清单 / 定向补跑（子命令再分） |
 | 服务 | `serve` / `mcp` / `snapshot` | Web 页面 / MCP 网关 / 快照与回滚 |
 
@@ -64,7 +64,7 @@
 ### 2.3 控制台与体检
 
 - `console.run_console()`：菜单式入口，`env_snapshot()` 先打印环境；
-  `action_ingest / search / dashboard / dashboard_stop / clean / score / distill / memos / status`
+  `action_ingest / search / dashboard / dashboard_stop / clean / score / distill / status`
   都是对 CLI 同一函数的薄封装——**不是另一套实现**。
 - `health.py` 三段：`collect(conn)` 采集指标 → `diagnose(m)` 出人话诊断 →
   `reclaim(conn)` 回收（VACUUM / 清理孤儿）。CLI `stats` 与面板健康卡都建立在 `collect()` 上。

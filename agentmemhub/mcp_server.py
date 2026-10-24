@@ -23,7 +23,7 @@ Tools:
 - memory_search(query, topK)  语义检索历史记忆（转发 /api/v1/memory/search）
 - memory_recent(limit)        最近记忆时间线（/api/v1/traces）
 - memory_stats()              引擎在线状态与记忆概要
-- memory_save(content, tags)  写入一条记忆（构造 bundle → /api/v1/import）
+- memory_save(content, tags)  写入一条记忆（直写索引库 + 蒸馏表）
 - memory_score(trace_id, p)   写后即评：打极性分（/api/v1/feedback）
 - feed_add(input, value, …)   投喂外部素材（path / url / data / text 四种形态）
 - feed_list(status, …)        列已投喂素材（按状态 / 低质量筛）
@@ -237,40 +237,17 @@ def _save(args: dict) -> str:
             if isinstance(raw_tags, (list, tuple)) else [])
     ts = int(time.time() * 1000)
     tid = _trace_id(content, ts)
-    bundle = {
-        "version": 1,
-        "traces": [{
-            "id": tid, "episodeId": "mcp", "sessionId": "mcp",
-            "ts": ts, "turnId": ts,
-            "userText": content, "agentText": "",
-            "summary": content[:200],
-            "value": value, "alpha": 0.3,
-            "priority": value,
-            "tags": tags,
-            "toolCalls": [], "agentThinking": None,
-        }],
-        "policies": [], "worldModels": [], "skills": [],
-    }
-    # 写后验证：import 偶发瞬时失败（SQLITE_BUSY 被引擎静默吞，返回 imported=0）
-    # 时重试一次；仍失败则落日志并明确报错，不再伪装“已写入”。
-    imported = skipped = 0
-    resp: dict = {}
-    for attempt in (1, 2):
-        try:
-            from agentmemhub.memos import push_bundle
-            resp = push_bundle(bundle, memos_daemon.base_url())
-        except memos_daemon.EngineAuthError:
-            raise _ToolError(_auth_hint())
-        except Exception as e:
-            if attempt == 2:
-                raise _ToolError(f"记忆写入失败：{e}")
-            time.sleep(0.6)
-            continue
-        imported = int(resp.get("imported", 0) or 0)
-        skipped = int(resp.get("skipped", 0) or 0)
-        if imported > 0:
-            break
-        time.sleep(0.6)
+    # 直写索引库（不再经 MemOS 的 bundle / HTTP 导入语义）。
+    # 幂等靠 tid 落 legacy_id；多模型向量、tags、origin、初始分由 bridge 一次写完，
+    # 因此不需要再补一次 embeddings/rebuild（旧路径靠它补向量）。
+    from agentmemhub import rag_bridge
+    try:
+        resp = rag_bridge.save_memory_trace(
+            content, tid=tid, ts=ts, value=value, priority=value, tags=tags)
+    except Exception as e:                      # 索引库写失败要明确报出
+        raise _ToolError(f"记忆写入失败：{e}")
+    imported = int(resp.get("imported", 0) or 0)
+    skipped = int(resp.get("skipped", 0) or 0)
     if imported == 0:
         try:
             from agentmemhub import logs
@@ -279,13 +256,6 @@ def _save(args: dict) -> str:
         except Exception:
             pass
         raise _ToolError(f"记忆写入未生效（imported=0, skipped={skipped}），请稍后重试")
-    # 单条入库后补一次增量向量（repair：只补缺失），失败不阻塞
-    try:
-        memos_daemon.engine_request(
-            "POST", "/api/v1/embeddings/rebuild",
-            body={"mode": "repair"}, timeout=300)
-    except Exception:
-        pass
     # 同步一条蒸馏表记录：MCP 直写的记忆此前不进 distilled_memories —— 记忆
     # 报表看不见、wiki 编译输入（status IN new/similar）完全不可见。落表后
     # 报表与 wiki 才能覆盖 Agent 主动写入的记忆（投影由下次蒸馏统一补齐）。

@@ -406,92 +406,77 @@ def traces_list(limit: int = 20, offset: int = 0) -> dict:
         conn.close()
 
 
-def import_bundle(traces: list[dict], *, embedder=None) -> dict:
-    """POST /api/v1/import 的 rag 实现：按 legacy_id 幂等（与 MemOS 行为对齐）。
+def save_memory_trace(
+    text: str,
+    *,
+    tid: str = "",
+    ts: int | None = None,
+    value: float = 0.0,
+    priority: float | None = None,
+    tags: list[str] | None = None,
+    origin: str = "native",
+    embedder=None,
+) -> dict:
+    """写入一条 Agent 直写记忆（units + 多模型向量 + 可选初始分）。
 
-    处理的是「记忆型 trace DTO」（userText/agentText/summary + value 预置）；
-    会话轨迹在 rag 后端下由 run_ingest 直采源库，不经此路径。
+    这是 MCP `memory_save` 的唯一写入口（v2.8 起不再经 bundle/HTTP 导入语义）：
 
-    `origin`（**逐条可选**）：数据来源维度，`external`=外部投喂 / 缺省 `native`=自有沉淀。
-    为什么需要它：Agent 用 Read 工具读完 PDF/图片后把结论写回时走的正是**这条直写通路**，
-    而它原先硬编码 `source='memory'` 且**不写 origin** ⇒ 外部知识会被标成"自有沉淀"
-    （2026-10-10 实测缺口，M0 地基）。取值非法时回落 `native`，不写脏数据
-    （与 `tags` 只接受序列同一原则）。
+    - **幂等**：`tid` 落 `legacy_id`，同 id 重放返回 `skipped`；不带 tid 则总是新增。
+    - **多模型**：按 `rag.write.order` 逐模型嵌入并写各自向量表（与 `run_ingest`
+      同语义）——只写 active 一个模型时，一旦配置换模型（而进程仍缓存旧 active），
+      新记忆会落进另一张表、在召回侧"隐形"。
+    - **origin 逐条可声明**：`external`=外部投喂 / 缺省 `native`=自有沉淀。Agent 用
+      Read 读完 PDF/图片后把结论写回走的正是这条通路，不写 origin 会让外部知识被
+      标成"自有沉淀"（2026-10-10 实测缺口）。取值非法回落 `native`，不写脏值。
+    - **tags**：只透传（引擎不解释语义），存 JSON 数组文本供面板筛选与溯源。
     """
+    text = (text or "").strip()
+    if not text:
+        return {"imported": 0, "skipped": 1}
     st = settings()
     conn = _conn()
-    imported = skipped = 0
     try:
+        if tid and conn.execute("SELECT 1 FROM units WHERE legacy_id=?",
+                                (tid,)).fetchone():
+            return {"imported": 0, "skipped": 1}
         emb = embedder or get_active_embedder(st)
-        spec = st.active_spec
-        ensure_vec_table(conn, spec)
-        pend_texts: list[str] = []
-        pend_dtos: list[dict] = []
-        for t in traces or []:
-            lid = str(t.get("id") or "").strip()
-            text = (t.get("userText") or "").strip() or \
-                   (t.get("agentText") or "").strip() or \
-                   (t.get("summary") or "").strip()
-            if not lid or not text:
-                skipped += 1
-                continue
-            if conn.execute("SELECT 1 FROM units WHERE legacy_id=?",
-                            (lid,)).fetchone():
-                skipped += 1
-                continue
-            pend_texts.append(text)
-            pend_dtos.append({**t, "_text": text})
-        if pend_texts:
-            # 多模型写入：按 rag.write.order 逐模型嵌入并写各自向量表
-            # （与 run_ingest 的多模型编排同语义）——只写 active 一个模型时，
-            # 一旦配置换模型（而写入进程仍缓存旧 active），新记忆就会落进
-            # 另一张表、在召回侧"隐形"；多写一份即消除该结构性风险。
-            multi: list[tuple] = []
-            for mid in st.write_order:
-                s = st.model(mid)
-                ensure_vec_table(conn, s)
-                em = emb if mid == st.active_model else get_embedder(s, settings=st)
-                multi.append((s, em.encode_passages(pend_texts)))
-            with conn:
-                seq = conn.execute(
-                    "SELECT COALESCE(MAX(seq),0) FROM units"
-                    " WHERE source='memory'").fetchone()[0]
-                for i, d in enumerate(pend_dtos):
-                    seq += 1
-                    ts = int((d.get("ts") or time.time() * 1000) // 1000)
-                    # 标签：MCP memory_save 的可选 tags → 存 JSON 数组文本；其它来源为 NULL。
-                    # 只接受序列，避免 bundle 里出现任意类型时写出脏数据。
-                    raw_tags = d.get("tags")
-                    tags_json = None
-                    if isinstance(raw_tags, (list, tuple)) and raw_tags:
-                        tags_json = json.dumps([str(x) for x in raw_tags],
-                                               ensure_ascii=False)
-                    # 来源维度：逐条可声明（Agent 直写外部知识时用）；
-                    # 非法/缺省一律 native —— 不写脏值
-                    _origin = d.get("origin")
-                    _origin = _origin if _origin in ("native", "external") else "native"
-                    cur = conn.execute(
-                        "INSERT INTO units(source, conversation_id, seq, role,"
-                        " turn_key, src_id, time, title, text, chars, legacy_id,"
-                        " tags, origin, updated_at)"
-                        " VALUES('memory','mcp',?,'user','mcp',?,?,?,?,?,?,?,?,?)",
-                        (seq, content_anchor(d["_text"]), ts,
-                         "记忆", d["_text"], len(d["_text"]), d["id"], tags_json,
-                         _origin, int(time.time())))
-                    for s, vecs in multi:
-                        conn.execute(
-                            f"INSERT OR REPLACE INTO {s.vec_table}"
-                            "(rowid, embedding) VALUES(?,?)",
-                            (cur.lastrowid, bytes(vecs[i])))
-                    value = float(d.get("value") or 0.0)
-                    if value:
-                        conn.execute(
-                            "INSERT OR REPLACE INTO unit_values(unit_id, value,"
-                            " r_human, priority, updated_at) VALUES(?,?,?,?,?)",
-                            (cur.lastrowid, value, None,
-                             float(d.get("priority") or abs(value)), int(time.time())))
-                    imported += 1
-        return {"imported": imported, "skipped": skipped}
+        ensure_vec_table(conn, st.active_spec)
+        multi: list[tuple] = []
+        for mid in st.write_order:
+            s = st.model(mid)
+            ensure_vec_table(conn, s)
+            em = emb if mid == st.active_model else get_embedder(s, settings=st)
+            multi.append((s, em.encode_passages([text])))
+        tags_json = None
+        if tags:
+            tags_json = json.dumps([str(x) for x in tags], ensure_ascii=False)
+        _origin = origin if origin in ("native", "external") else "native"
+        ts_s = int((ts or time.time() * 1000) // 1000)
+        with conn:
+            seq = conn.execute(
+                "SELECT COALESCE(MAX(seq),0)+1 FROM units"
+                " WHERE source='memory'").fetchone()[0]
+            cur = conn.execute(
+                "INSERT INTO units(source, conversation_id, seq, role,"
+                " turn_key, src_id, time, title, text, chars, legacy_id,"
+                " tags, origin, updated_at)"
+                " VALUES('memory','mcp',?,'user','mcp',?,?,?,?,?,?,?,?,?)",
+                (seq, content_anchor(text), ts_s, "记忆", text, len(text),
+                 tid or None, tags_json, _origin, int(time.time())))
+            for s, vecs in multi:
+                conn.execute(
+                    f"INSERT OR REPLACE INTO {s.vec_table}"
+                    "(rowid, embedding) VALUES(?,?)",
+                    (cur.lastrowid, bytes(vecs[0])))
+            v = float(value or 0.0)
+            if v:
+                conn.execute(
+                    "INSERT OR REPLACE INTO unit_values(unit_id, value,"
+                    " r_human, priority, updated_at) VALUES(?,?,?,?,?)",
+                    (cur.lastrowid, v, None,
+                     float(priority if priority is not None else abs(v)),
+                     int(time.time())))
+        return {"imported": 1, "skipped": 0, "unit_id": cur.lastrowid}
     finally:
         conn.close()
 
@@ -536,7 +521,7 @@ def feedback(trace_id: str, polarity: str, *, magnitude: float = 1.0,
 
 
 def rebuild_embeddings(mode: str = "repair", limit: int = 500,
-                       offset: int = 0) -> dict:
+                       offset: int = 0, on_progress=None) -> dict:
     """POST /api/v1/embeddings/rebuild 的 rag 实现。
 
     rag 写入即嵌入：repair = 给 active 表缺向量的 units 补嵌；
@@ -566,6 +551,8 @@ def rebuild_embeddings(mode: str = "repair", limit: int = 500,
                             f"INSERT OR REPLACE INTO {spec.vec_table}(rowid,"
                             " embedding) VALUES(?,?)", (uid, bytes(v)))
                         updated += 1
+                if on_progress is not None:
+                    on_progress(f"补向量 {mode}: {updated}/{len(missing)}")
         total = conn.execute("SELECT COUNT(*) FROM units").fetchone()[0]
         return {"processed": total, "updated": updated, "failed": 0,
                 "done": True, "nextOffset": 0,

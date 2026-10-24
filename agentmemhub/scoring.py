@@ -125,33 +125,12 @@ def read_engine_llm() -> dict[str, Any]:
     endpoint = str(llm.get("endpoint") or "")
     api_key = str(llm.get("api_key") or "")
     model = str(llm.get("model") or "")
-    if endpoint and api_key and model:
-        return {"endpoint": endpoint, "api_key": api_key, "model": model,
-                "headers": dict(llm.get("headers") or {})}
-    return _read_memos_engine_llm()
-
-
-def _read_memos_engine_llm() -> dict[str, Any]:
-    """[回退] 读 MemOS 引擎 config.yaml 的 LLM 配置（backend=memos 旧环境）。"""
-    import yaml
-    home = memos_daemon.engine_home()
-    if home is None:
+    if not (endpoint and api_key and model):
         raise RuntimeError(
             "LLM 未配置：在 agentmemhub.yaml 的 llm 段填 endpoint/api_key/model"
             "（或 scripts/sync_llm_from_zcode.py 一键同步）")
-    p = home / "config.yaml"
-    if not p.exists():
-        raise RuntimeError(
-            f"LLM 未配置：agentmemhub.yaml 的 llm 段为空，且引擎配置不存在（{p}）")
-    cfg = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-    llm = cfg.get("llm") or {}
-    endpoint = llm.get("endpoint") or ""
-    api_key = llm.get("apiKey") or ""
-    model = llm.get("model") or ((llm.get("models") or {}).get("summary") if isinstance(llm.get("models"), dict) else "")
-    if not endpoint or not api_key or not model:
-        raise RuntimeError(
-            "LLM 未配置：agentmemhub.yaml 的 llm 段为空，引擎 config.yaml 的 llm 段也不完整")
-    return {"endpoint": endpoint, "api_key": api_key, "model": model, "headers": {}}
+    return {"endpoint": endpoint, "api_key": api_key, "model": model,
+            "headers": dict(llm.get("headers") or {})}
 
 
 def _llm_opener() -> urllib.request.OpenerDirector:
@@ -256,88 +235,26 @@ def _parse_verdict(content: str) -> str:
 
 
 def _backend_is_rag() -> bool:
+    """恒 True —— MemOS 回退后端已移除；保留函数只为不动旧调用方。"""
     return memos_daemon._backend_is_rag()
 
 
-def _engine_db_path() -> Path:
-    home = memos_daemon.engine_home()
-    if home is None:
-        raise RuntimeError("未找到引擎 home（先配置 memos.home 或确认引擎默认位置）")
-    return home / "data" / "memos.db"
-
-
 def list_all_traces() -> list[dict[str, Any]]:
-    """只读枚举引擎库全部 traces（绕开 listTraces 的 500 行分页窗口上限）。
-
-    引擎 listTraces 在 repo 层把 fetch 窗口钳到最新 500 行（clampLimit 500），
-    超过 500 条时 API 分页取不到更早的 trace——评分需要全量，故只读直连
-    引擎 SQLite 枚举（仅 SELECT，不修改引擎数据；feedback 写入仍走 API）。
-    rag 后端：改走 rag_bridge.all_traces（轮次视图，id 为可回指的锚点）。
-    """
-    if _backend_is_rag():
-        from agentmemhub import rag_bridge
-        return rag_bridge.all_traces()
-    import sqlite3
-    db = _engine_db_path()
-    if not db.exists():
-        raise RuntimeError(f"引擎记忆库不存在：{db}（先启动引擎或确认 memos.home）")
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    try:
-        rows = conn.execute(
-            "SELECT id, user_text, agent_text FROM traces ORDER BY ts").fetchall()
-        return [{"id": r[0], "userText": r[1] or "", "agentText": r[2] or ""}
-                for r in rows]
-    finally:
-        conn.close()
+    """引擎全部 traces（轮次视图，id 为可回指的锚点）。"""
+    from agentmemhub import rag_bridge
+    return rag_bridge.all_traces()
 
 
 def list_trace_ids() -> list[str]:
-    """只读枚举引擎库全部 trace id（不取正文，廉价）——增量评分先筛 id 再定点读。"""
-    if _backend_is_rag():
-        from agentmemhub import rag_bridge
-        return rag_bridge.turn_refs()
-    import sqlite3
-    db = _engine_db_path()
-    if not db.exists():
-        raise RuntimeError(f"引擎记忆库不存在：{db}（先启动引擎或确认 memos.home）")
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    try:
-        return [r[0] for r in conn.execute("SELECT id FROM traces ORDER BY ts").fetchall()]
-    finally:
-        conn.close()
+    """引擎全部 trace id（不取正文，廉价）——增量评分先筛 id 再定点读。"""
+    from agentmemhub import rag_bridge
+    return rag_bridge.turn_refs()
 
 
 def list_traces_by_ids(ids: set[str]) -> list[dict[str, Any]]:
-    """定点只读指定 trace id（增量评分路径：零全量枚举，500/批防变量数上限）。
-
-    与 list_all_traces 同口径（id/userText/agentText）；不存在的 id 不报错，
-    由调用方 diff 出 missing。rag 后端走 rag_bridge.traces_by_ids（含轮次展开）。
-    """
-    if _backend_is_rag():
-        from agentmemhub import rag_bridge
-        return rag_bridge.traces_by_ids(ids)
-    import sqlite3
-    id_list = sorted({str(i) for i in ids if i})
-    if not id_list:
-        return []
-    db = _engine_db_path()
-    if not db.exists():
-        raise RuntimeError(f"引擎记忆库不存在：{db}（先启动引擎或确认 memos.home）")
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    result: list[tuple[Any, dict[str, Any]]] = []
-    try:
-        for i in range(0, len(id_list), 500):
-            chunk = id_list[i:i + 500]
-            marks = ",".join("?" * len(chunk))
-            rows = conn.execute(
-                f"SELECT id, user_text, agent_text, ts FROM traces WHERE id IN ({marks})",
-                tuple(chunk)).fetchall()
-            result.extend((r[3], {"id": r[0], "userText": r[1] or "",
-                                  "agentText": r[2] or ""}) for r in rows)
-    finally:
-        conn.close()
-    result.sort(key=lambda x: x[0] or 0)   # 与 list_all_traces 同口径（ts 升序）
-    return [d for _, d in result]
+    """定点读指定 trace id（零全量枚举）；缺失 id 由调用方 diff 出 missing。"""
+    from agentmemhub import rag_bridge
+    return rag_bridge.traces_by_ids(ids)
 
 
 def count_unscored(*, base_url: str = "", traces: Optional[list[dict]] = None) -> int:
@@ -354,45 +271,14 @@ def count_unscored(*, base_url: str = "", traces: Optional[list[dict]] = None) -
 
 def sync_episode_r_task(*, trace_ids: Optional[list[str]] = None,
                         episode_ids: Optional[list[str]] = None) -> int:
-    """把 episode.r_task 同步为它受评 traces 的平均 value。
+    """把会话评分同步进 `conv_scores`（引擎侧 episode.r_task 的对应物）。
 
-    viewer 的记忆列表「评分」标签读 episodeRTask（memory-core.ts:5598 的
-    episodeRTask = episode?.rTask ?? null）——写入 r_task 后 viewer 不再把
-    已评记忆显示为「待评分」。引擎零改动（直接写 episodes 表）；引擎自身
-    reward 管线若日后运行会覆盖，本库无 rewardDirty 不触发、可接受。
+    内置引擎下由 `rag_bridge.sync_conv_scores` 全量重算——feedback 写入时已
+    滚动更新，这里用于兜底保持一致。`trace_ids` / `episode_ids` 仅为兼容
+    旧调用方签名保留。
     """
-    if _backend_is_rag():
-        # rag：conv_scores 已在 feedback 写入时滚动更新，此处触发全量重建保持一致
-        from agentmemhub import rag_bridge
-        return int(rag_bridge.sync_conv_scores().get("conversations", 0))
-    import sqlite3
-    db = _engine_db_path()
-    if not db.exists():
-        raise RuntimeError(f"引擎记忆库不存在：{db}")
-    conn = sqlite3.connect(db, timeout=30)
-    updated = 0
-    try:
-        if trace_ids:
-            qmarks = ",".join("?" * len(trace_ids))
-            rows = conn.execute(
-                f"SELECT DISTINCT episode_id FROM traces WHERE id IN ({qmarks})",
-                tuple(trace_ids)).fetchall()
-            episode_ids = [r[0] for r in rows]
-        if not episode_ids:
-            episode_ids = [r[0] for r in conn.execute(
-                "SELECT id FROM episodes").fetchall()]
-        for ep in episode_ids:
-            avg = conn.execute(
-                "SELECT AVG(value) FROM traces WHERE episode_id=? AND value <> 0",
-                (ep,)).fetchone()[0]
-            conn.execute(
-                "UPDATE episodes SET r_task=? WHERE id=?",
-                (float(avg) if avg is not None else 0.0, ep))
-            updated += 1
-        conn.commit()
-    finally:
-        conn.close()
-    return updated
+    from agentmemhub import rag_bridge
+    return int(rag_bridge.sync_conv_scores().get("conversations", 0))
 
 
 def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
@@ -422,7 +308,7 @@ def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
 
     out = emit or (lambda s: None)
     llm_cfg = read_engine_llm()
-    root = (base_url or memos_daemon.base_url()).rstrip("/")
+    root = (base_url or "").rstrip("/")
     summary = {"evaluated": 0, "skipped": 0, "positive": 0, "neutral": 0,
                "negative": 0, "errors": 0, "missing": 0, "dryRun": bool(dry_run)}
     lock = threading.Lock()

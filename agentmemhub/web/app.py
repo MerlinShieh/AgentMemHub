@@ -275,24 +275,12 @@ def _run_ingest_fn(cli, adapters, source: str, signature: str):
 
 
 def _run_push_fn(cli, source: str):
-    """看板「推送记忆」后台动作：按 source 幂等推送 + 补向量（不 ingest）。"""
-    from agentmemhub import adapters, memos_daemon
-    from agentmemhub.store import Store
+    """看板「推送记忆」后台动作：会话轨迹由向量化直采源库（push 语义 = 向量化）。
 
+    `source` 保留在签名里仅为兼容调用方——直采是全量 keyset 增量，不按 source 分批。
+    """
     def _run() -> None:
-        if memos_daemon._backend_is_rag():
-            # rag 后端：会话轨迹由向量化直采源库（push 语义 = 向量化；
-            # 走 bundle 会把 trac_ 轨迹二次落成 memory 单元造成重复）
-            return cli._vectorize_stage(stdout=print)
-        store = Store()
-        try:
-            batches = ([source] if source
-                       else [a.source for a in adapters.all_adapters() if a.locate()])
-            # stdout=print：_DualWriter 实时捕获每行（推送批/rebuild 进度）→ 面板逐行显示
-            cli.push_to_memos(store, sources=batches,
-                              base_url=memos_daemon.base_url(), stdout=print)
-        finally:
-            store.close()
+        cli._vectorize_stage(stdout=print)
     return _emit_task(_run)
 
 
@@ -402,14 +390,12 @@ def _run_clean_fn(cli, source: str):
 
 
 def _run_rebuild_fn(mode: str):
-    """看板「补向量」后台动作：引擎 embedding rebuild（逐轮进度）。"""
-    from agentmemhub import memos_daemon
-    from agentmemhub.memos import rebuild_embeddings
+    """看板「补向量」后台动作：内置引擎补嵌（逐轮进度）。"""
+    from agentmemhub import rag_bridge
 
     def _run() -> None:
-        r = rebuild_embeddings(base_url=memos_daemon.base_url(),
-                               mode=mode,
-                               on_progress=lambda s: print(s))
+        r = rag_bridge.rebuild_embeddings(mode=mode,
+                                          on_progress=lambda s: print(s))
         print(f"补向量完成({mode}): {r}")
     return _emit_task(_run)
 
