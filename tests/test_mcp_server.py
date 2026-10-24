@@ -12,7 +12,7 @@ from unittest import mock
 
 import pytest
 
-from agentmemhub import memos_daemon
+from agentmemhub import engine_api
 from agentmemhub.logs import read_mcp_audit as _audit_lines
 from agentmemhub.mcp_server import MCPHandler, _engine_hint, run_stdio
 from agentmemhub.rag.memstore import AGENT_IMPORTANCE_VALUES, BASE_VALUE_AGENT_WRITE
@@ -126,7 +126,7 @@ def test_tools_list_contract():
 # 引擎离线：所有工具统一 isError + 启动指引
 # ---------------------------------------------------------------------------
 
-@mock.patch.object(memos_daemon, "auth_state", return_value=None)
+@mock.patch.object(engine_api, "auth_state", return_value=None)
 def test_tools_offline_return_engine_hint(_auth):
     """引擎离线：所有工具统一 isError + 后端相关的排障指引。"""
     h, _ = _handler()
@@ -137,16 +137,17 @@ def test_tools_offline_return_engine_hint(_auth):
         r = _call(h, _req("tools/call", {"name": tool, "arguments": args}, mid=7))
         assert r["result"]["isError"] is True
         text = r["result"]["content"][0]["text"]
-        # 提示文案按后端区分（memos 后端=daemon；rag 后端=索引库/sync）
-        assert ("记忆引擎未运行" in text) or ("记忆索引不可用" in text)
+        # 提示指向索引库与 sync；回退后端已移除，不该再出现守护进程指引
+        assert "记忆索引不可用" in text
+        assert "memos-daemon" not in text
 
 
 # ---------------------------------------------------------------------------
 # 引擎在线（mock 转发）
 # ---------------------------------------------------------------------------
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
-@mock.patch.object(memos_daemon, "engine_request")
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "engine_request")
 def test_memory_search_online(engine_request, _auth):
     engine_request.side_effect = [
         {"hits": [{"score": 0.87, "tier": "traces", "refKind": "episode",
@@ -169,8 +170,8 @@ def test_memory_search_online(engine_request, _auth):
     assert kwargs["body"] == {"agent": "hermes", "query": "语言偏好"}
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
-@mock.patch.object(memos_daemon, "engine_request")
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "engine_request")
 def test_memory_recent_online(engine_request, _auth):
     engine_request.return_value = {"traces": [
         {"ts": 1750000000000, "value": 0.6, "userText": "修好了登录 bug",
@@ -182,8 +183,8 @@ def test_memory_recent_online(engine_request, _auth):
     assert "事件监听器" in text
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
-@mock.patch.object(memos_daemon, "daemon_status")
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "daemon_status")
 def test_memory_stats_online(status, _auth):
     status.return_value = {
         "online": True, "base_url": "http://127.0.0.1:18800",
@@ -199,8 +200,8 @@ def test_memory_stats_online(status, _auth):
     assert "all-MiniLM-L6-v2" in text and "完整进化" in text
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
-@mock.patch.object(memos_daemon, "engine_request")
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "engine_request")
 @mock.patch("agentmemhub.rag_bridge.save_memory_trace")
 def test_memory_save_online(save_trace, engine_request, _auth):
     save_trace.return_value = {"imported": 1, "skipped": 0}
@@ -221,8 +222,8 @@ def test_memory_save_online(save_trace, engine_request, _auth):
     assert engine_request.call_count == 0
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
-@mock.patch.object(memos_daemon, "engine_request")
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "engine_request")
 @mock.patch("agentmemhub.rag_bridge.save_memory_trace")
 def test_memory_save_initial_value_is_agent_tier(save_trace, engine_request, _auth):
     """回归：MCP 写入的初始价值必须等同引擎的「Agent 主动写入」档位。
@@ -252,8 +253,8 @@ def test_memory_save_initial_value_is_agent_tier(save_trace, engine_request, _au
     ("low", 0.4),
     (None, BASE_VALUE_AGENT_WRITE),      # 不传 = normal，与历史行为一致
 ])
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
-@mock.patch.object(memos_daemon, "engine_request")
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "engine_request")
 @mock.patch("agentmemhub.rag_bridge.save_memory_trace")
 def test_memory_save_importance_tiers(save_trace, engine_request, _auth,
                                       importance, expected):
@@ -279,7 +280,7 @@ def test_importance_tiers_are_ordered_and_disjoint():
     assert vals["normal"] == BASE_VALUE_AGENT_WRITE
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
+@mock.patch.object(engine_api, "auth_state", return_value={})
 def test_memory_save_rejects_unknown_importance(_auth):
     """非法档位报参数错误，不静默落到默认值。"""
     h, _ = _handler()
@@ -290,8 +291,8 @@ def test_memory_save_rejects_unknown_importance(_auth):
     assert "importance" in r["result"]["content"][0]["text"]
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
-@mock.patch.object(memos_daemon, "engine_request")
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "engine_request")
 @mock.patch("agentmemhub.rag_bridge.save_memory_trace")
 def test_memory_save_passes_tags(save_trace, engine_request, _auth):
     """tags 透传进 bundle：去空白、去空串；非序列一律忽略（不写脏数据）。"""
@@ -309,7 +310,7 @@ def test_memory_save_passes_tags(save_trace, engine_request, _auth):
     assert _saved_trace(save_trace)["tags"] == []
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
+@mock.patch.object(engine_api, "auth_state", return_value={})
 def test_memory_save_requires_content(_auth):
     """参数校验优先：引擎在线时缺 content 报参数错误（离线时统一报引擎未运行）。"""
     h, _ = _handler()
@@ -377,8 +378,8 @@ def test_run_stdio_roundtrips_chinese_over_locale_streams(monkeypatch):
 # 与"没记"。放在 _tools_call（stdio 与 HTTP 的唯一分发点）即 100% 覆盖。
 # ---------------------------------------------------------------------------
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
-@mock.patch.object(memos_daemon, "engine_request")
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "engine_request")
 def test_audit_records_call_and_result(engine_request, _auth, audit_dir):
     """每次工具调用记两条（call / result），以 call_id 关联。
 
@@ -401,8 +402,8 @@ def test_audit_records_call_and_result(engine_request, _auth, audit_dir):
     assert lines[0]["ts"] <= lines[1]["ts"]
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
-@mock.patch.object(memos_daemon, "engine_request")
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "engine_request")
 def test_audit_records_failure(engine_request, _auth, audit_dir):
     """失败调用同样留痕（ok=False + 错误摘要）——失败比成功更需要溯源。"""
     engine_request.side_effect = RuntimeError("engine down")
@@ -416,7 +417,7 @@ def test_audit_records_failure(engine_request, _auth, audit_dir):
     assert "engine down" in lines[1]["error"]
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value=None)
+@mock.patch.object(engine_api, "auth_state", return_value=None)
 def test_audit_records_call_even_when_engine_offline(_auth, audit_dir):
     """引擎离线导致调用被拒，也算一次留痕（否则"没做"与"做了但失败"无从区分）。"""
     h, _ = _handler()
@@ -427,8 +428,8 @@ def test_audit_records_call_even_when_engine_offline(_auth, audit_dir):
     assert lines[1]["ok"] is False
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
-@mock.patch.object(memos_daemon, "engine_request")
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "engine_request")
 @mock.patch("agentmemhub.rag_bridge.save_memory_trace")
 def test_audit_truncates_content(save_trace, engine_request, _auth, audit_dir):
     """正文只留摘要 + 字数：不重复存全文，也不让敏感内容二次落盘。"""

@@ -315,28 +315,28 @@ def _rag_log():
     return logging.getLogger("asrag.cli-sync")
 
 
-def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
-             rebuild_mode: str = "repair", full: bool = False) -> None:
+def run_sync(*, source: str = "", vectorize: bool = True,
+             full: bool = False) -> None:
     """增量同步：ingest（会话级增量）→ 清洗 delta 注入事件 → 只推送变更会话。
 
     全链路围绕 <data_dir>/watermarks.json 的变更集（delta）：
     - ingest：list_sessions 对比库内 updated_at，只重读变化会话并 upsert；
     - clean：只清 delta 会话的系统注入事件（--full / oversized 时跳过，
       手动 `clean --apply` 仍为全库清理）；
-    - push：向量化阶段（源库→session_rag.db 增量嵌入，keyset 水位自带幂等）；
+    - vectorize：向量化阶段（源库→session_rag.db 增量嵌入，keyset 水位自带幂等）；
     - 推送成功的 trace id 入 pending_score 队列，评分入口（score / 面板 / 控制台）
       增量优先消费（sync 不自动评分——LLM 成本由用户显式触发）。
     delta 缺失/oversized 时回退全量（幂等兜底）。索引不可用：ingest 照常
     完成，向量化跳过（delta 保留，下次 sync 补做）。向量化有失败时 delta
     不标记消费，下次 sync 重试。
     """
-    from agentmemhub import adapters, config, memos_daemon, watermarks
+    from agentmemhub import adapters, config, engine_api, watermarks
 
     sources = [source] if source else [a.source for a in adapters.all_adapters()]
     run_ingest(sources, full=full)
-    if not push:
+    if not vectorize:
         return
-    if memos_daemon.auth_state() is None:
+    if engine_api.auth_state() is None:
         _stdout("记忆索引不可用（检查 database/session_rag.db 与 models/）——"
                 "ingest 已完成，跳过向量化。")
         _cli_log("sync 跳过向量化（索引不可用）", level="warn")
@@ -373,14 +373,7 @@ def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
 
 
 def cmd_sync(args) -> None:
-    push = args.push
-    from agentmemhub import memos_daemon
-    if memos_daemon._backend_is_rag():
-        # rag 后端：向量化即 sync 终点，--push 语义转为开关（"" 显式禁用以跳过）
-        push = "rag" if getattr(args, "no_push", False) is False and not push             else ("" if getattr(args, "no_push", False) else push)
-    run_sync(source=args.source, push=push,
-             no_rebuild=args.no_rebuild, rebuild_mode=args.rebuild_mode,
-             full=args.full)
+    run_sync(source=args.source, vectorize=not args.ingest_only, full=args.full)
 
 
 def run_clean(store, *, source: str = "", apply: bool = False,
@@ -439,8 +432,8 @@ def cmd_rebuild(args) -> None:
     rag 后端下写入即嵌入，全量重算由 `reembed --model` 负责；rebuild 模式
     在本引擎里等价于 repair（无历史向量需重算）。
     """
-    from agentmemhub import memos_daemon, rag_bridge
-    if memos_daemon.auth_state() is None:
+    from agentmemhub import engine_api, rag_bridge
+    if engine_api.auth_state() is None:
         _stdout("记忆索引不可用——检查 database/session_rag.db 与 models/ 是否就绪")
         return
 
@@ -472,7 +465,7 @@ def cmd_score(args) -> None:
             return
         _stdout(f"待评分 {len(ids)} 条（pending_score 队列）…")
         try:
-            r = run_score_all(emit=_emit, base_url=args.push,
+            r = run_score_all(emit=_emit,
                               dry_run=args.dry_run, workers=args.workers,
                               only_ids=set(ids))
             _stdout(f"评分完成: evaluated={r['evaluated']} skipped={r['skipped']} "
@@ -490,7 +483,7 @@ def cmd_score(args) -> None:
     if args.unscored_count:
         from agentmemhub.scoring import count_unscored
         try:
-            n = count_unscored(base_url=args.push)
+            n = count_unscored()
             _stdout(f"未评分记忆：{n} 条")
             _cli_log(f"score --unscored-count → {n}")
         except Exception as e:
@@ -513,13 +506,13 @@ def cmd_score(args) -> None:
         _stdout(s)
     try:
         if args.ids:
-            r = run_score_all(emit=_emit, base_url=args.push,
+            r = run_score_all(emit=_emit,
                               limit=args.limit, dry_run=args.dry_run,
                               workers=args.workers, only_ids=args.ids)
             mode = "ids"
         else:
             # 默认走增量优先：pending_score 队列非空只评队列，空则全量筛未评定点读
-            r = run_score_incremental(emit=_emit, base_url=args.push,
+            r = run_score_incremental(emit=_emit,
                                       limit=args.limit, dry_run=args.dry_run,
                                       workers=args.workers)
             mode = r.get("mode", "?")
@@ -1133,14 +1126,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     psy = sub.add_parser("sync", help="增量同步：ingest 增量 → 清洗变更会话 → 向量化写入记忆索引")
     psy.add_argument("--source", default="")
-    psy.add_argument("--push", default="", help="[回退] MemOS base URL（rag 后端下忽略）")
-    psy.add_argument("--no-push", action="store_true",
-                    help="仅 ingest，跳过向量化/推送阶段")
-    psy.add_argument("--no-rebuild", action="store_true",
-                    help="[回退] push 后不触发 embedding rebuild")
-    psy.add_argument("--rebuild-mode", default="repair", choices=("repair", "rebuild"))
+    psy.add_argument("--ingest-only", dest="ingest_only", action="store_true",
+                     help="只采集入库并清洗系统注入事件，跳过向量化阶段")
     psy.add_argument("--full", action="store_true",
-                     help="强制全量同步（默认按 watermarks 变更集增量推送）")
+                     help="强制全量同步（默认按 watermarks 变更集增量处理）")
 
     pcl = sub.add_parser("clean", help="记忆清洗：删除系统注入事件（is_system；默认预览，--apply 执行）")
     pcl.add_argument("--source", default="")
@@ -1154,7 +1143,6 @@ def build_parser() -> argparse.ArgumentParser:
     psc.add_argument("--limit", type=int, default=0, help="最多评分条数（0=全部）")
     psc.add_argument("--dry-run", action="store_true", help="只评估不写入（预览 verdict 分布）")
     psc.add_argument("--workers", type=int, default=4, help="并发评估线程数（默认 4；IO 密集建议 4~8）")
-    psc.add_argument("--push", default="", help="引擎 base URL（默认 18800，一般不用设）")
     psc.add_argument("--ids", type=_csv_ids, default=None,
                      help="只评分指定 trace id（逗号分隔，如 --ids trac_1,trac_2；配合写后即评/锚点）")
     psc.add_argument("--unscored-count", action="store_true",

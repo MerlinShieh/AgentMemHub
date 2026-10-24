@@ -368,7 +368,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     </div>
   </section>
 
-  <!-- 记忆索引板块（原 memosPanel）已迁移为「记忆报表」标签页 —— 见 viewMemories -->
+  <!-- 记忆索引板块（原 enginePanel）已迁移为「记忆报表」标签页 —— 见 viewMemories -->
 
 
   <!-- 操作日志 -->
@@ -465,12 +465,12 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
           </button>
           <!-- 自动评分入口已隐藏（蒸馏置信度 + 👍/👎 已覆盖质量把关；CLI: python -m agentmemhub score） -->
           <span class="ml-auto flex items-center gap-1.5">
-            <span id="memosDot" class="h-2 w-2 rounded-full bg-muted-foreground"></span>
-            <span id="memosState" class="text-xs text-muted-foreground">检测中…</span>
-            <span id="memosMeta" class="tnum text-[11px] text-muted-foreground"></span>
+            <span id="engineDot" class="h-2 w-2 rounded-full bg-muted-foreground"></span>
+            <span id="engineState" class="text-xs text-muted-foreground">检测中…</span>
+            <span id="engineMeta" class="tnum text-[11px] text-muted-foreground"></span>
           </span>
         </div>
-        <div id="memosHint" class="mt-2 hidden text-[11px] text-muted-foreground"></div>
+        <div id="engineHint" class="mt-2 hidden text-[11px] text-muted-foreground"></div>
       </div>
     </section>
 
@@ -508,10 +508,10 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         </div>
         <div class="relative mt-2 w-full">
           <i data-lucide="search" class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"></i>
-          <input id="memosKw" type="text" placeholder="语义检索记忆（例：部署、依赖修复…），回车触发"
+          <input id="engineKw" type="text" placeholder="语义检索记忆（例：部署、依赖修复…），回车触发"
                  class="w-full rounded-md border border-input bg-background py-1.5 pl-8 pr-3 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring">
         </div>
-        <div id="memosHits" class="mt-2 hidden max-h-72 space-y-1.5 overflow-y-auto scroll-thin"></div>
+        <div id="engineHits" class="mt-2 hidden max-h-72 space-y-1.5 overflow-y-auto scroll-thin"></div>
       </div>
     </section>
 
@@ -1229,9 +1229,9 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     loadMemories().catch(()=>{});       // 首次加载记忆列表
     loadHealth().catch(()=>{});         // 首次采集一致性指标
   }
-  function renderMemosStatus(s){
-    const dot = $('#memosDot'), state = $('#memosState'),
-          meta = $('#memosMeta'), hint = $('#memosHint');
+  function renderEngineStatus(s){
+    const dot = $('#engineDot'), state = $('#engineState'),
+          meta = $('#engineMeta'), hint = $('#engineHint');
     const summ = s.summary || {};
     if(s.online){
       dot.className = 'h-2 w-2 rounded-full bg-emerald-500';
@@ -1326,7 +1326,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     memOpBusy=true; renderMemTable();
     try{
       const q = value==='' ? '' : `&value=${value}`;
-      const r=await fetchWithTimeout(`/api/memos/weight?traceId=${encodeURIComponent(unitRef)}${q}`,{method:'POST'},10000);
+      const r=await fetchWithTimeout(`/api/engine/weight?traceId=${encodeURIComponent(unitRef)}${q}`,{method:'POST'},10000);
       const d=await r.json().catch(()=>({}));
       if(!r.ok){ toast(typeof d.detail==='string'?d.detail:'加权失败'); return; }
       const it = rowKey ? MEMF.items.find(x=>memKey(x)===rowKey) : null;
@@ -1337,14 +1337,14 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     finally{ memOpBusy=false; renderMemTable(); }
   }
   // 👍/👎 状态式反馈：再点同极性 = 取消（干净回退来源初始分）。
-  async function scoreMemos(unitRef, polarity, rowKey){
+  async function scoreViaEngine(unitRef, polarity, rowKey){
     if(!lastEngineOnline){ toast('记忆索引不可用，无法打分'); return; }
     if(memOpBusy) return;
     const it = rowKey ? MEMF.items.find(x=>memKey(x)===rowKey) : null;
     const revoke = !!(it && it.fb_polarity === polarity);
     memOpBusy=true; renderMemTable();
     try{
-      const u = `/api/memos/feedback?traceId=${encodeURIComponent(unitRef)}`
+      const u = `/api/engine/feedback?traceId=${encodeURIComponent(unitRef)}`
               + (revoke ? '&revoke=1' : `&polarity=${polarity}`);
       const r=await fetchWithTimeout(u,{method:'POST'},10000);
       const d=await r.json().catch(()=>({}));
@@ -1359,12 +1359,12 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     }catch(e){ toast('打分失败：'+(e.message||e)); }
     finally{ memOpBusy=false; renderMemTable(); }
   }
-  async function memosSearch(q){
-    const box = $('#memosHits');
+  async function engineSearch(q){
+    const box = $('#engineHits');
     box.classList.remove('hidden');           // 结果容器随检索展开（改造时曾漏掉，导致有结果看不见）
     box.innerHTML = '<div class="py-2 text-center text-[11px] text-muted-foreground">检索中…</div>';
     try{
-      const r = await fetch('/api/memos/search?q='+encodeURIComponent(q));
+      const r = await fetch('/api/engine/search?q='+encodeURIComponent(q));
       if(r.status===503) throw new Error('记忆索引不可用');
       if(!r.ok) throw new Error('HTTP '+r.status);
       const d = await r.json();
@@ -3294,15 +3294,15 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
              if(w.dataset.unit) setWeight('unit:'+w.dataset.unit, w.dataset.weight, tr && tr.dataset.memrow); return; }
       const btn=e.target.closest('button[data-score]');
       if(btn){ const tr=btn.closest('tr[data-memrow]');
-               if(btn.dataset.unit) scoreMemos('unit:'+btn.dataset.unit, btn.dataset.score, tr && tr.dataset.memrow); return; }
+               if(btn.dataset.unit) scoreViaEngine('unit:'+btn.dataset.unit, btn.dataset.score, tr && tr.dataset.memrow); return; }
       const go=e.target.closest('[data-goconv]');
       if(go){ e.preventDefault(); gotoConversation(go.dataset.source, go.dataset.convid, go.dataset.turn||''); return; }
       const tr=e.target.closest('tr[data-memrow]');
       if(tr) toggleMemDetail(tr.dataset.memrow);
     });
-    $('#memosKw').addEventListener('keydown',e=>{ if(e.key==='Enter'){ const q=e.target.value.trim(); if(q) memosSearch(q); } });
-    memosPollStatus();                          // 立即探一次索引状态（按钮置灰）
-    setInterval(memosPollStatus, 15000);        // 之后每 15s 自动刷新
+    $('#engineKw').addEventListener('keydown',e=>{ if(e.key==='Enter'){ const q=e.target.value.trim(); if(q) engineSearch(q); } });
+    pollEngineStatus();                          // 立即探一次索引状态（按钮置灰）
+    setInterval(pollEngineStatus, 15000);        // 之后每 15s 自动刷新
   }
   const memKey = it => it.origin + ':' + it.id;
   function toggleMemDetail(key){
@@ -3591,18 +3591,18 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     }catch(e){ toast('提交失败：'+(e.message||e)); }
   }
   // 索引状态自动轮询（索引不可用时记忆操作按钮置灰、状态行变灰）
-  let lastMemosSig='', lastEngineOnline=false;
-  async function memosPollStatus(){
+  let lastEngineSig='', lastEngineOnline=false;
+  async function pollEngineStatus(){
     try{
-      const r=await fetchWithTimeout('/api/memos/status',{},8000);
+      const r=await fetchWithTimeout('/api/engine/status',{},8000);
       if(!r.ok) return;
       const s=await r.json();
       lastEngineOnline=!!(s.online && !s.auth_required);
       $('#adminPushBtn').disabled = !lastEngineOnline;     // 索引不可用时写入/评分按钮置灰
       const sig=JSON.stringify([s.online, s.auth_required, (s.summary||{}).traces]);
-      if(sig===lastMemosSig) return;                       // 无变化不重绘（避免闪烁）
-      lastMemosSig=sig;
-      renderMemosStatus(s);
+      if(sig===lastEngineSig) return;                       // 无变化不重绘（避免闪烁）
+      lastEngineSig=sig;
+      renderEngineStatus(s);
     }catch(e){}
   }
   async function refreshData(opts){
@@ -3804,7 +3804,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     $('#prevPage').onclick=()=>{if(page>1){page--;renderTable();}};
     $('#nextPage').onclick=()=>{if(page*pageSize<filtered.length){page++;renderTable();}};
     // 记忆索引板块
-    $('#memosKw').addEventListener('keydown',e=>{ if(e.key==='Enter'){ const q=e.target.value.trim(); if(q) memosSearch(q); } });
+    $('#engineKw').addEventListener('keydown',e=>{ if(e.key==='Enter'){ const q=e.target.value.trim(); if(q) engineSearch(q); } });
     // 数据操作：提取入库 / 写入记忆（提交后台任务并轮询状态）
     $('#adminIngestBtn').onclick=()=>adminSubmit('/api/admin/ingest');
     // 蒸馏记忆：需 LLM 已配置；幂等，可反复执行（已完成切片自动跳过）

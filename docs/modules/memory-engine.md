@@ -38,7 +38,7 @@ v2.0 起这个项目自带记忆引擎（`agentmemhub.rag`），进程内直调�
 | 引擎 CLI | `python -m agentmemhub.rag.cli` | 子命令 `ingest` / `stats` / `reembed` / `eval` / `search` / `bench` |
 | 上层 CLI | `python -m agentmemhub search` / `weight` / `rebuild` | 经 `cli.py` 转调，多一层参数整理与日志 |
 | MCP 工具 | `memory_stats` / `memory_search` / `memory_save` / `memory_score` / `memory_recent` | `mcp_server.py` 里 5 个，**给 Agent 的语义接口** |
-| HTTP | `/api/memos/{status,search,weight,feedback,traces}`、`/api/memories` | 面板用；契约见 [API.md](../API.md) |
+| HTTP | `/api/engine/{status,search,weight,feedback,traces}`、`/api/memories` | 面板用；契约见 [API.md](../API.md) |
 | Python | `agentmemhub.rag.ingest.run_ingest(...)`、`search.hybrid_search(...)`、`memstore.save_memory(...)` | 测试与脚本直接调，是**最稳定的入口** |
 
 ## 3. 数据流与不变量
@@ -151,7 +151,7 @@ rel = max(该 unit 在所有通道的原始分) + rrf_weight * Σ 1/(rrf_k + ran
 | 换模型后召回变差 | `rag.active` 改回去即可（旧向量表还在）；确认新模型 `dim` 与建表时一致 |
 | 向量数少于 units 数 | `run_reembed` 补算；`run_stats` 里对账 `units` vs `vec_*` 行数 |
 | 价值分不生效 | 分清三个来源；手动加权锁定后不衰减，反馈是状态式可撤销；`no_decay_ids` 查的是锁定集合 |
-| 记忆写入后搜不到 | 写入是**派生**：先落 `units`，再向量化。写入成功但向量失败时，`units` 有、`vec` 无——`/api/memos/status` 与健康检查会报一致性 |
+| 记忆写入后搜不到 | 写入是**派生**：先落 `units`，再向量化。写入成功但向量失败时，`units` 有、`vec` 无——`/api/engine/status` 与健康检查会报一致性 |
 
 **评测**：`python -m agentmemhub.rag.cli eval --cases <path>` 跑 hit@k / MRR，
 报告格式见 `eval.format_report`。

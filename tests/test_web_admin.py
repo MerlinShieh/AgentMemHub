@@ -96,7 +96,7 @@ def test_admin_ingest_busy_conflict_409():
 
 def test_admin_push_offline_503():
     c = _client()
-    with mock.patch("agentmemhub.memos_daemon.auth_state", return_value=None):
+    with mock.patch("agentmemhub.engine_api.auth_state", return_value=None):
         r = c.post("/api/admin/push")
     assert r.status_code == 503
     assert "记忆索引不可用" in r.json()["detail"]
@@ -110,7 +110,7 @@ def test_admin_push_online_job():
         out("[zcode] 向量化 ok: embedded=3 skipped=5")
         out("正在补向量（embedding repair，本地计算可能耗时数分钟）…")
         return {"failed": 0, "embedded": 3, "skipped_known": 5}
-    with mock.patch("agentmemhub.memos_daemon.auth_state", return_value={}), \
+    with mock.patch("agentmemhub.engine_api.auth_state", return_value={}), \
          mock.patch("agentmemhub.cli._vectorize_stage", side_effect=fake_vectorize):
         r = c.post("/api/admin/push")
         assert r.status_code == 200
@@ -188,7 +188,7 @@ def test_task_full_log_persisted_to_file(tmp_path, monkeypatch):
     def fake_vectorize(*, stdout=None):
         (stdout or print)("[zcode] 向量化 ok: embedded=3 skipped=5")
         return {"failed": 0, "embedded": 3}
-    with mock.patch("agentmemhub.memos_daemon.auth_state", return_value={}), \
+    with mock.patch("agentmemhub.engine_api.auth_state", return_value={}), \
          mock.patch("agentmemhub.cli._vectorize_stage", side_effect=fake_vectorize):
         c.post("/api/admin/push")
         done = _wait_done(c)
@@ -199,12 +199,12 @@ def test_task_full_log_persisted_to_file(tmp_path, monkeypatch):
     assert logs.task_log_tail(done["id"]) == text.strip()
 
 
-def test_memos_feedback_forwards_to_engine():
+def test_engine_feedback_forwards():
     """记忆打分：转发引擎 /api/v1/feedback 带 traceId（即时重算 value）；离线 503。"""
     c = _client()
-    with mock.patch("agentmemhub.memos_daemon.engine_request") as er:
+    with mock.patch("agentmemhub.engine_api.engine_request") as er:
         er.return_value = {"id": "fb-1", "polarity": "positive", "ts": 1}
-        r = c.post("/api/memos/feedback?traceId=trac_abc&polarity=positive")
+        r = c.post("/api/engine/feedback?traceId=trac_abc&polarity=positive")
         assert r.status_code == 200
         assert r.json()["traceId"] == "trac_abc"
         args, kwargs = er.call_args
@@ -212,12 +212,12 @@ def test_memos_feedback_forwards_to_engine():
         assert kwargs["body"]["polarity"] == "positive"
         assert kwargs["body"]["traceId"] == "trac_abc"
     # 非法极性被拒绝
-    r = c.post("/api/memos/feedback?traceId=x&polarity=maybe")
+    r = c.post("/api/engine/feedback?traceId=x&polarity=maybe")
     assert r.status_code == 422
     # 引擎离线（auth/连接挂）→ 502
-    with mock.patch("agentmemhub.memos_daemon.engine_request",
+    with mock.patch("agentmemhub.engine_api.engine_request",
                     side_effect=RuntimeError("conn reset")):
-        r2 = c.post("/api/memos/feedback?traceId=x&polarity=negative")
+        r2 = c.post("/api/engine/feedback?traceId=x&polarity=negative")
         assert r2.status_code == 502
 
 
@@ -240,7 +240,7 @@ def test_admin_clean_job_runs(tmp_path, monkeypatch):
 
 def test_admin_rebuild_offline_503():
     c = _client()
-    with mock.patch("agentmemhub.memos_daemon.auth_state", return_value=None):
+    with mock.patch("agentmemhub.engine_api.auth_state", return_value=None):
         r = c.post("/api/admin/rebuild")
     assert r.status_code == 503
     assert "记忆索引不可用" in r.json()["detail"]
@@ -248,7 +248,7 @@ def test_admin_rebuild_offline_503():
 
 def test_admin_rebuild_job_runs():
     c = _client()
-    with mock.patch("agentmemhub.memos_daemon.auth_state", return_value={}), \
+    with mock.patch("agentmemhub.engine_api.auth_state", return_value={}), \
          mock.patch("agentmemhub.rag_bridge.rebuild_embeddings") as re_:
         re_.return_value = {"done": True, "rounds": 2, "processed": 500, "failed": 0}
         def fake_rebuild(*a, **k):
@@ -274,7 +274,7 @@ def test_task_log_single_line_append(tmp_path, monkeypatch):
 def test_admin_distill_offline_503():
     """索引不可用（无 LLM 或库缺失之外的硬前提）→ 503 且不提交任务。"""
     c = _client()
-    with mock.patch("agentmemhub.memos_daemon.auth_state", return_value=None):
+    with mock.patch("agentmemhub.engine_api.auth_state", return_value=None):
         r = c.post("/api/admin/distill")
     assert r.status_code == 503
     assert "记忆索引不可用" in r.json()["detail"]
@@ -286,7 +286,7 @@ def test_admin_distill_reports_missing_llm():
     from agentmemhub.web import tasks
 
     c = _client()
-    with mock.patch("agentmemhub.memos_daemon.auth_state", return_value={"ok": 1}), \
+    with mock.patch("agentmemhub.engine_api.auth_state", return_value={"ok": 1}), \
          mock.patch("agentmemhub.rag_bridge.settings", return_value=object()), \
          mock.patch("agentmemhub.distill.run_distill",
                     return_value={"error": "LLM 未配置完整，缺少：endpoint、api_key、model"}):

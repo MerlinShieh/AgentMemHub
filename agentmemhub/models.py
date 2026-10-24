@@ -19,7 +19,7 @@ EVENT_VERSION = 1
 
 # 系统注入消息识别（伪装成 role=user 的 harness 自动注入）。
 # 与前端 index.html isSystemMessage 同规则，另补 task-notification / system-reminder。
-# adapter 层打 is_system 标记 → MemOS 导出跳过这些轮，Web 渲染归 system。
+# adapter 层打 is_system 标记 → 记忆导出跳过这些轮，Web 渲染归 system。
 _SYSTEM_INJECT_RE = re.compile(
     r"^The TodoWrite tool"
     r"|^Current runtime context"
@@ -57,7 +57,7 @@ class Event:
     content: Optional[str] = None  # user/assistant/reasoning 的正文
     parent_id: Optional[str] = None
 
-    # 记忆桥接锚（MemOS 导出幂等与轮次分组用）
+    # 记忆桥接锚（导出幂等与轮次分组用）
     src_id: Optional[str] = None   # 事件在源数据里的稳定定位（re-ingest 不变）
     turn_key: Optional[str] = None # 所属轮次的锚（= 该轮根 user 消息的 src_id）
     is_system: Optional[bool] = None  # 源级可识别的系统注入消息（DSH plugin / Qwen system）

@@ -7,7 +7,7 @@
     ├── mcp.log        MCP 记忆调用审计（Agent 侧事实流，JSONL 只追加；见 audit_mcp）
     ├── memory.log     记忆操作事实流（数据层：哪条记忆被写/读/删，含内容；见 audit_memory）
     ├── wiki.log       LLM Wiki 编译事件（阶段/目标/token/成败/断点；见 audit_wiki）
-    ├── engine.log     MemOS 引擎 daemon 输出（memos_daemon 日志）
+    ├── engine.log     内置引擎运行时日志（engine_api）
     └── tasks/<id>.log 看板后台任务完整输出（逐行、带时间戳）
 
 **为什么 wiki 要单独一个文件**：wiki 编译是长任务（实测第二级 39 分钟、246 次

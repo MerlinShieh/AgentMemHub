@@ -229,14 +229,14 @@ def test_memories_conversation_flag_and_feedback_state(memories_env, monkeypatch
     assert all(i["fb_polarity"] is None for i in d["items"])
 
     uid = by["会话一的蒸馏结论"]["unit_id"]
-    r = client.post("/api/memos/feedback",
+    r = client.post("/api/engine/feedback",
                     params={"traceId": f"unit:{uid}", "polarity": "positive"})
     assert r.status_code == 200, r.text
     d2 = client.get("/api/memories", params={"status": "all"}).json()
     m2 = {i["content"]: i for i in d2["items"]}["会话一的蒸馏结论"]
     assert m2["fb_polarity"] == "positive" and m2["value"] == 1.0
 
-    r2 = client.post("/api/memos/feedback",
+    r2 = client.post("/api/engine/feedback",
                      params={"traceId": f"unit:{uid}", "revoke": True})
     assert r2.status_code == 200, r2.text
     d3 = client.get("/api/memories", params={"status": "all"}).json()

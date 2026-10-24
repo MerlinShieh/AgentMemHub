@@ -1,7 +1,7 @@
-"""AgentMemHub ↔ agentmemhub.rag 协议桥（R3）：以 MemOS 端点语义实现替换 HTTP 引擎。
+"""AgentMemHub ↔ agentmemhub.rag 协议桥（R3）：以 /api/v1 端点语义在进程内实现（取代 HTTP 引擎）。
 
 设计（详见 docs/rag-bridge-switch-plan.md）：
-- 唯一接缝：memos_daemon.engine_request/auth_state/daemon_status 在 backend=rag 时
+- 唯一接缝：engine_api.engine_request/auth_state/daemon_status 在 backend=rag 时
   派发进本模块——MCP 五工具、web 网关、cli 的调用方代码与响应形状零改动；
 - trace 语义 = 轮次视图（units 按 turn_key 聚合），refId 解析序：
   legacy_id → src_id → 数字 unit_id（保证 memory_score 跨系统回指）；
@@ -123,7 +123,7 @@ def _group_key(r: sqlite3.Row) -> str:
 
 
 def _rows_to_traces(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
-    """units(+values) → MemOS TraceDTO 形状的轮次视图（ts 毫秒，对齐旧口径）。"""
+    """units(+values) → TraceDTO 形状的轮次视图（ts 毫秒，对齐旧口径）。"""
     groups: dict[str, list[sqlite3.Row]] = {}
     for r in rows:
         groups.setdefault(_group_key(r), []).append(r)
@@ -488,7 +488,7 @@ def feedback(trace_id: str, polarity: str, *, magnitude: float = 1.0,
 
     state=True：**面板状态式反馈**（先清后写；revoke=True 表示仅清除取消）——
     一个 unit 一条当前表态，反复点不叠加、可干净回退；
-    默认 False：**历史累加**语义（MemOS 同源，MCP memory_score / 批量评分沿用）。
+    默认 False：**历史累加**语义（上游同源，MCP memory_score / 批量评分沿用）。
     """
     conn = _conn()
     try:
@@ -570,14 +570,14 @@ def overview() -> dict:
         convs = conn.execute(
             "SELECT COUNT(DISTINCT source||'/'||conversation_id) FROM units"
             " WHERE source<>'memory'").fetchone()[0]
-        memos = conn.execute(
+        memory_units = conn.execute(
             "SELECT COUNT(*) FROM units WHERE source='memory'").fetchone()[0]
         vt = st.active_spec.vec_table
         has = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE name=?", (vt,)).fetchone()
         vecs = conn.execute(f"SELECT COUNT(*) FROM {vt}").fetchone()[0] if has else 0
         return {"ok": True, "episodes": convs, "traces": units,
-                "memory_units": memos, "skills": {"total": 0},
+                "memory_units": memory_units, "skills": {"total": 0},
                 "policies": 0, "worldModels": 0,
                 "embedder": {"available": units == 0 or vecs > 0,
                              "model": st.active_model},
@@ -668,7 +668,7 @@ def sync_episode_r_task(trace_ids=None) -> dict:
 
 def unscored_traces(*, exclude_ids: set[str] | None = None,
                     limit: int | None = None) -> list[dict]:
-    """评分枚举（取代 scoring 直连 memos.db）：无 value 的轮次视图，ts 升序。"""
+    """评分枚举（取代 scoring 直连旧库）：无 value 的轮次视图，ts 升序。"""
     conn = _conn()
     try:
         rows = conn.execute(
@@ -682,7 +682,7 @@ def unscored_traces(*, exclude_ids: set[str] | None = None,
 
 
 def traces_by_ids(ids: set[str]) -> list[dict]:
-    """定点读轮次视图（scoring 增量路径，取代 memos.db 直读）。
+    """定点读轮次视图（scoring 增量路径，取代旧库直读）。
 
     每个 id 先解析到 unit，再展开其所在轮次的全部 units——
     非锚点 unit（如轮内 assistant 消息）被引用时同样能取回完整轮。

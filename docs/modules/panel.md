@@ -50,7 +50,7 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 | 组 | 代表路由 | 说明 |
 |---|---|---|
 | 会话 | `/api/conversations`、`/api/conversation/{sid}`、`/api/search`、`/api/stats`、`/api/facets`、`/api/title`、`/api/delete` | 列表分页 + 全文搜索 + 聚合统计；标题修改与删除**不会被后续 ingest 覆盖** |
-| 记忆 | `/api/memories`、`/api/memories/{mid}`、`/api/memos/traces`、`/api/memos/search`、`/api/memos/weight`、`/api/memos/feedback`、`/api/memos/status` | 报表（蒸馏终稿 ∪ MCP 直写）+ 单条详情 + 时间线（原始输入、`sort=time`）+ 语义检索 + 加权/反馈 |
+| 记忆 | `/api/memories`、`/api/memories/{mid}`、`/api/engine/traces`、`/api/engine/search`、`/api/engine/weight`、`/api/engine/feedback`、`/api/engine/status` | 报表（蒸馏终稿 ∪ MCP 直写）+ 单条详情 + 时间线（原始输入、`sort=time`）+ 语义检索 + 加权/反馈 |
 | 长任务 | `/api/admin/{ingest,push,clean,distill,rebuild,score,exclude,job}` | 全部走 `tasks`，进度条全局可见 |
 | wiki 浏览 | `/api/wiki/pages`、`/api/wiki/page` | **磁盘为准**；`origin` 区分蒸馏与投喂 |
 | wiki 运维 | `/api/wiki/align`、`/api/wiki/pending`、`/api/wiki/failures`、`/api/wiki/retry`、`/api/wiki/update`、`/api/wiki/triggers`、`/api/wiki/batch/*` | 对齐审计 / 待更新 / 补跑 / 增量 / 触发器热改 / 批次 |

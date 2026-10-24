@@ -25,7 +25,7 @@ from unittest import mock
 
 import pytest
 
-from agentmemhub import memos_daemon
+from agentmemhub import engine_api
 from agentmemhub.feed import service as svc
 from agentmemhub.mcp_server import MCPHandler
 
@@ -57,7 +57,7 @@ def feed_cfg(tmp_path, monkeypatch):
 @pytest.fixture()
 def offline(monkeypatch):
     """引擎离线（feed 工具本就不该受它影响 —— 这正是要测的）。"""
-    monkeypatch.setattr(memos_daemon, "auth_state", lambda: None)
+    monkeypatch.setattr(engine_api, "auth_state", lambda: None)
 
 
 def _handler() -> tuple[MCPHandler, io.StringIO]:
@@ -128,8 +128,7 @@ def test_feed工具在引擎离线时仍可用(feed_cfg, offline, tmp_path):
     assert "投喂成功" in _text(_call(h, "feed_add",
                                      {"input": "path", "value": str(p)}))
     assert "投喂素材库" in _text(_call(h, "feed_status", {}))
-    # 文案按后端而异（rag 后端是"记忆索引不可用…"，memos 后端是"记忆引擎未运行…"），
-    # 所以断言"确实失败了"，而不是去钉某一句话
+    # 只断言"确实失败了"，不钉具体文案（提示语会随排障指引调整）
     assert _call(h, "memory_stats", {})["result"].get("isError") is True
 
 

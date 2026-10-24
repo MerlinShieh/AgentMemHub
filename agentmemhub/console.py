@@ -7,7 +7,7 @@ action 收尾日志统一走本模块 _action_log（延迟导入 cli._cli_log，
 去耦约定：
 - 不出现任何绝对路径：数据位置走 Store 默认解析（HOME / 环境变量），
   看板端口走 AGENTMEMHUB_PORT（默认 8086）。
-- 引擎状态一律经 memos_daemon.daemon_status() 获取（rag 后端为进程内直调，
+- 引擎状态一律经 engine_api.daemon_status() 获取（rag 后端为进程内直调，
   不发 HTTP、无守护进程可启停）。
 - 不 import web 模块本身（看板用独立子进程启动，避免阻塞菜单）。
 
@@ -66,11 +66,11 @@ def env_snapshot() -> dict:
     引擎状态只取 daemon_status() 一处真相（rag 后端下它是进程内直调，
     不探 18800）；不再额外发 HTTP 二次探测。
     """
-    from agentmemhub import memos_daemon
+    from agentmemhub import engine_api
     return {
         "adapters": [a.describe() for a in adapters.all_adapters()],
         "stats": _store_stats_safe(),
-        "engine": memos_daemon.daemon_status(),
+        "engine": engine_api.daemon_status(),
     }
 
 
@@ -88,29 +88,19 @@ def _render_snapshot(s: dict) -> str:
         lines.append("  本地库: （空 —— 建议先执行 [1] 提取入库）")
     eng = s.get("engine") or {}
     summ = eng.get("summary") or {}
-    if eng.get("backend") == "rag":
-        # 内置引擎：随进程启动，无守护/无端口；就绪即可 [3] 写入
-        if eng.get("online"):
-            traces = summ.get("traces")
-            model = summ.get("embedding_model")
-            cov = summ.get("coverage")
-            detail = "，".join(x for x in (
-                f"{traces} 条记忆" if traces is not None else "",
-                f"模型 {model}" if model else "",
-                f"向量覆盖 {(cov * 100):.0f}%" if cov is not None else "",
-            ) if x)
-            lines.append("  记忆索引: 就绪（内置引擎）" + (f" · {detail}" if detail else ""))
-        else:
-            lines.append("  记忆索引: 不可用 —— 检查 database/session_rag.db 与 models/")
-        return "\n".join(lines)
+    # 内置引擎：随进程启动，无守护/无端口；就绪即可 [3] 写入
     if eng.get("online"):
-        managed = "，本工具托管" if eng.get("managed") else ""
-        pid = f" PID {eng['pid']}" if eng.get("pid") else ""
         traces = summ.get("traces")
-        extra = f"，{traces} 条记忆" if traces is not None else ""
-        lines.append(f"  记忆引擎: 运行中{pid}{managed}{extra}（{eng.get('base_url') or ''}）")
+        model = summ.get("embedding_model")
+        cov = summ.get("coverage")
+        detail = "，".join(x for x in (
+            f"{traces} 条记忆" if traces is not None else "",
+            f"模型 {model}" if model else "",
+            f"向量覆盖 {(cov * 100):.0f}%" if cov is not None else "",
+        ) if x)
+        lines.append("  记忆索引: 就绪（内置引擎）" + (f" · {detail}" if detail else ""))
     else:
-        lines.append("  记忆引擎: 已停止（backend=memos 回退模式，需外部引擎）")
+        lines.append("  记忆索引: 不可用 —— 检查 database/session_rag.db 与 models/")
     return "\n".join(lines)
 
 
@@ -397,7 +387,7 @@ def action_distill() -> None:
     _action_log(f"蒸馏记忆（控制台）→ {r}")
 
 
-def action_memos() -> None:
+def action_memory_write() -> None:
     """写入记忆：把采集库的会话向量化写入记忆索引（小模型先跑完即可检索）。"""
     from agentmemhub.cli import _vectorize_stage
     if not _confirm("  开始向量化写入记忆索引？"):
@@ -423,7 +413,7 @@ ACTIONS = {
     "1": ("提取会话入库", action_ingest),
     "2": ("清洗数据", action_clean),
     "3": ("蒸馏记忆", action_distill),
-    "4": ("写入记忆", action_memos),
+    "4": ("写入记忆", action_memory_write),
     # 「自动评分」入口已隐藏（action_score 保留，供 CLI score 与将来恢复）
     "5": ("检索关键字", action_search),
     "6": ("启动网页看板", action_dashboard),

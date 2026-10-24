@@ -208,7 +208,7 @@ def test_search_hits_carry_location(client, monkeypatch):
 
     面板端点经 engine_request 转发 → mock 该出口，验证字段透传与上限放宽。
     """
-    from agentmemhub import memos_daemon
+    from agentmemhub import engine_api
     seen = {}
 
     def fake_engine(method, path, body=None, **kw):
@@ -225,8 +225,8 @@ def test_search_hits_carry_location(client, monkeypatch):
                     "injectedContext": ""}
         return {}
 
-    monkeypatch.setattr(memos_daemon, "engine_request", fake_engine)
-    r = client.get("/api/memos/search?q=测试")
+    monkeypatch.setattr(engine_api, "engine_request", fake_engine)
+    r = client.get("/api/engine/search?q=测试")
     assert seen.get("path") == "/api/v1/memory/search"
     assert r.status_code == 200
     h = r.json()["hits"][0]

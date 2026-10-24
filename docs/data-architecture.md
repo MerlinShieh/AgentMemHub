@@ -43,10 +43,11 @@
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
-**唯一引擎事实**：`memory_backend` 默认 `rag`（自研内核，`agentmemhub/rag/`）。
-MCP 五工具虽有 `/api/v1/*` 的 MemOS 端点语义（兼容层），但 `engine_request`
-**进程内直调 `rag_bridge`，不发 HTTP**；MemOS 上游已于 v2.8 彻底移除（vendored
-`memOS/` 目录、`agentmemhub.memos` 模块、回退配置键全删），数据路径上无任何残留。`memory_stats` 里的
+**唯一引擎事实**：引擎只有一种后端 —— 自研内核 `agentmemhub/rag/`（`memory_backend`
+键已于 v2.8 删除，**没有回退开关**）。MCP 五工具沿用的 `/api/v1/*` 端点语义只是
+**兼容视图**：`engine_request` **进程内直调 `rag_bridge`，不发 HTTP、无端口、无守护进程**。
+MemOS 上游已于 v2.8 彻底移除（vendored `memOS/` 目录、`agentmemhub.memos` 模块、
+回退配置键全删），数据路径上无任何残留。`memory_stats` 里的
 `traces/episodes` 是 rag_bridge 对索引库数据的兼容命名视图。
 
 ---
@@ -181,7 +182,7 @@ MCP memory_save(content="…", importance="high", type="lesson")
 | ⑧ 终审截断 | `safe_cutoff_hits`（桥接层，`floor_ratio` 与两个兜底席来自档位） | 页面占名额、不参与窗口截断；**非页面也有字面兜底席**（§4.2 末） |
 
 ⚠️ **下游有两处"取前 N 条"**（`safe_cutoff_hits` 的 `hits[:max_keep]`、面板
-`/api/memos/search` 的 `top`），所以第 ⑦ 步必须保持"总数不变"——实测踩过：
+`/api/engine/search` 的 `top`），所以第 ⑦ 步必须保持"总数不变"——实测踩过：
 追加让 `len(hits)=k+1`，`k=8` 时页面在窗口内正常、`k=20` 时页面掉出窗口消失。
 
 ### 4.1 页面层（L2 知识页）召回
@@ -229,7 +230,7 @@ wiki 页面此前是**只读产物**（Agent 搜不到）。现在 L2 页面**�
    - **保底占位**（`reserve_pages`）：选中的页面不被记忆挤出 k 条。
      ⚠️ 占位必须是**替换末尾非页面**而非追加：追加会让 `len(hits) = k+1`，
      而下游有两处按前 N 条截断（`rag_bridge.safe_cutoff_hits` 的
-     `hits[:max_keep]` 窗口、面板 `/api/memos/search` 的 `top` 参数），排在
+     `hits[:max_keep]` 窗口、面板 `/api/engine/search` 的 `top` 参数），排在
      末尾的页面**正好被切掉**——实测 `k=8` 正常、`k=20` 时页面凭空消失。
      同理页面在 `safe_cutoff_hits` 里**占名额、不参与窗口截断**，总数守恒。
 4. **向量用整页正文而非摘要**：实测摘要向量更差（查询"容错语义"时核心页从

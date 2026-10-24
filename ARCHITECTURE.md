@@ -54,7 +54,7 @@ AgentMemHub/
 │   ├── sanitize.py             # 脱敏（凭据/PII 扫描与剥离；has_substance 门限）
 │   ├── scoring.py              # LLM 三轴评分（入口已隐藏；与蒸馏共用 llm 段）
 │   ├── mcp_server.py           # MCP 记忆网关（stdio / Streamable HTTP；含调用审计）
-│   ├── memos_daemon.py         # 引擎门面（/api/v1/* 语义 → 进程内 rag_bridge）
+│   ├── engine_api.py         # 引擎门面（/api/v1/* 语义 → 进程内 rag_bridge）
 │   ├── rag_bridge.py           # ★ 引擎接缝：MCP/面板/CLI 的统一调用入口
 │   ├── health.py               # 记忆库一致性巡检（面板健康卡片/CLI/测试共用判据）
 │   ├── failures.py             # ★ 长任务失败清单（分类/汇总/单独重跑；wiki 两级共用）

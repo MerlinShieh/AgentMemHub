@@ -44,7 +44,7 @@
 | `logs/agentmemhub.log` | 命名空间根 logger `agentmemhub` 的兜底 handler（`logs.setup_app_logging()`，由 `_append_line` 顺带挂上） | 应用内 `logging.getLogger("agentmemhub.*")` 的文本日志：LLM 瞬态重试 / 格式修复、蒸馏失败与判重、`store` 提示 | 看应用内部发生了什么；标准库 `RotatingFileHandler`，**5 MB × 3 份** |
 | `logs/asrag.log` | 命名空间根 logger `asrag` 的兜底 handler | 没有专属文件的 `asrag.*` logger（如 `asrag.bridge` 的检索记录） | 桥接 / 召回侧文本日志 |
 | `logs/asrag-<component>.log` | `rag.logkit.get_logger(component, log_dir)`，并设 `propagate = False` | `ingest` / `eval` / `search` 等组件的文本日志 | 组件级隔离（这些记录不会再进 `asrag.log`） |
-| `logs/engine.log` | `memos_daemon._log_file()` | 引擎门面的历史日志文件（v2.8 起进程内直调，**通常为空**） | 排查引擎层问题优先看 `mcp.log` / `asrag*.log` |
+| `logs/engine.log` | `engine_api._log_file()` | 引擎门面的历史日志文件（v2.8 起进程内直调，**通常为空**） | 排查引擎层问题优先看 `mcp.log` / `asrag*.log` |
 | `logs/tasks/<job_id>.log` | `logs.append_task_line(job_id, line)`（`web/app.py:_logged_task()` 逐行转写） | 看板后台任务的**完整输出**（纯文本，非 JSONL） | 页面关掉 / 进程中断后追溯 |
 | `logs/wiki_trigger_state.json` | `wiki_triggers.STATE_FILE` | 触发状态（`last_update_at` / `update_started_at` / `last_error` / `fired`）；`wiki_triggers._LOCK_FILE` 是单飞行锁（两者都是**相对路径** `Path("logs")/…`，跟随进程 CWD，不走 `logs.log_dir()`） | 不是日志，但排查触发器必须一起看 |
 

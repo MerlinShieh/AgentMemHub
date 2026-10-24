@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS ingest_meta(
 );
 """
 
-# R3：MemOS trace id 兼容别名（legacy_id）与桥接元表（增量补列，幂等）
+# R3：trace id 兼容别名（legacy_id）与桥接元表（增量补列，幂等）
 _SCHEMA_BRIDGE = """
 CREATE TABLE IF NOT EXISTS conv_scores(
     source TEXT NOT NULL,

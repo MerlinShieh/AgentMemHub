@@ -56,7 +56,7 @@ class EngineAuthError(Exception):
 
 
 def _rag_dispatch(method: str, path: str, body: Optional[dict]) -> dict:
-    """把 MemOS 端点语义派发到进程内 rag_bridge（唯一接缝）。
+    """把 /api/v1 端点语义派发到进程内 rag_bridge（唯一接缝）。
 
     返回与旧 HTTP 端点同形状的 dict；调用方（mcp/web/cli）零改动。
     未知路径抛异常（配置/版本漂移早暴露），不回退 HTTP。
@@ -123,7 +123,7 @@ def auth_state() -> Optional[dict]:
 def daemon_status() -> dict[str, Any]:
     """引擎状态摘要（面板 / 控制台消费）。
 
-    字段名沿用 MemOS 时代（`pid` / `engine_home` / `lightweight` 等返回中性值），
+    字段名沿用旧 HTTP 引擎时代（`pid` / `engine_home` / `lightweight` 等返回中性值），
     消费端据此降级展示，不必改前端契约。
     """
     from agentmemhub import rag_bridge

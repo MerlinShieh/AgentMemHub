@@ -2,7 +2,7 @@
 
 契约（模型切换一等公民）：
 - 一切行为由 ModelSpec 注册表驱动：onnx 文件、pooling、归一化、截断窗口、query 前缀；
-- 首次推理实测维度并与 spec.dim 断言，注册表漂移立刻报错（拒绝 MemOS 式静默截断）；
+- 首次推理实测维度并与 spec.dim 断言，注册表漂移立刻报错（拒绝静默截断）；
 - 输出恒为 (N, dim) float32、L2 归一化（spec.normalize 时）。
 """
 from __future__ import annotations

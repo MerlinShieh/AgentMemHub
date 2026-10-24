@@ -1,12 +1,12 @@
 """AgentMemHub MCP 记忆网关（stdio / Streamable HTTP 双传输）。
 
-把本地记忆引擎（MemOS）的语义检索/读写包装成 MCP server，挂在
+把本地记忆引擎的语义检索/读写包装成 MCP server，挂在
 ZCode / OpenCode / Claude Code 等支持 MCP 的 Agent harness 上。
 
 设计原则：
-- 引擎生命周期完全由用户控制（看板 / `agentmemhub memos-daemon`）；
+- 引擎随进程内直调，无守护进程、无端口；
   本网关**只转发请求、从不拉起或停止引擎**，引擎离线时返回明确错误。
-- 业务复用 memos_daemon.engine_request（含自动登录），不写本地库：
+- 业务复用 engine_api.engine_request（含自动登录），不写本地库：
   检索/写入全部实时走引擎 HTTP API。
 - 协议层（JSON-RPC 处理）与传输层分离，两种传输共用同一份逻辑。
 
@@ -43,7 +43,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from agentmemhub import memos_daemon
+from agentmemhub import engine_api
 
 # ---- Streamable HTTP 软依赖 ----------------------------------------------
 # fastapi 仅 --http 模式需要；stdio 模式不强制安装。顶部 import 是为了让
@@ -58,25 +58,17 @@ except ImportError:
 
 SERVER_INFO = {"name": "agentmemhub-mcp", "version": "0.1.0"}
 
-#: 引擎记忆空间的 agent 标识（与 web 网关 /api/memos/* 口径一致）
+#: 引擎记忆空间的 agent 标识（与 web 网关 /api/engine/* 口径一致）
 _AGENT = "hermes"
 
 def _engine_hint() -> str:
-    """引擎不可用时的提示（按后端区分：rag 进程内无守护，memos 才有 daemon）。"""
-    from agentmemhub import memos_daemon
-    if memos_daemon._backend_is_rag():
-        return ("记忆索引不可用——检查 database/session_rag.db 与 models/ 是否就绪；"
-                "首次使用先跑 `agentmemhub sync` 建立索引")
-    return ("记忆引擎未运行——先启动：`agentmemhub memos-daemon start`，"
-            "或看板「记忆引擎 → 启动」后重试")
+    """引擎不可用时的提示（内置引擎随进程启动、无守护进程，多半是索引库或模型未就绪）。"""
+    return ("记忆索引不可用——检查 database/session_rag.db 与 models/ 是否就绪；"
+            "首次使用先跑 `agentmemhub sync` 建立索引")
 
 
 def _auth_hint() -> str:
-    from agentmemhub import memos_daemon
-    if memos_daemon._backend_is_rag():
-        return "记忆索引无鉴权面；若持续失败请检查索引库权限"
-    return ("引擎已设密码且网关未登录：先运行 `agentmemhub memos-daemon "
-            "--set-password <密码>` 保存密码后重试")
+    return "记忆索引无鉴权面；若持续失败请检查索引库权限"
 
 
 class _ToolError(Exception):
@@ -116,15 +108,15 @@ def _search(args: dict) -> str:
         # Agent 的自动召回通常希望"少而准"，可以比面板查询配得更严。
         from agentmemhub.rag.config import retrieval_caller
         with retrieval_caller("mcp"):
-            res = memos_daemon.engine_request("POST", "/api/v1/memory/search",
+            res = engine_api.engine_request("POST", "/api/v1/memory/search",
                                               body=body, timeout=30)
             ov: dict = {}
             try:
-                ov = memos_daemon.engine_request("GET", "/api/v1/overview",
+                ov = engine_api.engine_request("GET", "/api/v1/overview",
                                                  timeout=8)
             except Exception:
                 pass
-    except memos_daemon.EngineAuthError:
+    except engine_api.EngineAuthError:
         raise _ToolError(_auth_hint())
     except Exception as e:
         raise _ToolError(f"引擎检索失败：{e}")
@@ -173,9 +165,9 @@ def _search(args: dict) -> str:
 def _recent(args: dict) -> str:
     limit = _clamp(args.get("limit"), 1, 30, 8)
     try:
-        res = memos_daemon.engine_request(
+        res = engine_api.engine_request(
             "GET", f"/api/v1/traces?limit={limit}&offset=0&groupByTurn=1", timeout=15)
-    except memos_daemon.EngineAuthError:
+    except engine_api.EngineAuthError:
         raise _ToolError(_auth_hint())
     except Exception as e:
         raise _ToolError(f"引擎读取失败：{e}")
@@ -201,7 +193,7 @@ def _recent(args: dict) -> str:
 
 
 def _stats(args: dict) -> str:
-    st = memos_daemon.daemon_status()
+    st = engine_api.daemon_status()
     if not st["online"]:
         raise _ToolError(_engine_hint())
     lines = [f"记忆引擎：在线（{st['base_url']}）"]
@@ -237,7 +229,7 @@ def _save(args: dict) -> str:
             if isinstance(raw_tags, (list, tuple)) else [])
     ts = int(time.time() * 1000)
     tid = _trace_id(content, ts)
-    # 直写索引库（不再经 MemOS 的 bundle / HTTP 导入语义）。
+    # 直写索引库（进程内直调，无 bundle / HTTP 导入语义）。
     # 幂等靠 tid 落 legacy_id；多模型向量、tags、origin、初始分由 bridge 一次写完，
     # 因此不需要再补一次 embeddings/rebuild（旧路径靠它补向量）。
     from agentmemhub import rag_bridge
@@ -359,12 +351,12 @@ def _score(args: dict) -> str:
     if polarity not in ("positive", "neutral", "negative"):
         raise _ToolError("polarity 必须是 positive | neutral | negative")
     try:
-        memos_daemon.engine_request(
+        engine_api.engine_request(
             "POST", "/api/v1/feedback",
             body={"channel": "explicit", "polarity": polarity,
                   "magnitude": 1.0, "traceId": tid},
             timeout=30)
-    except memos_daemon.EngineAuthError:
+    except engine_api.EngineAuthError:
         raise _ToolError(_auth_hint())
     except Exception as e:
         raise _ToolError(f"评分失败（trace 不存在或引擎异常）：{e}")
@@ -931,7 +923,7 @@ class MCPHandler:
             # 引擎未运行时**记忆工具**统一返回明确指引（网关不代管引擎生命周期）。
             # feed 工具**跳过这道检查**：它们是本地文件处理，与索引是否就绪无关 ——
             # "索引没建好就不能投喂"没有任何道理（投喂产物落在旁路根，本来也不进索引）。
-            if name not in _ENGINE_FREE_TOOLS and memos_daemon.auth_state() is None:
+            if name not in _ENGINE_FREE_TOOLS and engine_api.auth_state() is None:
                 raise _ToolError(_engine_hint())
             return fn(a)
 

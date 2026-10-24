@@ -1,4 +1,4 @@
-"""混合召回（P1 结构，参照 MemOS core/retrieval 机制分析）：
+"""混合召回（P1 结构，参照早期 core/retrieval 机制分析）：
 
 候选级通道融合：
     relevance = best_channel_score          # 各通道拉到同一 (0,1] 尺度取最好
@@ -36,9 +36,9 @@ CHUNK_CAP = 16
 IDENT_CAP = 5
 RRF_K = 60
 RRF_WEIGHT = 0.4
-THRESHOLD_FLOOR = 0.2      # MemOS 同源默认（ranker.ts:120）
+THRESHOLD_FLOOR = 0.2      # 上游同源默认
 STRONG_BYPASS_SCORE = 0.35  # bypass 需 ≥2 通道且其中最好通道分达此线
-# MemOS keyword.ts:36 同源噪音表
+# 上游同源噪音表
 _CJK_NOISE = set("我你他她它的了呢吗么还记得是有想请问谁哪帮")
 _IDENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_\-:.]{11,}")
 #: **多词短语**：2 个以上连续 ASCII 词（"command code" / "api key"）——见
@@ -130,7 +130,7 @@ def threshold_filter(
     exempt_ids: set[int] | None = None,
 ) -> tuple[dict[int, float], set[int]]:
     """相对阈值：rel < floor×top 剔除；≥2 通道且最好通道分 ≥ strong 可旁路
-    （防"纯关键词 rank-0 命中被 cosine 尺度绞杀"，MemOS ranker.ts:462 同源思想）。
+    （防"纯关键词 rank-0 命中被 cosine 尺度绞杀"，上游同源思想）。
     返回 (存活, 旁路id集)。
 
     ``exempt_ids``（页面）不参与本阈值：页面的 rel 分天然低一个量级
@@ -286,7 +286,7 @@ def reserve_pages(
 
     **占位方式：替换末尾的非页面条目，而不是追加**——总数必须保持 ≤ k。
     实测踩过：追加会让 `len(hits) = k + 1`，而下游（`rag_bridge.safe_cutoff_hits`
-    的 `hits[:max_keep]` 窗口、面板 `/api/memos/search` 的 `top` 截断）都按
+    的 `hits[:max_keep]` 窗口、面板 `/api/engine/search` 的 `top` 截断）都按
     前 N 条切，排在末尾的页面**正好被切掉**（k=8 时页面在窗口内所以正常，
     k=20 时页面掉出窗口就消失了）。
 

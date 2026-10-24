@@ -1,13 +1,13 @@
-"""MemOS 历史记忆批量自动评分器。
+"""历史记忆批量自动评分器。
 
 背景：importBundle 导入的历史 trace 不参与引擎自动进化链（无 rewardDirty
-标记），value 停留在启发式初值。MemOS 的 feedback 接口（POST /api/v1/feedback
+标记），value 停留在启发式初值。旧引擎的 feedback 接口（POST /api/v1/feedback
 带 traceId）会立即重算 value/rHuman，但 magnitude 被 0~1 钳制、value 是反馈
 加权平均——只能表达极性分（positive/negative 二值），写不了任意连续分。
 
-本模块"用 MemOS 的方式"实现自动化打分：
+本模块按旧引擎的规则实现自动化打分：
 - 复用引擎已配置的 LLM（engine config.yaml 的 llm 段，openai_compatible）
-- 按 MemOS reward 的三轴思想（目标达成 / 过程质量 / 用户价值）逐条评估
+- 按 reward 的三轴思想（目标达成 / 过程质量 / 用户价值）逐条评估
 - 判定 positive（值得保留）/ neutral（一般）/ negative（无价值或噪音）
 - 三档 verdict 都记入跳过清单（neutral 不写 value 但不再重评）；网关内容审核
   拒评（code 1301）确定性无法评估 → 归 neutral 记账，不重复送、不算 error
@@ -26,7 +26,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from agentmemhub import memos_daemon
+from agentmemhub import engine_api
 
 _SYSTEM_PROMPT = (
     "你是记忆质量评估器。判断一条 Agent 任务记忆是否值得长期保留。\n"
@@ -117,7 +117,7 @@ def read_engine_llm() -> dict[str, Any]:
     """读 LLM 配置（**与蒸馏同源**）：优先 agentmemhub.yaml 的 `llm` 段。
 
     评分与蒸馏共用同一份 LLM 接入（换模型/换服务商只改一处）；
-    该段缺项时回退 MemOS 引擎 config.yaml（backend=memos 的旧环境兼容）。
+    该段缺项时回退引擎自己的 config.yaml（历史环境兼容）。
     key 只读不打印。
     """
     from agentmemhub import config as hub_config
@@ -236,7 +236,7 @@ def _parse_verdict(content: str) -> str:
 
 def _backend_is_rag() -> bool:
     """恒 True —— MemOS 回退后端已移除；保留函数只为不动旧调用方。"""
-    return memos_daemon._backend_is_rag()
+    return engine_api._backend_is_rag()
 
 
 def list_all_traces() -> list[dict[str, Any]]:
@@ -385,7 +385,7 @@ def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
                     out(f"{label} → {verdict}（dry-run 不写入）")
                 else:
                     try:
-                        memos_daemon.engine_request(
+                        engine_api.engine_request(
                             "POST", "/api/v1/feedback",
                             body={"channel": "explicit", "polarity": verdict,
                                   "magnitude": 1.0, "traceId": tid},

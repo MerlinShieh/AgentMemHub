@@ -5,7 +5,7 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
-from agentmemhub import memos_daemon
+from agentmemhub import engine_api
 from agentmemhub.logs import read_mcp_audit
 from agentmemhub.mcp_server import build_http_app
 
@@ -45,7 +45,7 @@ def test_http_tools_list():
             "memory_save", "memory_score"} <= names
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value=None)
+@mock.patch.object(engine_api, "auth_state", return_value=None)
 def test_http_tools_call_offline(_auth):
     r = _post({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                "params": {"name": "memory_stats", "arguments": {}}})
@@ -55,7 +55,7 @@ def test_http_tools_call_offline(_auth):
     assert "记忆索引不可用" in res["content"][0]["text"]
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value=None)
+@mock.patch.object(engine_api, "auth_state", return_value=None)
 def test_http_tools_call_is_audited(_auth, audit_dir):
     """HTTP 传输与 stdio 共用 _tools_call，因此同样留痕——审计不挑传输方式。"""
     _post({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
@@ -68,8 +68,8 @@ def test_http_tools_call_is_audited(_auth, audit_dir):
     assert lines[1]["ok"] is False        # 引擎离线，但依然留痕
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
-@mock.patch.object(memos_daemon, "engine_request")
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "engine_request")
 def test_http_tools_call_online(engine_request, _auth):
     engine_request.return_value = {
         "hits": [{"score": 0.9, "tier": 2, "refKind": "trace",

@@ -185,7 +185,7 @@ class TraeAdapter(AgentAdapter):
 
     # -------------------------------------------------------------- 项目记忆
     def _load_memory(self, mem_dir: Path) -> list[dict[str, Any]]:
-        """Trae 项目记忆：每条 Markdown 一条 user 事件（可入 MemOS 被检索）。"""
+        """Trae 项目记忆：每条 Markdown 一条 user 事件（可入记忆索引被检索）。"""
         if not mem_dir.is_dir():
             return []
         sessions: list[dict[str, Any]] = []

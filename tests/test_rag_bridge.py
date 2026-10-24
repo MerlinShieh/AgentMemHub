@@ -1,6 +1,6 @@
 """R3 rag 后端派发层测试：backend 开关、engine_request 路由、状态语义、sync 向量化分支。
 
-约定（tests/conftest.py）：存量套件整体钉 memos；本文件逐测试显式 opt-in rag。
+约定：引擎只剩进程内一种后端（回退路径已移除），本文件是派发层的专项测试。
 全部使用 tmp 沙箱索引库（rag_bridge.configure），绝不触碰真实 session_rag.db。
 """
 from __future__ import annotations
@@ -11,7 +11,7 @@ import logging
 
 import pytest
 
-from agentmemhub import memos_daemon, rag_bridge
+from agentmemhub import engine_api, rag_bridge
 from agentmemhub.config import Config
 from agentmemhub.rag.config import load_settings
 
@@ -48,7 +48,7 @@ def test_dispatch_routes(rag_env, monkeypatch):
                         lambda tid, pol, **k: {"ok": 1, "t": tid})
     monkeypatch.setattr(rag_bridge, "rebuild_embeddings",
                         lambda mode="repair": {"done": True})
-    er = memos_daemon.engine_request
+    er = engine_api.engine_request
     assert er("POST", "/api/v1/memory/search", {"agent": "a", "query": "问题"})["hits"] == []
     assert calls["search"] == "问题"
     assert er("GET", "/api/v1/overview")["ok"] is True
@@ -68,7 +68,7 @@ def test_dispatch_routes(rag_env, monkeypatch):
 # ── 真实桥端到端（tmp 库，不 mock bridge 内部） ─────────────────────────
 
 def test_end_to_end_save_search_score_recent(rag_env):
-    er = memos_daemon.engine_request
+    er = engine_api.engine_request
     r = rag_bridge.save_memory_trace(
         "SQLite WAL 文件膨胀拖慢写入：TRUNCATE checkpoint 归零解决",
         tid="mcp_e2e", ts=1786000000000, value=0.5)
@@ -95,9 +95,9 @@ def test_feedback_unknown_id_raises(rag_env):
 # ── 状态语义：auth_state / daemon_status / probe ───────────────────────
 
 def test_auth_state_and_daemon_status_rag(rag_env, monkeypatch):
-    st = memos_daemon.auth_state()
+    st = engine_api.auth_state()
     assert st and st["authenticated"] is True          # 沙箱库可开 → 在线
-    ds = memos_daemon.daemon_status()
+    ds = engine_api.daemon_status()
     assert ds["online"] is True and ds["backend"] == "rag"
     assert ds["managed"] is False and ds["pid"] is None
     assert ds["summary"]["traces"] >= 0
@@ -106,8 +106,8 @@ def test_auth_state_and_daemon_status_rag(rag_env, monkeypatch):
 def test_auth_state_offline_when_bridge_broken(rag_env, monkeypatch):
     monkeypatch.setattr(rag_bridge, "probe",
                         lambda: {"online": False, "error": "db missing"})
-    assert memos_daemon.auth_state() is None
-    assert memos_daemon.daemon_status()["online"] is False
+    assert engine_api.auth_state() is None
+    assert engine_api.daemon_status()["online"] is False
 
 
 # ── scoring 派发（memos 直读 vs rag bridge） ───────────────────────────
@@ -139,7 +139,7 @@ def test_run_sync_rag_vectorize_stage(rag_env, monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli, "_vectorize_stage", fake_vectorize)
     monkeypatch.setattr(cli, "run_ingest", lambda *a, **k: None)
-    monkeypatch.setattr(memos_daemon, "auth_state", lambda: {"authenticated": True})
+    monkeypatch.setattr(engine_api, "auth_state", lambda: {"authenticated": True})
     monkeypatch.setattr(cli, "Store", lambda *a, **k: _FakeStore())
 
     def mark(s, key):
@@ -150,7 +150,7 @@ def test_run_sync_rag_vectorize_stage(rag_env, monkeypatch, tmp_path):
     monkeypatch.setattr(watermarks, "pending_for", lambda s, k: [])
 
     assert not hasattr(cli, "push_to_memos"), "MemOS 推送路径应已整体移除"
-    cli.run_sync(push="rag")
+    cli.run_sync(vectorize=True)
     assert vec.get("called") is True
     assert state_calls.get("push") == 1
 

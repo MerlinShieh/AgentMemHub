@@ -148,7 +148,7 @@ AgentMemHub/
 │   ├── feed/                     # ★ 外部投喂转译层（格式注册表 + 三段物料）
 │   ├── adapters/                 # 8 个 Agent 数据源适配器（src_id/turn_key/注入识别）
 │   ├── web/                      # FastAPI 记忆面板 + 前端 + /api/* 网关
-│   └── memos_daemon.py           # 引擎运行时门面（/api/v1/* 端点派发到进程内 rag_bridge）
+│   └── engine_api.py           # 引擎运行时门面（/api/v1/* 端点派发到进程内 rag_bridge）
 ├── models/                       # 嵌入模型（自带 bge-small 开箱即用）
 ├── agentmemhub.yaml(.example)    # 统一配置（模型/分桶/召回/后端开关；本体 gitignore）
 ├── database/                     # 数据目录（gitignore）：采集库 + 索引库 + 水位 + 评分状态
@@ -630,7 +630,7 @@ uv run python -m agentmemhub serve       # 启动记忆面板 http://127.0.0.1:8
 - **性能优化**：批量嵌入按**文本长度分桶**，避免短文本被长文本 padding 拖累
   （实测 bge-base 从 5.26 → 26 条/秒，全量 51 分钟 → 11.6 分钟）。
 - **没有回退开关了**：MemOS 上游已于 2026-10-24 彻底移除（vendored 目录、模块、
-  导入端点、`memos` 子命令、`memory_backend` 配置键全删）。`agentmemhub/memos_daemon.py`
+  导入端点、`memos` 子命令、`memory_backend` 配置键全删）。`agentmemhub/engine_api.py`
   名字保留，但它现在只是**进程内引擎的运行时门面**（把 MemOS 时代的 `/api/v1/*`
   端点语义派发到 `rag_bridge`），没有守护进程可启停。
 

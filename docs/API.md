@@ -87,11 +87,11 @@ GET  /api/admin/job  →  轮询进度
 |---|---|---|
 | `GET` | `/api/memories` | 记忆报表（筛选 + 分页 + 溯源）|
 | `GET` | `/api/memories/{mid}` | 单条记忆详情（wiki 引用点开看来源用）|
-| `GET` | `/api/memos/search` | 语义检索（混合召回）|
-| `POST` | `/api/memos/feedback` | 👍/👎 反馈（状态式，可撤销）|
-| `POST` | `/api/memos/weight` | ⭐ 手动加权（锁定不衰减）|
-| `GET` | `/api/memos/traces` | 近期记忆轨迹 |
-| `GET` | `/api/memos/status` | 记忆引擎状态 |
+| `GET` | `/api/engine/search` | 语义检索（混合召回）|
+| `POST` | `/api/engine/feedback` | 👍/👎 反馈（状态式，可撤销）|
+| `POST` | `/api/engine/weight` | ⭐ 手动加权（锁定不衰减）|
+| `GET` | `/api/engine/traces` | 近期记忆轨迹 |
+| `GET` | `/api/engine/status` | 记忆引擎状态 |
 
 **`GET /api/memories/{mid}` 返回**
 
@@ -124,7 +124,7 @@ GET  /api/admin/job  →  轮询进度
 | `sort` | `time` | `time\|value\|type\|confidence\|status\|source\|conversation` |
 | `page` / `page_size` | 1 / 20 | 分页 |
 
-**`POST /api/memos/feedback` 参数**
+**`POST /api/engine/feedback` 参数**
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
@@ -357,7 +357,7 @@ python scripts/audit_frontend_api.py        # 或 --used 连已用的一起列 /
 | **外部投喂** | ✅ **全部接上** | 投喂视图：清单 / 详情 / 四形态投喂 / 上传 / 扫描批量 / 重转 / 撤下 / 删除 / 体检 / 格式白名单，2026-10-22 |
 | **快照** | ✅ **全部接上** | 运维页「快照与回滚」卡：列表 / 立即快照 / 分范围回滚（执行前自动存保护快照），2026-10-23 |
 | 会话 + 记忆排除 | 部分未接 | 记忆排除 UI 已下线（整会话 / 部分轮次 + `exclusions/summary`）；面板改标题等仍在用 |
-| **记忆** | ✅ **全部接上** | 报表 + 单条详情（wiki 溯源浮层）+ 时间线明细（`/api/memos/traces`），2026-10-23 |
+| **记忆** | ✅ **全部接上** | 报表 + 单条详情（wiki 溯源浮层）+ 时间线明细（`/api/engine/traces`），2026-10-23 |
 | **配置** | ✅ **已接（只读）** | 设置页：按模块分组、带原注释、标出环境变量覆盖；**无写接口**（见 §3.8）|
 | 运维 | 部分未接 | `admin/score`（入口已隐藏）/ `admin/exclude` / `admin/rebuild` |
 | 引导与统计 | 部分未接 | 面板走 `/api/bootstrap`（**已含统计**），`stats`/`facets`/`folders` 供外部调用 |
@@ -414,7 +414,7 @@ python scripts/audit_frontend_api.py        # 或 --used 连已用的一起列 /
 | `POST /api/wiki/update` | 增量更新 wiki | ✅ 运维·增量更新 |
 | `GET /api/wiki/batch/status`、`run`、`cancel`、`resubmit`、`checks` | 离线批处理（Batch API，官方价 5 折）的推进与预检 | ✅ 运维·离线批处理 |
 | `GET /api/snapshots`、`POST /api/snapshots/create`、`POST /api/snapshots/restore` | 快照与回滚（列表 / 立即快照 / 分范围回滚） | ✅ 运维·快照与回滚 |
-| `GET /api/memos/traces` | 记忆**时间线明细**（原始逐条轨迹，含 user/agent 摘要与分值）。面板「记忆报表」头部的**时间线**弹层用它：按天分组、滚动加载 | ✅ 记忆·时间线（2026-10-23）|
+| `GET /api/engine/traces` | 记忆**时间线明细**（原始逐条轨迹，含 user/agent 摘要与分值）。面板「记忆报表」头部的**时间线**弹层用它：按天分组、滚动加载 | ✅ 记忆·时间线（2026-10-23）|
 | `GET /api/memories/{mid}` | **单条记忆详情**。wiki 页里 `[m3711]` 点击后的速览浮层用它（含去重链与回跳会话所需的 `has_conversation`）| ✅ wiki 溯源（本轮新增）|
 | `GET /api/config` | **配置只读视图**：带原注释、按模块分组、标出被环境变量覆盖的键、与 `agentmemhub.yaml.example` 做键集体检。故意不提供写接口 | ✅ 设置页（本轮新增）|
 
@@ -562,7 +562,7 @@ python scripts/audit_frontend_api.py --json   # 机器读（给看板 / CI）
 它的边界（漏网情形）写在脚本 docstring 里，**别把它的结论当唯一真相**。
 
 > ⚠️ **静态扫描前端调用一定有漏网**：URL 若写在变量里
-> （如 `` const u = `/api/memos/feedback?...`; fetch(u) ``），正则匹配不到。
+> （如 `` const u = `/api/engine/feedback?...`; fetch(u) ``），正则匹配不到。
 > 本次就误报过一次"feedback 没被调用"——**关键接口必须交叉验证**
 > （用关键字 grep 确认），不能只信脚本结论。
 

@@ -144,13 +144,13 @@ def _index_counts(source: str, cid: str,
                   whole: bool = False) -> tuple[int, int]:
     """(该会话当前已入库单元数, 被排除轮次影响过的单元数)。
 
-    用于面板展示「已写入 N 条 / 已排除影响 M 条」；memos 后端返回 (0, 0)。
+    用于面板展示「已写入 N 条 / 已排除影响 M 条」；旧回退后端返回 (0, 0)。
     turn_keys/whole 由调用方从采集库的排除表读出后传入（排除表在采集库，
     索引库里没有它）。
     """
     try:
-        from agentmemhub import memos_daemon
-        if not memos_daemon._backend_is_rag():
+        from agentmemhub import engine_api
+        if not engine_api._backend_is_rag():
             return 0, 0
         import sqlite3
 
@@ -180,12 +180,12 @@ def _index_counts(source: str, cid: str,
 def _purge_index(source: str, cid: str, turn_key: str | None = None) -> int:
     """索引库级联清理（R6）：会话删除/排除后同步移除派生记忆。
 
-    rag 后端下直接删 units+vec+FTS；memos 回退后端无本地索引，返回 0。
+    直接删 units+vec+FTS；旧回退后端无本地索引，返回 0。
     失败不抛（面板操作不该因索引异常而整体失败），仅记日志。
     """
     try:
-        from agentmemhub import memos_daemon
-        if not memos_daemon._backend_is_rag():
+        from agentmemhub import engine_api
+        if not engine_api._backend_is_rag():
             return 0
         from agentmemhub import rag_bridge
         from agentmemhub.rag.ingest import (
@@ -892,17 +892,17 @@ def create_app(db_path: Path | None = None):
     # 不碰本地采集库、不持 _LOCK；不可用时透明降级并回 503
     # ------------------------------------------------------------------
 
-    @app.get("/api/memos/status", summary="记忆引擎状态")
-    def api_memos_status():
-        from agentmemhub import memos_daemon
-        return JSONResponse(memos_daemon.daemon_status())
+    @app.get("/api/engine/status", summary="记忆引擎状态")
+    def api_engine_status():
+        from agentmemhub import engine_api
+        return JSONResponse(engine_api.daemon_status())
 
     @app.get("/api/health", summary="记忆库一致性巡检")
     def api_health():
         """记忆库一致性指标（只读）。引擎离线时 503。"""
-        from agentmemhub import memos_daemon
+        from agentmemhub import engine_api
         try:
-            return JSONResponse(memos_daemon.engine_request(
+            return JSONResponse(engine_api.engine_request(
                 "GET", "/api/v1/health", timeout=15))
         except Exception as e:
             raise HTTPException(status_code=503, detail=f"health check failed: {e}")
@@ -910,39 +910,39 @@ def create_app(db_path: Path | None = None):
     @app.post("/api/health/reclaim", summary="回收孤儿投影（清理 units 已不存在的向量）")
     def api_health_reclaim():
         """回收滞留投影（幂等）——与蒸馏流程里自动执行的是同一个函数。"""
-        from agentmemhub import memos_daemon
+        from agentmemhub import engine_api
         try:
-            return JSONResponse(memos_daemon.engine_request(
+            return JSONResponse(engine_api.engine_request(
                 "POST", "/api/v1/health/reclaim", timeout=60))
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"reclaim failed: {e}")
 
     def _require_engine() -> dict:
         """引擎在线且鉴权可过则返回 overview；否则 503（detail 含原因）。"""
-        from agentmemhub import memos_daemon
+        from agentmemhub import engine_api
         try:
-            return memos_daemon.engine_request("GET", "/api/v1/overview", timeout=15)
-        except memos_daemon.EngineAuthError as e:
+            return engine_api.engine_request("GET", "/api/v1/overview", timeout=15)
+        except engine_api.EngineAuthError as e:
             raise HTTPException(status_code=503, detail=str(e))
         except Exception:
             raise HTTPException(status_code=503, detail="memory engine offline")
 
-    @app.get("/api/memos/search", summary="语义检索记忆（三路融合召回）")
-    def api_memos_search(q: str = Query(default="", min_length=1, description="检索词"),
+    @app.get("/api/engine/search", summary="语义检索记忆（三路融合召回）")
+    def api_engine_search(q: str = Query(default="", min_length=1, description="检索词"),
                          top: int = Query(default=20, ge=1, le=50, description="返回条数上限（1~50）")):
         """语义检索：返回 hits（含会话定位信息，前端可点击跳转）。"""
         import json as _json
-        from agentmemhub import memos_daemon
+        from agentmemhub import engine_api
         ov = _require_engine()
         try:
             # 标注调用方：**用户主动查询**希望"尽量不遗漏"，可以比 Agent 自动
             # 召回配得更宽松（对应 `rag.retrieval.callers.panel`）
             from agentmemhub.rag.config import retrieval_caller
             with retrieval_caller("panel"):
-                res = memos_daemon.engine_request(
+                res = engine_api.engine_request(
                     "POST", "/api/v1/memory/search",
                     body={"agent": "hermes", "query": q}, timeout=30)
-        except memos_daemon.EngineAuthError as e:
+        except engine_api.EngineAuthError as e:
             raise HTTPException(status_code=503, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"engine query failed: {e}")
@@ -975,8 +975,8 @@ def create_app(db_path: Path | None = None):
                              "episodes": ov.get("episodes"),
                              "traces": ov.get("traces")})
 
-    @app.post("/api/memos/feedback", summary="记忆反馈 👍/👎（状态式，可撤销）")
-    def api_memos_feedback(traceId: str = Query(..., description="记忆 id（mcp_* / dst_* / msg:* 等）"),
+    @app.post("/api/engine/feedback", summary="记忆反馈 👍/👎（状态式，可撤销）")
+    def api_engine_feedback(traceId: str = Query(..., description="记忆 id（mcp_* / dst_* / msg:* 等）"),
                            polarity: str = Query(default="neutral", pattern="^(positive|negative|neutral)$", description="极性：positive / negative / neutral"),
                            magnitude: float = Query(default=1.0, description="强度（越大影响越显著）"),
                            channel: str = Query(default="explicit", description="反馈渠道：explicit（面板）/ implicit（行为推断）"),
@@ -987,16 +987,16 @@ def create_app(db_path: Path | None = None):
         state=true（面板默认）：**状态式可撤销**——同一 unit 只保留一条当前
         表态；再次点击同极性 = revoke 取消，回退到来源初始分（蒸馏 0.3 /
         Agent 写入 0.6）。这解决"反复点赞只是历史均值被稀释、且无法取消"。
-        state=false：历史累加语义（MemOS 同源，MCP memory_score 走它）。
+        state=false：历史累加语义（上游同源，MCP memory_score 走它）。
         """
-        from agentmemhub import logs, memos_daemon
+        from agentmemhub import logs, engine_api
         body = {"channel": channel, "polarity": polarity,
                 "magnitude": magnitude, "traceId": traceId,
                 "state": state, "revoke": revoke}
         try:
-            res = memos_daemon.engine_request(
+            res = engine_api.engine_request(
                 "POST", "/api/v1/feedback", body=body, timeout=15)
-        except memos_daemon.EngineAuthError as e:
+        except engine_api.EngineAuthError as e:
             raise HTTPException(status_code=503, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"engine feedback failed: {e}")
@@ -1289,8 +1289,8 @@ def create_app(db_path: Path | None = None):
             src.close()
         return JSONResponse(out)
 
-    @app.post("/api/memos/weight", summary="记忆手动加权 ⭐（锁定不衰减）")
-    def api_memos_weight(traceId: str = Query(..., description="记忆 id"),
+    @app.post("/api/engine/weight", summary="记忆手动加权 ⭐（锁定不衰减）")
+    def api_engine_weight(traceId: str = Query(..., description="记忆 id"),
                          value: float | None = Query(default=None,
                                                      ge=0.0, le=1.0,
                                                      description="权重 0~1；不传=仅查看当前权重")):
@@ -1302,10 +1302,10 @@ def create_app(db_path: Path | None = None):
         """
         import sqlite3 as _sq
 
-        from agentmemhub import logs, memos_daemon
+        from agentmemhub import logs, engine_api
         from agentmemhub.rag import memstore
         from agentmemhub import rag_bridge
-        if memos_daemon.auth_state() is None:
+        if engine_api.auth_state() is None:
             raise HTTPException(
                 status_code=503,
                 detail="记忆索引不可用（检查 database/session_rag.db 与 models/）")
@@ -1322,17 +1322,17 @@ def create_app(db_path: Path | None = None):
                     + ("清除手动设定" if value is None else f"锁定 {value}"))
         return JSONResponse({"ok": True, "traceId": traceId, **r})
 
-    @app.get("/api/memos/traces", summary="近期记忆轨迹")
-    def api_memos_traces(limit: int = Query(default=8, ge=1, le=50, description="返回条数（1~50）"),
+    @app.get("/api/engine/traces", summary="近期记忆轨迹")
+    def api_engine_traces(limit: int = Query(default=8, ge=1, le=50, description="返回条数（1~50）"),
                          offset: int = Query(default=0, ge=0, description="跳过前 N 条（分页）")):
         """转发最近记忆列表（时间线，纯 SQL 侧）。"""
-        from agentmemhub import memos_daemon
+        from agentmemhub import engine_api
         _require_engine()
         try:
-            res = memos_daemon.engine_request(
+            res = engine_api.engine_request(
                 "GET", f"/api/v1/traces?limit={limit}&offset={offset}&groupByTurn=1",
                 timeout=15)
-        except memos_daemon.EngineAuthError as e:
+        except engine_api.EngineAuthError as e:
             raise HTTPException(status_code=503, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"engine query failed: {e}")
@@ -1369,10 +1369,10 @@ def create_app(db_path: Path | None = None):
     @app.post("/api/admin/push", summary="向量化写入记忆索引（长任务）")
     def api_admin_push(source: str = Query(default="", description="限定某个 Agent 来源（留空=全部）")):
         """写入记忆：把采集库会话向量化写入记忆索引（后台任务）。"""
-        from agentmemhub import cli, memos_daemon
+        from agentmemhub import cli, engine_api
         from agentmemhub import logs
         from agentmemhub.web import tasks
-        if memos_daemon.auth_state() is None:
+        if engine_api.auth_state() is None:
             raise HTTPException(status_code=503, detail="记忆索引不可用（检查 database/session_rag.db 与 models/）")
         name = f"写入记忆索引{'（' + source + '）' if source else ''}"
         job = tasks.submit(name, _logged_task(name, _run_push_fn(cli, source)))
@@ -1390,9 +1390,9 @@ def create_app(db_path: Path | None = None):
     def api_admin_score(limit: int = Query(default=0, ge=0, description="最多评多少条（0=全部）"),
                         dryRun: bool = Query(default=False, description="只评估不写分")):
         """LLM 批量自动评分历史记忆（后台任务，实时进度）。需记忆索引可用且已配置 LLM。"""
-        from agentmemhub import cli, logs, memos_daemon
+        from agentmemhub import cli, logs, engine_api
         from agentmemhub.web import tasks
-        if memos_daemon.auth_state() is None:
+        if engine_api.auth_state() is None:
             raise HTTPException(status_code=503, detail="记忆索引不可用（检查 database/session_rag.db 与 models/）")
         name = f"自动评分历史记忆{'（上限 ' + str(limit) + ' 条）' if limit else ''}"
         job = tasks.submit(name, _logged_task(
@@ -1437,9 +1437,9 @@ def create_app(db_path: Path | None = None):
 
         需 llm 段已配置；幂等（重跑跳过已完成切片），失败切片不登记、重跑可补。
         """
-        from agentmemhub import logs, memos_daemon
+        from agentmemhub import logs, engine_api
         from agentmemhub.web import tasks
-        if memos_daemon.auth_state() is None:
+        if engine_api.auth_state() is None:
             raise HTTPException(
                 status_code=503,
                 detail="记忆索引不可用（检查 database/session_rag.db 与 models/）")
@@ -1457,9 +1457,9 @@ def create_app(db_path: Path | None = None):
                                             pattern="^(repair|rebuild)$",
                                             description="repair=只补缺失向量；rebuild=全量重算")):
         """补向量：给缺向量的记忆补嵌（后台任务，逐轮进度）。"""
-        from agentmemhub import logs, memos_daemon
+        from agentmemhub import logs, engine_api
         from agentmemhub.web import tasks
-        if memos_daemon.auth_state() is None:
+        if engine_api.auth_state() is None:
             raise HTTPException(status_code=503, detail="记忆索引不可用（检查 database/session_rag.db 与 models/）")
         name = f"补向量（{mode}）"
         job = tasks.submit(name, _logged_task(name, _run_rebuild_fn(mode)))
