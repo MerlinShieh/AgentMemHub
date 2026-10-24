@@ -81,7 +81,7 @@ def test_设置页与记忆溯源的关键节点齐全():
     """JS 里 `$('#id')` 拿不到元素会静默失败，这里先钉住。"""
     html = _html_stripped()
     for eid in ("cfgDrift", "cfgDriftSum", "cfgDriftToggle", "cfgDriftBody",
-                "cfgList", "cfgFile", "cfgStats", "cfgSearch",
+                "cfgList", "cfgFile", "cfgStats", "cfgSearch", "cfgFoldBtn",
                 "memTimeline", "memTimelineBtn", "memoPeek", "memoPeekBody"):
         assert f'id="{eid}"' in html, f"缺少 #{eid}"
 

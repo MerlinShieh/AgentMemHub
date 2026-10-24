@@ -888,6 +888,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         <span class="ml-auto flex items-center gap-1.5">
           <input id="cfgSearch" type="text" placeholder="筛配置项（键名 / 值 / 注释）"
                  class="w-60 rounded-md border border-input bg-background px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring">
+          <button id="cfgFoldBtn" class="wk-act">全部收起</button>
           <button id="cfgRefreshBtn" class="wk-act">重新读取</button>
         </span>
       </div>
@@ -1749,12 +1750,76 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
   }
 
   // ===== 设置页：统一配置只读视图 =====
-  const CFG = { data: null, q: '', bound: false };
+  // `collapsed` 记的是用户**主动折叠**过的分组路径 —— 搜索会重渲染，
+  // 若不记住，收起状态每次输入都被冲掉。
+  const CFG = { data: null, q: '', bound: false, collapsed: new Set() };
 
   function cfgHit(e, q){
     if(!q) return true;
     return `${e.path} ${e.key} ${e.value_raw || ''} ${e.comment || ''}`
       .toLowerCase().includes(q);
+  }
+
+  /** 把按文件顺序的扁平 `entries` 还原成真实层级。
+   *
+   * `parse_annotated` 给的是逐行序列，缩进信息在 `depth` 里；配一个栈就能重建树。
+   * 之所以要重建而不是硬靠 `depth` 打左 padding：折叠需要**父子关系**
+   * （折叠一个分组要收起它的整棵子树），纯 padding 做不到。
+   */
+  function cfgBuildTree(entries){
+    const root = { children: [], depth: -1 };
+    const stack = [root];
+    for(const e of entries){
+      const node = Object.assign({}, e, { children: [] });
+      while(stack.length > 1 && stack[stack.length - 1].depth >= node.depth) stack.pop();
+      stack[stack.length - 1].children.push(node);
+      stack.push(node);
+    }
+    return root.children;
+  }
+
+  /** 搜索过滤：叶子命中即留；分组名命中则**整棵子树都留**。
+   *
+   * 搜 "wiki" 的人想看的是"这一节到底配了什么"，不是只剩一个空标题。
+   */
+  function cfgFilter(node, q){
+    if(!q) return node;
+    if(!node.is_section) return cfgHit(node, q) ? node : null;
+    const selfHit = `${node.path} ${node.key} ${node.comment || ''}`
+      .toLowerCase().includes(q);
+    const kids = node.children.map(c => cfgFilter(c, q)).filter(Boolean);
+    if(!selfHit && !kids.length) return null;
+    return Object.assign({}, node, {
+      children: selfHit ? node.children : kids,
+      forceOpen: true,
+    });
+  }
+
+  function cfgNodeHtml(node, d, q){
+    const esc = wikiEsc;
+    if(!node.is_section){
+      const over = (d.env_overrides || []).find(o => o.path === node.path && o.active);
+      const val = node.value_raw
+        ? esc(node.value_raw)
+        : '<span class="text-muted-foreground">—</span>';
+      return `<div class="flex flex-wrap items-baseline gap-x-2 px-2 py-[3px] hover:bg-muted/40">`
+        + `<span class="shrink-0 font-mono text-[11px] text-foreground" title="${esc(node.path)}（第 ${node.line} 行）">${esc(node.key)}</span>`
+        + `<span class="min-w-0 break-all font-mono text-[11px] text-primary" title="${esc(node.value_raw)}">${val}</span>`
+        + `<span class="min-w-0 flex-1 text-[10px] leading-snug text-muted-foreground">${esc(node.comment || '')}`
+        +   (over ? ` <span class="chip bg-warning-soft text-warning">被 ${esc(over.env)} 覆盖</span>` : '')
+        + `</span></div>`;
+    }
+    const open = node.forceOpen || !CFG.collapsed.has(node.path);
+    const kids = node.children.map(c => cfgNodeHtml(c, d, q)).join('');
+    const cnt = node.children.filter(c => !c.is_section).length;
+    return `<details class="cfg-sec" data-path="${esc(node.path)}"${open ? ' open' : ''}>`
+      + `<summary class="flex cursor-pointer flex-wrap items-baseline gap-x-2 border-t border-border bg-muted/40 px-2 py-1">`
+      +   `<span class="font-mono text-[11px] font-semibold text-foreground">${esc(node.key)}</span>`
+      +   (cnt ? `<span class="text-[10px] text-muted-foreground">${cnt} 项</span>` : '')
+      +   (node.comment ? `<span class="min-w-0 flex-1 truncate text-[10px] text-muted-foreground"># ${esc(node.comment)}</span>` : '')
+      + `</summary>`
+      + `<div class="ml-2 border-l border-border/60 pl-2">${kids}</div>`
+      + `</details>`;
   }
 
   async function loadConfig(){
@@ -1837,44 +1902,12 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     }
 
     const q = (CFG.q || '').trim().toLowerCase();
-    // 搜索时只保留命中的叶子及其**祖先分组** —— 否则分组标题会满屏都是，
-    // 反而看不出"命中在哪一节"。
-    const keepSections = new Set();
-    if(q){
-      leaves.forEach(e => {
-        if(!cfgHit(e, q)) return;
-        const parts = e.path.split('.');
-        for(let k = 1; k < parts.length; k++) keepSections.add(parts.slice(0, k).join('.'));
-      });
-    }
-
-    const out = [];
-    entries.forEach(e => {
-      if(e.is_section){
-        if(q && !keepSections.has(e.path)) return;
-        out.push(`<div class="flex items-start gap-2 border-t border-border bg-muted/40 px-4 py-1.5">`
-          + `<i data-lucide="folder-tree" class="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground"></i>`
-          + `<div class="min-w-0 flex-1">`
-          +   `<div class="font-mono text-[11px] font-semibold text-foreground" title="第 ${e.line} 行">${wikiEsc(e.path)}</div>`
-          +   (e.comment ? `<div class="text-[10px] leading-snug text-muted-foreground">${wikiEsc(e.comment)}</div>` : '')
-          + `</div></div>`);
-        return;
-      }
-      if(!cfgHit(e, q)) return;
-      const over = (d.env_overrides || []).find(o => o.path === e.path && o.active);
-      const val = e.value_raw
-        ? wikiEsc(e.value_raw)
-        : '<span class="text-muted-foreground">—</span>';
-      out.push(`<div class="flex items-start gap-3 px-4 py-1.5 hover:bg-muted/30">`
-        + `<span class="shrink-0 truncate font-mono text-[11px] text-foreground" style="width:14rem;padding-left:${e.depth * 1.1}rem"`
-        +   ` title="${wikiEsc(e.path)}（第 ${e.line} 行）">${wikiEsc(e.key)}</span>`
-        + `<span class="w-56 shrink-0 truncate font-mono text-[11px] text-primary" title="${wikiEsc(e.value_raw)}">${val}</span>`
-        + `<span class="min-w-0 flex-1 text-[11px] leading-snug text-muted-foreground">${wikiEsc(e.comment || '')}`
-        +   (over ? ` <span class="chip bg-warning-soft text-warning">被 ${wikiEsc(over.env)} 覆盖</span>` : '')
-        + `</span></div>`);
-    });
-    if(!out.length) out.push('<div class="px-4 py-6 text-center text-xs text-muted-foreground">没有匹配的配置项</div>');
-    $('#cfgList').innerHTML = out.join('');
+    // 真实层级 + 可折叠：用 `<details>` 原生实现（键盘、读屏、marker 都免费），
+    // 而不是靠 depth 往左打 padding 假装成树。
+    const tree = cfgBuildTree(entries);
+    const shown = q ? tree.map(n => cfgFilter(n, q)).filter(Boolean) : tree;
+    $('#cfgList').innerHTML = shown.map(n => cfgNodeHtml(n, d, q)).join('')
+      || '<div class="px-4 py-6 text-center text-xs text-muted-foreground">没有匹配的配置项</div>';
     reicons();
   }
 
@@ -1893,6 +1926,23 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       const v = e.target.value;
       t = setTimeout(() => { CFG.q = v; if(CFG.data) renderConfig(); }, 200);
     });
+    // `<details>` 的 toggle **不冒泡**，只能在捕获阶段收。记住用户主动折叠了
+    // 哪几节 —— 否则搜索触发重渲染，收起状态会被一起冲掉。
+    $('#cfgList').addEventListener('toggle', e => {
+      const det = e.target;
+      if(!det || det.tagName !== 'DETAILS' || !det.classList.contains('cfg-sec')) return;
+      if(det.open) CFG.collapsed.delete(det.dataset.path);
+      else CFG.collapsed.add(det.dataset.path);
+    }, true);
+    $('#cfgFoldBtn').onclick = () => {
+      const secs = ((CFG.data || {}).entries || []).filter(e => e.is_section);
+      const allFolded = secs.every(s => CFG.collapsed.has(s.path));
+      CFG.collapsed = allFolded ? new Set() : new Set(secs.map(s => s.path));
+      CFG.q = '';                       // 收起/展开全部时清掉搜索，否则只作用在过滤后
+      $('#cfgSearch').value = '';
+      $('#cfgFoldBtn').textContent = allFolded ? '全部收起' : '全部展开';
+      renderConfig();
+    };
   }
 
   // ==================================================================
