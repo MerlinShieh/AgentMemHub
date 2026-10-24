@@ -1138,7 +1138,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     psc = sub.add_parser("score", help="LLM 批量自动评分历史记忆（三轴评估 → feedback 写入，检索排序生效）")
     psc.add_argument("--pending", action="store_true",
-                     help="只评分 sync 推送成功后入队的 trace（pending_score 队列，"
+                     help="只评分 sync 处理后入队的 trace（pending_score 队列，"
                           "成功后消费清空；dry-run 不清空）")
     psc.add_argument("--limit", type=int, default=0, help="最多评分条数（0=全部）")
     psc.add_argument("--dry-run", action="store_true", help="只评估不写入（预览 verdict 分布）")
