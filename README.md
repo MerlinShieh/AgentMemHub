@@ -866,11 +866,11 @@ uv run python -m agentmemhub llm-config --json   # 机器读
 | 离线批处理（Batch API） | `llm_batch.py`、`batch_client.py`、`wiki_batch.py`、`task_queue.py`（通用惰性收割）、`batch_ops.py`（CLI/HTTP 共用动作层） | [docs/modules/batch-offline.md](docs/modules/batch-offline.md) | 已落地（M0–M3 + M4/M5 核心；剩 M6 收尾，见 [计划](docs/batch-offline-plan.md)） |
 | 通知与推送 | `notify.py`（**通道可插拔**）、`logs.py`（`audit_notify`） | [docs/modules/notify.md](docs/modules/notify.md) | 已写（2026-10-04） |
 | 外部投喂转译层 | `agentmemhub/feed/**`（转换器注册表 + 三段物料）、`cli.py`（`feed` 子命令）、`mcp_server.py`（`feed_add`/`feed_list`/`feed_status`） | [docs/modules/feed.md](docs/modules/feed.md) | **常用文档已适配**：md/txt · 网页（含本地另存）· 公众号 · **PDF** · **DOCX** · **PPTX** · **XLSX** · **XMIND** · **CSV/TSV**；MCP 三个投喂工具与通知已接（M5 ✅）；**面板投喂视图已落地**（清单/四形态投喂/扫描批量/重转/撤下/删除/体检/格式白名单，2026-10-22）；剩 T4 图片 OCR（见 [计划](docs/feed-adapter-plan.md)） |
-| 记忆引擎（内置 rag） | `agentmemhub/rag/**` | `docs/modules/memory-engine.md` | 计划中 |
+| 记忆引擎（内置 rag） | `agentmemhub/rag/**` | [docs/modules/memory-engine.md](docs/modules/memory-engine.md) | 已写（2026-10-23） |
 | 面板后端网关 | `agentmemhub/web/**`、`mdmini.py` | [docs/modules/panel.md](docs/modules/panel.md) | 已写（2026-10-23） |
-| 采集与适配 | `agentmemhub/adapters/**`、`store.py`、`models.py`、`watermarks.py` | `docs/modules/ingest-adapters.md` | 计划中 |
-| 蒸馏与 LLM 接入 | `distill.py`、`scoring.py`、`llm.py`、`export.py` | `docs/modules/distill-llm.md` | 计划中 |
-| 三层对外入口 | `mcp_server.py`、`cli.py`、`console.py`、`health.py` | `docs/modules/interfaces.md` | 计划中 |
+| 采集与适配 | `agentmemhub/adapters/**`、`store.py`、`models.py`、`watermarks.py` | [docs/modules/ingest-adapters.md](docs/modules/ingest-adapters.md) | 已写（2026-10-23） |
+| 蒸馏与 LLM 接入 | `distill.py`、`scoring.py`、`llm.py`、`export.py` | [docs/modules/distill-llm.md](docs/modules/distill-llm.md) | 已写（2026-10-23） |
+| 三层对外入口 | `mcp_server.py`、`cli.py`、`console.py`、`health.py` | [docs/modules/interfaces.md](docs/modules/interfaces.md) | 已写（2026-10-23） |
 
 ## 需求
 
