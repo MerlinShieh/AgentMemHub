@@ -412,7 +412,9 @@ wiki:
       —— **2026-10-08 复查**：其中 `offline_submitted`（M2b-1）与 `batch_consumed` / `batch_voided` /
       `batch_expired`（M2b-2）**均已转正**；**只剩 `config_change` 未实现**，
       它也是 `logging.md` §8 现在唯一列着的事件（该节内容已核实准确，无需改动）。
-      `config_change` 属于面板 `PUT /api/config` 白名单的能力，**待面板重做时一并补**。
+      `config_change` 属于面板 `PUT /api/config` 白名单的能力。**2026-10-23 决策变更**：
+      面板最终做成**只读**配置视图（`GET /api/config`），**不实现 `PUT /api/config`**
+      —— 没有写入口就没有审计对象，该事件**不再计划实现**（详见 [config.md](modules/config.md) §8）。
 > **2026-10-08 复查（Merlin 核准）**：本节原列 4 条 `- [ ]`，逐条对照代码与实盘后：
 > **3 条已完成，1 条撤销**。撤销那条是**反向错误**（差点把"未实现的"写成"已实现"）。
 

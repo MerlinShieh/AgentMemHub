@@ -848,7 +848,7 @@ uv run python -m agentmemhub llm-config --json   # 机器读
 | [docs/model-selection.md](docs/model-selection.md) | LLM 模型选型与定价（含免费档与跑批注意事项） |
 | [docs/API.md](docs/API.md) | 对外契约：HTTP / MCP / CLI（含错误语义与长任务约定） |
 | [docs/EXAMPLES.md](docs/EXAMPLES.md) | SQL / CLI / Python 查询示例 |
-| [docs/branch-divergence.md](docs/branch-divergence.md) | 分支差异记录（`feat/llm-wiki` 相对 `main`） |
+| [docs/branch-divergence.md](docs/branch-divergence.md) | **历史归档**：`feat/llm-wiki` 相对 `main` 的差异记录（该分支已于 2026-10-23 删除，内容全部并入 `feat/kb-ui`，删除前打了 tag `llm-wiki-done` = `d5dd4f4`） |
 
 服务运行时另有交互式接口文档 `/api/docs`（Swagger UI）。
 
@@ -865,9 +865,9 @@ uv run python -m agentmemhub llm-config --json   # 机器读
 | 日志与可观测性 | `logs.py`、`failures.py`、`snapshot.py`、`notify.py` | [docs/logging.md](docs/logging.md)（**事件字典 + 排查剧本**） | 已写 |
 | 离线批处理（Batch API） | `llm_batch.py`、`batch_client.py`、`wiki_batch.py`、`task_queue.py`（通用惰性收割）、`batch_ops.py`（CLI/HTTP 共用动作层） | [docs/modules/batch-offline.md](docs/modules/batch-offline.md) | 已落地（M0–M3 + M4/M5 核心；剩 M6 收尾，见 [计划](docs/batch-offline-plan.md)） |
 | 通知与推送 | `notify.py`（**通道可插拔**）、`logs.py`（`audit_notify`） | [docs/modules/notify.md](docs/modules/notify.md) | 已写（2026-10-04） |
-| 外部投喂转译层 | `agentmemhub/feed/**`（转换器注册表 + 三段物料）、`cli.py`（`feed` 子命令）、`mcp_server.py`（`feed_add`/`feed_list`/`feed_status`） | [docs/modules/feed.md](docs/modules/feed.md) | **常用文档已适配**：md/txt · 网页（含本地另存）· 公众号 · **PDF** · **DOCX** · **PPTX** · **XLSX** · **XMIND** · **CSV/TSV**；MCP 三个投喂工具与通知已接（M5 ✅）；剩 T4 图片 OCR 与面板入口（见 [计划](docs/feed-adapter-plan.md)） |
+| 外部投喂转译层 | `agentmemhub/feed/**`（转换器注册表 + 三段物料）、`cli.py`（`feed` 子命令）、`mcp_server.py`（`feed_add`/`feed_list`/`feed_status`） | [docs/modules/feed.md](docs/modules/feed.md) | **常用文档已适配**：md/txt · 网页（含本地另存）· 公众号 · **PDF** · **DOCX** · **PPTX** · **XLSX** · **XMIND** · **CSV/TSV**；MCP 三个投喂工具与通知已接（M5 ✅）；**面板投喂视图已落地**（清单/四形态投喂/扫描批量/重转/撤下/删除/体检/格式白名单，2026-10-22）；剩 T4 图片 OCR（见 [计划](docs/feed-adapter-plan.md)） |
 | 记忆引擎（内置 rag） | `agentmemhub/rag/**` | `docs/modules/memory-engine.md` | 计划中 |
-| 面板后端网关 | `agentmemhub/web/**` | `docs/modules/panel.md` | 计划中 |
+| 面板后端网关 | `agentmemhub/web/**`、`mdmini.py` | [docs/modules/panel.md](docs/modules/panel.md) | 已写（2026-10-23） |
 | 采集与适配 | `agentmemhub/adapters/**`、`store.py`、`models.py`、`watermarks.py` | `docs/modules/ingest-adapters.md` | 计划中 |
 | 蒸馏与 LLM 接入 | `distill.py`、`scoring.py`、`llm.py`、`export.py` | `docs/modules/distill-llm.md` | 计划中 |
 | 三层对外入口 | `mcp_server.py`、`cli.py`、`console.py`、`health.py` | `docs/modules/interfaces.md` | 计划中 |
@@ -1137,6 +1137,37 @@ RAG 优化「能不能捞到」，wiki 优化「有没有结构」；**wiki 不�
       删完**重建 manifest**。**边界**：只处理**尚未进 wiki** 的记忆（删除不产生死链），
       已进 wiki 的删除属 `docs/memory-deletion.md` 范畴，`drop()` 会拒绝
 - [x] 主模型切换 `xiaomi/mimo-v2.6-flash`（同价优先新模型，V2.5 留作回退位）
+
+### v2.5（2026-10-15 ~ 10-22）外部文档投喂
+
+**知识来源从"对话"扩到"文档"**：
+
+- [x] **素材登记层**（`materials.db`）+ 三段物料（原件快照 / 转换后正文 / 发布页），
+      与自有 wiki **并列**而非从属：不参与蒸馏、不参与 L1/L2 编译，产物落旁路根 `out_feed/`
+- [x] **格式覆盖**：md/txt · 网页（含本地另存）· 公众号 · PDF · DOCX · PPTX · **XLSX** ·
+      **XMIND** · **CSV/TSV**（表格转 markdown 有行列/单元格上限，超限截断并标注）
+- [x] **11 个 HTTP 接口 + 3 个 MCP 工具**（`feed_add` / `feed_list` / `feed_status`）——
+      MCP **只给写入与查看、不给删除**（无人值守约束）；面板人工勾选 + 二次确认，可以删
+- [x] **幂等**（内容哈希判重，重复投喂答"已投喂过"）+ 后缀白名单热改
+- [x] **面板投喂视图**：清单 / 四形态投喂（路径·链接·上传·正文）/ 扫描批量（先只读预览）/
+      重转·撤下·删除 / 体检（P0/P1）/ 白名单
+
+### v2.6（2026-10-18 ~ 10-23）面板 UI 统一重做
+
+**把"后端做完了但没入口"补齐**（62 个路由只调了 18 个 → 64 个路由调了 53 个）：
+
+- [x] **四标签页**：「统一会话」/「记忆报表」/「wiki知识库」/「设置」，各管一层、互不混排
+- [x] **知识库三子视图**：**浏览**（磁盘为准、不查投影）/ **运维**（健康·待更新·失败补跑·
+      触发器热改·离线批次·快照回滚六块）/ **投喂**
+- [x] **记忆溯源可点**：正文里的 `[m3236]` 即 `distilled_memories.id`，点开浮层看
+      类型/置信/来源会话/去重链（`GET /api/memories/{mid}`），可一跳报表、一跳原始会话
+      （采集库已无该会话时**不给回跳按钮**，避免死链）
+- [x] **记忆时间线**：按天分组的原始输入轨迹，与报表的"蒸馏终稿"口径分开
+- [x] **设置页（只读）**：`config_doc.py` 行扫描保留每个键的原注释 + 与
+      `agentmemhub.yaml.example` 做键集体检（缺失/多余/取值不同）；**刻意不提供写接口**
+- [x] **守护**：`scripts/audit_frontend_api.py`（路由↔前端对账）、
+      `tests/test_web_layout.py`（四个视图容器必须挂在 `#app` 之内——
+      **div 数量平衡 ≠ 嵌套正确**，设置页整片空白就是这么来的）
 
 - [ ] 更多 Agent（Claude Code / Cursor / Gemini CLI / CodeBuddy）
 - [ ] 记忆折叠压缩（超长会话压缩、相邻轮折叠）

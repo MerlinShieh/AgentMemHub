@@ -1,5 +1,9 @@
 # 分支差异记录：`main` ↔ `feat/llm-wiki`
 
+> **2026-10-23 注：本文档已归档，不再更新。** `feat/llm-wiki` 分支当日已删除
+> （内容全部并入 `feat/kb-ui`），删除前打了 annotated tag **`llm-wiki-done` = `d5dd4f4`**，
+> 那个节点随时可找回。当前分支关系与里程碑看 [branch-milestones.md](branch-milestones.md)。
+
 > 记录时间：2026-09-18　｜　**2026-09-22 更新**：通用修复已回移到 `feat/llm-robustness`
 > ｜　分叉点：`253257f`（Merge feat/memory-distillation）
 >
