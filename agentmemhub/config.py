@@ -209,7 +209,8 @@ DEFAULT_LOGS = {
 }
 
 
-#: 通知配置（`notify` 段）。**落库始终启用**（面板可查、带未读状态）；
+#: 通知配置（`notify` 段）。**落库始终启用**（写 `notify.db`，供程序读取与审计）；
+#: 注意：面板目前**没有**通知查询页，想看请用 `notify.list_notifications()`。
 #: 这里是可选的**推送通道** —— 目前支持 Pushplus（微信）。
 #: 推送是**旁路**：失败只落日志，绝不影响落库与调用方（与 `notify.py` 同一哲学）。
 DEFAULT_NOTIFY = {
@@ -505,7 +506,7 @@ class Config:
     def notify(self) -> dict[str, Any]:
         """通知配置（已合并默认值）：推送通道 + 去重窗口。
 
-        落库（面板可查、带未读状态）**始终启用**；这里的 `pushplus` 只是可选的
+        落库（写 `notify.db`，供程序读取与审计）**始终启用**；这里的 `pushplus` 只是可选的
         外部推送，`dedup_window_s` 防止失败重试把微信刷屏。
         """
         return _deep_merge(DEFAULT_NOTIFY, self._get("notify", {}) or {})

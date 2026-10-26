@@ -412,6 +412,8 @@ def notify(level: str, category: str, title: str, body: str = "", *,
     except Exception as e:               # noqa: BLE001 —— 旁路，永不抛
         _fallback(row, e)
     _audit(row, ok)
+    if ok:
+        _maybe_prune(db)
     # 推送要过**策略**（哪些事件值得推微信，见 `should_push`）—— 落库不受影响：
     # 策略关了只是"不推微信"，面板里照样查得到。
     if ok and push_too and should_push(lv, cat):
@@ -530,6 +532,31 @@ def mark_read(ids: Optional[list[int]] = None, *, all: bool = False,
             return int(cur.rowcount or 0)
     except Exception:                    # noqa: BLE001
         return 0
+
+
+#: 每写多少条通知顺手清一次过期行
+_PRUNE_EVERY = 200
+_prune_tick = 0
+
+
+def _maybe_prune(db: Optional[str] = None) -> None:
+    """每写 `_PRUNE_EVERY` 条顺手清一次过期通知（`prune()` 的唯一自动调用点）。
+
+    为什么需要它：`prune()` 此前**没有任何调用者** —— `notifications` 表只增
+    不减，`notify_fallback.jsonl` 也不滚动，而注释里写的"面板可查、带未读
+    状态"其实从未接上。表小的时候看不出来，但它按天增长且没人负责清理。
+
+    为什么节流而不是每次写都删：通知常成批写（一次批量投喂几十条），逐条
+    删会把写放大成两条 SQL；节流后最坏留 199 条过期行，下一次写就收掉。
+    """
+    global _prune_tick
+    _prune_tick += 1
+    if _prune_tick % _PRUNE_EVERY:
+        return
+    try:
+        prune(DEFAULT_KEEP_DAYS, db=db)
+    except Exception:                    # noqa: BLE001 —— 清理失败不影响写通知
+        pass
 
 
 def prune(keep_days: int = DEFAULT_KEEP_DAYS, *, db: Optional[str] = None) -> int:
