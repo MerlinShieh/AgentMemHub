@@ -42,6 +42,18 @@
   `print`（CLI 场景），MCP 必须把过程日志收进返回文本（否则日志混进 JSON-RPC，客户端解析失败）；
   源库（`database/agentmemhub.db`）只读、索引库（`session_rag.db`）自持；
   摄取幂等（`src_id` 锚）、排除机制防回流。
+- **安全边界不是"只绑回环"就够**：面板**没有鉴权**（`web/__init__.py` 默认 `127.0.0.1`），
+  但浏览器里任意网页都能用 `<form method=POST>` 向本机端口发**简单请求**（不带预检、
+  不受 CORS 约束）—— 而面板的 POST 有真实副作用（覆盖索引库、`rmtree` 产物目录、
+  删投喂素材）。所以 `web/app.py` 里有 `_same_site_guard` 中间件（非只读方法校验
+  `Origin` / `Sec-Fetch-Site`），`tests/test_guardrails.py` 守着 —— **这不是可选项**。
+  同批加固：`_wiki_out_guard`（`l1`/`l2` 必须落在配置的产物目录内）、
+  `snapshot._safe_sid`（快照 id 会拼进备份根并参与 `rmtree`，要挡 `..` 与盘符）、
+  `feed.fetch` 的出网白名单（私网 / 回环 / 链路本地 / `100.64.0.0/10`（云元数据）/
+  `metadata.*` / 数字形主机名 `2130706433`——后者 `ipaddress` 判不出但 `getaddrinfo`
+  会解析成回环）。**投喂是"外部内容入口"**，它自己的四条闸见
+  [`feed.md` §11](docs/modules/feed.md) 不变量 28–31（凭据检查必须落在 `ingest()` 而非
+  `ingest_any()`、出网要逐跳校验、外部来的文件名先清洗再拼路径、purge 要连镜像一起清）。
 - **配置单点**：模型/分桶/召回/写入策略/蒸馏/LLM 一律经 `agentmemhub.yaml`，
   **禁止硬编码模型 id/维度/路径/密钥**。LLM 接入可用
   `scripts/sync_llm_from_zcode.py` 从 ZCode 配置同步（密钥只写本地 yaml，不入库）。
