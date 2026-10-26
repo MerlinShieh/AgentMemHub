@@ -8,7 +8,11 @@
 
 ---
 
-## 一、建议尽快（真实可达，或会静默丢数据）
+## 一、建议尽快 —— **2026-10-26 已全部修完**
+
+8 条的成因与当时的修法建议保留在下面备查（行号会漂移），**不要再当待办处理**；
+实际改法与验证见文末「已修 · 2026-10-26 第四轮」。它们之所以留在这里而不是删掉，
+是因为「为什么会写出这样的代码」比「改成了什么」更容易被后来的人重犯。
 
 ### 1. 控制台 `[7] 停止看板` 会强杀占用端口的任意进程
 - `agentmemhub/console.py:243-244`：`if os.name != "nt": return []` —— 非 Windows 永远拿不到进程清单，
@@ -121,6 +125,35 @@
 ---
 
 ## 已修（按时间倒序，便于以后不再重复排查）
+
+**2026-10-26 第四轮（第一章 8 条）**
+- `fix(console)` `[7] 停止看板` 不再误杀：兜底路径按端口拿到 PID 后**先问"你是谁"**
+  （`_process_cmdline` + `_looks_like_dashboard`，要求命令行同时含 `agentmemhub` 与 `serve`），
+  对不上就拒绝；确认后再核一次（发现到确认之间 PID 可能已被复用）。
+- `fix(scripts)` `merge_distill_into_db.py --dry-run` 不再落 schema。**「开事务再回滚」是无效方案**：
+  `sqlite3.executescript()` 会先隐式 COMMIT 再执行脚本，DDL 逃出事务之外 —— 实测空库跑完 dry-run
+  反而多出 12 个对象。改为 dry-run 时**根本不建** schema，下游查询全部走容错取值。
+- `fix(scripts)` `sensitive_scan.py` 重写为两档规则（fatal 命中即退出码 1 / soft 只提示）：
+  补 `ghp_` / `glpat-` / `AIza` / `sk-ant-` 等前缀；路径规则改通用盘符；用户名无法表达为规则时
+  降级成字面量并告警（原先中文/带空格用户名**一条规则都不生成且不提示**）；未跟踪文件进 soft 档。
+- `fix(watermarks)` 水位 tmp 名带 pid + 毫秒时间戳，写入后 `replace`、finally 清理 —— 固定 `.tmp`
+  在面板与 CLI 同时写时互相踩，两个进程各写一半、都没报错、内容还是混合的。
+  `load_state` 读不动时先把坏文件 `_quarantine` 改名留存再回默认（原先静默重置，`delta` / `consumed` /
+  `pending_score` 一起丢，无从对账）。
+- `fix(logs)` 滚动失败不再静默：`_rotate_out` 先重试 `rename`，仍失败退化为「复制 + 截断」；
+  压缩路径改为 `_truncate` 而非 `unlink`（别人手里的句柄不失效）。原先 `except Exception: pass`
+  的表现是"配了 5MB 上限却永远不滚"。
+- `fix(adapters/trae)` 三类数据 id 加类别前缀（`snap:` / `solo:` / `mem:`）—— 它们共用
+  `source="trae"`，而库主键是 `(source, id)`，同名直接整会话覆盖；`_load_memory` 的硬编码 `[:20]`
+  提为 `MAX_MEM_FILES`（第 21 个文件原先静默丢）。
+- `fix(adapters/qwen)` 清单与 `load` 统一用 `_peek_sid(fp) or fp.stem` —— 首行没有 `sessionId` 时
+  两边算出的 id 不同，增量比对永远判"已变"，该会话每轮全量重读；缺 `parts` 的 user 行改为跳过
+  （原先把**文件名**当用户说的话入库，污染检索且标题变成一串哈希）。
+- `fix(snapshot)` `restore` 前检查索引库 `-shm` / 非空 `-wal`，被占用即拒绝并提示先停其它进程 ——
+  直接覆盖的后果不是"回滚失败"而是**索引分叉**：对方旧连接会继续按自己的页缓存 checkpoint，
+  把刚恢复的库写成混合状态且全程无报错。CLI 加 `--force` 出口；面板调用传 `force=True`
+  （面板自己长期持有连接，检查必然误报，面板侧靠 `tasks` 单槽互斥）。
+  顺带修 `--wiki-only` 与 `--db-only` 同时给时"什么都没恢复却打印回滚完成"。
 
 **2026-10-26 第三轮（本轮）**
 - `fix(cli)` 子命令退出码恒 0 → `main() -> int` 透传返回值、`__main__.py` 走 `SystemExit(main())`；
