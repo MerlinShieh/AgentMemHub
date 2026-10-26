@@ -83,77 +83,81 @@ def run_ingest(sources: list[str], signature: str = "", *,
     now = time.time()
     wm_state = watermarks.load_state(config.config().data_dir)
 
-    for src in sources:
-        a = adapters.get_adapter(src)
-        if a is None:
-            out(f"[{src}] 未知 source")
-            continue
-        p = a.locate()
-        if p is None:
-            out(f"[{src}] 未找到数据源")
-            continue
-        sig = signature or ""
-        if full:
-            sessions = a.load(p)
-            n = store.replace_source(src, sessions, signature=sig)
-            total_conv += len(sessions)
-            total_ev += n
-            changed.extend({"source": src, "id": str(s["id"]), "status": "updated"}
-                           for s in sessions)
-            source_counts[src] = {"ts": now, "counts": {
-                "added": len(sessions), "updated": 0, "unchanged": 0}}
-            out(f"[{src}] 全量重建 {len(sessions)} 会话, {n} 事件")
-            continue
-
-        wm_ts = float((wm_state.get("last_ingest", {}).get("sources", {})
-                       .get(src, {}) or {}).get("ts") or 0)
-        fresh = a.source_freshness(p)
-        listed = a.list_sessions(p)
-        force = False
-        only_ids: Optional[set[str]] = None
-        plan: dict[str, str] = {}          # sid -> 预期状态（对比阶段）
-        if fresh is not None and wm_ts and fresh > wm_ts + 1.0:
-            force = True                    # 清单看不见的变更 → 整源重扫
-        elif listed is None:
-            pass                            # 无轻量清单 → 整源重扫（幂等对比）
-        else:
-            stored = {r["id"]: (r["updated_at"] or 0)
-                      for r in store.list_conversations(src)}
-            for entry in listed:
-                sid = str(entry["id"])
-                ts = entry.get("updated_at") or 0
-                if sid not in stored:
-                    plan[sid] = "added"
-                elif ts > stored[sid] + _MTIME_TOL:
-                    plan[sid] = "updated"
-            if not plan:
-                source_counts[src] = {"ts": now, "counts": {
-                    "added": 0, "updated": 0, "unchanged": len(listed)}}
-                out(f"[{src}] 无变化（{len(listed)} 会话跳过重读）")
+    try:
+        for src in sources:
+            a = adapters.get_adapter(src)
+            if a is None:
+                out(f"[{src}] 未知 source")
                 continue
-            only_ids = set(plan)
+            p = a.locate()
+            if p is None:
+                out(f"[{src}] 未找到数据源")
+                continue
+            sig = signature or ""
+            if full:
+                sessions = a.load(p)
+                n = store.replace_source(src, sessions, signature=sig)
+                total_conv += len(sessions)
+                total_ev += n
+                changed.extend({"source": src, "id": str(s["id"]), "status": "updated"}
+                               for s in sessions)
+                source_counts[src] = {"ts": now, "counts": {
+                    "added": len(sessions), "updated": 0, "unchanged": 0}}
+                out(f"[{src}] 全量重建 {len(sessions)} 会话, {n} 事件")
+                continue
 
-        sessions = a.load(p, only_ids=only_ids)
-        r = store.upsert_sessions(src, sessions, signature=sig, force=force)
-        total_conv += r["added"] + r["updated"]
-        total_ev += r["events"]
-        if force or listed is None:
-            changed.extend({"source": src, "id": str(s["id"]), "status": "updated"}
-                           for s in sessions)
-            label = "信号触发整源重扫" if force else "整源重扫"
-            out(f"[{src}] {label}: 新增 {r['added']}, 更新 {r['updated']}, "
-                f"未变 {r['unchanged']}（{r['events']} 事件）")
-        else:
-            changed.extend({"source": src, "id": sid, "status": stt}
-                           for sid, stt in plan.items())
-            skipped = (len(listed) - len(plan)) + r["unchanged"]
-            out(f"[{src}] 增量: 新增 {r['added']}, 更新 {r['updated']}, "
-                f"未变 {skipped}（{r['events']} 事件）")
-        source_counts[src] = {"ts": now, "counts": {
-            "added": r["added"], "updated": r["updated"],
-            "unchanged": r["unchanged"]}}
+            wm_ts = float((wm_state.get("last_ingest", {}).get("sources", {})
+                           .get(src, {}) or {}).get("ts") or 0)
+            fresh = a.source_freshness(p)
+            listed = a.list_sessions(p)
+            force = False
+            only_ids: Optional[set[str]] = None
+            plan: dict[str, str] = {}      # sid -> 预期状态（对比阶段）
+            if fresh is not None and wm_ts and fresh > wm_ts + 1.0:
+                force = True                # 清单看不见的变更 → 整源重扫
+            elif listed is None:
+                pass                        # 无轻量清单 → 整源重扫（幂等对比）
+            else:
+                stored = {r["id"]: (r["updated_at"] or 0)
+                          for r in store.list_conversations(src)}
+                for entry in listed:
+                    sid = str(entry["id"])
+                    ts = entry.get("updated_at") or 0
+                    if sid not in stored:
+                        plan[sid] = "added"
+                    elif ts > stored[sid] + _MTIME_TOL:
+                        plan[sid] = "updated"
+                if not plan:
+                    source_counts[src] = {"ts": now, "counts": {
+                        "added": 0, "updated": 0, "unchanged": len(listed)}}
+                    out(f"[{src}] 无变化（{len(listed)} 会话跳过重读）")
+                    continue
+                only_ids = set(plan)
 
-    store.close()
+            sessions = a.load(p, only_ids=only_ids)
+            r = store.upsert_sessions(src, sessions, signature=sig, force=force)
+            total_conv += r["added"] + r["updated"]
+            total_ev += r["events"]
+            if force or listed is None:
+                changed.extend({"source": src, "id": str(s["id"]), "status": "updated"}
+                               for s in sessions)
+                label = "信号触发整源重扫" if force else "整源重扫"
+                out(f"[{src}] {label}: 新增 {r['added']}, 更新 {r['updated']}, "
+                    f"未变 {r['unchanged']}（{r['events']} 事件）")
+            else:
+                changed.extend({"source": src, "id": sid, "status": stt}
+                               for sid, stt in plan.items())
+                skipped = (len(listed) - len(plan)) + r["unchanged"]
+                out(f"[{src}] 增量: 新增 {r['added']}, 更新 {r['updated']}, "
+                    f"未变 {skipped}（{r['events']} 事件）")
+            source_counts[src] = {"ts": now, "counts": {
+                "added": r["added"], "updated": r["updated"],
+                "unchanged": r["unchanged"]}}
+    finally:
+        # 任一 adapter 抛错也必须关库：`Store` 持着写锁，不关会让下一次 ingest
+        # 撞 busy；而**水位不落是有意的** —— 没读完就别记"已同步"，
+        # 否则下次增量会跳过这轮根本没读到的部分。
+        store.close()
     watermarks.record_ingest(wm_state, ts=now, source_counts=source_counts,
                              changed=changed)
     watermarks.save_state(config.config().data_dir, wm_state)
@@ -162,23 +166,37 @@ def run_ingest(sources: list[str], signature: str = "", *,
     return total_conv, total_ev
 
 
-def cmd_ingest(args) -> None:
-    sources = [args.source] if args.source else [a.source for a in adapters.all_adapters()]
+def cmd_ingest(args) -> int:
+    known = {a.source for a in adapters.all_adapters()}
+    sources = [args.source] if args.source else sorted(known)
+    unknown = [s for s in sources if s not in known]
+    if unknown:
+        # 原先只打印一行"未知 source"然后继续跑到 `完成: 0 会话, 0 事件`，
+        # 退出码还是 0 —— 拼错一个字母看起来像"这个源今天没数据"
+        _stdout("未知 source：%s（可选：%s）"
+                % ("、".join(unknown), "、".join(sorted(known))))
+        return 2
     total_conv, total_ev = run_ingest(sources, signature=args.signature,
                                       full=args.full)
     _stdout(f"完成: {total_conv} 会话, {total_ev} 事件")
+    return 0
 
 
 def cmd_list(args) -> None:
     store = Store()
-    convs = store.list_conversations(args.source)
-    if not convs:
-        _stdout("（空）")
-        return
-    for c in convs:
-        title = (c["title"] or "")[:40]
-        _stdout(f"[{c['source']}] {c['id'][:24]} | {title} | {c['event_count']} 事件")
-    store.close()
+    # 用 try/finally 而不是"每条路径都记得 close"：空结果那次提前 return
+    # 就漏掉了 close，连接与写锁留在进程里，`list` 之后紧接着跑 `ingest`
+    # 会撞 busy —— 而 `list` 看起来是纯读命令，没人会想到它是元凶
+    try:
+        convs = store.list_conversations(args.source)
+        if not convs:
+            _stdout("（空）")
+            return
+        for c in convs:
+            title = (c["title"] or "")[:40]
+            _stdout(f"[{c['source']}] {c['id'][:24]} | {title} | {c['event_count']} 事件")
+    finally:
+        store.close()
 
 
 def cmd_show(args) -> None:
@@ -216,13 +234,17 @@ def cmd_search(args) -> None:
 def cmd_export(args) -> None:
     from agentmemhub.export import export_jsonl, export_markdown
     store = Store()
-    out = Path(args.out)
-    if args.format == "jsonl":
-        n = export_jsonl(store, out, args.source)
-    else:
-        n = export_markdown(store, out, args.source)
+    try:
+        out = Path(args.out)
+        if args.format == "jsonl":
+            n = export_jsonl(store, out, args.source)
+        else:
+            n = export_markdown(store, out, args.source)
+    finally:
+        # 导出中途抛错（磁盘满、目录无权限）也必须关库，否则同进程后续
+        # 操作全撞在未释放的锁上
+        store.close()
     _stdout(f"已导出 {n} 个会话 → {out}")
-    store.close()
 
 
 def cmd_stats(args) -> None:
@@ -259,9 +281,15 @@ def cmd_folders(args) -> None:
 
 
 def cmd_serve(args) -> None:
-    """启动本地 Web 页面加载统一会话库。"""
+    """启动本地 Web 页面加载统一会话库。
+
+    端口优先命令行，其次配置 `web.port`：原先 argparse 写死 8086，改了配置
+    面板却还开在 8086，而控制台按配置端口拼 URL ⇒ 打开的是个空地址。
+    """
+    from agentmemhub.config import config
     from agentmemhub.web import run_server
-    run_server(port=args.port, open_browser=args.open,
+    port = args.port or config().web_port
+    run_server(port=port, open_browser=args.open,
                db=args.db or None)
 
 
@@ -1123,7 +1151,8 @@ def build_parser() -> argparse.ArgumentParser:
     pf.add_argument("--limit", type=int, default=20)
 
     pv = sub.add_parser("serve", help="启动本地 Web 页面（可选功能）")
-    pv.add_argument("--port", type=int, default=8086)
+    pv.add_argument("--port", type=int, default=None,
+                    help="监听端口（默认取配置 web.port，再退 8086）")
     pv.add_argument("--db", default="", help="数据库路径（默认 <项目根>/database/agentmemhub.db）")
     # 成对开关：--open / --no-open（默认自动打开浏览器）
     pv.add_argument("--open", action=argparse.BooleanOptionalAction, default=True,
