@@ -270,6 +270,39 @@ def _dashboard_pid(port: int) -> Optional[int]:
     return None
 
 
+_PS_CMDLINE = (
+    "$p = Get-CimInstance Win32_Process -Filter 'ProcessId={pid}' "
+    "-ErrorAction SilentlyContinue; if ($p) { $p.CommandLine }")
+
+
+def _process_cmdline(pid: int) -> str:
+    """取进程命令行 —— 用来回答"这个 PID 到底是谁"。取不到返回空串。"""
+    if os.name == "nt":
+        try:
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 _PS_CMDLINE.format(pid=pid)],
+                capture_output=True, text=True, errors="replace", timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        return (out.stdout or "").strip()
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            return fh.read().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+    except OSError:
+        return ""
+
+
+def _looks_like_dashboard(cmdline: str) -> bool:
+    """命令行像不像"本项目的看板进程"。
+
+    两个词都要有：只认 `agentmemhub`，`python -c "import agentmemhub"` 也会中；
+    只看 `serve`，`python -m http.server` 更不沾边。
+    """
+    low = f" {cmdline.lower()} "
+    return "agentmemhub" in low and " serve " in low
+
+
 def action_dashboard_stop() -> None:
     """停止网页看板：按进程特征找 serve 进程结束之（确认后执行）。"""
     import time as _t
@@ -283,6 +316,15 @@ def action_dashboard_stop() -> None:
         pid = _dashboard_pid(port)
         if pid is None:
             _out(f"  端口 {port} 被占用但未能解析进程 PID，请手动关闭占用进程")
+            return
+        # ⚠️ 端口占用 ≠ 看板占用。这条兜底路径上的 PID 只有一个来源（谁在监听
+        # 这个端口），没有任何归属信息 —— 原先直接 taskkill，端口被别家服务
+        # 占着就会把别人杀了。所以先问一句"你是谁"。
+        cmd = _process_cmdline(pid)
+        if not _looks_like_dashboard(cmd):
+            _out(f"  ✗ 端口 {port} 被 PID {pid} 占用，但它不是看板进程："
+                 f"{cmd[:80] or '（命令行取不到）'}")
+            _out("    拒绝误杀 —— 请自行确认那个进程后再处理")
             return
         procs = [{"pid": pid, "port": port}]
     where = "、".join(f"PID {p['pid']}（端口 {p['port']}）" for p in procs)
