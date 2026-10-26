@@ -186,6 +186,35 @@ def archive_dir(name: str = "") -> Path:
     return (root / name) if name else root
 
 
+def _truncate(path: Path) -> None:
+    """把文件清零 —— 不删，避免别人手里的句柄突然失效。"""
+    try:
+        with open(path, "r+b") as fh:
+            fh.truncate(0)
+    except OSError:
+        pass
+
+
+def _rotate_out(path: Path, dest: Path) -> None:
+    """把正在写的日志搬到归档位。
+
+    优先 `rename`（原子、不产生副本）；但 Windows 上**只要还有别的进程开着这个
+    文件，rename 必然抛 WinError 32** —— 而 `wiki.log` / `memory.log` 恰恰是面板
+    与 MCP 同时写的。原先这里失败被 `except Exception: pass` 吞掉，表现就是
+    "配了 5MB 上限却永远不滚"。所以失败后短暂重试，仍不行则退化为「复制 + 截断」：
+    不原子（复制期间的追加行会丢），但滚动真的会发生，比永不滚更接近目的。
+    """
+    for _ in range(3):
+        try:
+            path.rename(dest)
+            return
+        except OSError:
+            time.sleep(0.05)
+    with open(path, "rb") as fi, open(dest, "wb") as fo:
+        shutil.copyfileobj(fi, fo)
+    _truncate(path)
+
+
 def _maybe_archive(path: Path, name: str) -> None:
     """按生效策略滚动 + 归档 + 清理（任一步失败静默跳过）。"""
     try:
@@ -217,9 +246,9 @@ def _maybe_archive(path: Path, name: str) -> None:
             with gzip.open(str(dest) + ".gz", "wb") as fo, \
                     open(path, "rb") as fi:
                 shutil.copyfileobj(fi, fo)
-            path.unlink()
+            _truncate(path)                 # 截断而非删：别人手里的句柄不失效
         else:
-            path.rename(dest)               # 暂不压缩：原始文件直接搬走
+            _rotate_out(path, dest)         # 暂不压缩：原文搬走（失败则复制+截断）
         _prune_archive(name, pol)
     except Exception:                       # noqa: BLE001
         pass
