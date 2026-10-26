@@ -119,10 +119,33 @@ def collect_sources(root: Path | str = ROOT) -> dict[str, str]:
     return out
 
 
-def find_reads(leaf: str, sources: dict[str, str]) -> list[str]:
-    """找出"以字符串字面量提到过该叶子键名"的文件（启发式）。"""
-    pat = re.compile(r"""["']%s["']""" % re.escape(leaf))
-    return sorted(rel for rel, text in sources.items() if pat.search(text))
+def find_reads(key_path: str, sources: dict[str, str]) -> dict[str, list[str]]:
+    """按**证据强度**分档，找出"可能读取该键"的文件。
+
+    原先只匹配裸叶子名（`"llm"` / `"enabled"` / `"workers"`），这类短名几乎
+    必然出现在某个无关字符串里 ⇒ 僵尸键被判"活" —— 这正是假开关能长期潜伏的
+    机制：报告永远是"0 个僵尸键"。
+
+    现在分两档：
+    - **strong**：源码出现完整点分路径，或出现「最后两段」在同一文件里
+    - **weak**：只出现叶子名（不足以证明真有人读它，只说明词出现过）
+    """
+    leaf = key_path.split(".")[-1]
+    segs = [s for s in key_path.split(".") if s]
+    strong_pat = re.compile(r"""["']%s["']""" % re.escape(key_path))
+    leaf_pat = re.compile(r"""["']%s["']""" % re.escape(leaf))
+    tail = segs[-2:]
+    tail_pats = [re.compile(r"""["']%s["']""" % re.escape(s)) for s in tail]
+    strong: list[str] = []
+    weak: list[str] = []
+    for rel, text in sources.items():
+        if strong_pat.search(text):
+            strong.append(rel)
+        elif len(tail_pats) == 2 and all(p.search(text) for p in tail_pats):
+            strong.append(rel)
+        elif leaf_pat.search(text):
+            weak.append(rel)
+    return {"strong": sorted(strong), "weak": sorted(weak)}
 
 
 def audit(root: Path | str = ROOT, *, extra_yaml: Path | str | None = None
@@ -139,12 +162,16 @@ def audit(root: Path | str = ROOT, *, extra_yaml: Path | str | None = None
     report: dict[str, Any] = {}
     for label, path in targets:
         keys = load_keys(path)
-        reads = {k: find_reads(k.split(".")[-1], sources) for k in keys}
+        reads = {k: find_reads(k, sources) for k in keys}
         report[label] = {
             "path": str(path),
             "exists": Path(path).exists(),
             "keys": keys,
-            "dead": [k for k in keys if not reads[k]],
+            "dead": [k for k in keys
+                     if not reads[k]["strong"] and not reads[k]["weak"]],
+            # 只有弱证据：词出现过，但没有任何地方按路径读它 —— 最像假开关的一类
+            "weakOnly": [k for k in keys
+                         if not reads[k]["strong"] and reads[k]["weak"]],
             "reads": reads,
         }
     return report
@@ -162,12 +189,18 @@ def render(report: dict[str, Any]) -> str:
         lines.append("=== %s === %d 个叶子键（%s）"
                      % (label, len(r["keys"]), r["path"]))
         for k in r["keys"]:
-            hits = r["reads"][k]
-            if hits:
-                lines.append("  OK  %-36s ← %s" % (k, ", ".join(hits[:2])))
+            ev = r["reads"][k]
+            if ev["strong"]:
+                lines.append("  OK  %-36s ← %s" % (k, ", ".join(ev["strong"][:2])))
+            elif ev["weak"]:
+                lines.append("  ~?  %-36s ← 仅出现词义（%s），没有任何按路径的读取点"
+                             % (k, ", ".join(ev["weak"][:2])))
             else:
                 lines.append("  ??  %-36s ← 【无任何读取点，疑似僵尸键】" % k)
         lines.append("  ---- 疑似僵尸键 %d 个：%s" % (len(r["dead"]), r["dead"]))
+        if r.get("weakOnly"):
+            lines.append("  ---- 只有弱证据 %d 个（建议人工确认是否真有读取点）：%s"
+                         % (len(r["weakOnly"]), r["weakOnly"]))
         lines.append("")
         total_dead += len(r["dead"])
     lines.append("合计疑似僵尸键：%d" % total_dead)

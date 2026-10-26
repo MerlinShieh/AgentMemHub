@@ -69,8 +69,27 @@ def test_strip_default_blocks_嵌套块整体删除():
 
 def test_find_reads_按字面量匹配():
     sources = {"a.py": 'x = cfg.get("workers")', "b.py": "无关内容"}
-    assert cck.find_reads("workers", sources) == ["a.py"]
-    assert cck.find_reads("完全不存在的键", sources) == []
+    ev = cck.find_reads("workers", sources)
+    # 单段键的"完整路径"就等于叶子名，命中即强证据
+    assert ev["strong"] == ["a.py"] and ev["weak"] == []
+    assert cck.find_reads("完全不存在的键", sources) == {"strong": [], "weak": []}
+
+
+def test_find_reads_分层_路径比裸名更可信():
+    """裸名匹配是"词出现过"，不是"有人按路径读它"。
+
+    这正是假开关能潜伏的机制：`enabled` / `workers` 这类短名几乎必然在别的
+    上下文里出现一次，于是僵尸键被判活、报告永远"0 个"。
+    """
+    sources = {
+        "a.py": 'x = cfg.get("rag", {}).get("write", {}).get("enabled")',
+        "b.py": 'DEFAULT = {"enabled": True}',      # 只有裸名
+    }
+    ev = cck.find_reads("rag.write.enabled", sources)
+    assert ev["strong"] == ["a.py"], "最后两段同时出现 → 强证据"
+    assert ev["weak"] == ["b.py"], "只出现裸名 → 弱证据"
+    ev2 = cck.find_reads("other.enabled", sources)
+    assert ev2["strong"] == [] and ev2["weak"] == ["a.py", "b.py"]
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +113,8 @@ def test_audit_能发现僵尸键(tmp_path):
     r = cck.audit(tmp_path)["example（支持的键）"]
     assert r["keys"] == ["used", "unused"]
     assert r["dead"] == ["unused"], "没人读的键必须被报为僵尸"
-    assert r["reads"]["used"] == ["agentmemhub/core.py"]
+    # `used` 是单段键，完整路径即叶子名 ⇒ 算强证据
+    assert r["reads"]["used"]["strong"] == ["agentmemhub/core.py"]
 
 
 def test_audit_读取点在config属性内部也算数(tmp_path):

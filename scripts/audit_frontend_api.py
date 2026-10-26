@@ -43,6 +43,10 @@ _TEMPLATE_RE = re.compile(r"\$\{[^}]*\}")
 #: 段数比路由少一段，于是**明明在用也被报成未用**（2026-10-23 实测踩到 feed 详情那条）。
 #: 连闭合引号一起吃掉，替换成 `{}` 后才和模板串同一形态。
 _CONCAT_RE = re.compile(r"[\"']\s*\+\s*encodeURIComponent\([^)]*\)\s*")
+#: 前端 `fetch(..., { method: 'POST' })` 里的方法（用于核对「路径存在但方法不同」）
+_METHOD_RE = re.compile(r"method\s*:\s*[\"']([A-Za-z]+)[\"']")
+#: 找 method 的窗口：fetch 的第二个参数通常紧跟路径之后，但不一定贴着
+_METHOD_WINDOW = 400
 _ROUTE_RE = re.compile(r"@app\.(get|post|put|delete|patch)\(\s*[\"']([^\"']+)")
 
 
@@ -66,30 +70,73 @@ def front_paths() -> list[str]:
     return sorted(out)
 
 
+def front_calls() -> list[tuple[str, str]]:
+    """前端出现过的 `(method, path)`；方法取不到时 method 为 `""`（= 未知）。
+
+    取 method 的方式是「路径出现位置往后一小段里找 `method: 'X'`」—— 这是启发式，
+    宁可判"未知"也不猜。之所以必须区分：原先只比路径，一条 `GET /api/feed/{id}`
+    就能让同路径的 DELETE / POST / PUT 全部算作"已接入"，审计数字因此虚高。
+    """
+    html = HTML.read_text(encoding="utf-8")
+    html = _TEMPLATE_RE.sub("{}", html)
+    html = _CONCAT_RE.sub("{}", html)
+    out: set[tuple[str, str]] = set()
+    for m in _PATH_RE.finditer(html):
+        path = m.group(0).rstrip("/")
+        if len(path) <= 4:
+            continue
+        tail = html[m.end(): m.end() + _METHOD_WINDOW]
+        meth = _METHOD_RE.search(tail)
+        out.add(((meth.group(1).upper() if meth else ""), path))
+    return sorted(out)
+
+
 def audit() -> dict:
-    fsegs = [_segs(c) for c in front_paths()]
+    calls = front_calls()
+    fsegs = [(_segs(p), m) for m, p in calls]
 
-    def used(path: str) -> bool:
+    def match(path: str, method: str) -> tuple[bool, bool]:
+        """→ (有没有被调用, 方法是否核对一致)。"""
         want = _segs(path)
-        return any(len(want) == len(got)
-                   and all(a == b or b == "{}" for a, b in zip(want, got))
-                   for got in fsegs)
+        hit = exact = False
+        for got, got_m in fsegs:
+            if len(want) != len(got):
+                continue
+            if not all(a == b or b == "{}" for a, b in zip(want, got)):
+                continue
+            hit = True
+            if got_m:
+                if got_m == method:
+                    exact = True
+            elif method == "GET":
+                # 裸 fetch 不写 method 就是 GET —— 这是 fetch 的规范默认行为，
+                # 不是猜测；写操作在前端一律显式写 method，所以这里不会误判 POST
+                exact = True
+        return hit, exact
 
-    items = [{"method": m, "path": p,
-              "group": "/".join(p.split("/")[:3]), "frontend": used(p)}
-             for m, p in routes()]
+    items = []
+    for m, p in routes():
+        hit, exact = match(p, m)
+        items.append({"method": m, "path": p,
+                      "group": "/".join(p.split("/")[:3]),
+                      "frontend": hit, "methodChecked": exact})
     return {
         "total": len(items),
         "used": sum(1 for i in items if i["frontend"]),
         "unused": sum(1 for i in items if not i["frontend"]),
+        "methodChecked": sum(1 for i in items if i["methodChecked"]),
         "items": items,
-        "frontendPaths": front_paths(),
+        "frontendPaths": sorted({p for _m, p in calls}),
     }
 
 
 def render(rep: dict, *, show_used: bool = False) -> str:
-    lines = ["后端 HTTP 路由 %d 个 · 面板已用 %d · **未用 %d**"
-             % (rep["total"], rep["used"], rep["unused"]), ""]
+    lines = ["后端 HTTP 路由 %d 个 · 面板已用 %d · **未用 %d** · 方法核对一致 %d"
+             % (rep["total"], rep["used"], rep["unused"],
+                rep.get("methodChecked", 0)),
+             "（「方法核对一致」只统计能在路径附近抓到 method 的调用；"
+             "其余是「路径在、方法没核」—— 它们可能是对的，但别当成已验证）",
+             ""]
     groups: dict[str, list] = {}
     for it in rep["items"]:
         groups.setdefault(it["group"], []).append(it)
@@ -99,9 +146,13 @@ def render(rep: dict, *, show_used: bool = False) -> str:
             continue
         lines.append("## %s" % g)
         for i in rows:
-            lines.append("   %-7s %-52s %s"
-                         % (i["method"], i["path"],
-                            "面板已用" if i["frontend"] else "面板未用"))
+            if not i["frontend"]:
+                mark = "面板未用"
+            elif i.get("methodChecked"):
+                mark = "面板已用（方法已核）"
+            else:
+                mark = "面板已用（方法未核）"
+            lines.append("   %-7s %-52s %s" % (i["method"], i["path"], mark))
         lines.append("")
     lines.append("（--used 可连同已用的一起列；结论请交叉验证，见脚本 docstring）")
     return "\n".join(lines)

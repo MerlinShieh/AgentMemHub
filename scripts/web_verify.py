@@ -30,7 +30,11 @@ def get_raw(path):
 
 print("== 1. 页面与静态资源 ==")
 st, html = get_raw("/")
-check("GET / index.html", st == 200 and "AgentMemHub".lower() in html.decode("utf-8", "ignore").lower() or b"Agent" in html)
+_body = html.decode("utf-8", "ignore").lower()
+# 括号必须显式：`st == 200 and "a" in b or "c" in b` 会被解析成
+# `(st == 200 and "a" in b) or ("c" in b)` —— 于是 500 的错误页只要正文里
+# 出现 "agent" 就算通过，这正是"自检全绿但页面打不开"的经典成因
+check("GET / index.html", st == 200 and "agentmemhub" in _body)
 for f in ("vendor/tailwind.browser.js", "vendor/lucide.min.js", "vendor/chart.umd.js"):
     st, _ = get_raw("/" + f)
     check(f"GET /{f}", st == 200)
