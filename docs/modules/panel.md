@@ -151,6 +151,7 @@ tasks.submit(name: str, fn) -> dict          # fn 必须是 fn(emit, meta) -> st
 | 刷新页面后进度条没了 | 前端只在内网轮询、刷新就丢 | `init()` 里调 `adminPoll()` 重新挂上 |
 | 某标签页整片空白 | 视图容器落在 `#app` 之外 | `test_web_layout.py` 的祖先链断言；改 HTML 时先跑它 |
 | 运维页数字是"更新前"的 | 长任务还没结束，页面拿的是旧快照 | `opsSyncJob()` 在任务结束时重载；期间按钮置灰并显示"数据是更新前快照" |
+| 任务卡住、后续任务全 409 | `tasks` 是**单槽**：旧任务不出终态，新任务就进不来；而线程卡在 LLM 调用或 SQLite 锁上不会自己退 | 运维页点「请求取消」→ `POST /api/admin/job/cancel`。它只置 `cancelRequested` 旗标，任务在**阶段边界**收工（`wiki.update` 的四个检查点）；单槽等线程真正退出才释放，这是刻意的 —— 否则"取消一个还在写的任务 + 立刻提交新任务"= 两个线程写同一份产物。超时看门狗同理：只标 `timedOut`，不杀线程 |
 | 面板改了 yaml 不生效 | `config()` 单例、进程内缓存 | 重启 `serve`（MCP 常驻进程同理） |
 
 **日志位置**：`logs/web_stdout.log` / `logs/web_stderr.log`（启动时重定向）、

@@ -54,6 +54,15 @@
   会解析成回环）。**投喂是"外部内容入口"**，它自己的四条闸见
   [`feed.md` §11](docs/modules/feed.md) 不变量 28–31（凭据检查必须落在 `ingest()` 而非
   `ingest_any()`、出网要逐跳校验、外部来的文件名先清洗再拼路径、purge 要连镜像一起清）。
+- **长任务是"单槽 + 协作式取消"**：`web/tasks.py` 的 `_CURRENT` 只有一个槽位，旧任务
+  不出终态，新任务一律 409。Python 不能安全杀线程（硬杀一个正在写 SQLite 事务的线程 =
+  库损坏），所以取消/超时**只置旗标**（`cancelRequested` / `timedOut`），由任务在
+  **阶段边界**自愿收工 —— `wiki.update(should_stop=...)` 有四个检查点（L1 前 / L1 落盘后 /
+  L2 前 / L2 写完但跳过 linkfix）。**新增长任务必须做三件事**：① 透传
+  `meta["should_stop"]` 并在安全边界检查；② 显式给 `cancelable`（`snapshot.restore`
+  这类"半途停下比跑完更危险"的给 `False`）；③ 给 `timeout_s`。
+  单槽**必须等线程真正退出才释放**，别图快改成"取消即释放"——那等于两个线程写同一份产物。
+  `_snapshot()` 的僵尸检测（`running` 但线程已死 → 自动改 `error`）是兜底，不是可选项。
 - **配置单点**：模型/分桶/召回/写入策略/蒸馏/LLM 一律经 `agentmemhub.yaml`，
   **禁止硬编码模型 id/维度/路径/密钥**。LLM 接入可用
   `scripts/sync_llm_from_zcode.py` 从 ZCode 配置同步（密钥只写本地 yaml，不入库）。
