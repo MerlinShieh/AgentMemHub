@@ -498,7 +498,7 @@ PUT /api/feed/formats  {}
 `logs/tasks/<job_id>.log`。请求体：
 
 ```jsonc
-{"roots": ["D:/TCL/文档"], "recursive": true, "dry_run": false,
+{"roots": ["D:/docs/文档"], "recursive": true, "dry_run": false,
  "force": false, "limit": 0}
 ```
 

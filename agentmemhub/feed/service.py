@@ -44,7 +44,7 @@ INPUT_TEXT = "text"
 
 #: 疑似凭据：`path` 形态**不该**被用来读这些东西。
 #: 这里用黑名单而不是「只允许 home/cwd 之下」的白名单 —— 后者会误伤真实
-#: 用法（本机批量投喂过 `D:\TCL\文档` 这类盘符目录），而凭据目录是明确的、
+#: 用法（本机确实批量投喂过 `D:\<某个文档目录>` 这种盘符目录），而凭据目录是明确的、
 #: 可枚举的。威胁模型见 `docs/modules/feed.md`：本地单机 + 人工核对。
 _SENSITIVE_DIRS = (".ssh", ".aws", ".gnupg", ".kube", ".docker",
                    ".config/gcloud", "appdata/roaming/microsoft/credentials",

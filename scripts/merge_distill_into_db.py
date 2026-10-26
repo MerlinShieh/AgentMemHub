@@ -76,11 +76,24 @@ def main() -> int:
     tgt.execute("PRAGMA busy_timeout=30000")
     try:
         # ---- 目标 schema 就绪（幂等）----
-        ensure_distill_schema(tgt)
-        ensure_memstore_schema(tgt)
-        ensure_vec_table(tgt, spec)
+        # ⚠️ sqlite3 默认 isolation_level="" 下 **DDL 不进隐式事务、立即提交**，
+        # 而 `--dry-run` 承诺"未写入"（见下方同一处提示）。所以 dry-run 时显式
+        # 开一个事务、建完即回滚 —— 否则一次"只看不写"的预演会悄悄改掉目标库结构。
+        # ⚠️ `--dry-run` 承诺"未写入"，而 schema 准备会真的落 DDL。
+        # 曾想用"显式开事务再回滚"兜住 —— **无效**：sqlite3 的 executescript()
+        # 会先隐式 COMMIT 再执行脚本，DDL 逃出事务之外（实测空库跑完 dry-run
+        # 反而多出 12 个对象）。所以唯一可靠的做法是 dry-run 时**根本不建**，
+        # 下游所有依赖这些表的查询一律走容错取值（见下面的 next_id / _count）。
+        if not args.dry_run:
+            ensure_distill_schema(tgt)
+            ensure_memstore_schema(tgt)
+            ensure_vec_table(tgt, spec)
 
-        next_id = tgt.execute("SELECT COALESCE(MAX(id),0)+1 FROM units").fetchone()[0]
+        try:
+            next_id = tgt.execute(
+                "SELECT COALESCE(MAX(id),0)+1 FROM units").fetchone()[0]
+        except sqlite3.OperationalError:
+            next_id = 1                         # dry-run 且目标库原本没有 units 表
         print(f"目标：{tgt_path}")
         print(f"  units 现有 max(id)={next_id - 1}，蒸馏投影将从 {next_id} 起重映射")
 
@@ -109,9 +122,11 @@ def main() -> int:
 
         # ---- id 重映射 ----
         idmap = {old: next_id + i for i, old in enumerate(unit_ids)}
-        collisions = [old for old in unit_ids
-                      if old <= next_id - 1 and old in
-                      {r[0] for r in tgt.execute("SELECT id FROM units")}]
+        collisions = []
+        if not args.dry_run:                    # dry-run 时 units 表可能刚被回滚掉
+            existing = {r[0] for r in tgt.execute("SELECT id FROM units")}
+            collisions = [old for old in unit_ids
+                          if old <= next_id - 1 and old in existing]
 
         print(f"\n源：{src_path}")
         print(f"  memories {len(mems)} | hashes {len(hashes)} | "
@@ -122,10 +137,13 @@ def main() -> int:
               f"{unit_ids[-1]}→{idmap[unit_ids[-1]]}")
 
         # ---- 目标已存在内容的跳过统计 ----
-        exist_mem = tgt.execute(
-            "SELECT COUNT(*) FROM distilled_memories").fetchone()[0]
-        exist_units = tgt.execute(
-            "SELECT COUNT(*) FROM units WHERE role='distilled'").fetchone()[0]
+        def _count(sql: str) -> int:
+            try:
+                return tgt.execute(sql).fetchone()[0]
+            except sqlite3.OperationalError:
+                return 0                        # dry-run 且目标库原本没有该表
+        exist_mem = _count("SELECT COUNT(*) FROM distilled_memories")
+        exist_units = _count("SELECT COUNT(*) FROM units WHERE role='distilled'")
         print(f"  目标已有：memories {exist_mem} / 投影 {exist_units}"
               f"（存在即跳过，脚本幂等）\n")
 
