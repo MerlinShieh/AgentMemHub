@@ -1916,7 +1916,11 @@ def create_app(db_path: Path | None = None):
         def _do(emit, meta) -> str:
             import json as _j
             emit(f"回滚到快照 {snapshot_id} …")
-            r = snapshot.restore(snapshot_id, wiki_only=wiki_only, db_only=db_only)
+            # force=True：面板**自己**就长期持有索引库连接，`_assert_db_idle`
+            # 必然判"被占用"。面板侧的并发保护靠 tasks 单槽互斥（同一时刻
+            # 只有一个长任务在跑），不靠这道闸。
+            r = snapshot.restore(snapshot_id, wiki_only=wiki_only, db_only=db_only,
+                                 force=True)
             emit(f"已恢复：{r['restored']}")
             return _j.dumps(r, ensure_ascii=False)
 

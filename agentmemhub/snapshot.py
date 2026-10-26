@@ -176,8 +176,39 @@ def _safe_sid(sid: str) -> str:
     return s
 
 
-def restore(sid: str, *, wiki_only: bool = False, db_only: bool = False) -> dict[str, Any]:
-    """回滚到指定快照。**先给当前状态做一份快照**（防误恢复不可逆），再覆盖。"""
+def _assert_db_idle(live_db: Path) -> None:
+    """索引库有别的进程在用就拒绝回滚。
+
+    直接覆盖 + 删 `-wal` / `-shm` 的后果不是"回滚失败"，而是**索引分叉**：
+    对方手里还是旧连接，会按自己的页缓存继续 checkpoint，把刚恢复的库又写成
+    一份混合状态，全程没有任何报错 —— 事后看数据只是"对不上"，查不出原因。
+
+    判据是 `-shm` 与非空 `-wal` 的存在，它们是"有连接正打开着这个库"的直接痕迹。
+    崩溃残留也会留下它们，所以给 `force` 出口，而不是发现问题也放行。
+    """
+    if not live_db.exists():
+        return
+    holders: list[str] = []
+    for suffix, hint in (("-shm", "共享内存"), ("-wal", "未合并 WAL")):
+        p = Path(str(live_db) + suffix)
+        try:
+            if p.exists() and p.stat().st_size > 0:
+                holders.append(f"{p.name}（{hint}，{p.stat().st_size} 字节）")
+        except OSError:
+            continue
+    if holders:
+        raise RuntimeError(
+            "索引库正在被使用，拒绝回滚：" + "、".join(holders)
+            + "\n  请先停掉面板 / MCP / 引擎的其它进程，或加 --force 强制覆盖"
+              "（崩溃残留同样会留下这两个文件）。")
+
+
+def restore(sid: str, *, wiki_only: bool = False, db_only: bool = False,
+            force: bool = False) -> dict[str, Any]:
+    """回滚到指定快照。**先给当前状态做一份快照**（防误恢复不可逆），再覆盖。
+
+    `force` 只用于跳过「索引库被占用」这道检查（CLI 的 `--force`）。
+    """
     sid = _safe_sid(sid)
     root = backups_dir().resolve()
     src = (root / sid).resolve()
@@ -187,6 +218,10 @@ def restore(sid: str, *, wiki_only: bool = False, db_only: bool = False) -> dict
         raise ValueError(f"快照 id 越界：{sid}") from None
     if not (src / "meta.json").exists():
         raise ValueError(f"快照不存在：{sid}")
+    # 占用检查必须在 create() **之前**：create 自己会打开索引库读一份，
+    # 它留下的 -wal / -shm 会让随后的检查误判成"别人在用"。
+    if not force and not wiki_only:
+        _assert_db_idle(_index_db())
     # 保护快照必须**排除正在恢复的这一份**：按名字删最旧时它可能正好被删掉，
     # 之后每个 part 都找不到、静默跳过，调用方却看到成功。
     guard = create(reason=f"restore {sid} 前的当前状态保护快照", protect=(sid,))

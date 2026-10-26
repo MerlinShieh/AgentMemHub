@@ -1067,8 +1067,20 @@ def cmd_snapshot(args) -> int:
         if not args.snapshot_id:
             print("restore 需要 --snapshot-id（用 snapshot --snapshot-action list 查看可用快照）")
             return 2
-        r = snapshot.restore(args.snapshot_id, wiki_only=args.wiki_only,
-                             db_only=args.db_only)
+        if args.wiki_only and args.db_only:
+            # 两个都给时 restore() 里两个分支都不进，却照样打印"回滚完成" ——
+            # 实际只多出一份保护快照，什么都没恢复
+            print("--wiki-only 与 --db-only 互斥：只给一个，或都不给（=两者都回滚）")
+            return 2
+        try:
+            r = snapshot.restore(args.snapshot_id, wiki_only=args.wiki_only,
+                                 db_only=args.db_only,
+                                 force=getattr(args, "force", False))
+        except RuntimeError as e:
+            # 「索引库正在被使用」是可预期的拒绝，按用法错误返回 2，
+            # 不要把 traceback 甩给用户
+            print(str(e))
+            return 2
         print(_json.dumps(r, ensure_ascii=False, indent=2))
         print("回滚完成。当前状态已自动保存为保护快照：", r["guard_snapshot"])
         return 0
@@ -1629,6 +1641,8 @@ def _register_snapshot_parser(sub) -> None:
     ps.add_argument("--snapshot-id", default="", help="restore 用：目标快照 id")
     ps.add_argument("--wiki-only", action="store_true", help="restore 时只回滚 wiki 产物")
     ps.add_argument("--db-only", action="store_true", help="restore 时只回滚索引库")
+    ps.add_argument("--force", action="store_true",
+                    help="restore 时跳过「索引库正被其它进程使用」的检查（会导致索引分叉，慎用）")
 
 
 if __name__ == "__main__":
