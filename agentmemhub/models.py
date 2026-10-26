@@ -235,16 +235,24 @@ def to_event(
 
 
 def _to_epoch(value: Any) -> Optional[float]:
-    """多格式时间 → Unix 秒（处理毫秒/纳秒/ISO 字符串）。"""
+    """多格式时间 → Unix 秒（处理秒 / 毫秒 / 微秒 / 纳秒 / ISO 字符串）。
+
+    数字按「除以多大规模后能落进合理纪元区间」判断，而不是写死两个阈值：
+    微秒时间戳（≈1.7e15）过去被当成纳秒（`>1e13` 只分得出毫秒与纳秒两档），
+    算出来是 1970 年 —— 于是 `store` 里"时间没变"的判断永不成立，
+    那个会话每次增量都被当成变了而全量重写。
+    """
     if value in (None, ""):
         return None
     if isinstance(value, (int, float)):
         number = float(value)
-        if number > 10_000_000_000_000:   # 纳秒
-            number /= 1_000_000_000
-        elif number > 10_000_000_000:     # 毫秒
-            number /= 1000
-        return number
+        if number <= 0:
+            return number
+        for scale in (1.0, 1e3, 1e6, 1e9):
+            sec = number / scale
+            if 1e8 <= sec <= 4.2e9:          # 约 1973-02 ~ 2103-01
+                return sec
+        return number / 1e9                  # 都不合理：按纳秒收尾，别静默放大
     from datetime import datetime
     text = str(value).strip().replace("Z", "+00:00")
     try:

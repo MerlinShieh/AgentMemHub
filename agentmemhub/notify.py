@@ -331,7 +331,14 @@ def push(level: str, category: str, title: str, body: str = "", *,
                      meta=dict(meta or {}), cfg=dict(cfg_all.get(name) or {})) or {}
         except Exception as e:              # noqa: BLE001 —— 一个通道炸了不能牵连其它
             res = {"ok": False, "error": "%s: %s" % (type(e).__name__, str(e)[:160])}
-        out[name] = dict(res)
+        try:
+            out[name] = dict(res)
+        except (TypeError, ValueError):
+            # 通道返回了非 mapping（list/str/None）：原先这行在 try 之外，
+            # 一抛就把整个 push() 带崩，调用方再兜住 ⇒ **该通道与后续通道
+            # 都没有审计**，排查时只看得到"推送没成功"却找不到原因
+            out[name] = {"ok": False,
+                         "error": "渠道返回值不是 mapping：%s" % type(res).__name__}
         # **一个通道一条审计**：排查"哪个渠道没出去、为什么"必须分得开。
         try:
             from agentmemhub.logs import audit_notify
@@ -375,10 +382,15 @@ def notify(level: str, category: str, title: str, body: str = "", *,
     if lv not in LEVELS:
         lv = "info"
     cat = str(category or "general").strip().lower()
-    ttl = str(title or "")[:200]
+    # 截断要留标记：静默截断的后果是"看起来完整、其实后半句没了"，
+    # 而通知里后半句往往正是结论（"…失败：原因"）
     _ts = float(ts if ts is not None else time.time())
+    _raw_title = str(title or "")
+    _raw_body = str(body or "")
+    ttl = _raw_title[:200] if len(_raw_title) <= 200 else _raw_title[:199] + "…"
+    _body = _raw_body[:4000] if len(_raw_body) <= 4000 else _raw_body[:3999] + "…"
     row = {"ts": _ts, "level": lv, "category": cat, "title": ttl,
-           "body": str(body or "")[:4000],
+           "body": _body,
            "meta": dict(meta or {})}
     if _deduped(cat, ttl, _ts, db):
         try:

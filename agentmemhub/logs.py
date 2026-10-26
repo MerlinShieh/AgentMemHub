@@ -350,7 +350,11 @@ def prune_task_logs() -> list[str]:
         if not d.exists():
             return []
         for f in d.iterdir():
-            if f.is_file() and f.stat().st_mtime < cutoff:
+            # 只删本模块产出的任务日志：logs/tasks/ 是公共目录，
+            # 别人放进去的东西不该被"按 mtime 清理"顺手删掉
+            if not f.is_file() or f.suffix != ".log":
+                continue
+            if f.stat().st_mtime < cutoff:
                 f.unlink()
                 removed.append(f.name)
     except Exception:                       # noqa: BLE001

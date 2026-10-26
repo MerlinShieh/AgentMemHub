@@ -129,11 +129,24 @@ MENU = """
 
 
 def _choose_source() -> str:
-    """选择来源：直接回车 = 全部；输入 source 名 = 单个。"""
+    """选择来源：直接回车 = 全部；输入 source 名 = 单个。
+
+    拼错**必须说出来并重新问**：原先错名被静默回落成 `""`（= 全部源），
+    想只提取 `cla` 结果把全量重跑一遍，且没有任何提示。
+    """
     srcs = [a.source for a in adapters.all_adapters()]
     _out(f"  可选 source: {', '.join(srcs)}（回车 = 全部）")
-    raw = input("  source> ").strip().lower()
-    return raw if raw in srcs else ""
+    for _ in range(3):
+        raw = input("  source> ").strip().lower()
+        if not raw:
+            return ""
+        if raw in srcs:
+            return raw
+        near = [s for s in srcs if s.startswith(raw) or raw in s]
+        hint = f"（是不是 {near[0]}？）" if len(near) == 1 else ""
+        _out(f"  ✗ 没有名为 {raw!r} 的 source{hint}，请重输或直接回车=全部")
+    _out("  已放弃选择，按「全部源」处理 —— 若不想全量，请重开菜单")
+    return ""
 
 
 def _ask(prompt: str, default: str = "") -> str:
@@ -162,7 +175,24 @@ def action_search() -> None:
         return
     source = _choose_source()
     role = _ask("  角色（user/assistant/tool/reasoning，回车=全部）> ").lower()
+    if role and role not in ("user", "assistant", "tool", "reasoning"):
+        # 不校验的表现是：拼错就静默 0 命中，用户以为"库里没这条"
+        _out(f"  ✗ 角色只能是 user/assistant/tool/reasoning，已按全部处理")
+        role = ""
     run_search_text(query, source=source, role=role, limit=20)
+
+
+def _wait_port(port: int, timeout: float = 15.0, proc=None) -> bool:
+    """等端口真的能连上（进程中途退出则立刻返回 False）。"""
+    import time as _t
+    deadline = _t.time() + timeout
+    while _t.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            return False
+        if _port_listening(port):
+            return True
+        _t.sleep(0.2)
+    return _port_listening(port)
 
 
 def action_dashboard() -> None:
@@ -177,6 +207,13 @@ def action_dashboard() -> None:
         return
     port = dashboard_port()
     if _port_listening(port):
+        if _is_our_dashboard(port):
+            # 非 Windows 上没法枚举进程（见 `_find_serve_processes`），若不
+            # "认领"一下，用户第二次按 [6] 就会被劝"端口被别人占了" —— 而
+            # 那个"别人"正是自己刚启动的看板，提示完全指错方向。
+            _out(f"  看板已在运行 → http://127.0.0.1:{port}/")
+            _out("  （当前平台无法枚举进程归属，停止看板请用 [7] 或手动结束该进程）")
+            return
         _out(f"  端口 {port} 已被其他程序占用，看板无法启动；"
              f"可换端口启动：python -m agentmemhub serve --port <端口>")
         return
@@ -187,6 +224,14 @@ def action_dashboard() -> None:
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
     _out(f"  看板启动中（PID {proc.pid}）→ http://127.0.0.1:{port}/")
+    # 不能说完就不管：端口被占、依赖缺失都会让子进程立刻退出，而它的
+    # stderr 被 DEVNULL 吞掉 —— 用户看到的只有"打不开"，且反复按 [6]
+    # 会堆一串失败进程。所以等一下端口真的通，再宣布成功。
+    if _wait_port(port, timeout=15.0, proc=proc):
+        _out("  ✓ 看板已就绪")
+    else:
+        _out(f"  ✗ 看板 15 秒内没有起来（PID {proc.pid}，端口 {port}）")
+        _out("    请前台跑一次看报错：python -m agentmemhub serve --port <端口>")
     _out("  （在浏览器打开上面的地址；停止看板可用 [7] 或关闭该进程）")
     _action_log(f"看板启动（控制台）→ PID {proc.pid} 端口 {port}")
 
@@ -196,6 +241,23 @@ def _port_listening(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.5)
         return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _is_our_dashboard(port: int, timeout: float = 1.0) -> bool:
+    """端口上跑的是不是我们自己的看板。
+
+    靠 `/api/health` 的返回结构认领（它必带 `healthy` 字段）。探测失败一律
+    当作"不是"，因为这里的用途只是**避免误报**，不能反过来把真占用说成自己人。
+    """
+    import json
+    import urllib.request
+    try:
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/health", timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:                       # noqa: BLE001 —— 探不通就按"不是"处理
+        return False
+    return isinstance(data, dict) and "healthy" in data
 
 
 _PS_FIND_SERVE = ("Get-CimInstance Win32_Process | "

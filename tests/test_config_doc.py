@@ -203,3 +203,23 @@ def test_对比_真实文件结构自洽():
     assert len(names) == len(set(names)), "missing 与 obsolete 不该有交集"
     if d["missing"]:
         assert any(x["comment"] for x in d["missing"]), "新增键应当带上 example 注释"
+
+def test_值位只有注释时不会被当成值():
+    """`key:   # 说明` 是模板里的"保留位"写法。
+
+    原先只认 `" #"`，而这里 `#` 前没有值、只有空白，于是整段被当成值
+    `# 说明` —— 配置页会显示一个不存在的值，`diff_example` 拿它去比对
+    就会误报 changed。真实 yaml 目前没有这个形态，但模板一改就会踩。
+    """
+    entries = config_doc.parse_annotated("a:\n  keep:      # 保留位，暂未启用\n")
+    rec = {e["path"]: e for e in entries if not e["is_section"]}
+    assert rec["a.keep"]["value_raw"] == ""
+    assert rec["a.keep"]["comment"] == "保留位，暂未启用"
+
+
+def test_值里的井号不会被当成注释():
+    yaml_text = "a:\n  url: http://example.com/#anchor\n"
+    entries = config_doc.parse_annotated(yaml_text)
+    rec = {e["path"]: e for e in entries if not e["is_section"]}
+    assert rec["a.url"]["value_raw"] == "http://example.com/#anchor"
+    assert rec["a.url"]["comment"] == ""

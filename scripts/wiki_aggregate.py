@@ -877,7 +877,12 @@ def _yaml_flow_scalar(s: object) -> str:
 
 
 def render_page(page: dict, domain: str) -> str:
-    L = ["---", "title: %s" % page["title"], "domain: %s" % domain,
+    # title 必须走 `_yaml_flow_scalar`：标题里出现 ASCII 的 `": "` 时裸写会让
+    # 整段 frontmatter 解析失败（aliases 那行早就加了引号，title 当初漏了）。
+    # 解析失败不是小事 —— 页面在 Obsidian 里变成"无元数据"，`sources` /
+    # `merged_from` 全丢，投影侧读不到 domain 就会归进 unknown。
+    L = ["---", "title: %s" % _yaml_flow_scalar(page["title"]),
+         "domain: %s" % _yaml_flow_scalar(domain),
          # aliases：**这一行是给 Obsidian 用的**。Obsidian 的 `[[X]]` 按
          # **文件名或 frontmatter aliases** 解析，**不读 title**；而页面里
          # `**相关**：[[标题]]` 全是**标题**形态 —— 缺 aliases 时这些链接会
