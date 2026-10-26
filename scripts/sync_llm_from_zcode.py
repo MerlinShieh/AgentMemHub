@@ -30,6 +30,21 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TARGET_YAML = PROJECT_ROOT / "agentmemhub.yaml"
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    """原子写：先写同目录临时文件，再 `os.replace` 覆盖。
+
+    为什么不直接 `write_text`：这个 yaml 是所有模块的配置入口，写到一半
+    被中断（Ctrl-C / 磁盘满 / 断电）会留下**半截文件**，整个项目起不来；
+    而临时文件即使残留也只是垃圾，不会顶替真配置。
+    """
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def _mask(secret: str) -> str:
     """脱敏显示：只留首尾各 4 位（过短则全遮）。"""
     if not secret:
@@ -240,7 +255,7 @@ def main() -> int:
         _echo_section(new_text)
         return 0
 
-    TARGET_YAML.write_text(new_text, encoding="utf-8")
+    _atomic_write(TARGET_YAML, new_text)
     print(f"✓ 已写入 {TARGET_YAML}（{'新增 llm 段' if added else '更新 llm 段'}）")
     print("  该文件已被 .gitignore，密钥不会入库。")
     if args.show:

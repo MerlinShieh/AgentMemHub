@@ -20,12 +20,28 @@ agentmemhub.yaml 易错，而且会把明文密钥留在终端与对话记录里
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TARGET_YAML = PROJECT_ROOT / "agentmemhub.yaml"
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """原子写：先写同目录临时文件，再 `os.replace` 覆盖。
+
+    为什么不直接 `write_text`：这个 yaml 是所有模块的配置入口，写到一半
+    被中断（Ctrl-C / 磁盘满 / 断电）会留下**半截文件**，整个项目起不来；
+    而临时文件即使残留也只是垃圾，不会顶替真配置。
+    """
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 DSH_HOME = Path.home() / ".dsh"
 SETTINGS = DSH_HOME / "settings.yaml"
 CREDS = DSH_HOME / ".credentials.yaml"
@@ -174,7 +190,7 @@ def patch_yaml(info: dict, *, thinking: str = "", dry_run: bool = False,
     if dry_run:
         print("\n(--dry-run，未写入)")
         return
-    TARGET_YAML.write_text(text, encoding="utf-8")
+    _atomic_write(TARGET_YAML, text)
     print("\n✅ 已更新 %s 的 %s 段" % (TARGET_YAML, section))
 
 

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from collections import defaultdict
@@ -266,7 +267,15 @@ def run_fix(root: Path, dry_run: bool = False) -> dict:
 
         new = LINK_RE.sub(repl, text)
         if changed and not dry_run:
-            f.write_text(new, encoding="utf-8", newline="")
+            # 原子写：linkfix 一次会改几百个页面，原地覆盖时进程被杀/磁盘满
+            # 会把**已经读到内存、但没写完**的页面留成半截（正文没了、只剩
+            # frontmatter）。产物虽可重建，但重建要整域重编 —— 代价远大于写 tmp。
+            tmp = f.with_name(f".{f.name}.{os.getpid()}.tmp")
+            try:
+                tmp.write_text(new, encoding="utf-8", newline="")
+                os.replace(tmp, f)
+            finally:
+                tmp.unlink(missing_ok=True)
         if changed:
             n_files_changed += 1
 
