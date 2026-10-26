@@ -103,3 +103,23 @@ def test_render带外壳():
     out = mdmini.render("# 标题", title="某页")
     assert out.startswith("<article") and "<h1>标题</h1>" in out
     assert "某页" in out          # aria-label（无障碍 + 便于测试定位）
+
+
+def test_正文里的引号被转义():
+    """`"` 必须变成 `&quot;` —— 否则属性位点可以被正文内容闭合。"""
+    html = mdmini.render_body('他说"你好"')
+    assert "&quot;" in html
+    assert '"你好"' not in html
+
+
+def test_链接url里的引号不会逃出href():
+    """URL 里的 `"` 不得闭合 `href="…"`（外部投喂的文档是不可信输入）。
+
+    `_inline` 一开始若用 `html.escape(quote=False)`，下面这行会渲染成
+    `<a href="http://a/" onmouseover="alert(1">` —— 属性被提前闭合、事件
+    处理器被注入；而这段 HTML 最终走 `innerHTML` 进面板（外部投喂的 PDF、
+    网页正文都会经过这里），等于把整条执行链交给了投喂方。
+    """
+    html = mdmini.render_body('[x](http://a/"onmouseover="alert(1))')
+    assert 'onmouseover' in html, "内容不该被吞掉，只是要转义"
+    assert '"onmouseover=' not in html, "裸引号会闭合 href 属性"

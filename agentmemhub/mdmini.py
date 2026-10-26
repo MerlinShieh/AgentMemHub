@@ -33,7 +33,10 @@ _FENCE = "```"
 
 def _inline(text: str) -> str:
     """行内标记。**入口先转义** —— 之后插入的都是我们自己生成的标签。"""
-    t = html.escape(str(text or ""), quote=False)
+    # ⚠️ `quote=True` 是安全阀，别改回去：下面链接那一步把 URL 直接放进
+    # `href="…"`，若 `"` 不被转义，正文里写 `[x](http://a/"onmouseover="alert(1))`
+    # 就能闭合属性注入事件处理器 —— 而外部投喂的 PDF/网页正是不可信正文。
+    t = html.escape(str(text or ""), quote=True)
     t = re.sub(r"`([^`]+)`", r"<code>\1</code>", t)
     t = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", t)
     # 斜体：只排除**相邻**的 `*`（粗体已被上一步吃掉）。

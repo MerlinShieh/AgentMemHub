@@ -1799,12 +1799,15 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     const esc = wikiEsc;
     if(!node.is_section){
       const over = (d.env_overrides || []).find(o => o.path === node.path && o.active);
-      const val = node.value_raw
-        ? esc(node.value_raw)
+      // 脱敏与 drift 表同口径：`api_key` / `token` 这类键上屏必须是 `***`，
+      // 否则设置页会把真实密钥明文铺在屏幕上（drift 表做了，正文区漏了）。
+      const shown = node.value_raw ? cfgMask(node.path, node.value_raw) : '';
+      const val = shown
+        ? esc(shown)
         : '<span class="text-muted-foreground">—</span>';
       return `<div class="flex flex-wrap items-baseline gap-x-2 px-2 py-[3px] hover:bg-muted/40">`
         + `<span class="shrink-0 font-mono text-[11px] text-foreground" title="${esc(node.path)}（第 ${node.line} 行）">${esc(node.key)}</span>`
-        + `<span class="min-w-0 break-all font-mono text-[11px] text-primary" title="${esc(node.value_raw)}">${val}</span>`
+        + `<span class="min-w-0 break-all font-mono text-[11px] text-primary" title="${esc(shown)}">${val}</span>`
         + `<span class="min-w-0 flex-1 text-[10px] leading-snug text-muted-foreground">${esc(node.comment || '')}`
         +   (over ? ` <span class="chip bg-warning-soft text-warning">被 ${esc(over.env)} 覆盖</span>` : '')
         + `</span></div>`;
@@ -2842,7 +2845,9 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     if(!ok) return;
     try{
       $('#opsUpdatedAt').textContent = '检测中（可能要几分钟）…';
-      const d = await opsFetch('/api/wiki/trigger/run');
+      // 必须显式 POST：`opsFetch` 不传 opts 时是 GET，而后端这条路由只收 POST，
+      // 漏掉的后果是按钮永久 405（不是"偶尔失败"，是百分百失败）。
+      const d = await opsFetch('/api/wiki/trigger/run', { method:'POST' });
       toast('检测完成：' + ((d && (d.action || (d.should_run ? '已触发' : '未命中规则'))) || 'ok'));
       loadOps();
     }catch(e){ toast('检测失败：' + e.message); loadOps(); }
