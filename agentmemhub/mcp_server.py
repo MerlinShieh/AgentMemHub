@@ -299,6 +299,10 @@ def _save(args: dict) -> str:
                     "  WHERE dm.slice_key=?)",
                     (AGENT_IMPORTANCE_VALUES[importance],
                      f"mcp:{tid.removeprefix('mcp_')}"))
+                # 必须显式提交：`sqlite3` 的隐式事务在 `close()` 时**回滚**。
+                # 少了这一行，importance 档位（0.8/0.6/0.4）永远落不了库 ——
+                # 实测 225 条记忆的 value 全是 0.6，"重要"标记从未生效。
+                idx.commit()
         finally:
             idx.close()
     except Exception as e:                      # noqa: BLE001

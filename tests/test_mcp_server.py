@@ -272,6 +272,34 @@ def test_memory_save_importance_tiers(save_trace, engine_request, _auth,
     assert trace["priority"] == expected
 
 
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "engine_request")
+@mock.patch("agentmemhub.rag_bridge.save_memory_trace")
+@mock.patch("agentmemhub.distill._pending_projection", return_value=[])
+@mock.patch("agentmemhub.distill.save_direct_memory", return_value="inserted")
+@mock.patch("agentmemhub.rag.ingest.open_index")
+def test_memory_save_importance_commits(open_index, _sdm, _pend, save_trace,
+                                        engine_request, _auth):
+    """importance 的 UPDATE 必须显式 `commit()`。
+
+    `sqlite3` 的隐式事务在 `close()` 时**回滚** —— 少了这一行，档位
+    0.8/0.6/0.4 永远落不了库（实测 225 条记忆的 value 全是 0.6，
+    面板上"标记重要"从未生效）。这条测试守的是"提交"这个动作本身。
+    """
+    save_trace.return_value = {"imported": 1, "skipped": 0}
+    engine_request.return_value = {}
+    idx = mock.MagicMock()
+    open_index.return_value = idx
+
+    h, _ = _handler()
+    _call(h, _req("tools/call", {"name": "memory_save",
+                                 "arguments": {"content": "提交测试", "importance": "high"}}))
+
+    sql = str(idx.execute.call_args[0][0])
+    assert "UPDATE unit_values" in sql, "没走到 importance 的落库分支"
+    assert idx.commit.called, "UPDATE 之后必须 commit，否则 close() 回滚"
+
+
 def test_importance_tiers_are_ordered_and_disjoint():
     """三档必须递增且互不相同，且 normal 恰为 Agent 写入基线。"""
     vals = AGENT_IMPORTANCE_VALUES
