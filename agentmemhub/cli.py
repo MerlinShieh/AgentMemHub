@@ -1519,7 +1519,7 @@ def cmd_feed(args) -> int:
     return 2
 
 
-def main() -> None:
+def main() -> int:
     _force_utf8_stdio()
     parser = build_parser()
     # argparse **不允许位置参数夹在选项之间**：`feed add --force X` 里的 X 会被判成
@@ -1537,7 +1537,7 @@ def main() -> None:
         # 无参数 = 进入交互式控制台（新用户入口）
         from agentmemhub.console import run_console
         run_console()
-        return
+        return 0
     handlers = {
         "ingest": cmd_ingest, "list": cmd_list, "show": cmd_show,
         "search": cmd_search, "export": cmd_export, "stats": cmd_stats,
@@ -1554,8 +1554,12 @@ def main() -> None:
     fn = handlers.get(args.command)
     if fn is None:
         build_parser().print_help()
-        return
-    fn(args)
+        return 0
+    # 子命令用返回值表达成败（`feed lint` 的 P0 门槛、`feed add` 的部分失败等）。
+    # 2026-10-26 之前这里直接丢弃返回值、`main()` 也不返回 ⇒ **所有命令退出码恒 0**，
+    # 于是文档里写的"P0>0 ⇒ 退出码 1，可当提交/巡检门槛"从来没生效过。
+    rc = fn(args)
+    return rc if isinstance(rc, int) else 0
 
 
 def cmd_llm_config(args) -> int:

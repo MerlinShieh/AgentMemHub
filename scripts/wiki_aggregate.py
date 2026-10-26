@@ -1811,7 +1811,15 @@ def run(args) -> None:
     # 它的归类缓存按批次序号键控，L1 页数一变序号整体漂移，缓存全错位。
     dom_file = out / "_domains.json"
     preset = getattr(args, "preset_domains", None) or None
-    partial = bool(getattr(args, "partial", False))
+    # 过滤参数**隐含 partial**（2026-10-26）：`--domain` / `--limit` / `--retry-failed`
+    # 只处理一部分域，此时若按全量模式走，`_prune_stale_domain_dirs(partial=False)`
+    # 会把"本轮没处理"的 `NN-*` 目录整个 rmtree 掉 —— 而 `_run_coverage` 是按**新编号**
+    # 去读旧目录的，旧目录不在就 `old=∅` ⇒ 覆盖率判通过，闸门拦不住。
+    # argparse 里根本没有 `partial` 参数，所以过去 CLI 直跑 `--domain 记忆引擎`
+    # 会静默删掉其余所有域的产物。宁可少清一次，也不能删别人的产物。
+    partial = bool(getattr(args, "partial", False)) or bool(
+        getattr(args, "domain", "") or getattr(args, "limit", 0)
+        or getattr(args, "retry_failed", False))
     if preset:
         dom_list = [(name, members) for name, _dn, members in preset]
         preset_dirs = {name: dn for name, dn, _ in preset}
@@ -2112,7 +2120,7 @@ def run(args) -> None:
     return status
 
 
-def main() -> None:
+def main() -> int:
     ap = argparse.ArgumentParser(description="LLM Wiki 第二级：跨会话聚合")
     ap.add_argument("--src", required=True, help="第一级产出目录")
     ap.add_argument("--out", required=True, help="第二级输出目录")
@@ -2139,8 +2147,11 @@ def main() -> None:
     ap.add_argument("--no-resume", action="store_true", help="忽略已有的 _domains.json")
     args = ap.parse_args()
     args.resume = not args.no_resume
-    run(args)
+    status = run(args)
+    # 中止/降级必须反映到退出码（2026-10-26）：`run()` 返回的 status 过去被丢弃，
+    # 于是 degrade_ratio / domain_missing / run_coverage 三种中止都是 exit 0。
+    return 1 if (status or {}).get("aborted") else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

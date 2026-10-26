@@ -742,10 +742,12 @@ def main() -> int:
                 if s and c:
                     only.add((s, c))
             print("定向补跑 %d 个失败会话（不全量重来）" % len(only))
-        compile_all(db, out, workers=args.workers,
-                    limit=args.limit, resume=not args.no_resume, min_n=args.min,
-                    thinking=args.thinking, only=only, failures=fl)
-        return 0
+        results = compile_all(db, out, workers=args.workers,
+                              limit=args.limit, resume=not args.no_resume, min_n=args.min,
+                              thinking=args.thinking, only=only, failures=fl)
+        # 失败必须反映到退出码（2026-10-26）：这里过去直接 `return 0`，
+        # 于是挂在 cron/CI 上的"全量编译"永远是绿的，失败了也没人知道。
+        return 1 if [r for r in results if r.get("error")] else 0
 
     if not (args.source and args.cid):
         print("需要 --source 与 --conversation-id（或用 --list 查看候选）")
