@@ -121,3 +121,21 @@ def test_保留策略_默认配置为5份(env):
 def test_restore_不存在的快照明确报错(env):
     with pytest.raises(ValueError):
         snapshot.restore("nope_12345678")
+
+
+def test_恢复最旧快照时不被保护快照挤掉(env, monkeypatch):
+    """保护快照会触发 prune，而 prune 按名字删最旧 —— 要恢复的往往正是最旧那份。
+
+    2026-10-26 审计实测：旧实现把正在恢复的快照目录删掉后，每个 part 都找不到、
+    循环静默跳过，`restored=[]` 却返回成功，用户以为回滚完成。
+    """
+    _pin_keep(monkeypatch, 2)
+    _, idx, l1, l2 = env
+    (l1 / "a__s1.md").write_text("旧内容", encoding="utf-8")
+    oldest = snapshot.create(reason="最旧")
+    (l1 / "a__s1.md").write_text("新内容", encoding="utf-8")
+    snapshot.create(reason="较新")            # 已有 2 份，再建就要挤掉最旧
+
+    res = snapshot.restore(oldest["id"])
+    assert res["restored"], "正在恢复的快照被 prune 掉了（restored 为空）"
+    assert (l1 / "a__s1.md").read_text(encoding="utf-8") == "旧内容"

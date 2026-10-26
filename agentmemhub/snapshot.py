@@ -70,7 +70,8 @@ def _index_db() -> Path:
     return Path(load_settings().index_db)
 
 
-def create(reason: str = "手动") -> dict[str, Any]:
+def create(reason: str = "手动", *,
+           protect: "tuple[str, ...]" = ()) -> dict[str, Any]:
     """创建一份快照（索引库整库 + wiki 产物目录）。"""
     # id 精确到毫秒——同秒多次 create（如 restore 保护快照）不能互相覆盖
     ts = time.strftime("%Y%m%d_%H%M%S")
@@ -111,19 +112,28 @@ def create(reason: str = "手动") -> dict[str, Any]:
     }
     (root / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1),
                                     encoding="utf-8")
-    _prune()
+    _prune(protect)
     return {**meta, "path": str(root), "keep": keep_count(),
             "size_mb": round(sum(f.stat().st_size for f in root.rglob("*")
                                  if f.is_file()) / 1e6, 1)}
 
 
-def _prune() -> list[str]:
-    """保留最近 keep_count() 份，删最旧。返回被删的 id。"""
+def _prune(protect: "set[str] | tuple[str, ...]" = ()) -> list[str]:
+    """保留最近 keep_count() 份，删最旧。返回被删的 id。
+
+    `protect` 里的 id **绝不删**。`restore()` 会先做一份"当前状态"保护快照，
+    而按名字排序删最旧时，可能正好把**正在恢复的那份**（通常就是最旧的）删掉：
+    之后每个 part 都找不到、循环静默跳过，调用方却拿到成功 —— 用户以为回滚完成
+    （2026-10-26 审计实测）。
+    """
     root = backups_dir()
+    keep = set(protect or ())
     snaps = sorted([d for d in root.iterdir() if d.is_dir()],
                    key=lambda d: d.name)
+    removable = [d for d in snaps if d.name not in keep]
+    excess = len(removable) - keep_count()
     removed = []
-    for d in snaps[:-keep_count()]:
+    for d in (removable[:excess] if excess > 0 else []):
         shutil.rmtree(d, ignore_errors=True)
         removed.append(d.name)
     return removed
@@ -153,12 +163,33 @@ def list_snapshots() -> list[dict[str, Any]]:
     return out
 
 
+def _safe_sid(sid: str) -> str:
+    """快照 id 必须是一段名字。
+
+    它会被拼进 `backups_dir()` 之后参与 `copy2` / `rmtree+copytree`，而
+    `../..` 或绝对路径能直接越出备份根（`Path(root)/"/x"` 会丢弃 root）。
+    网关层对 `snapshot_id` 只做透传，所以校验必须落在这一层。
+    """
+    s = str(sid or "").strip()
+    if not s or s in (".", "..") or any(ch in s for ch in ("/", "\\", ":")):
+        raise ValueError(f"快照 id 非法：{sid}")
+    return s
+
+
 def restore(sid: str, *, wiki_only: bool = False, db_only: bool = False) -> dict[str, Any]:
     """回滚到指定快照。**先给当前状态做一份快照**（防误恢复不可逆），再覆盖。"""
-    src = backups_dir() / sid
+    sid = _safe_sid(sid)
+    root = backups_dir().resolve()
+    src = (root / sid).resolve()
+    try:
+        src.relative_to(root)             # 双保险：真被绕过也出不去
+    except ValueError:
+        raise ValueError(f"快照 id 越界：{sid}") from None
     if not (src / "meta.json").exists():
         raise ValueError(f"快照不存在：{sid}")
-    guard = create(reason=f"restore {sid} 前的当前状态保护快照")
+    # 保护快照必须**排除正在恢复的这一份**：按名字删最旧时它可能正好被删掉，
+    # 之后每个 part 都找不到、静默跳过，调用方却看到成功。
+    guard = create(reason=f"restore {sid} 前的当前状态保护快照", protect=(sid,))
 
     restored: list[str] = []
     # ① 索引库

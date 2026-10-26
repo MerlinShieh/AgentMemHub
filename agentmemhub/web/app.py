@@ -429,6 +429,45 @@ def _run_wiki_retry_fn(out: str, stage: str, src: str, workers: int):
     return _run
 
 
+def _wiki_out_guard(p: str, key: str) -> str:
+    """wiki 产物目录必须落在配置的 `wiki.out_l1` / `wiki.out_l2` 同根之下。
+
+    `wiki.update()` 会往这两个目录写 L1/L2 页与编译清单；网关层若原样透传，
+    任意路径都能被写（`?l1=C:\\Windows`）。配置值是唯一可信来源 ——
+    真要换目录试跑请走 CLI，不要在 HTTP 上开这个口子。
+    """
+    from pathlib import Path
+
+    from fastapi import HTTPException
+
+    from agentmemhub.config import config as _cfg
+
+    raw = str(p or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail=f"{key} 不能为空")
+    cfg_val = str((_cfg().wiki or {}).get(key) or "").strip()
+    if not cfg_val:
+        return raw                        # 没配就不设限（保持旧行为）
+    root = Path(cfg_val).resolve().parent
+    target = Path(raw).resolve()
+    try:
+        target.relative_to(root)          # 正常情形：与配置同根
+        return raw
+    except ValueError:
+        pass
+    # 相对路径允许（落在当前工作目录下，`wiki.update` 自己会建）；但它
+    # resolve 后仍必须在本进程 CWD 之内 —— `../../etc` 这类逃逸照样拒。
+    if not Path(raw).is_absolute():
+        try:
+            target.relative_to(Path.cwd().resolve())
+            return raw
+        except ValueError:
+            pass
+    raise HTTPException(
+        status_code=400,
+        detail=f"{key} 必须落在 {root} 之下（实际收到：{raw}）") from None
+
+
 def _logged_task(name: str, fn) -> Any:
     """任务包装：开始/完成/失败写统一操作日志（web.log）；完整输出逐行落盘
     <data_dir>/tasks/<job_id>.log（页面关掉/进程中断也可追溯）。"""
@@ -648,6 +687,31 @@ def create_app(db_path: Path | None = None):
         openapi_url="/api/openapi.json",
     )
     app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+    @app.middleware("http")
+    async def _same_site_guard(request, call_next):
+        """拒绝跨站发起的写请求（CSRF）。
+
+        本地面板不做鉴权的前提是「只绑 127.0.0.1」，但那**挡不住 CSRF**：
+        浏览器里任意网页都能用 `<form method=POST action="http://127.0.0.1:8765/…">`
+        发起简单请求（不带预检），副作用照样执行 —— 而这里的副作用是覆盖索引库、
+        `rmtree` 产物目录、删投喂素材。
+
+        判据：只对非只读方法、且浏览器**自己声明了来源**的请求校验同源。
+        `curl` / CLI / MCP 不带这些头，放行（它们不是浏览器，没有 CSRF 面）。
+        """
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            origin = (request.headers.get("origin") or "").strip()
+            site = (request.headers.get("sec-fetch-site") or "").strip().lower()
+            host = (request.headers.get("host") or "").strip()
+            if origin and host and origin not in ("http://" + host,
+                                                  "https://" + host):
+                return JSONResponse({"detail": "拒绝跨站请求：Origin 不匹配"},
+                                    status_code=403)
+            if site and site not in ("same-origin", "none"):
+                return JSONResponse({"detail": "拒绝跨站请求：Sec-Fetch-Site=%s" % site},
+                                    status_code=403)
+        return await call_next(request)
 
     def _invalidate():
         agg.invalidate()
@@ -1623,6 +1687,8 @@ def create_app(db_path: Path | None = None):
         """
         from agentmemhub import logs, wiki
         from agentmemhub.web import tasks
+        l1 = _wiki_out_guard(l1, "out_l1")
+        l2 = _wiki_out_guard(l2, "out_l2")
         name = "LLM Wiki 增量更新"
 
         # ⚠️ `tasks.submit` 的契约是 **`fn(emit, meta)`**（见 `web/tasks.py`），
