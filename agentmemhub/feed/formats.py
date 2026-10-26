@@ -101,16 +101,21 @@ def _configured_exts(config=None) -> list[str] | None:
 
 
 def _overrides() -> list[str] | None:
-    """运行时覆盖（看板写的状态文件）。没写过 / 空清单都返回 `None`（见上）。"""
+    """运行时覆盖（看板写的状态文件）。
+
+    三态必须分清，否则"空清单 = 禁止一切"这个能力根本不存在：
+      · 文件不存在 / 没有 `exts` 键 → `None`（没写过，回落 yaml/注册表）
+      · `"exts": []` → `[]`（**显式**禁止一切，是有效决定，不能当成没写过）
+      · 其它 → 规范化后的清单
+    """
     p = _state_path()
     try:
         if not p.is_file():
             return None
         data = json.loads(p.read_text(encoding="utf-8"))
-        exts = (data or {}).get("exts")
-        if not exts:
+        if not isinstance(data, dict) or "exts" not in data:
             return None
-        return [_norm(e) for e in exts if _norm(e)]
+        return [_norm(e) for e in (data.get("exts") or []) if _norm(e)]
     except Exception:                        # noqa: BLE001 —— 状态文件坏了不该让投喂瘫掉
         return None
 

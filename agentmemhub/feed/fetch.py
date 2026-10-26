@@ -19,6 +19,7 @@ UA 是硬需求（实测）
 """
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 from dataclasses import dataclass, field
@@ -65,6 +66,84 @@ class Fetched:
         return self.body.decode("utf-8", "replace")
 
 
+#: 即使手动跟跳，也不许无限套娃
+_MAX_REDIRECTS = 3
+
+_PRIVATE_HOSTS = ("localhost", "localhost.localdomain", "ip6-localhost")
+
+#: 云厂商元数据服务的固定域名。各家不同（且还有自建），但常见的都在这里；
+#: 正常投喂不会碰到这些名字，宁可多列。
+_METADATA_HOSTS = (
+    "metadata.google.internal", "metadata.goog", "metadata.azure.com",
+    "instance-data", "instance-data.ec2.internal",
+)
+
+#: 云内网段：阿里云/腾讯云的元数据地址常落在 100.64/10（运营商级 NAT 段），
+#: 而 `IPv4Address("100.100.100.200").is_private` 是 **False** —— 只靠 is_private
+#: 拦不住（2026-10-26 审计实测）。
+_EXTRA_NETS = tuple(ipaddress.ip_network(n) for n in ("100.64.0.0/10",))
+
+
+def _looks_numeric_host(h: str) -> bool:
+    """`2130706433` / `0x7f.0.0.1` / `0177.0.0.1` 这类"数字形"主机名。
+
+    它们都不是合法 IP 字面量（`ipaddress` 直接 ValueError），但 libc 的
+    `getaddrinfo` / `inet_aton` 会按 IPv4 的历史写法解析成 127.0.0.1 ——
+    放过去等于把整条私网判定绕开。正常域名不会是纯数字或 0x 点分段。
+    """
+    if h.isdigit():
+        return True
+    parts = h.split(".")
+    if len(parts) != 4:
+        return False
+    for p in parts:
+        if not p:
+            return False
+        if p[:2].lower() == "0x":
+            if not p[2:] or any(c not in "0123456789abcdef" for c in p[2:].lower()):
+                return False
+        elif not p.isdigit():
+            return False
+    return True
+
+
+def _is_private_host(host: str) -> bool:
+    """主机名是否指向本机/内网/云元数据。
+
+    只做**字面判定**（主机名 + IP 字面量），不做 DNS 解析：解析后再连会有
+    DNS rebinding 的时间窗，真要堵住得在连接层校验。这里挡住的是最直接那条
+    ——「投喂一个内网地址，让服务器替我去访问它」。
+    """
+    h = (host or "").strip().lower().rstrip(".")
+    if not h:
+        return True
+    if h in _PRIVATE_HOSTS or h.endswith(".localhost"):
+        return True
+    if h in _METADATA_HOSTS or h.startswith("metadata."):
+        return True
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        # 域名：普通域名交给连接层；"数字形"主机名是绕过手法，直接拒。
+        return _looks_numeric_host(h)
+    if any(ip in net for net in _EXTRA_NETS if ip.version == net.version):
+        return True
+    return (ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+
+
+def _assert_public_url(url: str) -> None:
+    """只放行 http/https 且目标不是本机/内网（`fetch` 是本模块唯一的出网口）。"""
+    p = urlparse(str(url or "").strip())
+    scheme = (p.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        raise FeedError("只支持 http/https 链接，拒绝：%s" % (scheme or "(空 scheme)"),
+                        kind="fetch", retryable=False)
+    if _is_private_host(p.hostname or ""):
+        raise FeedError("拒绝抓取本机/内网地址：%s" % (p.hostname or "(无主机名)"),
+                        kind="fetch", retryable=False)
+
+
 def fetch(url: str, *, timeout: float = 20.0, ua: str = DEFAULT_UA,
           referer: str = "", extra_headers: Optional[dict] = None,
           max_bytes: int = 8 * 1024 * 1024) -> Fetched:
@@ -79,6 +158,8 @@ def fetch(url: str, *, timeout: float = 20.0, ua: str = DEFAULT_UA,
         raise FeedError("测试沙箱禁止出网（%s 已置）—— 请 mock `feed.fetch.fetch`"
                         % SANDBOX_ENV, kind="fetch", retryable=False)
 
+    _assert_public_url(url)
+
     import httpx
 
     headers = {"User-Agent": ua,
@@ -88,20 +169,30 @@ def fetch(url: str, *, timeout: float = 20.0, ua: str = DEFAULT_UA,
         headers["Referer"] = referer
     headers.update(extra_headers or {})
     try:
-        with httpx.Client(timeout=timeout, follow_redirects=True,
+        # **不自动跟随重定向**：每一跳都重新校验目标。自动跟随等于把
+        # 「公网 URL →302→ 内网地址」这条绕过路径直接敞开（经典 SSRF）。
+        with httpx.Client(timeout=timeout, follow_redirects=False,
                           trust_env=True) as c:
-            with c.stream("GET", url, headers=headers) as r:
-                chunks: list[bytes] = []
-                got = 0
-                for chunk in r.iter_bytes():
-                    chunks.append(chunk)
-                    got += len(chunk)
-                    if got > max_bytes:
-                        raise FeedError("响应超过 %d MB 上限，已中止" % (max_bytes // 1048576),
-                                        kind="fetch", retryable=False)
-                return Fetched(url=str(r.url), status=int(r.status_code),
-                               body=b"".join(chunks),
-                               headers={k.lower(): v for k, v in r.headers.items()})
+            for _hop in range(_MAX_REDIRECTS + 1):
+                with c.stream("GET", url, headers=headers) as r:
+                    loc = r.headers.get("location")
+                    if int(r.status_code) in (301, 302, 303, 307, 308) and loc:
+                        url = urljoin(url, loc)
+                        _assert_public_url(url)
+                        continue
+                    chunks: list[bytes] = []
+                    got = 0
+                    for chunk in r.iter_bytes():
+                        chunks.append(chunk)
+                        got += len(chunk)
+                        if got > max_bytes:
+                            raise FeedError("响应超过 %d MB 上限，已中止" % (max_bytes // 1048576),
+                                            kind="fetch", retryable=False)
+                    return Fetched(url=str(r.url), status=int(r.status_code),
+                                   body=b"".join(chunks),
+                                   headers={k.lower(): v for k, v in r.headers.items()})
+            raise FeedError("重定向次数超过 %d 次，已中止" % _MAX_REDIRECTS,
+                            kind="fetch", retryable=False)
     except FeedError:
         raise
     except Exception as e:                  # noqa: BLE001 —— 网络层任何异常都算取回失败
@@ -206,9 +297,15 @@ def _local_image_path(src: str, base_dir) -> Optional[str]:
         p = Path(unquote(urlparse(s).path))
     except Exception:                        # noqa: BLE001
         return None
-    if p.is_absolute():
-        return str(p) if p.is_file() else None
-    cand = Path(base_dir) / p
+    base = Path(base_dir).resolve()
+    # 必须落在**本地网页所在目录**之内。不加这道校验，投喂一个另存的 .html
+    # （正文写 `<img src="C:/Users/<me>/.ssh/id_rsa">` 或 `../../.ssh/id_rsa`）
+    # 就能把任意可读文件当图片读进来、落进 mirror 并可经面板取回。
+    cand = (base / p if not p.is_absolute() else p).resolve()
+    try:
+        cand.relative_to(base)
+    except ValueError:
+        return None
     return str(cand) if cand.is_file() else None
 
 

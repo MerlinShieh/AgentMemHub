@@ -116,6 +116,35 @@ def test_清除_purge才连原件一起删(tmp_path, cfg):
     assert not raw.exists()
 
 
+def test_清除_purge也删掉镜像里的整篇副本(tmp_path, cfg):
+    """`mirror/<doc_id>/index.html` 是**整篇原文**的一份本地副本。
+
+    只删原件与交付物、留着镜像，"彻底清除"就名不副实 —— 用户以为删干净了，
+    磁盘上还躺着一份完整可读的副本（2026-10-26 审计）。
+    """
+    _, r = _add(tmp_path, cfg)
+    mirror = cfg.paths["store"] / "mirror" / r["doc_id"]
+    (mirror / "images").mkdir(parents=True, exist_ok=True)
+    (mirror / "index.html").write_text("<html>原文</html>", encoding="utf-8")
+
+    out = service.forget(r["doc_id"], purge=True, config=cfg, log=lambda *_: None)
+
+    assert out["ok"] and out["mirror_removed"] is True
+    assert not mirror.exists()
+
+
+def test_清除_默认保留镜像(tmp_path, cfg):
+    """不带 purge 时镜像一并保留 —— 它可由原件重生成，属于"可恢复"的那部分。"""
+    _, r = _add(tmp_path, cfg)
+    mirror = cfg.paths["store"] / "mirror" / r["doc_id"]
+    mirror.mkdir(parents=True, exist_ok=True)
+
+    out = service.forget(r["doc_id"], config=cfg, log=lambda *_e: None)
+
+    assert out["ok"] and out["mirror_removed"] is False
+    assert mirror.exists()
+
+
 def test_清除_不存在的id如实报错(cfg):
     r = service.forget("没有这个id", config=cfg, log=lambda *_: None)
     assert not r["ok"] and r["error_kind"] == "not_found"

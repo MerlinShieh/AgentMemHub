@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -40,6 +41,35 @@ INPUT_URL = "url"       # 网页链接（取回层出网抓）
 #: 或浏览器另存/反爬失败时的人工兜底。它是 `data` 形态的语法糖，
 #: 但值得单列 —— "我手上就是一段字"是最常见的输入，不该逼调用方去 base64。
 INPUT_TEXT = "text"
+
+#: 疑似凭据：`path` 形态**不该**被用来读这些东西。
+#: 这里用黑名单而不是「只允许 home/cwd 之下」的白名单 —— 后者会误伤真实
+#: 用法（本机批量投喂过 `D:\TCL\文档` 这类盘符目录），而凭据目录是明确的、
+#: 可枚举的。威胁模型见 `docs/modules/feed.md`：本地单机 + 人工核对。
+_SENSITIVE_DIRS = (".ssh", ".aws", ".gnupg", ".kube", ".docker",
+                   ".config/gcloud", "appdata/roaming/microsoft/credentials",
+                   "appdata/local/microsoft/credentials")
+_SENSITIVE_NAMES = ("id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "kubeconfig",
+                    "credentials", ".netrc", ".pgpass", ".env")
+
+
+def _sensitive_reason(p: Path) -> str:
+    """路径看着像凭据就返回原因，否则空串。**只做字面判定**，不读内容。"""
+    try:
+        rp = p.resolve()
+    except OSError:
+        return ""
+    low = str(rp).lower().replace("\\", "/") + "/"
+    for d in _SENSITIVE_DIRS:
+        if ("/" + d + "/") in low:
+            return "位于 %s 目录" % d
+    name = rp.name.lower()
+    for n in _SENSITIVE_NAMES:
+        if name == n or name.startswith(n + "."):
+            return "文件名是 %s" % n
+    if rp.suffix.lower() in (".pem", ".key", ".p12", ".pfx"):
+        return "扩展名是 %s" % rp.suffix
+    return ""
 INPUTS = (INPUT_PATH, INPUT_DATA, INPUT_URL, INPUT_TEXT)
 
 
@@ -92,6 +122,7 @@ def ingest_any(*, source: str, value: Any, filename: str = "", encoding: str = "
         if not p.is_file():
             return _early_fail("找不到文件：%s" % p, "not_found",
                                ref=str(p), retryable=False)
+        # 凭据文件的拦截在 `ingest()` 里（单条与批量共用那条路径），这里不重复判。
         if not is_allowed(str(p), config=cfg):
             return _early_fail(_format_msg(str(p), cfg), "unsupported_format",
                                ref=str(p))
@@ -427,6 +458,13 @@ def ingest(ref: str, *, kind: str = "", force: bool = False,
         src = Path(str(ref))
         if not src.is_file():
             return _fail("找不到文件：%s" % src, "not_found", retryable=False)
+        why = _sensitive_reason(src)
+        if why:
+            # 拦截必须落在 `ingest()` 而不是 `ingest_any()`：批量扫描
+            # （`ingest_batch`）直接调 `ingest()`，放在上层等于给「扫目录批量」
+            # 留了一道后门（2026-10-26 审计实测：整目录无后缀私钥全被读入）。
+            return _fail("拒绝投喂疑似凭据文件：%s（%s）" % (src, why),
+                         "bad_input", retryable=False)
         data = src.read_bytes()
 
     # 扩展名 / 文件名 / mtime 统一取"来源可用就用来源，否则用 ref 的形态"
@@ -712,19 +750,30 @@ def forget(doc_id: str, *, purge: bool = False, config=None,
         if raw.is_file():
             raw.unlink()
             removed_raw = True
+    removed_mirror = False
+    if purge:
+        # `mirror/<doc_id>/` 里是**整篇原文的 index.html 与全部图片**。不删它，
+        # "彻底清除"就名不副实 —— 本机仍留着一份完整可读副本（2026-10-26 审计）。
+        md = store.root / "mirror" / doc_id
+        if md.is_dir():
+            shutil.rmtree(md, ignore_errors=True)
+            removed_mirror = True
     db = MaterialsDB(paths["db"])
     try:
         db.delete(doc_id)
     finally:
         db.close()
     _audit(event="feed_forgot", doc_id=doc_id, kb_removed=removed_kb,
-           raw_removed=removed_raw, title=row.get("title") or "")
-    log("[+] 已清除登记：%s（交付物%s；原件%s）"
+           raw_removed=removed_raw, mirror_removed=removed_mirror,
+           title=row.get("title") or "")
+    log("[+] 已清除登记：%s（交付物%s；原件%s；镜像%s）"
         % ((row.get("title") or doc_id), "已删" if removed_kb else "无",
-           "已删（purge）" if removed_raw else "保留"))
+           "已删（purge）" if removed_raw else "保留",
+           "已删" if removed_mirror else "保留"))
     proj = _reproject(cfg, log=log)
     return {"ok": True, "doc_id": doc_id, "kb_removed": removed_kb,
-            "raw_removed": removed_raw, "projection": proj}
+            "raw_removed": removed_raw, "mirror_removed": removed_mirror,
+            "projection": proj}
 
 
 def lint(*, config=None, with_index: bool = True,

@@ -78,6 +78,32 @@ def _slug(text: str, *, limit: int = 60) -> str:
     return (s or "untitled")[:limit]
 
 
+def _safe_mirror_rel(name: str) -> str:
+    """把外部给的文件名压成 `mirror/<doc_id>/` 之内的一段相对路径。
+
+    `name` 的来源里至少有 PDF 内嵌图的资源名 —— **PDF 作者可控**。直接拼路径时
+    `embedded/p1/../../../../x.png` 会写到 store 之外；而 `put_mirror` 是
+    「先 `write_bytes`、再算 `relative_to`」，报错那一刻文件已经落地了
+    （2026-10-26 审计实测）。所以清洗必须发生在拼路径**之前**。
+    """
+    segs: list[str] = []
+    for seg in str(name or "").replace("\\", "/").split("/"):
+        seg = seg.strip()
+        if seg in ("", ".", ".."):
+            continue
+        seg = seg.replace(":", "_")                    # 去盘符（C:）
+        seg = re.sub(r'[<>"|?*\x00-\x1f]', "_", seg)   # Windows 非法字符
+        if seg:
+            segs.append(seg)
+    if not segs:
+        raise ValueError("非法的镜像文件名：%r" % (name,))
+    rel = "/".join(segs)
+    if len(rel) > 240:                                 # 超长名在 Windows 直接失败
+        head, _, tail = rel.rpartition("/")
+        rel = (head + "/" if head else "") + tail[-200:]
+    return rel
+
+
 @dataclass
 class MaterialStore:
     """三段物料的读写。路径全部相对 `root`（可整目录搬走 / 归档）。"""
@@ -118,7 +144,7 @@ class MaterialStore:
         return d
 
     def put_mirror(self, doc_id: str, name: str, data: bytes) -> str:
-        p = self.mirror_dir(doc_id) / name
+        p = self.mirror_dir(doc_id) / _safe_mirror_rel(name)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(data)
         return str(p.relative_to(self.root)).replace("\\", "/")
