@@ -192,7 +192,7 @@ def test_镜像文件名全空时报错(name):
 
 # ------------------------------- 投喂：本地 HTML 的 <img src> 不许出目录
 def test_本地图片不许读目录之外的文件(tmp_path):
-    """投喂一个"另存的网页"，正文写 `<img src="C:/Users/x/.ssh/id_rsa">`
+    """投喂一个"另存的网页"，正文写 `<img src="C:/Windows/win.ini">`
     就能把任意可读文件当图片读进来 —— 必须限制在网页所在目录之内。"""
     from agentmemhub.feed.fetch import _local_image_path
     base = tmp_path / "page"
