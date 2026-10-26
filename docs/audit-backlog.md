@@ -68,10 +68,20 @@
 
 ## 二、建议修，但不急（影响面小或触发条件苛刻）
 
-> **2026-10-26 更新**：本表 29 条已修 **21 条**，剩 8 条留在表内
-> （`obsidian` 每轮固定睡 20 秒、`wiki_linkfix` 非原子写、`sync_llm` 的 CRLF/原子写、
-> `fetch_model` 的假续传、`mdmini` 边界、`notify` 三个函数无人调用、`distill_sandbox`
-> 的 rmtree、`qodercn` 本机无源）。
+> **2026-10-26 更新**：本表 29 条已修 **24 条**；剩下 5 条**判定不修**，理由写在下面
+> （写清楚是为了以后不再重复讨论，而不是"懒得改"）：
+>
+> - `agentmemhub/obsidian.py:240` 固定睡 20 秒 —— 这一步是**等 Obsidian 重建内存索引**，
+>   而它没有对外可观测的"重建完成"信号。改成轮询只是拿不确定性换不确定性，反而更不可靠。
+> - `scripts/fetch_model.py` 不校验 Content-Length —— 截断的 `.onnx` 最终会被
+>   `OnnxEmbedder._check_dim` 的维数断言挡下（首次加载即报错，不会静默用错模型）。
+> - `agentmemhub/mdmini.py` 的表格分隔行/强调跨标签 —— 追求 CommonMark 完整实现超出
+>   本模块定位（它只服务 wiki 正文渲染），且注入面已由 `quote=True` 封住。
+> - `scripts/distill_sandbox.py:106` 的 `rmtree` —— 目标目录是写死的
+>   `PROJECT_ROOT/database_distill_test`，且必须 `--force` 才动手；junction 场景在
+>   Windows 上会直接抛错挡住（属侥幸，但改它要引入额外的 realpath 校验，收益不成比例）。
+> - `agentmemhub/adapters/qodercn.py` 时间戳与锚 —— 本机没有这个数据源，**无实证**，
+>   按"不改没证据的东西"处理。
 >
 > **已修的条目没有删行**：坑的教训比修本身有用 —— 后来者按位置检索时还能看到
 > "这里曾经怎么错"，而不是只剩一条干净的记录。
@@ -115,6 +125,13 @@
 | `scripts/merge_distill_into_db.py:80-82` | 目标库**没有 schema** 时直接崩在 `no such table: main.units`（`ensure_memstore_schema` 的前提是 `units` 已存在）。脚本本意是"并进既有库"，但报错信息完全看不出这个前提，用的人会以为脚本坏了 |
 | `agentmemhub/snapshot.py:restore` | 面板侧传 `force=True` 绕过占用检查（面板自己长期持有连接，不绕必然误报）。但**恢复期间面板仍在读旧库**：恢复完那几秒，面板拿到的仍可能是旧连接上的数据。彻底修要在恢复后重建连接池/重开库，属于结构性改动 |
 | `agentmemhub/snapshot.py:_assert_db_idle` | 判据（`-shm` / 非空 `-wal`）在**崩溃残留**时同样成立 ⇒ 会误报"被占用"。这是有意的取舍（宁可让人确认，也不静默分叉），但要知道 `--force` 有时是正确选择而不是冒险 |
+
+### 2.2 2026-10-26 深入检查新发现
+
+| 位置 | 问题 |
+|---|---|
+| `agentmemhub/rag/memstore.py:115-133`、`agentmemhub/distill.py:1642`、`agentmemhub/rag_bridge.py:460`、`agentmemhub/wiki_index.py:380` | 这四处**直写 `units` 时只写 `settings.active_spec` 的向量**，不走 `write.order` ⇒ 多模型下非 active 模型永远缺这些行（实测 base 表缺 **1912 条** `role='distilled'`）。而 `ingest --model` 的候选来自源库 `events` 而非 `units`，所以它**也补不上**（`scanned` 里根本没有这些行），只有 `reembed --model`（整表重建）能补齐。这与 `README` / `rag/config.py` 承诺的「models 下所有模型都会保持可用」不符 |
+| `docs` 与代码 | `agentmemhub/config.py` 原注释写「落库始终启用（**面板可查**、带未读状态）」，但面板**从未有过通知查询页**，`list_notifications` / `mark_read` / `prune` 除测试外无调用者 ⇒ `notify.db` 只增不减。已改注释为实情，并给 `prune()` 接上唯一的自动调用点 |
 
 ---
 
