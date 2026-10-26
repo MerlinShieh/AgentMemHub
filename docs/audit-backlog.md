@@ -68,6 +68,14 @@
 
 ## 二、建议修，但不急（影响面小或触发条件苛刻）
 
+> **2026-10-26 更新**：本表 29 条已修 **21 条**，剩 8 条留在表内
+> （`obsidian` 每轮固定睡 20 秒、`wiki_linkfix` 非原子写、`sync_llm` 的 CRLF/原子写、
+> `fetch_model` 的假续传、`mdmini` 边界、`notify` 三个函数无人调用、`distill_sandbox`
+> 的 rmtree、`qodercn` 本机无源）。
+>
+> **已修的条目没有删行**：坑的教训比修本身有用 —— 后来者按位置检索时还能看到
+> "这里曾经怎么错"，而不是只剩一条干净的记录。
+
 | 位置 | 问题 |
 |---|---|
 | `agentmemhub/export.py:69-71` | `_safe` 不管 Windows 保留名（CON/PRN/COM1）与尾部点/空格；两个长 id 截断后同名即后写覆盖；`:33` 非原子写 |
@@ -99,6 +107,14 @@
 | `agentmemhub/cli.py:86-90` | 未知 `--source` 只打印一行「未知 source」然后照样走到「完成: 0 会话」；退出码修好之后至少能看出失败 |
 | `agentmemhub/cli.py:172-181,218-225` | `cmd_list` 空结果、`cmd_export` 提前返回时跳过 `store.close()`（连接/锁不释放） |
 | `agentmemhub/console.py:164-165,180` | 角色是自由文本、不校验（拼错即静默 0 命中）；非 Windows 下自己的看板会被报成「端口已被其他程序占用」 |
+
+### 2.1 修第一章时新暴露出来的（原清单里没有）
+
+| 位置 | 问题 |
+|---|---|
+| `scripts/merge_distill_into_db.py:80-82` | 目标库**没有 schema** 时直接崩在 `no such table: main.units`（`ensure_memstore_schema` 的前提是 `units` 已存在）。脚本本意是"并进既有库"，但报错信息完全看不出这个前提，用的人会以为脚本坏了 |
+| `agentmemhub/snapshot.py:restore` | 面板侧传 `force=True` 绕过占用检查（面板自己长期持有连接，不绕必然误报）。但**恢复期间面板仍在读旧库**：恢复完那几秒，面板拿到的仍可能是旧连接上的数据。彻底修要在恢复后重建连接池/重开库，属于结构性改动 |
+| `agentmemhub/snapshot.py:_assert_db_idle` | 判据（`-shm` / 非空 `-wal`）在**崩溃残留**时同样成立 ⇒ 会误报"被占用"。这是有意的取舍（宁可让人确认，也不静默分叉），但要知道 `--force` 有时是正确选择而不是冒险 |
 
 ---
 
