@@ -21,6 +21,21 @@ from agentmemhub.models import Event, _to_epoch, renumber
 from .base import AgentAdapter
 
 
+def _pick(row: Any, key: str, default: Any = None) -> Any:
+    """按列名取值，列不存在时返回默认值。
+
+    为什么需要（2026-10-26）：`SELECT * FROM sessions` 之后这里直接取
+    `r["title"]` / `r["custom_title"]` / `r["project_id"]` 等 10 个列名，
+    而 WorkBuddy 的 sessions 表在不同版本里列并不一致。少一列就抛
+    `IndexError`，`load()` 又没有 except ⇒ 整个 sync 中断（后续源全不采），
+    再被 `load_all` 吞成"该源没有会话" ⇒ 静默停更。
+    """
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return default
+
+
 class WorkBuddyAdapter(AgentAdapter):
     source = "workbuddy"
     label = "WorkBuddy"
@@ -82,18 +97,19 @@ class WorkBuddyAdapter(AgentAdapter):
             if has_sessions:
                 rows = conn.execute("SELECT * FROM sessions").fetchall()
                 for r in rows:
-                    if only_ids is not None and str(r["id"]) not in only_ids:
+                    if only_ids is not None and str(_pick(r, "id", "")) not in only_ids:
                         continue  # 增量：未变化会话不带 audit 事件
                     sessions_list.append({
                         "source": self.source,
-                        "id": r["id"],
-                        "title": r["title"] or r["custom_title"] or "",
-                        "cwd": r["cwd"] or "",
-                        "created_at": _to_epoch(r["created_at"]),
-                        "updated_at": _to_epoch(r["updated_at"] or r["last_activity_at"]),
-                        "model": r["model"] or "",
-                        "meta": {"status": r["status"], "mode": r["mode"],
-                                 "project_id": r["project_id"]},
+                        "id": _pick(r, "id"),
+                        "title": _pick(r, "title") or _pick(r, "custom_title") or "",
+                        "cwd": _pick(r, "cwd") or "",
+                        "created_at": _to_epoch(_pick(r, "created_at")),
+                        "updated_at": _to_epoch(_pick(r, "updated_at")
+                                                or _pick(r, "last_activity_at")),
+                        "model": _pick(r, "model") or "",
+                        "meta": {"status": _pick(r, "status"), "mode": _pick(r, "mode"),
+                                 "project_id": _pick(r, "project_id")},
                         "events": [],
                     })
         finally:

@@ -31,7 +31,15 @@ _SYSTEM_INJECT_RE = re.compile(
     r'|^\{\s*"type"\s*:\s*"session/'
     r"|^<antml:"
     r"|^<task-notification\b|^<system-reminder\b"
-    r"|environment_context|runtime\.context|file\.policy|approval\.policy",
+    # ⚠️ 下面这几个词 2026-10-26 之前是**裸的**（无锚定）：`environment_context`、
+    # `runtime\.context`、`file\.policy`、`approval\.policy` 只要出现在用户正文的
+    # 任意位置就整条判成系统注入。后果不是"少一条系统消息"，而是**真实用户消息被
+    # 当成注入**：`distill.py` / `rag/ingest.py` 都会 `WHERE is_system = 0` 跳过它
+    # （这轮记忆永不生成、且无任何提示），而 `agentmemhub clean --apply` 会
+    # `DELETE FROM events WHERE is_system = 1` 把它们**物理删掉**。
+    # 现在只认它们作为**行首的标签/键**出现（允许前面有空白、引号、列表符）。
+    r"|^[\s\-\*\"'\[(]*(?:environment|runtime|file|approval)[\._ ](?:context|policy)\b"
+    r"|^<(?:environment|runtime)_context\b",
     re.IGNORECASE,
 )
 

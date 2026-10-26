@@ -60,7 +60,17 @@ def load_all(located: bool = True) -> dict[str, list[dict]]:
                 result[a.source] = []
                 continue
             result[a.source] = a.load(p) or []
-        except Exception:
+        except Exception as e:                  # 单源失败不拖垮整轮采集
+            # 2026-10-26：过去这里直接 `result[a.source] = []`，异常被吞成
+            # "该源没有会话"。于是源库一改 schema（比如 session 表少一列）就
+            # **静默停更** —— 用户只看到"这个源今天没有新会话"，查不出原因。
+            try:
+                from agentmemhub import logs as _logs
+                _logs.record(f"{a.source} 加载失败（本轮跳过该源）："
+                             f"{type(e).__name__}: {e}",
+                             level="warning", actor="adapters", dest="cli")
+            except Exception:                   # 日志系统也不可用时，不能再二次抛
+                pass
             result[a.source] = []
     return result
 

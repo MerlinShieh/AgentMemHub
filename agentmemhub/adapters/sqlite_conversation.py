@@ -30,18 +30,43 @@ _META_TIMELINE_TYPES = {"model_change", "model-switch", "title", "summary"}
 class SqliteConversationAdapter(AgentAdapter):
     """基于 session/message/part 表的通用 adapter（子类只需给 source/label/candidate_paths）。"""
 
+    @staticmethod
+    def _row_get(row: sqlite3.Row, key: str, default: Any = None) -> Any:
+        """按键取列值，列不存在时返回默认值。
+
+        为什么需要（2026-10-26）：opencode / zcode 这类源库的 `session` 表列名
+        会随版本变（`project_id`、`slug`、`permission` 都是后来加的）。过去这里
+        直接 `s["project_id"]`，一次列改名就抛 `IndexError`，而 `load()` 只有
+        `try/finally` 没有 `except` ⇒ 异常穿到 `cli.run_ingest`，把**整个 sync
+        中断**（后面的源本轮全不采）；而 `adapters/__init__.py` 的
+        `except Exception: result[a.source] = []` 又会把它吞成"该源没有会话"
+        ⇒ 这个源从此静默停更、没有任何提示。宁可少几个 meta 字段，也不能让
+        一列改名把采集停掉。
+        """
+        try:
+            return row[key]
+        except (IndexError, KeyError):
+            return default
+
     def list_sessions(self, path: Path) -> Optional[list[dict[str, Any]]]:
         """轻量清单：单 SELECT 只取 id/时间，不读 message/part（增量对比用）。"""
         try:
             conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
             conn.execute("PRAGMA query_only=ON")
             try:
-                rows = conn.execute("SELECT id, time_updated FROM session").fetchall()
+                # `time_updated` 不是所有版本都有 —— 缺了也不能整条清单失败
+                # （失败会返回 None，进而让上层回落"整源重扫"，代价大得多）
+                cols = {str(r[1]) for r in
+                        conn.execute("PRAGMA table_info(session)").fetchall()}
+                sel = "id, time_updated" if "time_updated" in cols else "id"
+                rows = conn.execute(f"SELECT {sel} FROM session").fetchall()
             finally:
                 conn.close()
         except Exception:
             return None
-        return [{"id": str(r[0]), "updated_at": _to_epoch(r[1]) or 0} for r in rows]
+        return [{"id": str(r[0]),
+                 "updated_at": (_to_epoch(r[1]) or 0) if len(r) > 1 else 0}
+                for r in rows]
 
     def load(self, path: Path, only_ids: Optional[set[str]] = None) -> list[dict[str, Any]]:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -51,18 +76,22 @@ class SqliteConversationAdapter(AgentAdapter):
         sessions: list[dict[str, Any]] = []
         try:
             for s in conn.execute("SELECT * FROM session").fetchall():
-                sid = s["id"]
+                sid = self._row_get(s, "id")
+                if sid is None:
+                    continue                # 没有主键列 —— 无法归属，跳过而不是炸
                 if only_ids is not None and str(sid) not in only_ids:
                     continue  # 增量：未变化会话不读事件（事件读取才是大头）
-                meta = {"project_id": s["project_id"], "parent_id": s["parent_id"],
-                        "permission": s["permission"], "slug": s["slug"]}
+                meta = {"project_id": self._row_get(s, "project_id"),
+                        "parent_id": self._row_get(s, "parent_id"),
+                        "permission": self._row_get(s, "permission"),
+                        "slug": self._row_get(s, "slug")}
                 session_dict = {
                     "source": self.source,
                     "id": sid,
-                    "title": s["title"] or "",
-                    "cwd": s["directory"] or "",
-                    "created_at": _to_epoch(s["time_created"]),
-                    "updated_at": _to_epoch(s["time_updated"]),
+                    "title": self._row_get(s, "title") or "",
+                    "cwd": self._row_get(s, "directory") or "",
+                    "created_at": _to_epoch(self._row_get(s, "time_created")),
+                    "updated_at": _to_epoch(self._row_get(s, "time_updated")),
                     "model": "",
                     "meta": {k: v for k, v in meta.items() if v is not None},
                     "events": [],
@@ -86,23 +115,23 @@ class SqliteConversationAdapter(AgentAdapter):
             f"SELECT * FROM message WHERE session_id = ? ORDER BY {msg_order}",
             (session_id,),
         ).fetchall():
-            md = self._safe_json(m["data"])
+            md = self._safe_json(self._row_get(m, "data"))
             msg_role = str(md.get("role", "")).lower()
-            msg_id = str(m["id"])
-            msg_time = _to_epoch(md.get("time", {}).get("created") if isinstance(md.get("time"), dict) else md.get("time")) or _to_epoch(m["time_created"])
+            msg_id = str(self._row_get(m, "id") or "")
+            msg_time = _to_epoch(md.get("time", {}).get("created") if isinstance(md.get("time"), dict) else md.get("time")) or _to_epoch(self._row_get(m, "time_created"))
             model = md.get("modelID") or (md.get("model") or {}).get("modelID")
 
             # 该消息下的 parts
             parts = conn.execute(
                 f"SELECT * FROM part WHERE message_id = ? ORDER BY {part_order}",
-                (m["id"],),
+                (self._row_get(m, "id"),),
             ).fetchall()
             # 系统注入检测：user 消息的正文（text part 优先，其次消息级 content）
             is_sys = False
             if msg_role in ("user", "human"):
                 probe_parts = []
                 for p in parts:
-                    pd0 = self._safe_json(p["data"])
+                    pd0 = self._safe_json(self._row_get(p, "data"))
                     if str(pd0.get("type") or "").lower() in ("text", "text_stream", "input_text", "output_text"):
                         probe_parts.append(str(pd0.get("text") or ""))
                 probe = "\n".join(x for x in probe_parts if x) or \
@@ -112,12 +141,13 @@ class SqliteConversationAdapter(AgentAdapter):
                     turn_key = msg_id
 
             for p in parts:
-                pd = self._safe_json(p["data"])
+                pd = self._safe_json(self._row_get(p, "data"))
                 ev = self._part_to_event(pd, msg_role, msg_time, model,
-                                         part_id=str(p["id"]), parent_id=msg_id,
+                                         part_id=str(self._row_get(p, "id") or ""),
+                                         parent_id=msg_id,
                                          turn_key=turn_key,
                                          is_system=True if is_sys else None,
-                                         raw=p["data"])
+                                         raw=self._row_get(p, "data"))
                 if ev is not None:
                     events.append(ev)
             # 若消息没有有效 part，仍保留消息本身正文（避免丢内容）
@@ -126,7 +156,7 @@ class SqliteConversationAdapter(AgentAdapter):
                            seq=0, time=msg_time, content=message_text(md["content"]),
                            parent_id=msg_id, src_id=f"m:{msg_id}", turn_key=turn_key,
                            is_system=True if is_sys else None,
-                           model=model or None, raw_json=m["data"])
+                           model=model or None, raw_json=self._row_get(m, "data"))
                 events.append(ev)
         return events
 
