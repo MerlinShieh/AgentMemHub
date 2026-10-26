@@ -63,6 +63,21 @@
   这类"半途停下比跑完更危险"的给 `False`）；③ 给 `timeout_s`。
   单槽**必须等线程真正退出才释放**，别图快改成"取消即释放"——那等于两个线程写同一份产物。
   `_snapshot()` 的僵尸检测（`running` 但线程已死 → 自动改 `error`）是兜底，不是可选项。
+- **命令行的成败靠退出码，不靠打印**：`main()` 透传子命令返回的 int（`__main__.py` 走
+  `raise SystemExit(main())`），`scripts/` 下各脚本的 `main()` 同理。2026-10-26 之前这里
+  把返回值丢了、`main() -> None`、全仓没有 `sys.exit` —— 于是文档承诺的
+  「`feed lint` P0>0 ⇒ 退出码 1，可直接当提交/巡检门槛」**从来没生效过**，挂 cron 的
+  "全量编译"永远是绿的。新增/改动子命令时：**有失败可能就 `return 非0`**。守卫：
+  `tests/test_cli_exit_code.py`。
+- **给数据打标签的正则必须锚定**：`models.py::is_system_inject` 曾用四个裸词
+  （`environment_context` / `runtime.context` / `file.policy` / `approval.policy`），
+  正文里提到这些字样就整条判成系统注入 —— 后果不是少渲染一条，而是**这条记忆永远不生成**
+  （蒸馏与入库都只取 `is_system = 0`，且没有任何提示），`clean --apply` 还会把它物理删掉。
+  写这类规则时先问一句"用户正常说话会不会命中"。守卫：`tests/test_models.py`。
+- **外部数据源的 schema 是会变的**：adapter 按列名取值失败要回落默认（`_row_get` /
+  `_pick`），只有主键缺失才跳过；单源失败要**写日志**，不能静默 `= []` ——
+  否则源库改一列，这个源就永久停更且没人知道（异常被吞成"该源没有会话"）。
+  守卫：`tests/test_adapter_schema.py`。
 - **配置单点**：模型/分桶/召回/写入策略/蒸馏/LLM 一律经 `agentmemhub.yaml`，
   **禁止硬编码模型 id/维度/路径/密钥**。LLM 接入可用
   `scripts/sync_llm_from_zcode.py` 从 ZCode 配置同步（密钥只写本地 yaml，不入库）。
