@@ -640,6 +640,8 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         <div id="opsJobState" class="mt-2 hidden items-center gap-1.5 rounded-md bg-info-soft px-2.5 py-1.5 text-[11px] text-info">
           <i data-lucide="loader-circle" class="h-3 w-3 shrink-0 animate-spin"></i>
           <span id="opsJobText"></span>
+          <!-- 取消是"协作式"的：只置旗标，任务在下一个阶段边界收工（见 tasks.py 注释） -->
+          <button id="opsCancelBtn" class="ml-auto hidden wk-act text-[11px]">请求取消</button>
         </div>
         <div id="opsWarn" class="mt-2 hidden rounded-md bg-warning-soft px-2.5 py-1.5 text-[11px] text-warning"></div>
       </div>
@@ -2787,14 +2789,25 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       const b = $(sel); if(b) b.disabled = running;
     });
     const box = $('#opsJobState');
+    const cancelBtn = $('#opsCancelBtn');
     if(box){
       if(!running){
         box.classList.add('hidden'); box.classList.remove('flex');
+        if(cancelBtn) cancelBtn.classList.add('hidden');
       }else{
         const secs = Math.max(0, Math.round(Date.now()/1000 - (j.startedAt || Date.now()/1000)));
-        $('#opsJobText').textContent = (j.name || '任务') + ' 进行中 · 已 ' + secs
-          + ' 秒 —— 下方数据是更新开始前的快照，完成后会自动刷新；'
-          + '实时日志见页面顶部那条进度条';
+        const requested = !!j.cancelRequested;
+        const cancelable = j.cancelable !== false;
+        $('#opsJobText').textContent = (j.name || '任务') + ' 进行中 · 已 ' + secs + ' 秒 —— '
+          + (requested
+              ? '已请求取消，等当前阶段跑完就收工（不会立刻停，这样产物才不会写坏）'
+              : '下方数据是更新开始前的快照，完成后会自动刷新；实时日志见页面顶部那条进度条');
+        if(cancelBtn){
+          // 不可取消的任务（如快照回滚）不显示按钮，避免给出做不到的承诺
+          cancelBtn.classList.toggle('hidden', !cancelable);
+          cancelBtn.disabled = requested;
+          cancelBtn.textContent = requested ? '已请求取消' : '请求取消';
+        }
         box.classList.remove('hidden'); box.classList.add('flex');
       }
     }
@@ -2820,6 +2833,19 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       adminPoll();                        // 复用全局进度条
       return true;
     }catch(e){ toast('提交失败：' + (e.message||e)); return false; }
+  }
+
+  // 请求取消当前任务 —— 只置旗标，任务在下一个阶段边界收工。
+  // 为什么不做"立刻停"：硬杀线程会在 sqlite 事务中途出事，宁可多等一个阶段。
+  async function opsCancel(){
+    const btn = $('#opsCancelBtn');
+    try{
+      const r = await fetchWithTimeout('/api/admin/job/cancel', {method:'POST'}, 10000);
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok){ toast(typeof d.detail==='string' ? d.detail : ('HTTP ' + r.status)); return; }
+      if(btn){ btn.disabled = true; btn.textContent = '已请求取消'; }
+      toast(d.reason || '已请求取消：当前阶段跑完就收工');
+    }catch(e){ toast('取消失败：' + (e.message||e)); }
   }
 
   function opsDirs(){
@@ -3049,6 +3075,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     $('#opsRefreshBtn').onclick = () => loadOps();
     $('#opsUpdateBtn').onclick = () => opsUpdate();
     $('#opsTriggerBtn').onclick = () => opsTriggerRun();
+    $('#opsCancelBtn').onclick = () => opsCancel();
     $('#opsRetryBtn').onclick = () => opsRetryFailures();
     $('#opsSaveTriggersBtn').onclick = () => opsSaveTriggers();
     // 忽略视图里「软删除」按钮变「恢复勾选」—— 用一个按钮承载两态，少一个入口
@@ -3539,7 +3566,14 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         }else{
           $('#adminJobBar').style.width='0%'; $('#adminJobPct').textContent='';
         }
-        if(j.error){ out.textContent='任务失败：'+j.error; out.classList.remove('hidden'); }
+        // 取消/超时与"失败"区别对待：在阶段边界收工，产物自洽，只是这一轮没收完
+        const stopped = j.status==='canceled' || j.status==='timeout';
+        if(stopped){
+          out.textContent = (j.error || (j.status==='timeout' ? '已超时收工' : '已取消'))
+            + '\n（在阶段边界停下：已产出的页面完整可用，下次增量会接着算）';
+          out.classList.remove('hidden');
+        }
+        else if(j.error){ out.textContent='任务失败：'+j.error; out.classList.remove('hidden'); }
         else if(j.output!==undefined && j.output!==''){ out.textContent=j.output.split('\n').slice(-300).join('\n'); out.classList.remove('hidden'); }
         else out.classList.add('hidden');
       }

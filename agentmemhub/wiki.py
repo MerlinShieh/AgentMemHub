@@ -782,6 +782,7 @@ def _offline_advance(*, l1: Path, l2: Path, db: str, runner, client,
 
 def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
            workers: int = 0, on_progress: Callable[[str], None] | None = None,
+           should_stop: Callable[[], bool] | None = None,
            offline_runner=None, offline_client=None,
            offline_deadline_s: float = 0.0, offline_plan: bool = False,
            full: bool = False) -> dict[str, Any]:
@@ -819,6 +820,14 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
     if not db:
         db = _default_db()
     t0 = time.time()
+
+    # **取消只在阶段边界生效**（`should_stop` 由面板长任务传进来）。理由：
+    # L1、L2 两段各自是黑盒（`compile_all` / `aggregate.run`），中途打断会在
+    # 产物目录留下半成品，而阶段边界是"产物要么全写、要么没写"的自然分界。
+    # 所以语义是"**干净地收工**"而不是"立刻停" —— 最坏要等一个阶段
+    # （实测 L1 约 33 分钟、L2 约 50 分钟），换来的是产物永远自洽。
+    def _stopped() -> str:
+        return "已请求取消（在阶段边界收工）" if (should_stop is not None and should_stop()) else ""
 
     # **离线模式先回读**：有在飞任务时，这一次要推进的是"回读"那一段（交编译段 /
     # 落盘），而不是再提交一批新请求 —— 否则就是重复付费。只有**没有**在飞任务时
@@ -867,6 +876,8 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
     import wiki_compile
 
     # ---- 2. 重编脏会话的 L1 ----
+    if _why := _stopped():
+        return {"updated": False, "aborted": _why}
     fl1 = FailureLog(l1 / "failures.jsonl")
     l1_results = wiki_compile.compile_all(
         Path(db), l1, workers=workers, resume=False,
@@ -874,6 +885,11 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
     l1_ok = [r for r in l1_results if not r.get("error") and not r.get("skipped")]
     l1_bad = [r for r in l1_results if r.get("error")]
     removed_files = _delete_empty_session_outputs(l1, dirty_sessions, db)
+
+    # L1 已落盘（每页整页重编，不会有半成品）—— 此处收工是安全的：L2 基线没动，
+    # 下次增量会把同样的脏会话再算一遍。
+    if _why := _stopped():
+        return {"updated": False, "aborted": _why, "l1_recompiled": len(l1_ok)}
 
     # ---- 3. 定位脏域 + 新文件归域 ----
     l2m = wm.load_manifest(wm.manifest_path(l2, "l2")) or {}
@@ -1008,6 +1024,10 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
     #: 离线提交是**按计划把活交出去了**（结果几小时后才有）。
     l2_offline: dict[str, Any] = {}
     link_check: dict[str, Any] = {}
+    # L2 在即 —— 这一步最贵（几十页 LLM 调用），所以在**进去之前**再看一眼：
+    # 已经请求取消就干脆别开始，省下的正是最贵的那一段。
+    if _why := _stopped():
+        return {"updated": False, "aborted": _why, "l1_recompiled": len(l1_ok)}
     if l1_all_failed:
         l2_stats: dict[str, Any] = {
             "domains_recompiled": 0, "pages": 0,
@@ -1026,6 +1046,13 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
             l2_stats = ({"domains_recompiled": 0, "pages": 0,
                          "offline_submitted": l2_offline} if l2_offline else
                         {"domains_recompiled": 0, "pages": 0, "aborted": l2_aborted})
+        elif _why := _stopped():
+            # L2 产物已写完，但用户要求停 —— 跳过 linkfix 与基线刷新。
+            # ⚠️ 这意味着**基线不前进**：下次增量会把同样的脏会话再算一遍。
+            # 宁可重算一遍，也不要刷一个"没跑 linkfix"的基线（那会让互链永久残破）。
+            l2_stats = {"domains_recompiled": len(l2_run.get("written_domains") or []),
+                        "pages": int(l2_run.get("pages") or 0),
+                        "aborted": _why}
         else:
             # ---- 5. linkfix（L2 标题可能变）----
             import wiki_linkfix

@@ -1450,6 +1450,23 @@ def create_app(db_path: Path | None = None):
         from agentmemhub.web import tasks
         return JSONResponse({"job": tasks.status()})
 
+    @app.post("/api/admin/job/cancel", summary="请求取消当前长任务（协作式）")
+    def api_admin_job_cancel(job_id: str = Query(default="", description="任务 id（空=当前任务）")):
+        """请求取消当前长任务。
+
+        **不是立刻停**：`tasks.cancel()` 只置旗标，任务在下一个检查点（循环迭代）退出。
+        这样做的理由写在 `web/tasks.py` 的模块 docstring 里 —— Python 无法安全终止
+        线程，硬杀一个正在写 sqlite 事务的线程就是库损坏；而且单槽必须等线程真正
+        结束才释放，否则"取消 + 立即提交新任务"会变成两个线程写同一份产物。
+        """
+        from agentmemhub import logs
+        from agentmemhub.web import tasks
+        out = tasks.cancel(job_id)
+        if not out.get("ok"):
+            raise HTTPException(status_code=409, detail=out.get("reason") or "无法取消")
+        logs.record(f"请求取消任务：{out['id']}")
+        return JSONResponse(out)
+
     @app.post("/api/admin/score", summary="LLM 批量评分（长任务；当前入口已隐藏）")
     def api_admin_score(limit: int = Query(default=0, ge=0, description="最多评多少条（0=全部）"),
                         dryRun: bool = Query(default=False, description="只评估不写分")):
@@ -1715,7 +1732,8 @@ def create_app(db_path: Path | None = None):
             wiki_triggers.mark_update_started("manual")
             r: dict = {}
             try:
-                r = wiki.update(l1_dir=l1, l2_dir=l2, db=db, workers=workers)
+                r = wiki.update(l1_dir=l1, l2_dir=l2, db=db, workers=workers,
+                                should_stop=(_meta or {}).get("should_stop"))
             except Exception as e:              # noqa: BLE001 —— 留痕后原样抛给任务层
                 wiki_triggers.mark_update_failed(e)
                 raise
@@ -1726,10 +1744,14 @@ def create_app(db_path: Path | None = None):
             # 会误判"今天已经更新过"而跳过当天真正需要的更新）
             wiki_triggers.mark_update_finished(
                 hook="manual", updated=bool((r or {}).get("updated")))
+            if (r or {}).get("aborted"):
+                emit("[!] " + str(r["aborted"]))
             emit(_json.dumps(r, ensure_ascii=False, default=str))
             return "增量更新结束"
 
-        job = tasks.submit(name, _logged_task(name, _run))
+        # 两小时上限：正常一轮（12 条新记忆）实测 L1 约 33 分钟 + L2 约 50 分钟，
+        # 留一倍余量。超时不会杀线程，只在阶段边界收工（见 tasks.py）。
+        job = tasks.submit(name, _logged_task(name, _run), timeout_s=7200)
         if job is None:
             raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
         logs.record(f"提交任务：{name}")
@@ -1818,7 +1840,9 @@ def create_app(db_path: Path | None = None):
             emit(_json.dumps(r, ensure_ascii=False, default=str))
             return "离线批处理推进结束"
 
-        job = tasks.submit(name, _logged_task(name, _run))
+        # 批量推进本身有 deadline 兜底，但**没接入**协作式取消（`batch_ops.run`
+        # 内部没有可以安全收工的阶段边界）—— 标成不可取消，免得按钮点了没反应。
+        job = tasks.submit(name, _logged_task(name, _run), cancelable=False)
         if job is None:
             raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
         logs.record("提交任务：%s" % name)
@@ -1896,7 +1920,9 @@ def create_app(db_path: Path | None = None):
             emit(f"已恢复：{r['restored']}")
             return _j.dumps(r, ensure_ascii=False)
 
-        job = tasks.submit(f"回滚快照（{snapshot_id}）", _logged_task("回滚快照", _do))
+        # 回滚**不可取消**：半途停下会留下"半个库 + 半个 wiki"，比跑完危险得多。
+        job = tasks.submit(f"回滚快照（{snapshot_id}）", _logged_task("回滚快照", _do),
+                           cancelable=False)
         if job is None:
             raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
         return JSONResponse({"job": job})
@@ -2001,7 +2027,9 @@ def create_app(db_path: Path | None = None):
                                 "errors": out["errors"][:50]},
                                ensure_ascii=False, indent=2)
 
-        job = tasks.submit("feed-batch", run)
+        # 投喂批量跑的是"逐个素材转译+落库"，中途停下会让素材停在半转换态，
+        # 所以不接协作式取消（用户要撤可用单个素材的"撤下"）。
+        job = tasks.submit("feed-batch", run, cancelable=False)
         if job is None:
             raise HTTPException(status_code=409, detail="已有长任务在运行")
         return JSONResponse({"job": job})

@@ -34,7 +34,7 @@ def client(tmp_path, monkeypatch):
     """立即执行的任务替身：契约不对就当场炸。"""
     calls: list = []
 
-    def _submit(name, fn):
+    def _submit(name, fn, **_kw):
         calls.append(name)
         fn(lambda _line: None, {"id": "job1", "name": name})
         return {"id": "job1", "name": name, "status": "done"}
@@ -80,7 +80,7 @@ def test_任务函数签名不对时_接口会把它暴露出来(client, monkeyp
     # 把替身换成"会检查签名"的那种：fn 不接受两参就直接抛（TestClient 会变成 500）
     from agentmemhub.web import tasks as t
 
-    def _strict_submit(name, fn):
+    def _strict_submit(name, fn, **_kw):
         fn(lambda _l: None, {"id": "j", "name": name})
         return {"id": "j", "name": name, "status": "done"}
 
@@ -108,7 +108,7 @@ def test_增量更新_任务一开始就emit可见行(tmp_path, monkeypatch):
 
     got: list = []
 
-    def _submit(name, fn):
+    def _submit(name, fn, **_kw):
         buf: list = []
         fn(buf.append, {"id": "j", "name": name})
         got.extend(str(x) for x in buf)
