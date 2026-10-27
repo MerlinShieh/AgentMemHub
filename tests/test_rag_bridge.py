@@ -367,6 +367,49 @@ def test_save_memory_trace_writes_all_write_order_models(rag_env, tmp_path):
         conn.close()
 
 
+def test_rebuild_repairs_all_models(rag_env, tmp_path):
+    """`rebuild --mode repair` 要给**每个**配置模型补缺失行，不只 active。
+
+    实测触发场景：写入侧修好之前落的那批记忆，small 全覆盖而 base 缺 1 条。
+    只补 active 时这个缺口永远补不上（`ingest --model` 的候选来自源库 events，
+    补不到 units 里的行），而缺一路向量不会报错 —— 只会让那部分内容在另一个
+    模型下"隐形"。
+    """
+    import dataclasses
+
+    from agentmemhub.rag.config import load_settings
+    from agentmemhub.rag.ingest import open_index
+
+    base = load_settings()
+    m2 = dataclasses.replace(base.active_spec, id="probe-m2-repair")
+    st = dataclasses.replace(
+        base, index_db=tmp_path / "idx_repair.db", source_db=tmp_path / "src.db",
+        log_dir=tmp_path / "logs",
+        models={**base.models, m2.id: m2},
+        write={**base.write, "order": [base.active_model, m2.id]})
+    rag_bridge.configure(st)
+    rag_bridge.save_memory_trace("补向量探针：两个模型都该被补齐", tid="probe-r1")
+
+    conn = open_index(st.index_db)
+    try:
+        uid = conn.execute("SELECT id FROM units WHERE legacy_id='probe-r1'"
+                           ).fetchone()[0]
+        with conn:                      # 模拟"历史遗留"：非 active 模型的向量缺失
+            conn.execute(f"DELETE FROM {m2.vec_table} WHERE rowid=?", (uid,))
+    finally:
+        conn.close()
+
+    assert rag_bridge.rebuild_embeddings("repair")["updated"] == 1
+
+    conn = open_index(st.index_db)
+    try:
+        for spec in (base.active_spec, m2):
+            assert conn.execute(f"SELECT 1 FROM {spec.vec_table} WHERE rowid=?",
+                                (uid,)).fetchone(), f"{spec.id} 的向量应被 repair 补回"
+    finally:
+        conn.close()
+
+
 # ── 终审（safe_cutoff_hits）：高分优先 + 低分字面兜底 ──────────────────
 #
 # 2026-09-22 实测发现：**页面层早已有"低分字面兜底席"，非页面层没有** ——

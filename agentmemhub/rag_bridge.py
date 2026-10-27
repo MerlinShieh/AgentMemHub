@@ -23,6 +23,7 @@ from agentmemhub.rag.ingest import (
     ensure_bridge_schema,
     ensure_vec_table,
     open_index,
+    write_models,
 )
 from agentmemhub.rag.memstore import (
     content_anchor,
@@ -524,39 +525,52 @@ def rebuild_embeddings(mode: str = "repair", limit: int = 500,
                        offset: int = 0, on_progress=None) -> dict:
     """POST /api/v1/embeddings/rebuild 的 rag 实现。
 
-    rag 写入即嵌入：repair = 给 active 表缺向量的 units 补嵌；
+    rag 写入即嵌入：repair = 给**每个配置模型**的向量表补缺失行；
     rebuild = 无需动作（全量重嵌是 reembed --model 的职责）。
+
+    ⚠️ 必须逐个模型补，不能只补 active：各模型的缺失集合**不一样**
+    （实测 small 全覆盖而 base 缺 1 条历史行 —— 写入侧修好之前落的那批）。
+    只补 active 会让其余模型永久缺行，而召回是融合多路的，缺一路不会报错，
+    只会让那部分内容在另一模型下"隐形"。
     """
     st = settings()
     conn = _conn()
     try:
-        spec = st.active_spec
-        ensure_vec_table(conn, spec)
-        missing = [r[0] for r in conn.execute(
-            f"SELECT u.id FROM units u LEFT JOIN {spec.vec_table} v ON v.rowid=u.id"
-            " WHERE v.rowid IS NULL")]
+        specs = write_models(st)
+        for _s in specs:
+            ensure_vec_table(conn, _s)
         updated = 0
-        if mode == "repair" and missing:
-            emb = get_active_embedder(st)      # 注意：签名收 Settings（曾误传 spec 致 AttributeError）
-            tables = [spec.vec_table]
-            for chunk_i in range(0, len(missing), 64):
-                ids = missing[chunk_i:chunk_i + 64]
-                rows = conn.execute(
-                    "SELECT id, text FROM units WHERE id IN (" +
-                    ",".join("?" * len(ids)) + ") ORDER BY id", ids).fetchall()
-                vecs = emb.encode_passages([r[1] for r in rows])
-                with conn:
-                    for (uid, _), v in zip(rows, vecs):
-                        conn.execute(
-                            f"INSERT OR REPLACE INTO {spec.vec_table}(rowid,"
-                            " embedding) VALUES(?,?)", (uid, bytes(v)))
-                        updated += 1
-                if on_progress is not None:
-                    on_progress(f"补向量 {mode}: {updated}/{len(missing)}")
+        missing_total = 0
+        if mode == "repair":
+            for spec in specs:
+                missing = [r[0] for r in conn.execute(
+                    f"SELECT u.id FROM units u LEFT JOIN {spec.vec_table} v"
+                    " ON v.rowid=u.id WHERE v.rowid IS NULL")]
+                missing_total += len(missing)
+                if not missing:
+                    continue
+                # active 模型直接用调用方可能已缓存的 embedder；其余现取
+                emb = (get_active_embedder(st) if spec.id == st.active_model
+                       else get_embedder(spec, settings=st))
+                for chunk_i in range(0, len(missing), 64):
+                    ids = missing[chunk_i:chunk_i + 64]
+                    rows = conn.execute(
+                        "SELECT id, text FROM units WHERE id IN (" +
+                        ",".join("?" * len(ids)) + ") ORDER BY id", ids).fetchall()
+                    vecs = emb.encode_passages([r[1] for r in rows])
+                    with conn:
+                        for (uid, _), v in zip(rows, vecs):
+                            conn.execute(
+                                f"INSERT OR REPLACE INTO {spec.vec_table}(rowid,"
+                                " embedding) VALUES(?,?)", (uid, bytes(v)))
+                            updated += 1
+                    if on_progress is not None:
+                        on_progress(f"补向量 {spec.id}: {updated}/{missing_total}")
         total = conn.execute("SELECT COUNT(*) FROM units").fetchone()[0]
         return {"processed": total, "updated": updated, "failed": 0,
                 "done": True, "nextOffset": 0,
-                "statsAfter": {"total": total, "missing": len(missing) - updated}}
+                "statsAfter": {"total": total,
+                               "missing": max(0, missing_total - updated)}}
     finally:
         conn.close()
 
