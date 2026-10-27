@@ -1595,12 +1595,16 @@ def purge_stale_memories(idx: sqlite3.Connection, settings, prompt_ver: int,
 
 
 def _project_one(idx: sqlite3.Connection, m: dict, vec: np.ndarray,
-                 spec) -> int:
+                 spec, *, extra: list[tuple] | None = None) -> int:
     """把一条蒸馏记忆投影进 units（幂等：src_id 命中则更新）。
 
     units.source/conversation_id 用**原会话**的值 → 排除与删除机制天然覆盖。
     seq 取负值（-memory_id）：既不与采集事件的正 seq 冲突，又保证同会话唯一。
+
+    `extra` 是其余配置模型的该条向量 `[(ModelSpec, ndarray)]` —— 一条记忆必须在
+    **每个**配置模型里都有向量，否则多模型召回会静默少一路通道。
     """
+    from agentmemhub.rag.ingest import put_vecs
     src_id = DISTILLED_SRC_PREFIX + (m.get("content_hash") or fingerprint(m["content"]))
     # 本函数要写 origin（来源维度）——列不存在时先幂等补列（极简测试库/老库）。
     # 用 PRAGMA 判断而非无条件调用：批量投影时不希望每行都做一次全量补列。
@@ -1633,10 +1637,6 @@ def _project_one(idx: sqlite3.Connection, m: dict, vec: np.ndarray,
              origin, int(time.time()), uid))
         # 自愈：旧版本投影的记忆可能缺来源初始分（列后加/逻辑后补），幂等补上
         ensure_base_value(idx, uid, BASE_VALUE_DISTILLED)
-        # vec0 是虚拟表，**不支持 INSERT OR REPLACE 的主键替换语义**（同一
-        # rowid 重复插入直接抛 UNIQUE 冲突）。原地更新必须先显式删掉旧向量，
-        # 否则这条 UPDATE 分支一旦被走到就会让整个投影阶段中断。
-        idx.execute(f"DELETE FROM {spec.vec_table} WHERE rowid=?", (uid,))
     else:
         uid = int(idx.execute(
             "INSERT INTO units(source, conversation_id, seq, role, turn_key,"
@@ -1650,9 +1650,9 @@ def _project_one(idx: sqlite3.Connection, m: dict, vec: np.ndarray,
     # 0.3 会系统性低估用户亲自保存的内容（实测反馈）。
     base = BASE_VALUE_AGENT_WRITE if m["source"] == "mcp" else BASE_VALUE_DISTILLED
     ensure_base_value(idx, uid, base)
-    idx.execute(
-        f"INSERT OR REPLACE INTO {spec.vec_table}(rowid, embedding) VALUES(?,?)",
-        (uid, np.ascontiguousarray(vec, dtype=np.float32).tobytes()))
+    # 写**全部**配置模型的向量（active + extra）：只写 active 会让其余模型永久
+    # 缺这一行，而 ingest 的候选来自源库 events、补不上 units 里的行。
+    put_vecs(idx, uid, [(spec, vec)] + list(extra or ()))
     return uid
 
 
@@ -1699,7 +1699,8 @@ def project_memories(idx: sqlite3.Connection, settings, memories: list[dict], *,
     memories：来自 distilled_memories 的条目（需含 id/source/conversation_id/
     content/type 等字段；可选 topic/turn_key/title/created_at）。
     """
-    from agentmemhub.rag.ingest import ensure_bridge_schema, ensure_vec_table
+    from agentmemhub.rag.ingest import (
+        encode_for_write, ensure_bridge_schema, ensure_vec_table, write_models)
     from agentmemhub.rag.runtime import get_active_embedder
     from agentmemhub.rag.search import ensure_search_schema, vector_search
 
@@ -1710,12 +1711,19 @@ def project_memories(idx: sqlite3.Connection, settings, memories: list[dict], *,
     # 投影要写 origin（来源维度）等桥接列——保证列在（幂等补列，测试库同样受益）
     ensure_bridge_schema(idx)
     spec = settings.active_spec
-    ensure_vec_table(idx, spec)
+    # 向量表要对**每个**配置模型都在，不只 active：投影是"新行入库"的主要入口，
+    # 只写 active 会让其余模型永久缺这些行的向量，而 `ingest --model` 的候选来自
+    # 源库 events、补不上 units 里的行（实测 base 表曾因此缺 1912 条 distilled）。
+    for _s in write_models(settings):
+        ensure_vec_table(idx, _s)
     ensure_search_schema(idx)          # FTS 触发器随投影自动同步
     embedder = get_active_embedder(settings)
-    vecs = embedder.encode_passages([m["content"] for m in memories])
+    texts = [m["content"] for m in memories]
+    vecs = embedder.encode_passages(texts)
+    # 其余模型的整批向量：判重与检索只要 active，但**写入必须全模型**
+    multi = encode_for_write(settings, texts)
 
-    for m, vec in zip(memories, vecs):
+    for i, (m, vec) in enumerate(zip(memories, vecs)):
         best_sim, best_anchor = 0.0, None
         for uid, sim in vector_search(idx, spec.vec_table, vec, k=8):
             row = idx.execute(
@@ -1736,7 +1744,8 @@ def project_memories(idx: sqlite3.Connection, settings, memories: list[dict], *,
                 status = "similar"
                 dedup_of = _memory_id_by_anchor(idx, best_anchor)
                 stats["similar"] += 1
-            _project_one(idx, m, vec, spec)
+            _project_one(idx, m, vec, spec,
+                         extra=[(s, vs[i]) for s, vs in multi])
             stats["projected"] += 1
         idx.execute(
             "UPDATE distilled_memories SET status=?, dedup_of=? WHERE id=?",

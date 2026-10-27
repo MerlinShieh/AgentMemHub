@@ -62,6 +62,31 @@ def test_save_memory_immediate_recall(rag_db, embedder):
     assert r["unit_id"] in {h.unit_id for h in hits}
 
 
+def test_save_memory_writes_all_write_order_models(rag_db):
+    """save_memory 必须写全 `write.order` 的模型，不能只写 active。
+
+    与蒸馏投影同一个道理：只写 active 会让其余模型**永久**缺这一行，而
+    `ingest --model` 的候选来自源库 events、补不上 units 里的行，唯一补救是
+    整表 `reembed --model`（实测 22228 条 / 19 分钟）。
+    """
+    base = rag_db
+    m2 = dataclasses.replace(base.active_spec, id="probe-m2-memstore")
+    st = dataclasses.replace(
+        base,
+        models={**base.models, m2.id: m2},
+        write={**base.write, "order": [base.active_model, m2.id]})
+    r = save_memory(st, "多模型写入探针：手动记忆也要落满每张向量表")
+    assert r["created"] is True
+    conn = open_index(st.index_db)
+    try:
+        for spec in (base.active_spec, m2):
+            assert conn.execute(
+                f"SELECT 1 FROM {spec.vec_table} WHERE rowid=?",
+                (r["unit_id"],)).fetchone(), f"{spec.id} 的向量表应有该单元"
+    finally:
+        conn.close()
+
+
 def test_save_memory_idempotent(rag_db, embedder):
     r1 = save_memory(rag_db, "重复内容测试", embedder=embedder)
     r2 = save_memory(rag_db, "重复内容测试", embedder=embedder)

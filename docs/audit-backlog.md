@@ -130,7 +130,7 @@
 
 | 位置 | 问题 |
 |---|---|
-| `agentmemhub/rag/memstore.py:115-133`、`agentmemhub/distill.py:1642`、`agentmemhub/rag_bridge.py:460`、`agentmemhub/wiki_index.py:380` | 这四处**直写 `units` 时只写 `settings.active_spec` 的向量**，不走 `write.order` ⇒ 多模型下非 active 模型永远缺这些行（实测 base 表缺 **1912 条** `role='distilled'`）。而 `ingest --model` 的候选来自源库 `events` 而非 `units`，所以它**也补不上**（`scanned` 里根本没有这些行），只有 `reembed --model`（整表重建）能补齐。这与 `README` / `rag/config.py` 承诺的「models 下所有模型都会保持可用」不符 |
+| `agentmemhub/distill.py`（`_project_one`）、`agentmemhub/rag/memstore.py`（`save_memory`） | **2026-10-27 已修**。这两处直写 `units` 时只写 `settings.active_spec` 的向量 ⇒ 多模型下非 active 模型永远缺这些行（实测 base 表缺 **1912 条** `role='distilled'`）；而 `ingest --model` 的候选来自源库 `events` 而非 `units`，所以它**也补不上**，只有整表 `reembed --model`（实测 22228 条 / 19 分钟）能补齐。现改为经 `rag.ingest` 的 `write_models` / `encode_for_write` / `put_vecs` 写**全部** `write.order` 模型，代价是每次写入多编码一遍非 active 模型。附带更正：`rag_bridge.save_memory_trace` 与 `wiki_index.project_pages` **本来就走 `write.order`**，最初判断的「四处」不成立（那两个之所以看起来缺向量，是历史存量而非写入路径造成的） |
 | `docs` 与代码 | `agentmemhub/config.py` 原注释写「落库始终启用（**面板可查**、带未读状态）」，但面板**从未有过通知查询页**，`list_notifications` / `mark_read` / `prune` 除测试外无调用者 ⇒ `notify.db` 只增不减。已改注释为实情，并给 `prune()` 接上唯一的自动调用点 |
 
 ---

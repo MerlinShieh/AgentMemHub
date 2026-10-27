@@ -977,6 +977,32 @@ def test_project_first_time_writes_units(idx_conn, real_settings):
     ).fetchone()[0] == "new"
 
 
+def test_project_writes_all_write_order_models(idx_conn, real_settings):
+    """一条蒸馏记忆必须在**每个**配置模型里都有向量（不只 active）。
+
+    修复前 `distill._project_one` 只写 active 一张表 ⇒ 非 active 模型永久缺这些
+    行；而 `ingest --model` 的候选来自源库 events、补不上 units 里的行，唯一补救
+    是整表 `reembed --model`（实测 22228 条 / 19 分钟）。2026-10-26 实测 base 表
+    曾因此缺 1912 条 distilled —— 记忆在 base 通道里等于不存在。
+    """
+    import dataclasses
+
+    base = real_settings
+    m2 = dataclasses.replace(base.active_spec, id="probe-m2-distill")
+    st = dataclasses.replace(
+        base,
+        models={**base.models, m2.id: m2},
+        write={**base.write, "order": [base.active_model, m2.id]})
+    m = _mem_dict(idx_conn, content="多模型写入探针：投影要落满每张向量表")
+    project_memories(idx_conn, st, [m])
+    uid = idx_conn.execute(
+        "SELECT id FROM units WHERE role=?", (DISTILLED_ROLE,)).fetchone()[0]
+    for spec in (base.active_spec, m2):
+        row = idx_conn.execute(
+            f"SELECT 1 FROM {spec.vec_table} WHERE rowid=?", (uid,)).fetchone()
+        assert row, f"{spec.id} 的向量表应有该单元"
+
+
 def test_project_idempotent(idx_conn, real_settings):
     m = _mem_dict(idx_conn, content="幂等性验证用的记忆内容甲")
     project_memories(idx_conn, real_settings, [m])

@@ -13,14 +13,14 @@ from __future__ import annotations
 
 import hashlib
 
-import numpy as np
 import sqlite3
 import time
 from typing import Sequence
 
 from .config import Settings
 from .embedder import Embedder
-from .ingest import ensure_vec_table, open_index
+from .ingest import (
+    encode_for_write, ensure_vec_table, open_index, put_vecs, write_models)
 from .runtime import get_active_embedder
 
 MEMSTORE_SCHEMA = """
@@ -111,7 +111,10 @@ def save_memory(
     spec = settings.active_spec
     try:
         ensure_memstore_schema(conn)
-        ensure_vec_table(conn, spec)
+        # 向量表要对**每个**配置模型都在（不只 active）：只写 active 会让其余
+        # 模型永久缺这一行，多模型召回静默少一路通道。
+        for _s in write_models(settings):
+            ensure_vec_table(conn, _s)
         hit = conn.execute(
             "SELECT id FROM units WHERE source='memory' AND src_id=?",
             (src_id,)).fetchone()
@@ -119,6 +122,9 @@ def save_memory(
             return {"unit_id": hit[0], "created": False, "src_id": src_id}
         emb = embedder or get_active_embedder(settings)
         vec = emb.encode_passages([text])[0]
+        # 其余模型的向量：单条写入也必须写全 —— `ingest --model` 的候选来自源库
+        # events，补不上 units 里的行，只有整表 reembed 能补（代价 19 分钟）。
+        multi = encode_for_write(settings, [text])
         ts = int(ts if ts is not None else time.time())
         with conn:  # 单事务：units+vec 原子落库
             seq = conn.execute(
@@ -130,9 +136,8 @@ def save_memory(
                 " VALUES('memory','mcp',?,?,'mcp',?,?,?,?,?,?)",
                 (seq, "user", src_id, ts, title or "记忆", text, len(text),
                  int(time.time())))
-            conn.execute(
-                f"INSERT INTO {spec.vec_table}(rowid, embedding) VALUES(?,?)",
-                (cur.lastrowid, np.ascontiguousarray(vec, dtype=np.float32).tobytes()))
+            put_vecs(conn, cur.lastrowid,
+                     [(spec, vec)] + [(s, vs[0]) for s, vs in multi])
         ensure_base_value(conn, cur.lastrowid, BASE_VALUE_AGENT_WRITE)
         return {"unit_id": cur.lastrowid, "created": True, "src_id": src_id}
     finally:

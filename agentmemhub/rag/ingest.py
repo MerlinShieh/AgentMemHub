@@ -199,6 +199,57 @@ def drop_vec_table(conn: sqlite3.Connection, spec: ModelSpec) -> None:
     conn.commit()
 
 
+def write_models(settings: Settings) -> list[ModelSpec]:
+    """`write.order` 里需要写向量的模型（去重、保序）。
+
+    为什么要单列一个函数：**写入侧必须写全部配置模型，而不是只写 active**。
+    只写 active 的后果是「非 active 模型的向量永远缺这些新行」—— 而
+    `ingest --model` 的候选来自源库 `events` 而非 `units`，它连这些行都看不见，
+    补不上；唯一能补的 `reembed --model` 要整表重建（实测 22228 条约 19 分钟），
+    只能当离线修复手段。实测踩过：base 表曾因蒸馏投影只写 active 而缺 1912 条。
+    """
+    out: list[ModelSpec] = []
+    seen: set[str] = set()
+    for mid in settings.write_order:
+        if mid in seen:
+            continue
+        seen.add(mid)
+        out.append(settings.model(mid))
+    return out
+
+
+def encode_for_write(settings: Settings, texts: list[str], *,
+                     skip_active: bool = True,
+                     ) -> list[tuple[ModelSpec, np.ndarray]]:
+    """为 `write.order` 里除 active 之外的模型各编码一次整批。
+
+    返回 `[(spec, (N, dim) 数组)]`。默认跳过 active 模型：调用方通常已经用
+    active embedder 编过一遍（判重与主检索都要它），重复编码是纯浪费。
+    """
+    out: list[tuple[ModelSpec, np.ndarray]] = []
+    for spec in write_models(settings):
+        if skip_active and spec.id == settings.active_model:
+            continue
+        emb = get_embedder(spec, settings=settings)
+        out.append((spec, emb.encode_passages(texts)))
+    return out
+
+
+def put_vecs(conn: sqlite3.Connection, rowid: int,
+             pairs: list[tuple[ModelSpec, np.ndarray]]) -> None:
+    """把一条 unit 的多模型向量写进各自的表（先删后插）。
+
+    vec0 是虚拟表，**不支持 `INSERT OR REPLACE` 的主键替换语义**（同一 rowid
+    重复插入直接抛 UNIQUE 冲突），所以原地更新必须先显式删旧向量 —— 这个坑在
+    蒸馏投影与 wiki 投影里各踩过一次，收到这里统一处理。
+    """
+    for spec, vec in pairs:
+        conn.execute(f"DELETE FROM {spec.vec_table} WHERE rowid=?", (rowid,))
+        conn.execute(
+            f"INSERT INTO {spec.vec_table}(rowid, embedding) VALUES(?,?)",
+            (rowid, np.ascontiguousarray(vec, dtype=np.float32).tobytes()))
+
+
 def _existing_keys(conn: sqlite3.Connection, vec_table: str | None = None) -> set[tuple]:
     """已入库的单元键集合（用于摄取去重）。
 
