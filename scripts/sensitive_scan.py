@@ -41,6 +41,13 @@ def _username_patterns() -> dict[str, re.Pattern]:
             continue
         if len(name) >= 3 and re.fullmatch(r"[A-Za-z0-9_.-]+", name):
             out[f"真实用户名 ({var})"] = re.compile(rf"\b{re.escape(name)}\b", re.I)
+        elif re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+            # 纯 ASCII 但只有 2 个字符（`Li`、`lj`）：`\b<2字符>\b` 仍会命中
+            # `label` / `lib` / `kj` 这类子串，裸字面量更糟 —— 闸门恒红等于没人看。
+            # 所以**不生成致命规则**，但必须出声：静默跳过会让使用者以为
+            # "这条已经查过了"（这是本脚本最危险的失效方式）。
+            print(f"⚠️  环境变量 {var} 的用户名过短（{name!r}），无法生成可靠的"
+                  f"致命规则；推送前请人工确认提交内容里没有出现该名", file=sys.stderr)
         elif len(name) >= 2:
             # 中文名 / 带空格 / 带特殊字符的用户名走不进 \b 正则。这里**不能静默跳过**：
             # 跳过等于这条规则根本不存在，而使用者会以为"已经查过了"。
@@ -57,9 +64,14 @@ def _local_path_patterns() -> dict[str, re.Pattern]:
     """
     out: dict[str, re.Pattern] = {}
     root = Path(__file__).resolve().parents[1]
-    for label, p in (("本机项目根路径", root), ("本机用户目录", Path.home())):
+    # 项目根的**上一级**（本机工作区根，如 `D:\data\vibeCoding`）：仓库里出现它
+    # 同样是泄漏，而根路径规则匹配不到它（根更长，子串方向不对）。
+    parent = root.parent
+    for label, p in (("本机项目根路径", root), ("本机工作区根路径", parent),
+                     ("本机用户目录", Path.home())):
         s = str(p)
-        if len(s) >= 6:
+        # 长度门槛：盘根（`D:\`）这种过短前缀会把全仓库路径都命中
+        if len(s) >= 8:
             out[label] = re.compile(re.escape(s), re.I)
     return out
 
