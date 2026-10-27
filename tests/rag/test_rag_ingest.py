@@ -226,6 +226,72 @@ def test_delete_units_for_conversation_cascade(
     assert st["vec_coverage"] == 1.0
 
 
+def test_删除会话后其它会话仍能被向量召回(
+    project_settings, embedder, fixture_source_db, tmp_path
+):
+    """删会话**不能**清掉 vec0 的影子表。
+
+    回归点：`delete_units_for_conversation` 曾用
+    `SELECT name FROM sqlite_master WHERE name LIKE 'vec_%'` 枚举"向量表"，
+    而 vec0 的影子表（`_info` / `_chunks` / `_rowids` / `_vector_chunks00`）
+    同样 `type='table'` 且以 `vec_` 开头，于是被按 rowid 删。表面上
+    `COUNT(*) FROM vec_x` 只剩该删的行（看着是对的），实际上聚类行被删、
+    ANN 索引整块失效 —— `WHERE embedding MATCH ?` 返回 0 条。
+    这个缺陷不抛错、不记日志、覆盖率统计也还是满的，只有 KNN 断言能抓到。
+    """
+    import numpy as np
+
+    from agentmemhub.rag.ingest import delete_units_for_conversation
+
+    idx = tmp_path / "rag.db"
+    _ingest(project_settings, embedder, fixture_source_db, idx)
+    vt = project_settings.active_spec.vec_table
+    conn = open_index(idx)
+    victim = conn.execute(
+        "SELECT conversation_id FROM units ORDER BY id LIMIT 1").fetchone()[0]
+    assert delete_units_for_conversation(conn, "hermes", victim) > 0
+    remaining = conn.execute("SELECT COUNT(*) FROM units").fetchone()[0]
+    assert remaining > 0, "夹具应还有其它会话可以召回"
+    q = np.asarray(embedder.encode_query("批量自动化脚本"), dtype=np.float32)
+    hits = conn.execute(
+        f"SELECT rowid FROM {vt} WHERE embedding MATCH ? AND k = ?",
+        (q.tobytes(), remaining)).fetchall()
+    conn.close()
+    assert hits, "删了一个会话就把整个 ANN 索引打死了（影子表被误删）"
+
+
+def test_rebuild_源库异常时不能清空索引(
+    project_settings, embedder, tmp_path
+):
+    """`--rebuild` 必须先打开源库校验 schema，**再**清索引。
+
+    反过来（先 `DELETE FROM units` 再 `open_source_ro`）意味着源库路径写错就
+    已经把索引清空了才报错：units 与全部模型向量不可逆丢失，而 units 是
+    AUTOINCREMENT，重灌后 id 更大 —— `unit_values`（手动加权 / 反馈）按旧 id
+    全部变成永久孤儿。这条测试守的是「失败要发生在破坏之前」。
+    """
+    idx = tmp_path / "rag.db"
+    conn = open_index(idx)
+    conn.execute(
+        "INSERT INTO units(source, conversation_id, seq, role, text, chars)"
+        " VALUES('zcode','c1',1,'user','这条必须活下来',4)")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(Exception):          # noqa: B017 —— 具体类型不重要
+        run_ingest(
+            dataclasses.replace(project_settings, index_db=idx),
+            embedder=embedder,
+            source_db=tmp_path / "不存在的源库.db",
+            rebuild=True,
+            log=_qlog,
+        )
+    conn = open_index(idx)
+    n = conn.execute("SELECT COUNT(*) FROM units").fetchone()[0]
+    conn.close()
+    assert n == 1, "源库打不开时索引已被清空 —— rebuild 的顺序反了"
+
+
 def test_open_index_busy_timeout(project_settings, tmp_path):
     """R1 并发加固：多进程写依赖 busy_timeout（面板×MCP 不同进程）。"""
     conn = open_index(tmp_path / "rag.db")

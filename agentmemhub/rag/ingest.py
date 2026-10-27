@@ -364,22 +364,28 @@ def run_ingest(
 
     idx = open_index(idx_path)
     try:
-        if rebuild:
-            log.info("rebuild requested: dropping units + %s", spec.vec_table)
-            drop_vec_table(idx, spec)
-            idx.execute("DELETE FROM units")
-            idx.execute("DELETE FROM ingest_meta WHERE key='watermark'")
-            idx.commit()
-        ensure_vec_table(idx, spec)
-        # 本函数要写**桥接列**（`origin`），所以必须自己保证列在 —— 不能指望
-        # 别的调用点（rag_bridge / wiki_index）已经迁移过这张库。
-        # 实测：全新索引库上只跑 ingest 会直接报
-        # `sqlite3.OperationalError: table units has no column named origin`。
-        ensure_bridge_schema(idx)
-
+        # ⚠️ 顺序很重要：**先**打开源库并校验 schema，**再**决定要不要清空索引。
+        # 反过来的写法（曾是这样）意味着源库路径写错或缺表时，`DELETE FROM units`
+        # 已经执行过才抛错 —— units（含 message/memory/wiki/distilled 全部投影）
+        # 与所有模型向量不可逆丢失；而 units 是 AUTOINCREMENT，重灌后 id 更大，
+        # unit_values（手动加权 / 反馈）按旧 id 全部变成永久孤儿。
         src = open_source_ro(src_path)
         try:
             validate_source_schema(src)
+
+            if rebuild:
+                log.info("rebuild requested: dropping units + %s", spec.vec_table)
+                drop_vec_table(idx, spec)
+                idx.execute("DELETE FROM units")
+                idx.execute("DELETE FROM ingest_meta WHERE key='watermark'")
+                idx.commit()
+            ensure_vec_table(idx, spec)
+            # 本函数要写**桥接列**（`origin`），所以必须自己保证列在 —— 不能指望
+            # 别的调用点（rag_bridge / wiki_index）已经迁移过这张库。
+            # 实测：全新索引库上只跑 ingest 会直接报
+            # `sqlite3.OperationalError: table units has no column named origin`。
+            ensure_bridge_schema(idx)
+
             known = _existing_keys(idx, spec.vec_table)
             cursor = None
             summary = {
@@ -570,6 +576,22 @@ def run_stats(settings: Settings, log: logging.Logger | None = None) -> dict:
         idx.close()
 
 
+def _vec_tables(conn: sqlite3.Connection) -> list[str]:
+    """真正的 vec0 虚拟表名（**不含**影子表）。
+
+    ⚠️ 必须按 `sql LIKE '%USING vec0%'` 筛，不能按 `name LIKE 'vec_%'`：
+    vec0 的影子表（`vec_xxx_info` / `_chunks` / `_rowids` / `_vector_chunks00`）
+    同样 `type='table'` 且以 `vec_` 开头。对它们执行 `DELETE ... WHERE rowid = ?`
+    会删掉**整块向量**所在的聚类行，而且一声不响：内存库实测删 rowid 1/2 后
+    `SELECT COUNT(*) FROM vec_xxx` 仍是 3（看着像没删），但
+    `WHERE embedding MATCH ?` 返回 **0 条** —— ANN 索引整块报废，而所有统计
+    口径（COUNT / coverage）都还是满的。vec0 自己维护影子表，删虚拟表行会联动。
+    """
+    return [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master"
+        " WHERE type='table' AND sql LIKE '%USING vec0%'")]
+
+
 def delete_units_for_conversation(conn: sqlite3.Connection,
                                   source: str, conversation_id: str) -> int:
     """级联删除某会话的全部派生数据（重构运行模型：AgentMemHub 删会话必须同步清索引）。
@@ -582,8 +604,7 @@ def delete_units_for_conversation(conn: sqlite3.Connection,
         (source, conversation_id))]
     if not ids:
         return 0
-    vec_tables = [r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'vec_%'")]
+    vec_tables = _vec_tables(conn)
     with conn:
         conn.execute(
             "DELETE FROM units WHERE source=? AND conversation_id=?",
@@ -606,8 +627,7 @@ def delete_units_for_turn(conn: sqlite3.Connection, source: str,
         (source, conversation_id, turn_key))]
     if not ids:
         return 0
-    vec_tables = [r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'vec_%'")]
+    vec_tables = _vec_tables(conn)
     with conn:
         conn.execute(
             "DELETE FROM units WHERE source=? AND conversation_id=? AND turn_key=?",
