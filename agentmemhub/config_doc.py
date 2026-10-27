@@ -43,12 +43,23 @@ _KEY_RE = re.compile(r"^(\s*)([^:#]+?)\s*:\s*(.*)$")
 def _split_inline_comment(rest: str) -> tuple[str, str]:
     """把 `value   # 说明` 拆成 (value, 说明)。
 
-    只认**空白 + #** 的行尾注释（`#` 紧跟字符时视为值的一部分，如 URL 锚点）。
+    两种形态都算注释：
+    - `value  # 说明` —— `#` 前有空白
+    - `   # 仅注释` —— 值位是空的，只有注释。模板里常这样给"保留位"留说明，
+      原先会被当成值 `# 仅注释`，于是配置页显示一个根本不存在的值，
+      `diff_example` 还会拿它去和本地配置比对。
+
+    `#` 紧跟非空白字符时视为值的一部分（URL 锚点 `http://x/#y` 不能拆）。
     """
-    idx = rest.find(" #")
+    idx = rest.find("#")
     if idx < 0:
         return rest.rstrip(), ""
-    return rest[:idx].rstrip(), rest[idx + 1:].strip().lstrip("#").strip()
+    head = rest[:idx]
+    if not head.strip():
+        return "", rest[idx + 1:].strip()
+    if not head.endswith((" ", "\t")):
+        return rest.rstrip(), ""
+    return head.rstrip(), rest[idx + 1:].strip()
 
 
 def parse_annotated(text: str) -> list[dict[str, Any]]:
@@ -91,7 +102,10 @@ def parse_annotated(text: str) -> list[dict[str, Any]]:
             comment = (comment + " " + inline).strip() if comment else inline
         pending = []
 
-        is_section = (rest == "")
+        # 只有"键后面真的什么都没有"才是 section 行。
+        # `key:   # 说明` 是**值为空但带注释**的叶子 —— 若把它当 section，
+        # 它就会从 `to_leaves()` 里消失，配置页与 example 比对都看不到这个键。
+        is_section = (rest == "" and not inline)
         entries.append({
             "path": path,
             "key": key,
