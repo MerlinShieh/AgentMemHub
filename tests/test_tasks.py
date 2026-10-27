@@ -171,6 +171,29 @@ def test_刚提交的任务不会被误判成僵尸():
     assert _wait_terminal()["status"] == "done"
 
 
+def test_僵尸占槽时直接提交也能收尸():
+    """前端关掉页面就没人轮询了 —— 只在 `status()` 里收尸是不够的。
+
+    这时单槽被死人占着，用户点任何操作都只得到「已有任务在运行」，而且
+    **再也提交不进去**（只能重启服务）。所以 `submit` 必须先收尸再判槽位。
+    """
+    with tasks._LOCK:
+        tasks._CURRENT = {
+            "id": "dead", "name": "僵尸", "status": "running",
+            "startedAt": time.time(), "finishedAt": None, "output": "",
+            "error": None, "progress": None, "cancelable": True,
+            "cancelRequested": False, "timedOut": False, "timeoutAt": None,
+        }
+        tasks._THREAD = threading.Thread(target=lambda: None)
+        tasks._THREAD_JOB_ID = "dead"
+    tasks._THREAD.start()
+    tasks._THREAD.join()                # 线程已结束，但状态还是 running
+
+    # 刻意**不调用** tasks.status()：模拟"没人在轮询"
+    assert tasks.submit("新任务", lambda emit, meta: "ok") is not None
+    assert _wait_terminal()["status"] == "done"
+
+
 def test_单槽互斥_已有任务时拒绝新任务():
     hold = threading.Event()
 

@@ -77,6 +77,10 @@ def submit(
     """
     global _CURRENT, _THREAD, _THREAD_JOB_ID
     with _LOCK:
+        # 先收尸再判槽位：只在 `status()` 里做僵尸检测是不够的 —— 前端关掉页面
+        # 就没人轮询了，僵尸会一直占着单槽，用户点任何操作都只得到「已有任务在
+        # 运行」，而且**再也提交不进去**（只能重启服务）。
+        _reap_locked()
         if _CURRENT and _CURRENT["status"] == "running":
             return None
         job: dict[str, Any] = {
@@ -179,24 +183,34 @@ def cancel(job_id: str = "") -> dict:
         return {"ok": True, "id": _CURRENT["id"], "reason": "已请求取消，等待任务退出"}
 
 
+def _reap_locked() -> None:
+    """僵尸检测（**调用方必须已持 `_LOCK`**）。
+
+    状态还是 running、但**属于这个 job 的**线程已经退出 —— 说明异常在 `_run`
+    之外逃逸（或进程重启后残留）。不修的话前端会永远转圈、新任务也永远提交
+    不进来（单槽被一个死人占着）。
+
+    三个前置条件都是防误判的：
+    - `_THREAD_JOB_ID == id`：`submit` 里"建 job"与"建线程"是两次持锁赋值，
+      中间窗口会看到「新 job + 旧线程」，不加这条会把刚提交的任务当场判死；
+    - `_THREAD.ident is not None`：线程还没 start 过时 `is_alive()` 恒 False；
+    - `_THREAD is not None`：进程刚起、从没跑过任务。
+    """
+    if (_CURRENT is None or _CURRENT["status"] != "running"
+            or _THREAD is None or _THREAD_JOB_ID != _CURRENT["id"]
+            or _THREAD.ident is None or _THREAD.is_alive()):
+        return
+    _CURRENT["status"] = "error"
+    _CURRENT["error"] = "任务线程已退出但未留下终态（未捕获异常）"
+    _CURRENT["finishedAt"] = time.time()
+
+
 def _snapshot() -> Optional[dict]:
     """当前任务的**可序列化**快照（剔除线程对象；顺带做僵尸检测）。"""
     with _LOCK:
         if not _CURRENT:
             return None
-        # 僵尸检测：状态还是 running，但**属于这个 job 的**线程已经没了 —— 说明异常
-        # 在 `_run` 之外逃逸（或进程重启后残留）。不修的话前端会永远转圈、新的任务
-        # 也永远提交不进来（单槽被一个死人占着）。
-        # 三个前置条件是防误判：
-        #  · `_THREAD_JOB_ID == id`：submit 里"建 job"与"建线程"是两次持锁赋值，
-        #    中间窗口会看到「新 job + 旧线程」，不加这条会把新任务当场判死；
-        #  · `ident is not None`：线程还没 start 过时 is_alive() 恒 False。
-        if (_CURRENT["status"] == "running" and _THREAD is not None
-                and _THREAD_JOB_ID == _CURRENT["id"]
-                and _THREAD.ident is not None and not _THREAD.is_alive()):
-            _CURRENT["status"] = "error"
-            _CURRENT["error"] = "任务线程已退出但未留下终态（未捕获异常）"
-            _CURRENT["finishedAt"] = time.time()
+        _reap_locked()
         return dict(_CURRENT)
 
 
