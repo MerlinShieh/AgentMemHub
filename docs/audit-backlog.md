@@ -208,3 +208,29 @@
 - 写端点 CSRF 闸（`_same_site_guard`，非只读方法校验 `Origin` / `Sec-Fetch-Site`）。
 - `forget --purge` 不删镜像；空格式白名单语义。
 - `tasks` 无超时无取消 ⇒ 改为协作式取消 + 超时旗标 + 僵尸检测 + 面板「请求取消」（`8bfa293`）。
+
+**2026-10-27 第三轮（`rag/` 包深度审计）**
+- `fix(rag)` 删会话 / 排除轮次会**静默报废 ANN 索引**：`delete_units_for_conversation` /
+  `delete_units_for_turn` 用 `sqlite_master WHERE type='table' AND name LIKE 'vec_%'` 找向量表，
+  vec0 的影子表（`vec_*_chunks` / `vec_*_rowids` / `vec_*_info` / `vec_*_vector_chunks00`）
+  同样满足条件，于是被按 unit id 删 rowid —— 而 `_chunks` 是 `INTEGER PRIMARY KEY`，
+  一行对应一整块向量。删掉 = 该块全部向量从 ANN 结构消失，但普通行查询仍查得到，
+  `run_stats` 的覆盖率照样显示"满"。内存库实测：删 2 行后 `COUNT(*)` 仍 3，
+  `MATCH ? AND k=5` 返回 **0**。改为只删虚拟表本身（`LIKE '%USING vec0%'`）。
+  守卫：`tests/rag/test_rag_ingest.py` 里直接断言 KNN 而不只断行数。
+- `fix(rag)` `--rebuild` 原先**先清索引、后开源库**：源库路径写错或缺表时
+  `DELETE FROM units` 已执行才抛错 —— units 与全部模型向量不可逆丢失，
+  且 units 是 AUTOINCREMENT，重灌后 id 更大，`unit_values` 按旧 id 成永久孤儿。
+  改为先 `open_source_ro` + `validate_source_schema`，失败必须发生在破坏之前。
+- **待修**（已确认，未动）：源端 `events.content` 变更后索引**永不刷新** ——
+  幂等键只有 `(source, conversation_id, seq)`，命中即 `skipped_known`，且只写向量
+  不 UPDATE `text/title/time/role`。`store.upsert_sessions` 在会话 `updated_at` 变化时
+  会整会话重插（同键正文被改写），此后任何 sync/ingest 都跳过它；若该模型向量曾缺失，
+  会用**新文本**写向量而 `units.text` 仍是旧文本 → 向量与正文语义错位。
+  现实修法只能是 `--rebuild`（代价见上一条），需要设计「known 命中后比对 content hash」。
+- **待修**：`rag.retrieval.models` 里非 active 模型文件缺失时 `search.py:744-751` 无 try，
+  整个检索 500（`config.py` 只校验 active 模型的文件存在）。
+- **待修**：`seq = MAX(seq)+1` 在两个 MCP 客户端同时写时撞 `UNIQUE(source,conversation_id,seq)`，
+  `legacy_id` 唯一索引的"先查后插"同样非原子；应改 `BEGIN IMMEDIATE` + 冲突重试。
+- **待修**：`rag.write.order` 漏掉 active 模型时，新记忆/页面的 active 向量永不写入，
+  而召回主通道正是 active 表 —— 配置检查脚本应加「active ∈ write_order」校验。
