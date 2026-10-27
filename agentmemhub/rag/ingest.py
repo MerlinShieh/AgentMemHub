@@ -230,8 +230,17 @@ def encode_for_write(settings: Settings, texts: list[str], *,
     for spec in write_models(settings):
         if skip_active and spec.id == settings.active_model:
             continue
-        emb = get_embedder(spec, settings=settings)
-        out.append((spec, emb.encode_passages(texts)))
+        try:
+            emb = get_embedder(spec, settings=settings)
+            out.append((spec, emb.encode_passages(texts)))
+        except Exception:                   # noqa: BLE001 —— 见下方注释
+            # 单个模型不可用（onnx 缺失/损坏、内存不足、维度不符）**不该让整条记忆
+            # 写不进去**：只写 active 时不会失败，改成写全模型后这是新引入的脆性，
+            # 而"一个坏模型 ⇒ 所有记忆都存不了"比"少一路召回"糟得多。
+            # 但**绝不能静默**：这批记忆在该模型里就没有向量，只能靠这条日志发现。
+            logging.getLogger("asrag.ingest").warning(
+                "写入侧跳过模型 %s（不可用）：这批 %d 条在该模型里不会有向量",
+                spec.id, len(texts), exc_info=True)
     return out
 
 
