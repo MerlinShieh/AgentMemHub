@@ -344,8 +344,8 @@ python -m agentmemhub llm-config [--json]                       # 各 LLM 使用
 
 ## 六、接口使用现状（面板未调用的接口）
 
-**2026-10-26 实测**：后端 **65 个 HTTP 路由**，面板前端调用了 **54 个**，
-**11 个未接**；其中 **43 个能核对到 HTTP 方法一致**（脚本会抓路径附近的
+**2026-10-27 实测**：后端 **66 个 HTTP 路由**，面板前端调用了 **55 个**，
+**11 个未接**；其中 **44 个能核对到 HTTP 方法一致**（脚本会抓路径附近的
 `method: 'X'`，抓不到就标「方法未核」而不是算作已验证）。复跑一条命令即可对账：
 
 ```powershell
@@ -436,10 +436,34 @@ python scripts/audit_frontend_api.py        # 或 --used 连已用的一起列 /
 | `POST` | `/api/feed/batch` | 批量投喂（**长任务**，轮询 `/api/admin/job`）|
 | `GET` | `/api/feed/list` | 素材列表（`status` / `low_quality` / `limit`）|
 | `GET` | `/api/feed/show/{doc_id}` | 单条详情（404 = 没有这条）|
+| `GET` | `/api/feed/content/{doc_id}` | 转换后的**正文**（服务端渲染 HTML；409 = 还没交付物，400 = 路径越界）|
 | `POST` | `/api/feed/retry` | 重转（来源不可达时**自动回落 `raw/` 原件**）|
 | `POST` | `/api/feed/retract` | 撤下（可恢复；**原件保留**）|
 | `POST` | `/api/feed/forget` | 清除登记（`purge=true` 才连原件一起删）|
 | `GET` | `/api/feed/lint` | 确定性体检（`P0>0` 表示数据不一致）|
+
+#### 素材正文（`GET /api/feed/content/{doc_id}`）
+
+详情接口只给登记表整行（属性 + 告警），**正文要单独取**：交付物是
+「frontmatter + 正文」，frontmatter 是给下游读的溯源字段（`title` / `doc` /
+`origin` / `quality` …），混进正文展示的第一屏就全是元数据。
+
+```json
+{
+  "doc_id": "2c9471cdfe808c96",
+  "title": "Limited Distribution License Agreement",
+  "chars": 10333,
+  "frontmatter": {"doc": "2c9471cdfe808c96", "kind": "pdf", "origin": "external"},
+  "html": "<article class=\"md-body\">…</article>"
+}
+```
+
+- `chars` 是**正文**长度（不算 frontmatter）。
+- `html` 由 `agentmemhub/mdmini.py` 服务端渲染 —— 面板没有 markdown 渲染器，
+  浏览页正文也是服务端渲染好再返回的；两套渲染器必然漂移。
+- `kb_path` 来自登记表，而登记表是**可写数据**：按 `feed.kb_dir` 做根校验，
+  越界回 `400`。
+- 未转换 / 转换失败的素材没有 `kb_path` → `409`（带状态），不是 `500`。
 
 #### 四种输入形态（`POST /api/feed/add`）
 

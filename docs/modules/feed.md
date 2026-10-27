@@ -472,6 +472,19 @@ agentmemhub wiki --action index-pages    # 投影**所有页面根**（L2 自有
 multipart 上传、扫目录批量、重转 / 撤下 / 删除、格式白名单热改）。11 个 HTTP 接口
 至此**全部有了前端**。
 
+**详情页要看得到正文**（2026-10-27 补）：`/api/feed/show` 只回登记表整行（属性 +
+告警），用户点开素材却看不到"转出来的是什么"。新增
+`GET /api/feed/content/{doc_id}`：读交付物、**剥掉 frontmatter**、用
+`mdmini` 渲染成 HTML 返回。两个要点 ——
+
+- **必须剥 frontmatter**：交付物是「frontmatter + 正文」，frontmatter 直接丢给
+  mdmini 会渲染成一串 `---` 与 `title: ...` 段落，第一屏全是元数据。浏览页早就
+  剥掉了（`wiki_pages._split_frontmatter`），这边必须一致。
+- **服务端渲染而不是前端渲染**：面板没有 markdown 渲染器（浏览页正文一直是
+  服务端渲染好再返回），再引一套必然漂移 —— md 渲染只认 `agentmemhub/mdmini.py`。
+- `kb_path` 来自登记表，而登记表是**可写数据**：按 `feed.kb_dir` 做根校验，
+  越界回 400；没有 `kb_path`（未转换/失败）回 409 带状态。
+
 ⚠️ **面板能删（含 `purge` 连原件删），MCP 仍然不能删** —— 两者约束不同，别混：
 MCP 是给 Agent 的接口（低门槛、无人值守，所以只给写入与查看）；面板是人工操作，
 勾选 + 二次确认之后由人负责。**不要拿 MCP 的约束去砍面板的能力。**
@@ -482,7 +495,7 @@ MCP 是给 Agent 的接口（低门槛、无人值守，所以只给写入与查
 |---|---|---|---|---|
 | 投喂一项 | `feed add <路径>` · `feed add --stdin` | `POST /api/feed/add`（四形态）· `/api/feed/upload`（multipart 直传） | `feed_add` | ✅ 四形态 + 多文件上传 + dry-run |
 | 看投过什么 | `feed list [--status X] [--low-quality]` | `GET /api/feed/list` | `feed_list` | ✅ 清单 + 状态/低质量筛选 |
-| 看单条详情 | `feed show <doc_id>` | `GET /api/feed/show/{doc_id}` | `feed_status`（传 `doc_id`） | ✅ 详情 + 跳到对应知识页 |
+| 看单条详情 | `feed show <doc_id>` | `GET /api/feed/show/{doc_id}` · `GET /api/feed/content/{doc_id}`（正文渲染） | `feed_status`（传 `doc_id`） | ✅ 详情 + **转换后的正文** + 跳到对应知识页 |
 | 看整体健康 | `feed lint [--json]` | `GET /api/feed/lint` | `feed_status`（**`with_index=False`**） | ✅ 体检（P0/P1 分级） |
 | 目录批量 | `feed scan <目录>`（只读）· `feed batch <目录> [--apply]` | `POST /api/feed/scan` · `/api/feed/batch`（长任务） | **不给** | ✅ 扫描→预览→确认投喂（接全局进度条） |
 | 格式白名单 | `feed formats [--set-formats …]` | `GET`/`PUT /api/feed/formats` | 只在 `feed_status` 里显示 | ✅ 查看来源 + 热改 + 恢复默认 |

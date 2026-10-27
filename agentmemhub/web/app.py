@@ -2054,6 +2054,52 @@ def create_app(db_path: Path | None = None):
             raise HTTPException(status_code=404, detail="没有这条素材：%s" % doc_id)
         return JSONResponse(m)
 
+    @app.get("/api/feed/content/{doc_id}",
+             summary="投喂：转换后的正文（服务端渲染为 HTML）")
+    def api_feed_content(doc_id: str):
+        """把交付物 md 渲染成 HTML，供详情页直接展示。
+
+        为什么服务端渲染而不是让前端取 md 自己转：面板里没有 markdown 渲染器，
+        浏览页的正文一直是 `mdmini` 渲染好再返回的。再引一套前端渲染器，
+        markdown 就有两处真相，必然漂移（本项目在"两处各写一份"上踩过多次）。
+        """
+        from fastapi import HTTPException
+
+        from agentmemhub import mdmini
+        from agentmemhub.config import config as _cfg
+        from agentmemhub.feed import service as svc
+        from agentmemhub.web import wiki_pages as _wiki_pages
+
+        m = svc.get_material(doc_id)
+        if not m:
+            raise HTTPException(status_code=404, detail="没有这条素材：%s" % doc_id)
+        kb = str(m.get("kb_path") or "").strip()
+        if not kb:
+            raise HTTPException(
+                status_code=409,
+                detail="这条素材还没有交付物（状态：%s）" % (m.get("status") or "未知"))
+        # kb_path 来自登记表，登记表是**可写数据** —— 不能当可信输入直接用
+        root = _cfg().feed_paths()["kb"].resolve()
+        target = Path(kb).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="交付物路径越界：%s" % kb)
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail="交付物文件不在了：%s" % kb)
+        text = target.read_text(encoding="utf-8", errors="replace")
+        # 交付物是「frontmatter + 正文」；frontmatter 是给下游读的溯源字段，
+        # 直接丢给 mdmini 会渲染成一串 `---` 和 `title: ...` 段落（浏览页早就
+        # 剥掉了，这里必须一致）。
+        meta, body = _wiki_pages._split_frontmatter(text)
+        return JSONResponse({
+            "doc_id": doc_id,
+            "title": m.get("title") or "",
+            "chars": len(body),
+            "frontmatter": meta,
+            "html": mdmini.render(body, title=str(m.get("title") or "")),
+        })
+
     @app.post("/api/feed/retry", summary="投喂：重转（来源不可达时自动回落原件）")
     def api_feed_retry(payload: FeedIdIn):
         from agentmemhub.feed import service as svc

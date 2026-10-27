@@ -467,3 +467,111 @@ def test_kb页面_低质量带warnings字段():
                        warnings=["表格可能失真", "公式丢失"])
     fm = __import__("yaml").safe_load(render_kb_page(doc).split("---")[1])
     assert fm["quality"] == 0.4 and "表格可能失真" in fm["warnings"]
+
+
+def test_投喂详情能看到转换后的正文(monkeypatch, tmp_path):
+    """详情页必须能看到**转换后的正文**，且是剥掉 frontmatter 的正文。
+
+    原先 `GET /api/feed/show/{doc_id}` 只返回登记表整行（属性 + 告警），
+    面板就只有一个属性表 —— 用户投喂完看不到转出来的是什么。
+
+    另一个坑：交付物是「frontmatter + 正文」，frontmatter 直接丢给 mdmini
+    会渲染成一串 `---` 与 `title: ...` 段落，第一屏全是元数据。浏览页早就
+    剥掉了，这里必须一致。
+    """
+    kb_root = tmp_path / "kb"
+    kb_root.mkdir()
+    doc_id = "d" * 16
+    p = kb_root / (doc_id + ".md")
+    p.write_text('---\ntitle: "示例文档"\norigin: external\n'
+                 'source_ref: "a.pdf"\n---\n\n# 一级标题\n\n正文一段。\n',
+                 encoding="utf-8")
+
+    from agentmemhub.feed import service as svc
+    monkeypatch.setattr(svc, "get_material", lambda d: {
+        "doc_id": doc_id, "title": "示例文档", "status": "published",
+        "kb_path": str(p), "kind": "pdf"})
+
+    import agentmemhub.config as C
+
+    _real_cfg = C.config()          # 先取真的，再换 —— 否则 __init__ 里就是递归
+
+    class _Cfg:
+        """只换 kb 根，其余字段全部委托真实配置 —— `create_app()` 还会读
+        `db_path` 等字段，瘦身版会让测试死在无关的地方。"""
+
+        def __init__(self):
+            self._real = _real_cfg
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def feed_paths(self):
+            return {**self._real.feed_paths(), "kb": kb_root}
+
+    monkeypatch.setattr(C, "config", lambda: _Cfg())
+
+    from fastapi.testclient import TestClient
+    from agentmemhub.web.app import create_app
+    c = TestClient(create_app())
+    r = c.get("/api/feed/content/" + doc_id)
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j["chars"] > 0
+    assert "title:" not in j["html"], "frontmatter 漏进正文了"
+    assert "---" not in j["html"].split("<p>")[0]
+    assert j["frontmatter"]["origin"] == "external"
+    assert "一级标题" in j["html"] and "正文一段" in j["html"]
+
+
+def test_投喂正文_没有交付物时明确拒绝(monkeypatch, tmp_path):
+    """未转换 / 失败的素材没有 kb_path —— 要回 409 且说清状态，不要 500。"""
+    from agentmemhub.feed import service as svc
+    monkeypatch.setattr(svc, "get_material", lambda d: {
+        "doc_id": "x" * 16, "title": "t", "status": "failed", "kb_path": ""})
+
+    from fastapi.testclient import TestClient
+    from agentmemhub.web.app import create_app
+    c = TestClient(create_app())
+    r = c.get("/api/feed/content/" + "x" * 16)
+    assert r.status_code == 409
+    assert "失败" in r.json()["detail"] or "failed" in r.json()["detail"]
+
+
+def test_投喂正文_路径越界被拦(monkeypatch, tmp_path):
+    """kb_path 来自登记表 —— 登记表是可写数据，不能当可信输入直接读。"""
+    kb_root = tmp_path / "kb"
+    kb_root.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("# 不该被读到", encoding="utf-8")
+
+    from agentmemhub.feed import service as svc
+    monkeypatch.setattr(svc, "get_material", lambda d: {
+        "doc_id": "y" * 16, "title": "t", "status": "published",
+        "kb_path": str(outside)})
+
+    import agentmemhub.config as C
+
+    _real_cfg = C.config()          # 先取真的，再换 —— 否则 __init__ 里就是递归
+
+    class _Cfg:
+        """只换 kb 根，其余字段全部委托真实配置 —— `create_app()` 还会读
+        `db_path` 等字段，瘦身版会让测试死在无关的地方。"""
+
+        def __init__(self):
+            self._real = _real_cfg
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def feed_paths(self):
+            return {**self._real.feed_paths(), "kb": kb_root}
+
+    monkeypatch.setattr(C, "config", lambda: _Cfg())
+
+    from fastapi.testclient import TestClient
+    from agentmemhub.web.app import create_app
+    c = TestClient(create_app())
+    r = c.get("/api/feed/content/" + "y" * 16)
+    assert r.status_code == 400
+    assert "越界" in r.json()["detail"]
