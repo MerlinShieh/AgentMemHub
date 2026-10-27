@@ -31,12 +31,17 @@ from __future__ import annotations
 
 import threading
 import time
+import traceback
 import uuid
 from typing import Any, Callable, Optional
 
 _LOCK = threading.Lock()
 _CURRENT: Optional[dict] = None     # {id, name, status, output, error, ...}
 _THREAD: Optional[threading.Thread] = None   # 当前任务线程（不放进 job，避免 JSON 序列化炸）
+# 线程属于哪个 job：`_CURRENT` 与 `_THREAD` 是**两次**持锁赋值（先建 job、后建线程），
+# 中间窗口里 `status()` 会看到"新 job + 旧线程"。没有这个 id，僵尸检测就会把
+# 刚提交、线程还没 start 的新任务判成"线程已退出"并永久标 error。
+_THREAD_JOB_ID: Optional[str] = None
 _OUTPUT_CAP = 200_000               # 输出上限（字符），防长期任务撑爆内存
 
 
@@ -70,7 +75,7 @@ def submit(
     `timeout_s > 0` 时到点自动请求取消（终态 `timeout`）；`cancelable=False`
     用于"绝不能被打断"的任务（如已经开始的快照回滚 —— 半途停下比跑完更危险）。
     """
-    global _CURRENT, _THREAD
+    global _CURRENT, _THREAD, _THREAD_JOB_ID
     with _LOCK:
         if _CURRENT and _CURRENT["status"] == "running":
             return None
@@ -124,14 +129,20 @@ def submit(
                 )
                 job["finishedAt"] = time.time()
         except Exception as e:          # noqa: BLE001 —— 任务错误如实上报
+            tb = traceback.format_exc()
             with _LOCK:
                 job["error"] = str(e)
+                # 只留尾部：报错现场通常在最后几帧，而完整 traceback 可能上千行、
+                # 把 output 挤爆（output 有 200K 上限，超了从头部截断，反而把
+                # 真正有用的上下文切掉）。
+                _append_output(job, "\n[traceback]\n" + tb[-4000:] + "\n")
                 job["status"] = "error"
                 job["finishedAt"] = time.time()
 
     th = threading.Thread(target=_run, daemon=True, name=f"task-{name}")
     with _LOCK:
         _THREAD = th
+        _THREAD_JOB_ID = job["id"]
     th.start()
 
     # 超时看门狗：只置旗标，不杀线程（理由见模块 docstring）
@@ -173,10 +184,16 @@ def _snapshot() -> Optional[dict]:
     with _LOCK:
         if not _CURRENT:
             return None
-        # 僵尸检测：状态还是 running，但线程已经没了 —— 说明异常在 `_run`
-        # 之外逃逸（或进程重启后残留）。不修的话前端会永远转圈、
-        # 而且新的任务永远提交不进来（单槽被一个死人占着）。
-        if _CURRENT["status"] == "running" and _THREAD is not None and not _THREAD.is_alive():
+        # 僵尸检测：状态还是 running，但**属于这个 job 的**线程已经没了 —— 说明异常
+        # 在 `_run` 之外逃逸（或进程重启后残留）。不修的话前端会永远转圈、新的任务
+        # 也永远提交不进来（单槽被一个死人占着）。
+        # 三个前置条件是防误判：
+        #  · `_THREAD_JOB_ID == id`：submit 里"建 job"与"建线程"是两次持锁赋值，
+        #    中间窗口会看到「新 job + 旧线程」，不加这条会把新任务当场判死；
+        #  · `ident is not None`：线程还没 start 过时 is_alive() 恒 False。
+        if (_CURRENT["status"] == "running" and _THREAD is not None
+                and _THREAD_JOB_ID == _CURRENT["id"]
+                and _THREAD.ident is not None and not _THREAD.is_alive()):
             _CURRENT["status"] = "error"
             _CURRENT["error"] = "任务线程已退出但未留下终态（未捕获异常）"
             _CURRENT["finishedAt"] = time.time()
@@ -197,7 +214,8 @@ def status() -> Optional[dict]:
 
 def reset() -> None:
     """清空任务状态（测试用）。"""
-    global _CURRENT, _THREAD
+    global _CURRENT, _THREAD, _THREAD_JOB_ID
     with _LOCK:
         _CURRENT = None
         _THREAD = None
+        _THREAD_JOB_ID = None

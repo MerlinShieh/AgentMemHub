@@ -3595,7 +3595,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       if(seq!==pollSeq) return;
       try{ adminRender(j); }catch(e){ /* 渲染异常不中断轮询（自愈到终态） */ }
       try{ opsSyncJob(j); }catch(e){ /* 同步到运维页失败不中断轮询 */ }
-      if(!j || j.status!=='running'){  // 无任务或已到终态（done/error）
+      if(!j || j.status!=='running'){  // 无任务或已到终态（done/error/canceled/timeout）
         if(!err) $('#adminJobWarn').classList.add('hidden');
         if(j && (j.name||'').includes('提取') && j.status==='done'){
           refreshData().catch(()=>{}); // 入库完成 → 自动刷新列表/统计（失败不阻塞）

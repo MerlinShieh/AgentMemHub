@@ -132,6 +132,9 @@ def test_僵尸检测_线程已退出则改判错误():
             "cancelRequested": False, "timedOut": False, "timeoutAt": None,
         }
         tasks._THREAD = threading.Thread(target=lambda: None)
+        # 线程归属该 job：真实路径由 submit 与 _THREAD 同步设置。没有它，
+        # 僵尸检测分不清"这个 job 的线程死了"和"这是上一个 job 留下的线程"。
+        tasks._THREAD_JOB_ID = "dead"
     tasks._THREAD.start()
     tasks._THREAD.join()                # 线程已结束，但状态还是 running
 
@@ -140,6 +143,32 @@ def test_僵尸检测_线程已退出则改判错误():
     assert "未留下终态" in s["error"]
     # 关键：僵尸清掉后新任务提交得进来（不然单槽被死人永久占住）
     assert tasks.submit("新任务", lambda emit, meta: "ok") is not None
+
+
+def test_刚提交的任务不会被误判成僵尸():
+    """守住一个真实竞态：`_CURRENT` 与 `_THREAD` 是**两次**持锁赋值。
+
+    submit 建好 job 之后、线程 start 之前有个窗口，此时 `status()` 看到的是
+    「新 job（running）+ 旧线程（已死）」。若僵尸检测只凭 `not _THREAD.is_alive()`
+    就改判，用户刚点下按钮就会看到"任务线程已退出"——而且新任务也提交不进来。
+    `_THREAD_JOB_ID` 就是这条归属校验。
+    """
+    hold = threading.Event()
+
+    def fn(emit, meta):
+        hold.wait(3)
+        return "ok"
+
+    # 先跑完一个任务，把 _THREAD 留成"已死的线程"
+    tasks.submit("先跑一个", lambda emit, meta: "ok")
+    _wait_terminal()
+
+    assert tasks.submit("新任务", fn) is not None
+    for _ in range(20):                 # 轮询覆盖 start 前后的窗口
+        assert tasks.status()["status"] == "running"
+        time.sleep(0.005)
+    hold.set()
+    assert _wait_terminal()["status"] == "done"
 
 
 def test_单槽互斥_已有任务时拒绝新任务():
