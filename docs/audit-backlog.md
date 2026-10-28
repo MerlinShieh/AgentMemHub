@@ -133,6 +133,8 @@
 | `agentmemhub/distill.py`（`_project_one`）、`agentmemhub/rag/memstore.py`（`save_memory`） | **2026-10-27 已修**。这两处直写 `units` 时只写 `settings.active_spec` 的向量 ⇒ 多模型下非 active 模型永远缺这些行（实测 base 表缺 **1912 条** `role='distilled'`）；而 `ingest --model` 的候选来自源库 `events` 而非 `units`，所以它**也补不上**，只有整表 `reembed --model`（实测 22228 条 / 19 分钟）能补齐。现改为经 `rag.ingest` 的 `write_models` / `encode_for_write` / `put_vecs` 写**全部** `write.order` 模型，代价是每次写入多编码一遍非 active 模型。附带更正：`rag_bridge.save_memory_trace` 与 `wiki_index.project_pages` **本来就走 `write.order`**，最初判断的「四处」不成立（那两个之所以看起来缺向量，是历史存量而非写入路径造成的） |
 | `docs` 与代码 | `agentmemhub/config.py` 原注释写「落库始终启用（**面板可查**、带未读状态）」，但面板**从未有过通知查询页**，`list_notifications` / `mark_read` / `prune` 除测试外无调用者 ⇒ `notify.db` 只增不减。已改注释为实情，并给 `prune()` 接上唯一的自动调用点 |
 
+| `database/session_rag.db` 的 `unit_values` | **6266 条孤儿行**（`unit_id` 不在 `units` 里，id 范围 22110–35478）。根因：`wiki_index.project_pages` 清扫旧投影时只删 `units` 与向量、**不删价值行**，于是每次页面重编 / 改名都遗一批，平时完全看不出来（值表查不到就当没有）。2026-10-28 投喂交付物改名实测新增 4 条（已随手清掉）。**清扫分支已补上连带删除**，不会再涨；历史 6266 条**未动**（删数据不可逆，留给人决定） |
+
 ---
 
 ## 三、明确决定不修（附理由，避免以后重复讨论）
