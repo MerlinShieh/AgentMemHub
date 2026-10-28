@@ -422,10 +422,18 @@ def project_pages(idx: sqlite3.Connection, roots,
             row = idx.execute("SELECT id FROM units WHERE src_id=?",
                               (s,)).fetchone()
             if row:
+                uid = int(row[0])
                 for s_model, _ in multi:
                     idx.execute(f"DELETE FROM {s_model.vec_table} WHERE rowid=?",
-                                (int(row[0]),))
-                idx.execute("DELETE FROM units WHERE id=?", (int(row[0]),))
+                                (uid,))
+                # ⚠️ **价值行必须一起清**：`unit_values` / `unit_feedback` 以
+                # `units.id` 为键（没有 FK 约束），清扫时漏掉就会攒下悬空行 ——
+                # 平时看不出来（查不到就当没有），直到做一致性检查才炸出一大片。
+                # 2026-10-28 实测：库里已攒 6266 条孤儿（每次页面重编 / 改名都会
+                # 遗一批），所以这里补上，别再往上涨。
+                idx.execute("DELETE FROM unit_values WHERE unit_id=?", (uid,))
+                idx.execute("DELETE FROM unit_feedback WHERE unit_id=?", (uid,))
+                idx.execute("DELETE FROM units WHERE id=?", (uid,))
     roots_txt = "、".join(d.name for d in live)
     log(f"页面层投影：{len(pages)} 页（新增 {inserted} / 更新 {updated} / "
         f"未变跳过 {unchanged} / 清理 {len(gone)}）｜根：{roots_txt}"
