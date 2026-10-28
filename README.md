@@ -1004,9 +1004,19 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
   所以中文注释**不可能被程序冲掉**。真要做"面板改配置"，正确做法是"按行号文本级定点替换"，
   而不是把配置拆成 `config/` 多个文件（成本与收益对比见 [`docs/modules/config.md`](docs/modules/config.md) §8）
 
-> 面板截图暂缺。原先的 `dashboard.png` / `detail.png` / `memory-report.png` 拍于
-> 2026-09，是**双标签页**时代的界面，与现在的四标签页 + 知识库三子视图差得太远，
-> 留着只会误导，已一并移除。想看实际界面：`uv run python -m agentmemhub serve`。
+### 界面
+
+> 下面是**虚构演示数据**的截图（`scripts/make_demo_data.py` 生成的「星轨笔记」示例库：
+> 6 个会话 / 21 条记忆 / 11 篇知识库页 / 2 份投喂素材），**不含任何真实会话与配置**。
+> 想重新生成：跑该脚本后用 `AGENTMEMHUB_CONFIG=demo/config.yaml` 起一个独立端口即可。
+
+| 会话（默认视图） | 记忆报表 |
+|---|---|
+| ![会话](docs/images/panel-conversations.png) | ![记忆报表](docs/images/panel-memories.png) |
+
+| 知识库 · 浏览 | 设置 · 只读配置 |
+|---|---|
+| ![知识库](docs/images/panel-wiki.png) | ![设置](docs/images/panel-settings.png) |
 
 设计要点：
 
