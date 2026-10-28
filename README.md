@@ -190,7 +190,7 @@ AgentMemHub/
 │   ├── sync_llm_from_dsh.py      #   从 DSH 配置同步 LLM 接入参数（密钥只写本地 yaml）
 │   └── e2e/                      #   浏览器级端到端测试
 ├── eval/                         # 召回评测示例集（queries.example.yaml；私有集不入库）
-├── tests/                        # pytest（1370 项通过 / 1 项条件跳过；65 个测试文件）
+├── tests/                        # pytest（1466 项通过 / 1 项条件跳过；88 个测试文件）
 ├── docs/                         # 技术文档（架构全景/蒸馏/召回/wiki/模型选型/接口契约）
 ├── start.bat                     # 启动控制台（Windows）
 ├── ClearData.bat / ClearTest.bat # 清空数据 / 恢复干净测试环境
