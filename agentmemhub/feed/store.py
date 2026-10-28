@@ -104,6 +104,36 @@ def _safe_mirror_rel(name: str) -> str:
     return rel
 
 
+#: 文件名末尾的 doc_id（`<自然语言标题>-<doc_id>.md`，也认早期的纯 `<doc_id>.md`）
+_DOC_ID_TAIL_RE = re.compile(r"^(?:(?P<slug>.+)-)?(?P<doc>[0-9a-f]{8,64})$")
+
+#: 文件名里不能出现的字符：文件系统保留字符 + Obsidian 的 `[ ] # ^ |`
+#: （Obsidian 会把它们当链接/标签/别名语法，文件名里出现就无法 `[[链接]]`）
+_FILENAME_BAD = re.compile(r'[\\/:*?"<>|\[\]#^]')
+
+
+def kb_slug(title: str, limit: int = 60) -> str:
+    """把标题压成能当文件名的**自然语言片段**。保留中文，只清掉非法字符。
+
+    为什么限长 60：完整文件名是 `标题-<16位doc_id>.md`，Windows 单段上限 255、
+    整路径 260，60 个**字符**（中文按字符算、按字节会到 180）留足了余量，
+    同时又不至于把长标题切得看不懂。
+    """
+    s = _FILENAME_BAD.sub(" ", str(title or ""))
+    s = re.sub(r"\s+", " ", s).strip(" .")
+    if not s:
+        return ""
+    if len(s) > limit:
+        s = s[:limit].rstrip(" .")
+    return s
+
+
+def kb_doc_of(filename: str) -> str:
+    """从交付物文件名反解 doc_id；认不出（纯哈希之外的怪名字）返回空串。"""
+    m = _DOC_ID_TAIL_RE.match(Path(filename).stem)
+    return m.group("doc") if m else ""
+
+
 @dataclass
 class MaterialStore:
     """三段物料的读写。路径全部相对 `root`（可整目录搬走 / 归档）。"""
@@ -163,23 +193,49 @@ class MaterialStore:
 
     # -- 第 3 段：最终 md（交付物 / 知识库） ------------------------------
 
-    def kb_path_of(self, doc_id: str) -> str:
-        """kb 文件路径 = **纯内容锚** `<doc_id>.md`。
+    def kb_path_of(self, doc_id: str, title: str = "") -> str:
+        """交付物文件名 = `<自然语言标题>-<doc_id>.md`。
 
-        为什么不拼标题：路径是投影的 `src_id`/`seq` 派生依据（必须**路径稳定**），
-        而标题是可变的人读字段 —— 标题一改路径就变，旧页会变成孤儿。
-        人读的标题放 frontmatter（`title` / 后续补 `aliases`）。
+        早期是纯 `<doc_id>.md`，理由是「路径是投影的 src_id/seq 派生依据，
+        必须路径稳定」。代价是在 Obsidian / 资源管理器里只看到一串哈希
+        （2026-10-28 用户提出要改）。现在改为**标题在前、完整 doc_id 在后**：
+
+        - 人读的是标题，机器读的是末尾的 doc_id（`kb_doc_of()` 反解），
+          所以「按 doc_id 找文件」的幂等性没丢，只是从"拼路径"变成"扫目录"；
+        - 标题为空 / 全是非法字符时**退回纯 `<doc_id>.md`**，保证任何素材
+          都有落点，不会因为没有标题而写不出文件。
         """
-        return "%s.md" % doc_id
+        slug = kb_slug(title)
+        return "%s-%s.md" % (slug, doc_id) if slug else "%s.md" % doc_id
 
-    def publish_kb(self, doc_id: str, text: str) -> str:
+    def kb_candidates(self, doc_id: str) -> list[Path]:
+        """所有**可能**是 `doc_id` 交付物的文件（`<标题>-<id>.md` 与旧的 `<id>.md`）。"""
+        if not self.kb_dir.is_dir():
+            return []
+        return ([self.kb_dir / ("%s.md" % doc_id)]
+                + sorted(self.kb_dir.glob("*-%s.md" % doc_id)))
+
+    def publish_kb(self, doc_id: str, text: str, title: str = "") -> str:
         self.kb_dir.mkdir(parents=True, exist_ok=True)
-        p = self.kb_dir / self.kb_path_of(doc_id)
-        p.write_text(text, encoding="utf-8")
-        return str(p)
+        target = self.kb_dir / self.kb_path_of(doc_id, title)
+        target.write_text(text, encoding="utf-8")
+        # 标题会变（重转 / 改元数据），旧名必须删：否则同一份素材在目录里躺两份，
+        # 而 lint 的「文件名 ↔ doc_id」对账会把它当成一条多余登记。
+        # 顺序是「先写新、后删旧」—— 中途失败最多多一个文件，不会一份都不剩。
+        for old in self.kb_candidates(doc_id):
+            if old.resolve() != target.resolve():
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+        return str(target)
 
     def kb_file(self, doc_id: str) -> Path:
-        return self.kb_dir / self.kb_path_of(doc_id)
+        """按 doc_id 找交付物；找不到时返回纯锚路径（调用方用 `.is_file()` 判断）。"""
+        for p in self.kb_candidates(doc_id):
+            if p.is_file():
+                return p
+        return self.kb_dir / ("%s.md" % doc_id)
 
 
 class MaterialsDB:
@@ -238,6 +294,13 @@ class MaterialsDB:
             "UPDATE materials SET status=?, error=?, error_kind=?, updated_at=?"
             " WHERE doc_id=?", (status, error, error_kind, int(time.time()),
                                 doc_id))
+        self.conn.commit()
+
+    def set_kb_path(self, doc_id: str, kb_path: str) -> None:
+        """只改交付物路径（改名迁移用；整行 `upsert` 需要补齐所有字段，太重）。"""
+        self.conn.execute(
+            "UPDATE materials SET kb_path=?, updated_at=? WHERE doc_id=?",
+            (kb_path, int(time.time()), doc_id))
         self.conn.commit()
 
     def delete(self, doc_id: str) -> bool:

@@ -603,7 +603,7 @@ def ingest(ref: str, *, kind: str = "", force: bool = False,
             % (doc.title, len(doc.markdown), doc.quality))
 
         # ④ 发布最终 md（交付物 / 知识库本体）
-        kb_path = store.publish_kb(doc_id, render_kb_page(doc))
+        kb_path = store.publish_kb(doc_id, render_kb_page(doc), title=doc.title)
         db.upsert(doc_id=doc_id, sha256=sha2, kind=doc.kind,
                   source_ref=doc.source_ref, title=doc.title,
                   doc_time=doc.doc_time, raw_path=raw_rel,

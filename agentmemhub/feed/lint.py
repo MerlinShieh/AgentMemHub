@@ -39,6 +39,21 @@ def _fm_of(text: str) -> dict:
         return {}
 
 
+def _kb_file_of(kb_dir: Path, doc_id: str) -> Path:
+    """按 doc_id 找交付物（`<标题>-<id>.md` 与旧的纯 `<id>.md` 都认）。
+
+    为什么不直接拼 `<doc_id>.md`：2026-10-28 起交付物文件名改成
+    「自然语言标题 + 末尾 doc_id」，路径不能再由 doc_id 反推。
+    """
+    exact = kb_dir / ("%s.md" % doc_id)
+    if exact.is_file():
+        return exact
+    for p in sorted(kb_dir.glob("*-%s.md" % doc_id)):
+        if p.is_file():
+            return p
+    return exact
+
+
 def run_lint(*, config=None, with_index: bool = True,
              index_db=None) -> dict[str, Any]:
     """跑全部检查。返回 `{"issues": [...], "counts": {...}, "p0": n, "ok": bool}`。
@@ -49,7 +64,7 @@ def run_lint(*, config=None, with_index: bool = True,
     `index_db` 可注入（**测试用**）：不注入就读配置里的真实索引库 —— 那是只读的，
     但会让测试依赖真实库状态、结果不确定。
     """
-    from .store import MaterialsDB
+    from .store import MaterialsDB, kb_doc_of
 
     if config is None:
         from agentmemhub.config import config as _cfg
@@ -94,7 +109,7 @@ def run_lint(*, config=None, with_index: bool = True,
                 add("P1", "failed_material", doc,
                     "转译失败（%s）：%s" % (kind or "-", (r.get("error") or "")[:100]))
             continue
-        kb_file = kb_dir / ("%s.md" % doc)
+        kb_file = _kb_file_of(kb_dir, doc)
         if not kb_file.is_file():
             add("P0", "kb_missing", doc,
                 "登记为 published 但交付物不存在：%s" % kb_file)
@@ -118,13 +133,21 @@ def run_lint(*, config=None, with_index: bool = True,
 
     # ---- 2. 交付物 ↔ 登记（反向：kb 里有、登记里没有）-------------------
     if kb_dir.is_dir():
+        seen: dict[str, list[str]] = {}
         for f in sorted(kb_dir.rglob("*.md")):
-            stem = f.stem
-            if stem not in by_doc:
-                add("P0", "kb_unregistered", stem,
-                    "交付物没有对应登记：%s（不该发生）" % f.name)
-            elif f.name != "%s.md" % stem:
-                add("P0", "kb_name", stem, "交付物文件名必须等于 <doc_id>.md")
+            doc = kb_doc_of(f.name)
+            if not doc or doc not in by_doc:
+                add("P0", "kb_unregistered", f.stem,
+                    "交付物没有对应登记：%s（文件名末尾应是 16 位 <doc_id>.md）"
+                    % f.name)
+                continue
+            seen.setdefault(doc, []).append(f.name)
+        # 同一份素材留了两份交付物（改了标题但旧文件没删、或手工复制）⇒ 投影会
+        # 把同内容算成两个页面，召回时自己跟自己做重复 —— 必须报出来。
+        for doc, names in seen.items():
+            if len(names) > 1:
+                add("P0", "kb_duplicate", doc,
+                    "同一份素材有多个交付物文件：%s" % "、".join(sorted(names)))
 
     # ---- 3. 投影（units）与登记的一致性 ---------------------------------
     if with_index:
