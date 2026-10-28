@@ -19,7 +19,7 @@
 | 外部投喂的素材管理：路径/链接/上传/正文四种投喂、扫描批量、重转/撤下/删除 | `app.py` + `agentmemhub/feed/**` |
 | 配置**只读**视图：带原注释、按模块分组、与 `.example` 做键集体检 | `agentmemhub/config_doc.py` |
 | 长任务统一调度与进度上报 | `agentmemhub/web/tasks.py` + `_logged_task`（`app.py:446`） |
-| 前端（单文件，4337 行）：四标签页 + 三子视图 + 浮层 | `agentmemhub/web/static/index.html` |
+| 前端（单文件 `index.html`）：四标签页 + 三子视图 + 浮层 | `agentmemhub/web/static/index.html` |
 
 **不做什么**
 
@@ -111,6 +111,12 @@ tasks.submit(name: str, fn) -> dict          # fn 必须是 fn(emit, meta) -> st
 | 记忆报表 | **蒸馏终稿**：结构化记忆（∪ MCP 直写） | 时间线看的是**原始输入**，两者口径不同，别混 |
 | wiki 知识库 | **编译产物**：L2 蒸馏页 + 投喂页 | 与会话零耦合；浏览/运维/投喂三子视图 |
 | 设置 | **配置视图**：yaml 只读 + 键集体检 | 只读，没有保存按钮 |
+
+> **长标题看不全怎么办**：wiki 浏览页的域栏、以及页面列表的表头列宽**都能拖**
+> —— 竖条拖域栏、表头右边缘拖列宽，双击域栏分隔条恢复默认。宽度分别存在
+> `localStorage` 的 `wk-domains-w` / `wk-cols`，换浏览器或清缓存就回默认值。
+> （2026-10-28 加：L2 页面标题普遍很长，而第一列原是 `max-w-0` + truncate，
+> 只能看到前几个字。）
 
 ### 3.4 安全边界（"只绑回环"不等于"关起门就安全"）
 

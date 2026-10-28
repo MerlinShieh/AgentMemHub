@@ -603,7 +603,9 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     <section class="px-5 py-3">
       <div class="flex gap-3" style="height:calc(100vh - 230px);min-height:400px">
         <!-- 左：域列表（21 个域，含页数） -->
-        <aside id="wikiDomains" class="w-52 shrink-0 overflow-y-auto scroll-thin rounded-xl border border-border bg-card p-2 text-xs"></aside>
+        <aside id="wikiDomains" class="shrink-0 overflow-y-auto scroll-thin rounded-xl border border-border bg-card p-2 text-xs" style="width:208px"></aside>
+        <!-- 可拖拽分隔条：域名和页面标题都容易长，固定宽度只能看半截 -->
+        <div id="wikiSplitA" class="wk-split" title="拖拽调整域栏宽度，双击恢复默认"></div>
         <!-- 右：页面列表 ⇄ 页面正文 -->
         <div class="min-w-0 flex-1 overflow-hidden rounded-xl border border-border bg-card">
           <div id="wikiListPane" class="h-full overflow-y-auto scroll-thin"></div>
@@ -1110,6 +1112,30 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
             border-bottom: 1px solid color-mix(in srgb, var(--as-border) 60%, transparent); }
   .wk-row:last-child { border-bottom: 0; }
   .wk-row:hover { background: color-mix(in srgb, var(--as-primary) 4%, transparent); }
+
+  /* ---- 可拖拽的宽度手柄 ----
+     `.wk-split` 是域栏与列表之间那条竖线：视觉 2px、热区 8px（手不用瞄准）。
+     `body.wk-resizing` 期间把全局光标钉成 col-resize —— 拖动时指针会滑出热区，
+     不钉的话光标在中途变回箭头，人会以为拖拽断了。 */
+  .wk-split { flex: none; align-self: stretch; width: 8px; margin: 0 -4px; cursor: col-resize;
+              position: relative; z-index: 3; touch-action: none; }
+  .wk-split::before { content: ''; position: absolute; inset: 0 3px; border-radius: 2px;
+                      background: transparent; transition: background .12s; }
+  .wk-split:hover::before, .wk-split.dragging::before {
+    background: color-mix(in srgb, var(--as-primary) 45%, transparent); }
+  body.wk-resizing { cursor: col-resize; }
+  body.wk-resizing * { cursor: col-resize !important; user-select: none !important; }
+
+  /* 表头右边缘的列宽抓手：`th` 里绝对定位，右边溢出 4px 让相邻两列都能抓 */
+  th.wk-th { position: relative; }
+  .wk-grip { position: absolute; top: 0; right: -4px; bottom: 0; width: 9px;
+             cursor: col-resize; z-index: 2; touch-action: none; }
+  .wk-grip::after { content: ''; position: absolute; top: 3px; bottom: 3px; right: 4px; width: 2px;
+                    border-radius: 1px; background: transparent; transition: background .12s; }
+  .wk-grip:hover::after, .wk-grip.dragging::after {
+    background: color-mix(in srgb, var(--as-primary) 55%, transparent); }
+  table.wk-fixed { table-layout: fixed; }
+  table.wk-fixed td, table.wk-fixed th { overflow: hidden; }
 </style>
 
 <!-- ============ LOGIC（v2: 数据全部来自本机 API，事件按需加载）============ -->
@@ -1490,6 +1516,89 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     reicons();
   }
 
+  // ---- 列宽 / 域栏宽度：都可拖，各自记忆到 localStorage ----
+  // 第 0 列（页面标题）默认留空 = auto，由 table-layout:fixed 吃掉剩余宽度；
+  // 人拖过之后才变成固定像素。其余列给一个"看起来正常"的起点。
+  const WK_COL_DEFAULT = ['', 110, 90, 72, 116];
+  const WK_COL_MIN = [160, 56, 48, 52, 96];
+  function wkColWidths(){
+    let w = null;
+    try{ w = JSON.parse(localStorage.getItem('wk-cols') || 'null'); }catch(_){}
+    if(!Array.isArray(w) || w.length !== WK_COL_DEFAULT.length) return WK_COL_DEFAULT.slice();
+    return WK_COL_DEFAULT.map((d,i)=> (typeof w[i] === 'number' && w[i] > 0) ? w[i] : d);
+  }
+  function wkSaveCols(w){
+    try{ localStorage.setItem('wk-cols', JSON.stringify(w)); }catch(_){}
+  }
+  function initWikiSplit(){
+    const el = $('#wikiSplitA'), pane = $('#wikiDomains');
+    if(!el || !pane || el.dataset.inited) return;
+    el.dataset.inited = '1';
+    try{
+      const w = parseInt(localStorage.getItem('wk-domains-w') || '', 10);
+      if(w >= 140 && w <= 560) pane.style.width = w + 'px';
+    }catch(_){}
+    let drag = null;
+    el.addEventListener('pointerdown', e => {
+      drag = { x: e.clientX, w: pane.getBoundingClientRect().width };
+      el.classList.add('dragging');
+      document.body.classList.add('wk-resizing');
+      e.preventDefault();
+    });
+    // 监听挂在 window 上而不是手柄上：指针一旦滑出 8px 热区，挂在元素上的
+    // pointermove 就收不到了，拖拽会在半路"掉"。
+    window.addEventListener('pointermove', e => {
+      if(!drag) return;
+      pane.style.width = Math.max(140, Math.min(560, Math.round(drag.w + e.clientX - drag.x))) + 'px';
+    });
+    window.addEventListener('pointerup', () => {
+      if(!drag) return;
+      drag = null;
+      el.classList.remove('dragging');
+      document.body.classList.remove('wk-resizing');
+      try{ localStorage.setItem('wk-domains-w', String(parseInt(pane.style.width, 10) || 208)); }catch(_){}
+    });
+    el.addEventListener('dblclick', () => {
+      pane.style.width = '208px';
+      try{ localStorage.removeItem('wk-domains-w'); }catch(_){}
+    });
+  }
+  // 表头右边缘拖拽改列宽。表体是整块 innerHTML 重绘的，所以只能事件委托。
+  function initWikiColResize(){
+    const pane = $('#wikiListPane');
+    if(!pane || pane.dataset.colResize) return;
+    pane.dataset.colResize = '1';
+    let drag = null;
+    pane.addEventListener('pointerdown', e => {
+      const g = e.target.closest('.wk-grip'); if(!g) return;
+      const table = pane.querySelector('table'); if(!table) return;
+      const idx = Number(g.dataset.col);
+      const col = table.querySelectorAll('col')[idx];
+      const th = g.closest('th');
+      if(!col || !th) return;
+      drag = { idx, col, x: e.clientX, w: th.getBoundingClientRect().width, moved: false };
+      g.classList.add('dragging');
+      document.body.classList.add('wk-resizing');
+      e.preventDefault();
+    });
+    window.addEventListener('pointermove', e => {
+      if(!drag) return;
+      const w = Math.max(WK_COL_MIN[drag.idx], Math.round(drag.w + e.clientX - drag.x));
+      if(Math.abs(e.clientX - drag.x) > 2) drag.moved = true;
+      drag.col.style.width = w + 'px';
+    });
+    window.addEventListener('pointerup', () => {
+      if(!drag) return;
+      const c = drag; drag = null;
+      document.body.classList.remove('wk-resizing');
+      const g = pane.querySelector('.wk-grip.dragging'); if(g) g.classList.remove('dragging');
+      if(!c.moved) return;            // 只点了一下没拖，别把列"钉死"成固定宽
+      const widths = wkColWidths();
+      widths[c.idx] = parseInt(c.col.style.width, 10) || widths[c.idx];
+      wkSaveCols(widths);
+    });
+  }
+
   function renderWikiList(){
     const d = WIKI.data; if(!d) return;
     const pane = $('#wikiListPane');
@@ -1503,7 +1612,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       : '<span class="chip bg-muted text-muted-foreground">蒸馏</span>';
     const rows = items.map(it=>`
       <tr class="wiki-row cursor-pointer border-b border-border/60 hover:bg-muted/50" data-path="${wikiEsc(it.path)}">
-        <td class="max-w-0 px-3 py-1.5">
+        <td class="px-3 py-1.5">
           <div class="truncate font-medium text-foreground" title="${wikiEsc(it.title)}">${wikiEsc(it.title)}</div>
           <div class="truncate text-[10px] text-muted-foreground">${wikiEsc(it.rel)}</div>
         </td>
@@ -1518,13 +1627,18 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         <span class="tnum">${d.page} / ${d.pageCount}</span>
         <button id="wikiNext" class="rounded border border-border px-2 py-0.5 hover:bg-muted ${d.page>=d.pageCount?'opacity-40':''}">下一页</button>
       </div>` : '';
-    pane.innerHTML = `<table class="w-full text-xs">
+    // 列宽可拖：原先第一列是 `max-w-0` + truncate，长标题只能看到前几个字。
+    // 改成 table-layout:fixed + <colgroup> 显式宽，第 0 列留 auto 吃剩余空间；
+    // 拖过之后存 localStorage，下次进来还是自己的习惯。
+    const cw = wkColWidths();
+    pane.innerHTML = `<table class="wk-fixed w-full text-xs">
+        <colgroup>${cw.map(w=>`<col${w?' style="width:'+w+'px"':''}>`).join('')}</colgroup>
         <thead class="sticky top-0 z-10 bg-card">
           <tr class="border-b border-border text-left text-[10px] uppercase tracking-wide text-muted-foreground">
-            <th class="px-3 py-2 font-medium">页面</th>
-            <th class="px-3 py-2 font-medium">域</th>
-            <th class="px-3 py-2 font-medium">类型</th>
-            <th class="px-3 py-2 font-medium">来源</th>
+            <th class="wk-th px-3 py-2 font-medium">页面<span class="wk-grip" data-col="0"></span></th>
+            <th class="wk-th px-3 py-2 font-medium">域<span class="wk-grip" data-col="1"></span></th>
+            <th class="wk-th px-3 py-2 font-medium">类型<span class="wk-grip" data-col="2"></span></th>
+            <th class="wk-th px-3 py-2 font-medium">来源<span class="wk-grip" data-col="3"></span></th>
             <th class="px-3 py-2 font-medium">编译时间</th>
           </tr>
         </thead><tbody>${rows}</tbody></table>${pager}`;
@@ -3033,6 +3147,8 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         loadWiki();
       };
     });
+    initWikiSplit();
+    initWikiColResize();
     $('#wikiDomains').addEventListener('click', e=>{
       const b = e.target.closest('.wiki-dom'); if(!b) return;
       WIKI.domain = b.dataset.domain || '';
