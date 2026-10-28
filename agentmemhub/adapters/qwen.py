@@ -102,6 +102,10 @@ class QwenAdapter(AgentAdapter):
                     guess.add(peek)
                 if not (guess & only_ids):
                     continue  # 增量：内容 id 与文件名都不在变更集 → 不读
+            # 会话 id 与「清单」必须同一口径：清单用 `_peek_sid(fp) or fp.stem`，
+            # 而这里原先用逐行 `o.get("sessionId")` —— 首行没有 sessionId 时两边
+            # 算出的 id 不同，cli 的增量比对永远判"已变"，该会话每轮全量重读。
+            file_sid = self._peek_sid(fp) or fp.stem
             mtime = _to_epoch(fp.stat().st_mtime) or 0
             try:
                 turn_by_uuid: dict[str, str] = {}
@@ -117,7 +121,7 @@ class QwenAdapter(AgentAdapter):
                         except Exception:
                             continue
                         typ = o.get("type")
-                        sid = o.get("sessionId") or fp.stem
+                        sid = file_sid
                         # 稳定锚 + 轮次归属：沿 parentUuid 追到根 user 行
                         uuid = str(o.get("uuid") or f"idx:{ln}")
                         parent = str(o["parentUuid"]) if o.get("parentUuid") else None
@@ -183,7 +187,9 @@ class QwenAdapter(AgentAdapter):
                 return None
             return Event(role="meta", time=ts, is_system=True, **kw)
         if typ == "user":
-            text = _parts_text(parts) or (fp.stem if not parts else "")
+            # 缺 parts 时原先拿**文件名**顶替 —— `abc123.jsonl` 会被当成用户说的话
+            # 入库，既污染检索、又让标题变成一串哈希。宁可跳过这一行。
+            text = _parts_text(parts)
             if not text:
                 return None
             return Event(role="user", time=ts, content=text,

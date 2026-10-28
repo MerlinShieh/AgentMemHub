@@ -5,7 +5,7 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
-from agentmemhub import memos_daemon
+from agentmemhub import engine_api
 from agentmemhub.logs import read_mcp_audit
 from agentmemhub.mcp_server import build_http_app
 
@@ -39,20 +39,23 @@ def test_http_tools_list():
     r = _post({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     assert r.status_code == 200
     names = {t["name"] for t in r.json()["result"]["tools"]}
-    assert names == {"memory_search", "memory_recent", "memory_stats", "memory_save", "memory_score"}
+    # 五个记忆工具必须在（HTTP 与 stdio 共用同一份 `_TOOLS`）；
+    # 不写死总数 —— feed 三个是新增的独立工具（stdio 侧有专门测试）
+    assert {"memory_search", "memory_recent", "memory_stats",
+            "memory_save", "memory_score"} <= names
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value=None)
+@mock.patch.object(engine_api, "auth_state", return_value=None)
 def test_http_tools_call_offline(_auth):
     r = _post({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                "params": {"name": "memory_stats", "arguments": {}}})
     assert r.status_code == 200
     res = r.json()["result"]
     assert res["isError"] is True
-    assert "记忆引擎未运行" in res["content"][0]["text"]
+    assert "记忆索引不可用" in res["content"][0]["text"]
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value=None)
+@mock.patch.object(engine_api, "auth_state", return_value=None)
 def test_http_tools_call_is_audited(_auth, audit_dir):
     """HTTP 传输与 stdio 共用 _tools_call，因此同样留痕——审计不挑传输方式。"""
     _post({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
@@ -65,8 +68,8 @@ def test_http_tools_call_is_audited(_auth, audit_dir):
     assert lines[1]["ok"] is False        # 引擎离线，但依然留痕
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
-@mock.patch.object(memos_daemon, "engine_request")
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "engine_request")
 def test_http_tools_call_online(engine_request, _auth):
     engine_request.return_value = {
         "hits": [{"score": 0.9, "tier": 2, "refKind": "trace",

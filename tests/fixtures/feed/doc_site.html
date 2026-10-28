@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta property="og:title" content="pushplus(推送加) 文档中心">
+<meta property="article:published_time" content="2026-10-07T10:00:00+08:00">
+<title>开放接口文档 | pushplus(推送加) 文档中心</title>
+</head><body><main><article>
+id="content"><h1 id="pushplus-开放接口文档-v1-20" tabindex="-1"><a href="#pushplus-开放接口文档-v1-20"> pushplus 开放接口文档 V1.20 </a></h1> 点击展开版本更新日志 <p>1.20 接口更新日期：2026-10-08 QQ机器人渠道支持绑定自有机器人，增加自有机器人管理和设置默认机器人接口，QQ机器人配置支持“发给自己”类型；</p><p>1.19 接口更新日期：2026-09-14 增加新消息ClawBot渠道相关接口</p><p>1.18 接口更新日期：2026-09-11 增加消息规则和触发记录相关接口</p><p>1.17 接口更新日期：2026-08-26 增加QQ机器人渠道相关接口</p><p>1.16 接口更新日期：2026-08-17 增加好友黑名单和群组订阅人黑名单相关接口</p><p>1.15 接口更新日期：2026-08-07 个人资料详情接口返回会员信息和是否实名</p><p>1.14 接口更新日期：2026-05-09 增加图片服务相关接口</p><p>1.13 接口更新日期：2026-04-14 完善群组接口字段，增加群组修改相关接口</p><p>1.12 接口更新日期：2026-03-27 增加微信ClawBot渠道相关接口</p><p>1.11 接口更新日期：2026-01-27 群组二维码和个人二维码增加可扫码次数参数</p><p>1.10 接口更新日期：2025-12-08 默认渠道接口修改，根据消息token来配置不同的默认渠道</p><p>1.9 接口更新日期：2025-12-01 增加删除消息接口</p><p>1.8 接口更新日期：2025-11-23 增加删除群组接口</p><p>1.7 接口更新日期：2025-11-18 webhook类型支持自定义 默认渠道枚举完善</p><p>1.6 接口更新日期：2025-10-10 增加插件转发设置接口</p><p>1.5 接口更新日期：2025-05-09 增加消息token相关接口 增加预处理信息相关接口</p><p>1.4 接口更新日期：2024-04-23 群组二维码支持自定义有效期</p><p>1.3.1 接口更新日期：2023-01-30 获取群组内用户接口增加关注群组时间字段</p><p>1.3 接口更新日期：2022-09-17 渠道配置接口增加公众号、企业微信、邮件相关接口； 增加查询当日消息接口请求次数接口； 增加修改消息打开方式接口； 优化群组相关接口</p><p>1.2 接口更新日期：2022-09-10 增加开发\禁用发送消息接口</p><p>1.1 接口更新日期：2022-09-05 增加好友功能相关接口</p><p>1.0 接口更新日期：2021-12-21 通过accessKey调用消息、用户、群组、渠道配置和功能设置接口</p> 点击查看目录 <ul><li><a aria-current="page" href="/doc/guide/openApi.html#文档说明">文档说明</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#接口在线测试页面">接口在线测试页面</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#一-获取accesskey">一. 获取AccessKey</a><ul><li><a aria-current="page" href="/doc/guide/openApi.html#_1-使用说明">1. 使用说明</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_2-接口调用说明">2. 接口调用说明</a></li></ul></li><li><a aria-current="page" href="/doc/guide/openApi.html#二-消息接口">二. 消息接口</a><ul><li><a aria-current="page" href="/doc/guide/openApi.html#_1-消息列表">1. 消息列表</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_2-查询消息发送结果">2. 查询消息发送结果</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_3-删除消息">3. 删除消息</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_4-消息详情">4. 消息详情</a></li></ul></li><li><a aria-current="page" href="/doc/guide/openApi.html#三-用户接口">三. 用户接口</a><ul><li><a aria-current="page" href="/doc/guide/openApi.html#_1-获取用户token">1. 获取用户token</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_2-个人资料详情">2. 个人资料详情</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_3-获取解封剩余时间">3. 获取解封剩余时间</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_4-查询当日消息接口请求次数">4. 查询当日消息接口请求次数</a></li></ul></li><li><a aria-current="page" href="/doc/guide/openApi.html#四-消息token接口">四. 消息token接口</a><ul><li><a aria-current="page" href="/doc/guide/openApi.html#_1-获取消息token列表">1. 获取消息token列表</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_2-新增消息token">2. 新增消息token</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_3-修改消息token">3. 修改消息token</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_4-删除消息token">4. 删除消息token</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_5-消息token下拉选择列表">5. 消息token下拉选择列表</a></li></ul></li><li><a aria-current="page" href="/doc/guide/openApi.html#五-群组接口">五. 群组接口</a><ul><li><a aria-current="page" href="/doc/guide/openApi.html#_1-群组列表">1. 群组列表</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_2-获取我创建的群组详情">2. 获取我创建的群组详情</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_3-获取我加入的群详情">3. 获取我加入的群详情</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_4-新增群组">4. 新增群组</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_5-修改群组">5. 修改群组</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_6-获取群组二维码">6. 获取群组二维码</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_7-退出群组">7. 退出群组</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_8-删除群组">8. 删除群组</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_9-上下架积分群组">9. 上下架积分群组</a></li></ul></li><li><a aria-current="page" href="/doc/guide/openApi.html#六-群组用户接口">六. 群组用户接口</a><ul><li><a aria-current="page" href="/doc/guide/openApi.html#_1-获取群组内用户">1. 获取群组内用户</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_2-删除群组内用户">2. 删除群组内用户</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_3-修改订阅人备注">3. 修改订阅人备注</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_4-将订阅人加入黑名单">4. 将订阅人加入黑名单</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_5-订阅人黑名单列表">5. 订阅人黑名单列表</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_6-解除订阅人黑名单">6. 解除订阅人黑名单</a></li></ul></li><li><a aria-current="page" href="/doc/guide/openApi.html#七-渠道配置接口">七. 渠道配置接口</a><ul><li><a aria-current="page" href="/doc/guide/openApi.html#_1-获取webhook列表">1. 获取webhook列表</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_2-webhook详情">2. webhook详情</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_3-新增webhook">3. 新增webhook</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_4-修改webhook配置">4. 修改webhook配置</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_5-获取微信公众号渠道列表">5. 获取微信公众号渠道列表</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_6-获取企业微信应用渠道列表">6. 获取企业微信应用渠道列表</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_7-获取邮箱渠道列表">7. 获取邮箱渠道列表</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_8-邮箱渠道详情">8. 邮箱渠道详情</a></li></ul></li><li><a aria-current="page" href="/doc/guide/openApi.html#八-微信clawbot接口">八. 微信ClawBot接口</a><ul><li><a aria-current="page" href="/doc/guide/openApi.html#_1-获取二维码">1. 获取二维码</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_2-扫码结果查询">2. 扫码结果查询</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_3-绑定详情">3. 绑定详情</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_4-解绑">4. 解绑</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_5-获取发送消息">5. 获取发送消息</a></li></ul></li><li><a aria-current="page" href="/doc/guide/openApi.html#九-新消息clawbot接口">九. 新消息ClawBot接口</a><ul><li><a aria-current="page" href="/doc/guide/openApi.html#_1-绑定">1. 绑定</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_2-查询绑定状态">2. 查询绑定状态</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_3-解绑">3. 解绑</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_4-发送测试消息">4. 发送测试消息</a></li></ul></li><li><a aria-current="page" href="/doc/guide/openApi.html#十-qq机器人接口">十. QQ机器人接口</a><ul><li><a aria-current="page" href="/doc/guide/openApi.html#_1-获取绑定链接">1. 获取绑定链接</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_2-查询绑定状态-1">2. 查询绑定状态</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_3-解绑qq机器人">3. 解绑QQ机器人</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_4-获取已加入的qq群列表">4. 获取已加入的QQ群列表</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_5-获取qq机器人配置列表">5. 获取QQ机器人配置列表</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_6-新增qq机器人配置">6. 新增QQ机器人配置</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_7-修改qq机器人配置">7. 修改QQ机器人配置</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_8-删除qq机器人配置">8. 删除QQ机器人配置</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_9-我的qq机器人列表">9. 我的QQ机器人列表</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_10-校验自有机器人凭证">10. 校验自有机器人凭证</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_11-添加自有机器人">11. 添加自有机器人</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_12-修改自有机器人appsecret">12. 修改自有机器人AppSecret</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_13-刷新自有机器人信息">13. 刷新自有机器人信息</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_14-删除自有机器人">14. 删除自有机器人</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_15-设置默认qq机器人">15. 设置默认QQ机器人</a></li></ul></li><li><a aria-current="page" href="/doc/guide/openApi.html#十一-功能设置接口">十一. 功能设置接口</a><ul><li><a aria-current="page" href="/doc/guide/openApi.html#_1-获取默认配置列表">1. 获取默认配置列表</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_2-默认配置详情">2. 默认配置详情</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_3-新增默认配置">3. 新增默认配置</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_4-修改默认配置">4. 修改默认配置</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_5-删除默认配置">5. 删除默认配置</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_6-修改接收消息限制">6. 修改接收消息限制</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_7-开启-关闭发送消息功能">7. 开启/关闭发送消息功能</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_8-修改打开消息方式">8. 修改打开消息方式</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_9-修改插件渠道转发">9. 修改插件渠道转发</a></li></ul></li><li><a aria-current="page" href="/doc/guide/openApi.html#十二-好友功能接口">十二. 好友功能接口</a><ul><li><a aria-current="page" href="/doc/guide/openApi.html#_1-获取个人二维码">1. 获取个人二维码</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_2-获取好友列表">2. 获取好友列表</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_3-删除好友">3. 删除好友</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_4-修改好友备注">4. 修改好友备注</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_5-将好友加入黑名单">5. 将好友加入黑名单</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_6-好友黑名单列表">6. 好友黑名单列表</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_7-解除好友黑名单">7. 解除好友黑名单</a></li></ul></li><li><a aria-current="page" href="/doc/guide/openApi.html#十三-预处理信息接口">十三. 预处理信息接口</a><ul><li><a aria-current="page" href="/doc/guide/openApi.html#_1-获取预处理信息列表">1. 获取预处理信息列表</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_2-预处理信息详情">2. 预处理信息详情</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_3-新增预处理信息">3. 新增预处理信息</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_4-修改预处理信息">4. 修改预处理信息</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_5-删除预处理信息">5. 删除预处理信息</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_6-测试预处理代码">6. 测试预处理代码</a></li></ul></li><li><a aria-current="page" href="/doc/guide/openApi.html#十四-图片服务接口">十四. 图片服务接口</a><ul><li><a aria-current="page" href="/doc/guide/openApi.html#_1-获取上传凭证">1. 获取上传凭证</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_2-上传图片">2. 上传图片</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_3-图片列表">3. 图片列表</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_4-删除图片">4. 删除图片</a></li></ul></li><li><a aria-current="page" href="/doc/guide/openApi.html#十五-消息规则接口">十五. 消息规则接口</a><ul><li><a aria-current="page" href="/doc/guide/openApi.html#_1-获取消息规则列表">1. 获取消息规则列表</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_2-消息规则详情">2. 消息规则详情</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_3-新增消息规则">3. 新增消息规则</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_4-修改消息规则">4. 修改消息规则</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_5-删除消息规则">5. 删除消息规则</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_6-启用停用消息规则">6. 启用停用消息规则</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_7-测试消息规则">7. 测试消息规则</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_8-获取消息规则模式">8. 获取消息规则模式</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_9-设置消息规则模式">9. 设置消息规则模式</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_10-获取触发记录列表">10. 获取触发记录列表</a></li><li><a aria-current="page" href="/doc/guide/openApi.html#_11-查看触发记录详情">11. 查看触发记录详情</a></li></ul></li></ul> <h2 id="文档说明" tabindex="-1"><a href="#文档说明"> 文档说明 </a></h2><p>    为了更方便的让用户使用pushplus功能，现将原本需要在界面上操作的功能开放出来，包括消息、用户、群组、设置、消息规则等能力。原本发送消息的接口是通过用户token来调用的，考虑到这种方式安全性较低，容易泄露，所以本次开放的接口采用AccessKey的校验方式。在请求接口的时候，需要在header中带上key名为“access-key”的内容，否则会请求失败。</p><p>    由于开放接口权限较高，泄露后会给用户造成严重后果，所以默认是禁用状态，需要用户手动的在开发设置中开启，并在调用AccessKey接口之前配置好secretKey和安全IP地址。</p><p>    推荐优先使用官方 <a href="/doc/guide/sdk.html">pushplus SDK</a>，而不是自行编写 HTTP 请求代码。SDK 已封装 AccessKey 刷新、发送频率控制、回调等常见场景，可降低开发成本和出错概率。如需了解接口参数，可参考下文接口说明。</p><h2 id="接口在线测试页面" tabindex="-1"><a href="#接口在线测试页面"> 接口在线测试页面 </a></h2><p>可以访问<a href="https://api.pushplus.plus/doc-6905395" target="_blank" rel="noopener noreferrer">https://api.pushplus.plus/doc-6905395</a>，在线的测试接口。可以直接使用页面上生成的代码示例，支持多种语言。</p><h2 id="一-获取accesskey" tabindex="-1"><a href="#一-获取accesskey"> 一. 获取AccessKey </a></h2><h3 id="_1-使用说明" tabindex="-1"><a href="#_1-使用说明"> 1. 使用说明 </a></h3><p>    AccessKey是开放接口的全局唯一的接口调用凭证，调用其他各接口都需要使用AccessKey。开发者需要进行妥善保存。AccessKey的存储至少要保留32个字符空间。AccessKey的有效期目前为2个小时，需定时刷新，重复获取将导致上次获取的AccessKey失效。</p><p>pushplus的开放接口调用所需的AccessKey的使用及生成方式说明：</p> <li><p>用户需要提前配置自己的secretKey，建议至少32位数字、英文大小写随机组合。将请求的服务器IP添加到安全IP列表中。接口使用的token同发送消息的token。</p></li><li><p>建议第三方开发者使用中控服务器统一获取和刷新AccessKey，其他业务逻辑服务器所使用的AccessKey均来自于该中控服务器，不应该各自去刷新，否则容易造成冲突，导致AccessKey覆盖而影响业务；</p></li><li><p>目前AccessKey的有效期通过返回的expireIn来传达，目前是7200秒之内的值。中控服务器需要根据这个有效时间提前去刷新新AccessKey。在刷新过程中，中控服务器可对外继续输出的老AccessKey，此时pushplus后台会保证在5分钟内，新老AccessKey都可用，这保证了第三方业务的平滑过渡；</p></li><li><p>AccessKey的有效时间可能会在未来有调整，所以中控服务器不仅需要内部定时主动刷新，还需要提供被动刷新AccessKey的接口，这样便于业务服务器在API调用获知AccessKey已超时的情况下，可以触发AccessKey的刷新流程。</p></li><li><p>对于可能存在风险的调用，在开发者进行获取AccessKey调用时请求的服务器需要在用户设置的安全IP列表内，否则会返回编码为403的错误。</p></li> <h3 id="_2-接口调用说明" tabindex="-1"><a href="#_2-接口调用说明"> 2. 接口调用说明 </a></h3><ul><li>请求地址：https://www.pushplus.plus/api/common/openApi/getAccessKey</li><li>请求方式：POST</li><li>请求参数:</li></ul><div><pre><code> { 
+ &quot;token&quot;: &quot;d90******c20&quot;, 
+ &quot;secretKey&quot;: &quot;qLc******gdk&quot; 
+ } 
+ </code></pre><div aria-hidden="true"><div></div><div></div><div></div><div></div></div></div><ul><li>请求参数说明</li></ul><table><thead><tr><th>参数名称</th><th>是否必填</th><th>默认值</th><th>说明</th></tr></thead> <tr><td>token</td><td>是</td><td>无</td><td>用户token。不支持使用消息token</td></tr><tr><td>secretKey</td><td>是</td><td>无</td><td>用户密钥</td></tr> </table><ul><li>响应内容</li></ul><div><pre><code> { 
+ &quot;code&quot;: 200, 
+ &quot;msg&quot;: &quot;请求成功&quot;, 
+ &quot;data&quot;: { 
+ &quot;accessKey&quot;: &quot;d7b******62f&quot;, 
+ &quot;expiresIn&quot;: 7200 
+ } 
+ } 
+ </code></pre><div aria-hidden="true"><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div></div><ul><li>响应字段说明</li></ul><table><thead><tr><th>参数名称</th><th>类型</th><th>说明</th></tr></thead> <tr><td>accessKey</td><td>字符串</td><td>访问令牌，后续请求需加到header中</td></tr><tr><td>expiresIn</td><td>数字</td><td>过期时间，过期后需要重新获取</td></tr> </table><h2 id="二-消息接口" tabindex="-1"><a href="#二-消息接口"> 二. 消息接口 </a></h2><h3 id="_1-消息列表" tabindex="-1"><a href="#_1-消息列表"> 1. 消息列表 </a></h3><ul><li>请求地址：https://www.pushplus.plus/api/open/message/list</li><li>请求方式：POST</li><li>Content-Type: application/json</li><li>(header) access-key: d7b******62f(获取到的AccessKey)</li><li>请求参数:</li></ul><div><pre><code> { 
+ &quot;current&quot;: 1, 
+ &quot;pageSize&quot;: 20 
+ } 
+ </code></pre><div aria-hidden="true"><div></div><div></div><div></div><div></div></div></div><ul><li>请求参数说明</li></ul><table><thead><tr><th>参数名称</th><th>是否必填</th><th>默认值</th><th>说明</th></tr></thead> <tr><td>current</td><td>否</td><td>1</td><td>当前所在分页数</td></tr><tr><td>pageSize</td><td>否</td><td>20</td><td>每页大小，最大值为50</td></tr> </table><ul><li>响应内容</li></ul><div><pre><code> { 
+ &quot;code&quot;: 200, 
+ &quot;msg&quot;: &quot;请求成功&quot;, 
+ &quot;data&quot;: { 
+ &quot;pageNum&quot;: 1, 
+ &quot;pageSize&quot;: 20, 
+ &quot;total&quot;: 8, 
+ &quot;pages&quot;: 1, 
+ &quot;list&quot;: [ 
+ { 
+ &quot;topicName&quot;: &quot;&quot;, 
+ &quot;messageType&quot;: 1, 
+ &quot;title&quot;: &quot;XXX&quot;, 
+ &quot;shortCode&quot;: &quot;a01***648&quot;, 
+ &quot;channel&quot;: &quot;wechat&quot;, 
+ &quot;updateTime&quot;: &quot;2021-12-08 20:19:02&quot; 
+ } 
+ ] 
+ } 
+ } 
+ </code></pre><div aria-hidden="true"><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div></div><ul><li>响应字段说明</li></ul><table><thead><tr><th>参数名称</th><th>类型</th><th>说明</th></tr></thead> <tr><td>pageNum</td><td>数字</td><td>当前页码</td></tr><tr><td>pageSize</td><td>数字</td><td>分页大小</td></tr><tr><td>total</td><td>数字</td><td>总行数</td></tr><tr><td>pages</td><td>数字</td><td>总页数</td></tr><tr><td>list</td><td>数组</td><td>消息列表</td></tr> </table><ul><li>消息列表字段说明</li></ul><table><thead><tr><th>参数名称</th><th>类型</th><th>说明</th></tr></thead> <tr><td>channel</td><td>字符串</td><td>消息发送渠道； wechat-微信公众号,mail-邮件,cp-企业微信应用,webhook-第三方webhook,qq-QQ机器人</td></tr><tr><td>messageType</td><td>数字</td><td>消息类型;1-一对一消息,2-一对多消息</td></tr><tr><td>shortCode</td><td>字符串</td><td>消息短链码;可用于查询消息发送结果</td></tr><tr><td>title</td><td>字符串</td><td>消息标题</td></tr><tr><td>topicName</td><td>字符串</td><td>群组名称，一对多消息才有值</td></tr><tr><td>updateTime</td><td>日期</td><td>更新日期</td></tr> </table><h3 id="_2-查询消息发送结果" tabindex="-1"><a href="#_2-查询消息发送结果"> 2. 查询消息发送结果 </a></h3><ul><li>请求地址：https://www.pushplus.plus/api/open/message/sendMessageResult?shortCode=a018***648</li><li>请求方式：GET</li><li>(header) access-key: d7b******62f(获取到的AccessKey)</li><li>请求参数，url传参</li><li>请求参数说明</li></ul><table><thead><tr><th>参数名称</th><th>是否必填</th><th>默认值</th><th>说明</th></tr></thead> <tr><td>shortCode</td><td>是</td><td>无</td><td>消息短链码</td></tr> </table><ul><li>响应内容</li></ul><div><pre><code> { 
+ &quot;code&quot;: 200, 
+ &quot;msg&quot;: &quot;请求成功&quot;, 
+ &quot;data&quot;: { 
+ &quot;status&quot;: 2, 
+ &quot;errorMessage&quot;: &quot;&quot;, 
+ &quot;updateTime&quot;: &quot;2021-12-08 12:19:02&quot; 
+ } 
+ } 
+ </code></pre><div aria-hidden="true"><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div></div><ul><li>响应字段说明</li></ul><table><thead><tr><th>参数名称</th><th>类型</th><th>说明</th></tr></thead> <tr><td>status</td><td>数字</td><td>消息投递状态；0-未投递，1-发送中，2-已发送，3-发送失败</td></tr><tr><td>errorMessage</td><td>字符串</td><td>发送失败原因</td></tr><tr><td>updateTime</td><td>日期</td><td>更新时间</td></tr> </table><h3 id="_3-删除消息" tabindex="-1"><a href="#_3-删除消息"> 3. 删除消息 </a></h3><p>注：删除后所有接收人均无法查看，且无法撤销。</p><ul><li>请求地址：https://www.pushplus.plus/api/open/message/deleteMessage?shortCode=a018***648</li><li>请求方式：DELETE</li><li>(header) access-key: d7b******62f(获取到的AccessKey)</li><li>请求参数，url传参</li><li>请求参数说明</li></ul><table><thead><tr><th>参数名称</th><th>是否必填</th><th>默认值</th><th>说明</th></tr></thead> <tr><td>shortCode</td><td>是</td><td>无</td><td>消息短链码</td></tr> </table><ul><li>响应内容</li></ul><div><pre><code> { 
+ &quot;code&quot;: 200, 
+ &quot;msg&quot;: &quot;请求成功&quot; 
+ } 
+ </code></pre><div aria-hidden="true"><div></div><div></div><div></div><div></div></div></div><h3 id="_4-消息详情" tabindex="-1"><a href="#_4-消息详情"> 4. 消息详情 </a></h3><ul><li>请求地址：https://www.pushplus.plus/shortMessage/a018***648</li><li>请求方式：GET</li><li>content-type: text/html;charset=UTF-8</li><li>请求参数，url传参</li><li>请求参数说明</li></ul><table><thead><tr><th>参数名称</th><th>是否必填</th><th>默认值</th><th>说明</th></tr></thead> <tr><td>a018***648</td><td>是</td><td>无</td><td>消息短链码,替换成发送消息同步返回的短链码</td></tr> </table><ul><li>响应内容</li></ul><p>消息内容html。不直接提供消息内容、标题、发送人等json格式的接口。</p><h2 id="三-用户接口" tabindex="-1"><a href="#三-用户接口"> 三. 用户接口 </a></h2><h3 id="_1-获取用户token" tabindex="-1"><a href="#_1-获取用户token"> 1. 获取用户token </a></h3><ul><li>请求地址：https://www.pushplus.plus/api/open/user/token</li><li>请求方式：GET</li><li>(header) access-key: d7b******62f(获取到的AccessKey)</li><li>请求参数：无</li><li>响应内容</li></ul><div><pre><code> { 
+ &quot;code&quot;: 200, 
+ &quot;msg&quot;: &quot;请求成功&quot;, 
+ &quot;data&quot;: &quot;604******f0b&quot; 
+ } 
+ </code></pre><div aria-hidden="true"><div></div><div></div><div></div><div></div><div></div></div></div><ul><li>响应内容说明</li></ul><p>data中直接返回当前用户token。</p><h3 id="_2-个人资料详情" tabindex="-1"><a href="#_2-个人资料详情"> 2. 个人资料详情 </a></h3><ul><li>请求地址：https://www.pushplus.plus/api/open/user/myInfo</li><li>请求方式：GET</li><li>(header) access-key: d7b******62f(获取到的AccessKey)</li><li>请求参数，url传参</li><li>请求参数：无</li><li>响应内容</li></ul><div><pre><code> { 
+ &quot;code&quot;: 200, 
+ &quot;msg&quot;: &quot;请求成功&quot;, 
+ &quot;data&quot;: { 
+ &quot;openId&quot;: &quot;o0a******A3Y&quot;, 
+ &quot;unionId&quot;: &quot;oGV******NZg&quot;, 
+ &quot;nickName&quot;: &quot;陈大人&quot;, 
+ &quot;headImgUrl&quot;: &quot;http://thirdwx.qlogo.cn/mmopen/ajNV***gg/132&quot;, 
+ &quot;userSex&quot;: 1, 
+ &quot;token&quot;: &quot;604******f0b&quot;, 
+ &quot;phoneNumber&quot;: &quot;13******4&quot;, 
+ &quot;email&quot;: &quot;admin@xxx.com&quot;, 
+ &quot;emailStatus&quot;: 1, 
+ &quot;birthday&quot;: &quot;1990-01-01&quot;, 
+ &quot;points&quot;: 2, 
+ &quot;verifyStatus&quot;: 1, 
+ &quot;vipInfo&quot;: { 
+ &quot;isVip&quot;: 1, 
+ &quot;lastDay&quot;: &quot;2030-10-02&quot; 
+ } 
+ } 
+ } 
+ </code></pre><div aria-hidden="true"><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div></div><ul><li>响应字段说明</li></ul><table><thead><tr><th>参数名称</th><th>类型</th><th>说明</th></tr></thead> <tr><td>openId</td><td>字符串</td><td>用户微信的openId</td></tr><tr><td>unionId</td><td>字符串</td><td>用户微信的unionId</td></tr><tr><td>nickName</td><td>字符串</td><td>昵称</td></tr><tr><td>headImgUrl</td><td>字符串</td><td>头像</td></tr><tr><td>userSex</td><td>数字</td><td>性别；0-未设置，1-男，2-女</td></tr><tr><td>token</td><td>字符串</td><td>用户令牌</td></tr><tr><td>phoneNumber</td><td>字符串</td><td>手机号</td></tr><tr><td>email</td><td>字符串</td><td>邮箱</td></tr><tr><td>emailStatus</td><td>数字</td><td>邮箱验证状态；0-未验证，1-待验证，2-已验证</td></tr><tr><td>birthday</td><td>日期</td><td>生日</td></tr><tr><td>points</td><td>数字</td><td>用户积分</td></tr><tr><td>verifyStatus</td><td>数字</td><td>实名状态：0-未实名，1-已实名</td></tr><tr><td>vipInfo</td><td>对象</td><td>会员信息</td></tr> </table><ul><li>会员信息对象说明</li></ul><table><thead><tr><th>参数名称</th><th>类型</th><th>说明</th></tr></thead> <tr><td>isVip</td><td>数字</td><td>是否会员；0-否，1-是</td></tr><tr><td>lastDay</td><td>字符串</td><td>会员到期日</td></tr> </table><h3 id="_3-获取解封剩余时间" tabindex="-1"><a href="#_3-获取解封剩余时间"> 3. 获取解封剩余时间 </a></h3><ul><li>请求地址：https://www.pushplus.plus/api/open/user/userLimitTime</li><li>请求方式：GET</li><li>(header) access-key: d7b******62f(获取到的AccessKey)</li><li>请求参数: 无</li><li>响应内容</li></ul><div><pre><code> { 
+ &quot;code&quot;: 200, 
+ &quot;msg&quot;: &quot;请求成功&quot;, 
+ &quot;data&quot;: { 
+ &quot;sendLimit&quot;: 1, 
+ &quot;userLimitTime&quot;: &quot;&quot; 
+ } 
+ } 
+ </code></pre><div aria-hidden="true"><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div></div><ul><li>响应字段说明</li></ul><table><thead><tr><th>参数名称</th><th>类型</th><th>说明</th></tr></thead> <tr><td>sendLimit</td><td>数字</td><td>发送限制状态;1-无限制，2-短期限制，3-永久限制</td></tr><tr><td>userLimitTime</td><td>字符串</td><td>解封时间</td></tr> </table><h3 id="_4-查询当日消息接口请求次数" tabindex="-1"><a href="#_4-查询当日消息接口请求次数"> 4. 查询当日消息接口请求次数 </a></h3><ul><li>请求地址：https://www.pushplus.plus/api/open/user/sendCount</li><li>请求方式：GET</li><li>(header) access-key: d7b******62f(获取到的AccessKey)</li><li>请求参数: 无</li><li>响应内容</li></ul><div><pre><code> { 
+ &quot;code&quot;: 200, 
+ &quot;msg&quot;: &quot;请求成功&quot;, 
+ &quot;data&quot;: { 
+ &quot;wechatSendCount&quot;: 283, 
+ &quot;cpSendCount&quot;: 0, 
+ &quot;webhookSendCount&quot;: 19, 
+ &quot;mailSendCount&quot;: 0, 
+ &quot;qqBotSendCount&quot;: 0 
+ } 
+ } 
+ </code></pre><div aria-hidden="true"><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div></div><ul><li>响应字段说明</li></ul><table><thead><tr><th>参数名称</th><th>类型</th><th>说明</th></tr></thead> <tr><td>wechatSendCount</td><td>数字</td><td>微信公众号渠道请求次数</td></tr><tr><td>cpSendCount</td><td>数字</td><td>企业微信应用渠道请求次数</td></tr><tr><td>webhookSendCount</td><td>数字</td><td>webhook渠道请求次数</td></tr><tr><td>mailSendCount</td><td>数字</td><td>邮件渠道请求次数</td></tr><tr><td>qqBotSendCount</td><td>数字</td><td>QQ机器人渠道请求次数</td></tr> </table><h2 id="四-消息token接口" tabindex="-1"><a href="#四-消息token接口"> 四. 消息token接口 </a></h2><h3 id="_1-获取消息token列表" tabindex="-1"><a href="#_1-获取消息token列表"> 1. 获取消息token列表 </a></h3><ul><li>请求地址：https://www.pushplus.plus/api/open/token/list</li><li>请求方式：POST</li><li>Content-Type: application/json</li><li>(header) access-key: d7b******62f(获取到的AccessKey)</li><li>请求参数:</li></ul><div><pre><code> { 
+ &quot;current&quot;: 0, 
+ &quot;pageSize&quot;: 0, 
+ &quot;params&quot;: {} 
+ } 
+ </code></pre><div aria-hidden="true"><div></div><div></div><div></div><div></div><div></div></div></div><ul><li>请求参数说明</li></ul><table><thead><tr><th>参数名称</th><th>是否必填</th><th>默认值</th><th>说明</th></tr></thead> <tr><td>current</td><td>否</td><td>1</td><td>当前所在分页数</td></tr><tr><td>pageSize</td><td>否</td><td>20</td><td>每页大小，最大值为50</td></tr> </table><ul><li>响应内容</li></ul><div><pre><code> { 
+ &quot;code&quot;: 200, 
+ &quot;msg&quot;: &quot;请求成功&quot;, 
+ &quot;data&quot;: { 
+ &quot;pageNum&quot;: 1, 
+ &quot;pageSize&quot;: 20, 
+ &quot;total&quot;: 3, 
+ &quot;pages&quot;: 1, 
+ &quot;list&quot;: [ 
+ { 
+ &quot;id&quot;: 1, 
+ &quot;name&quot;: &quot;pushplus&quot;, 
+ &quot;expireTime&quot;: &quot;2035-05-09 20:44:00&quot;, 
+ &quot;token&quot;: &quot;837******46e2&quot; 
+ } 
+ ] 
+ } 
+ } 
+ </code></pre><div aria-hidden="true"><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div></div><ul><li>响应字段说明</li></ul><table><thead><tr><th>参数名称</th><th>类型</th><th>说明</th></tr></thead> <tr><td>pageNum</td><td>数字</td><td>当前页码</td></tr><tr><td>pageSize</td><td>数字</td><td>分页大小</td></tr><tr><td>total</td><td>数字</td><td>总行数</td></tr><tr><td>pages</td><td>数字</td><td>总页数</td></tr><tr><td>list</td><td>数组</td><td>消息token列表</td></tr> </table><ul><li>消息token列表字段说明</li></ul><table><thead><tr><th>参数名称</th><th>类型</th><th>说明</th></tr></thead> <tr><td>id</td><td>数字</td><td>消息token编号</td></tr><tr><td>name</td><td>字符串</td><td>令牌名称</td></tr><tr><td>expireTime</td><td>日期</td><td>过期时间</td></tr><tr><td>token</td><td>字符串</td><td>消息token</td></tr> </table><h3 id="_2-新增消息token" tabindex="-1"><a href="#_2-新增消息token"> 2. 新增消息token </a></h3><ul><li>请求地址：https://www.pushplus.plus/api/open/token/add</li><li>请求方式：POST</li><li>Content-Type: application/json</li><li>(header) access-key: d7b******62f(获取到的AccessKey)</li><li>请求参数:</li></ul><div><pre><code> { 
+ &quot;name&quot;: &quot;pushplus&quot;, 
+ &quot;expireTime&quot;: &quot;2035-05-09 22:34:00&quot; 
+ } 
+ </code></pre><div aria-hidden="true"><div></div><div></div><div></div><div></div></div></div><ul><li>请求参数说明</li></ul><table><thead><tr><th>参数名称</th><th>是否必填</th><th>默认值</th><th>说明</th></tr></thead> <tr><td>name</td><td>是</td><td>无</td><td>令牌名称</td></tr><tr><td>expireTime</td><td>否</td><td>&#39;2999-12-31&#39;</td><td>过期时间</td></tr> </table><ul><li>响应内容</li></ul><div><pre><code> { 
+ &quot;code&quot;: 200, 
+ &quot;msg&quot;: &quot;执行成功&quot;, 
+ &quot;data&quot;: &quot;837******46e2&quot; 
+ } 
+ </code></pre><div aria-hidden="true"><div></div><div></div><div></div><div></div><div></div></div></div><ul><li>响应内容说明</li></ul><p>data中返回新建的消息token。</p><h3 id="_3-修改消息token" tabindex="-1"><a href="#_3-修改消息token"> 3. 修改消息token </a></h3><ul><li>请求地址：https://www.pushplus.plus/api/open/token/edit</li><li>请求方式：POST</li><li>Content-Type: application/json</li><li>(header) access-key: d7b******62f(获取到的AccessKey)</li><li>请求参数:</li></ul><div><pre><code> { 
+ &quot;id&quot;: 1, 
+ &quot;name&quot;: &quot;pushplus&quot;, 
+ &quot;expireTime&quot;: &quot;2035-05-09 22:34:00&quot; 
+ } 
+ </code></pre><div aria-hidden="true"><div></div><div></div><div></div><div></div><div></div></div></div><ul><li>请求参数说明</li></ul><table><thead><tr><th>参数名称</th><th>是否必填</th><th>默认值</th><th>说明</th></tr></thead> <tr><td>id</td><td>是</td><td>无</td><td>webhook编号</td></tr><tr><td>name</td><td>是</td><td>无</td><td>令牌名称</td></tr><tr><td>expireTime</td><td>否</td><td>&#39;2999-12-31&#39;</td><td>过期时间</td></tr> </table><ul><li>响应内容</li></ul><div><pre><code> { 
+ &quot;code&quot;: 200, 
+ &quot;msg&quot;: &quot;请求成功&quot;, 
+ &quot;data&quot;: &quot;修改成功&quot; 
+ } 
+ </code></pre><div aria-hidden="true"><div></div><div></div><div></div><div></div><div></div></div></div><h3 id="_4-删除消息token" tabindex="-1"><a href="#_4-删除消息token"> 4. 删除消息token </a></h3><ul><li>请求地址：https://www.pushplus.plus/api/open/token/deleteToken?id=1</li><li>请求方式：DELETE</li><li>(header) access-key: d7b******62f(获取到的AccessKey)</li><li>请求参数: url传参</li><li>请求参数说明</li></ul><table><thead><tr><th>参数名称</th><th>是否必填</th><th>默认值</th><th>说明</th></tr></thead> <tr><td>id</td><td>是</td><td>无</td><td>消息token编号</td></tr> </table><ul><li>响应内容</li></ul><div><pre><code> { 
+ &quot;code&quot;: 200, 
+ &quot;msg&quot;: &quot;请求成功&quot;, 
+ &quot;data&quot;: &quot;删除成功&quot; 
+ } 
+ </code></pre><div aria-hidden="true"><div></div><div></div><div></div><div></div><div></div></div></div><h3 id="_5-消息token下拉选择列表" tabindex="-1"><a href="#_5-消息token下拉选择列表"> 5. 消息token下拉选择列表 </a></h3><ul><li>请求地址：https://www.pushplus.plus/api/open/token/selectTokenList?type=0</li><li>请求方式：GET</li><li>Content-Type: application/json</li><li>(header) access-key: d7b******62f(获取到的AccessKey)</li><li>请求参数: url传参</li><li>请求参数说明</li></ul><table><thead><tr><th>参数名称</th><th>是否必填</th><th>默认值</th><th>说明</th></tr></thead> <tr><td>type</td><td>否</td><td>0</td><td>0-返回所有消息token；1-返回未配置默认推送渠道的消息token；</td></tr> </table><ul><li>响应内容</li></ul><div><pre><code> { 
+ &quot;code&quot;: 200, 
+ &quot;msg&quot;: &quot;执行成功&quot;, 
+ &quot;data&quot;: [ 
+ { 
+ &quot;id&quot;: 1, 
+ &quot;name&quot;: &quot;token1&quot; 
+ }, 
+ { 
+ &quot;id&quot;: 2, 
+ &quot;name&quot;: &quot;token2&quot; 
+ } 
+ ] 
+ } 
+ </code></pre><div aria-hidden="true"><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div></div><ul><li>响应字段说明</li></ul><table><thead><tr><th>参数名称</th><th>类型</th><th>说明</th></tr></thead> <tr><td>id</td><td>数字</td><td>消息令牌编号</td></tr><tr><td>name</td><td>字符串</td><td>消息令牌名称</td></tr> </table><h2 id="五-群组接口" tabindex="-1"><a href="#五-群组接口"> 五. 群组接口 </a></h2><h3 id="_1-群组列表" tabindex="-1"><a href="#_1-群组列表"> 1. 群组列表 </a></h3><ul><li>请求地址：https://www.pushplus.plus/api/open/topic/list</li><li>请求方式：POST</li><li>Content-Type: application/json</li><li>(header) access-key: d7b******62f(获取到的AccessKey)</li><li>请求参数:</li></ul><div><pre><code> { 
+ &quot;current&quot;: 0, 
+ &quot;pageSize&quot;: 0, 
+ &quot;params&quot;: { 
+ &quot;topicType&quot;: 0 
+ } 
+ } 
+ </code></pre><div aria-hidden="true"><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div></div><ul><li>请求参数说明</li></ul><table><thead><tr><th>参数名称</th><th>是否必填</th><th>默认值</th><th>说明</th></tr></thead> <tr><td>current</td><td>否</td><td>1</td><td>当前所在分页数</td></tr><tr><td>pageSize</td><td>否</td><td>20</td><td>每页大小，最大值为50</td></tr><tr><td>topicType</td><td>是</td><td>0</td><td>群组类型;0-我创建的，1-我加入的</td></tr> </table><ul><li>响应内容</li></ul><div><pre><code> { 
+ &quot;code&quot;: 200, 
+ &quot;msg&quot;: &quot;请求成功&quot;, 
+ &quot;data&quot;: { 
+ &quot;pageNum&quot;: 1, 
+ &quot;pageSize&quot;: 20, 
+ &quot;total&quot;: 3, 
+ &quot;pages&quot;: 1, 
+ &quot;list&quot;: [ 
+ { 
+ &quot;icon&quot;: &quot;群组图标地址&quot;, 
+ &quot;topicId&quot;: 4, 
+ &quot;topicCode&quot;: &quot;群组编码&quot;, 
+ &quot;topicName&quot;: &quot;群组名称&quot;, 
+ &quot;nickName&quot;: &quot;所属微信公众号名称&quot;, 
+ &quot;createTime&quot;: &quot;2021-12-24 01:19:15&quot;, 
+ &quot;topicUserCount&quot;: 1, 
+ &quot;topicType&quot;: 2, 
+ &quot;isApproved&quot;: 2, 
+ &quot;firstIsApproved&quot;: 2, 
+ &quot;approveReason&quot;: &quot;审批拒绝理由&quot;, 
+ &quot;isOpen&quot;: 1 
+ } 
+ ] 
+ } 
+ } 
+ </code></pre><div aria-hidden="true"><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div></div><ul><li>响应字段说明</li></ul><table><thead><tr><th>参数名称</th><th>类型</th><th>说明</th></tr></thead> <tr><td>pageNum</td><td>数字</td><td>当前页码</td></tr><tr><td>pageSize</td><td>数字</td><td>分页大小</td></tr><tr><td>total</td><td>数字</td><td>总行数</td></tr><tr><td>pages</td><td>数字</td><td>总页数</td></tr><tr><td>list</td><td>数组</td><td>群组列表</td></tr> </table><ul><li>群组列表字段说明</li></ul><table><thead><tr><th>参数名称</th><th>类型</th><th>说明</th></tr></thead> <tr><td>icon</td><td>字符串</td><td>群组图标</td></tr><tr><td>topicId</td><td>数字</td><td>群组编号</td></tr><tr><td>topicCode</td><td>字符串</td><td>群组编码</td></tr><tr><td>topicName</td><td>字符串</td><td>群组名称</td></tr><tr><td>nickName</td><td>字符串</td><td>所属微信公众号名称</td></tr><tr><td>createTime</td><td>日期</td><td>创建时间</td></tr><tr><td>topicUserCount</td><td>数字</td><td>群组订阅人总数</td></tr><tr><td>topicType</td><td>数字</td><td>群组类型；0普通群组；1积分群组；2公开群组</td></tr><tr><td>isApproved</td><td>数字</td><td>是否审核通过；0未审核，1审核不通过，2审核通过</td></tr><tr><td>firstIsApproved</td><td>数字</td><td>创建时是否审核通过；0未审核，1审核不通过，2审核通过</td></tr><tr><td>approveReason</td><td>字符串</td><td>审批拒绝理由</td></tr><tr><td>isOpen</td><td>数字</td><td>是否上架(仅积分群组)；0否，1是</td></tr> </table><h3 id="_2-获取我创建的群组详情" tabindex="-1"><a href="#_2-获取我创建的群组详情"> 2. 获取我创建的群组详情 </a></h3><ul><li>请求地址：https://www.pushplus.plus/api/open/topic/detail?topicId=1</li><li>请求方式：GET</li><li>(header) access-key: d7b******62f(获取到的AccessKey)</li><li>请求参数: url传参</li><li>请求参数说明</li></ul><table><thead><tr><th>参数名称</th><th>是否必填</th><th>默认值</th><th>说明</th></tr></thead> <tr><td>topicId</td><td>是</td><td>无</td><td>群组编号</td></tr> </table><ul><li>响应内容</li></ul><div><pre><code> { 
+ &quot;code&quot;: 200, 
+ &quot;msg&quot;: &quot;请求成功&quot;, 
+ &quot;data&quot;: { 
+ &quot;topicId&quot;: 1, 
+ &quot;topicName&quot;: &quot;测试&quot;, 
+ &quot;topicCode&quot;: &quot;123456&quot;, 
+ &quot;qrCodeImgUrl&quot;: &quot;&quot;, 
+ &quot;contact&quot;: &quot;联系方式&quot;, 
+ &quot;introduction&quot;: &quot;群组简介&quot;, 
+ &quot;receiptMessage&quot;: &quot;关注后回复&quot;, 
+ &quot;nickName&quot;: &quot;所属微信公众号名称&quot;, 
+ &quot;createTime&quot;: &quot;2021-02-10 16:58:01&quot;, 
+ &quot;topicUserCount&quot;: 1, 
+ &quot;icon&quot;: &quot;群组图标地址&quot;, 
+ &quot;appId&quot;: &quot;服务号appId&quot;, 
+ &quot;topicType&quot;: 2, 
+ &quot;price&quot;: 0.00, 
+ &quot;topicDescribe&quot;: &quot;一句话介绍&quot;, 
+ &quot;userNickName&quot;: &quot;创建人昵称&quot;, 
+ &quot;isApproved&quot;: 2, 
+ &quot;firstIsApproved&quot;: 2, 
+ &quot;approveReason&quot;: &quot;审批拒绝理由&quot;, 
+ &quot;isOpen&quot;: 1 
+ } 
+ } 
+ </code></pre><div aria-hidden="true"><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div></div><ul><li>响应字段说明</li></ul><table><thead><tr><th>参数名称</th><th>类型</th><th>说明</th></tr></thead> <tr><td>topicId</td><td>数字</td><td>群组编号</td></tr><tr><td>topicCode</td><td>字符串</td><td>群组编码</td></tr><tr><td>topicName</td><td>字符串</td><td>群组名称</td></tr><tr><td>qrCodeImgUrl</td><td>字符串</td><td>永久二维码图片地址</td></tr><tr><td>contact</td><td>字符串</td><td>联系方式</td></tr><tr><td>introduction</td><td>字符串</td><td>群组简介</td></tr><tr><td>receiptMessage</td><td>字符串</td><td>加入后回复内容</td></tr><tr><td>nickName</td><td>字符串</td><td>所属微信公众号名称</td></tr><tr><td>createTime</td><td>日期</td><td>创建时间</td></tr><tr><td>topicUserCount</td><td>字符串</td><td>群组订阅人总数</td></tr><tr><td>icon</td><td>字符串</td><td>群组图标</td></tr><tr><td>appId</td><td>字符串</td><td>服务号appId</td></tr><tr><td>topicType</td><td>数字</td><td>群组类型；0普通群组；1积分群组；2公开群组</td></tr><tr><td>price</td><td>数字</td><td>积分群组订阅积分；按月</td></tr><tr><td>topicDescribe</td><td>字符串</td><td>一句话介绍</td></tr><tr><td>userNickName</td><td>字符串</td><td>创建人昵称</td></tr><tr><td>isApproved</td><td>数字</td><td>是否审核通过；0未审核，1审核不通过，2审核通过</td></tr><tr><td>firstIsApproved</td><td>数字</td><td>创建时是否审核通过；0未审核，1审核不通过，2审核通过</td></tr><tr><td>approveReason</td><td>字符串</td><td>审批拒绝理由</td></tr><tr><td>isOpen</td><td>数字</td><td>是否上架(仅积分群组)；0否，1是</td></tr> </table><h3 id="_3-获取我加入的群详情" tabindex="-1"><a href="#_3-获取我加入的群详情"> 3. 获取我加入的群详情 </a></h3><ul><li>请求地址：https://www.pushplus.plus/api/open/topic/joinTopicDetail?topicId=1</li><li>请求方式：GET</li><li>(header) access-key: d7b******62f(获取到的AccessKey)</li><li>请求参数: url传参</li><li>请求参数说明</li></ul><table><thead><tr><th>参数名称</th><th>是否必填</th><th>默认值</th><th>说明</th></tr></thead> <tr><td>topicId</td><td>是</td><td>无</td><td>群组编号</td></tr> </table><ul><li>响应内容</li></ul><div><pre><code> { 
+ &quot;code&quot;: 200, 
+ &quot;msg&quot;: &quot;请求成功&quot;, 
+ &quot;data&quot;: { 
+ &quot;topicName&quot;: &quot;群组名称&quot;, 
+ &quot;topicCode&quot;: &quot;123456&quot;, 
+ &quot;topicId&quot;: 2, 
+ &quot;contact&quot;: &quot;联系方式&quot;, 
+ &quot;introduction&quot;: &quot;群组简介&quot;, 
+ &quot;nickName&quot;: &quot;所属微信公众号名称&quot;, 
+ &quot;createTime&quot;: &quot;2021-03-29 20:11:50&quot;, 
+ &quot;icon&quot;: &quot;群组图标&quot;, 
+ &quot;topicUserCount&quot;: 1, 
+ &quot;topicType&quot;: 1, 
+ &quot;price&quot;: 100.00, 
+ &quot;topicDescribe&quot;: &quot;一句话介绍&quot;, 
+ &quot;userNickName&quot;: &quot;创建者昵称&quot; 
+ } 
+ } 
+ </code></pre><div aria-hidden="true"><div></div><div></div><div></div><div></div><div></div><div></d
+</article></main></body></html>

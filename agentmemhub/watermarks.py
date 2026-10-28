@@ -29,9 +29,13 @@ consumed 键登记时间戳即可接入，无需改动 ingest。文件缺失/损
 from __future__ import annotations
 
 import json
+import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Optional
+
+_LOGGER = logging.getLogger(__name__)
 
 VERSION = 1
 DEFAULT_CAP = 5000
@@ -54,7 +58,10 @@ def load_state(data_dir: Path) -> dict[str, Any]:
     }
     try:
         raw = json.loads(state_path(data_dir).read_text(encoding="utf-8"))
-    except Exception:
+    except FileNotFoundError:
+        return st
+    except Exception as e:           # noqa: BLE001 —— 坏 JSON/编码，回默认但先留证
+        _quarantine(state_path(data_dir), e)
         return st
     if not isinstance(raw, dict):
         return st
@@ -76,13 +83,38 @@ def load_state(data_dir: Path) -> dict[str, Any]:
     return st
 
 
+def _quarantine(path: Path, err: Exception) -> None:
+    """把读不动的状态文件改名留存，再回默认值。
+
+    原先直接 `return st`：坏文件被静默重置成默认，delta / consumed / pending_score
+    一起丢，下次收尾再原子写回，原文件就彻底没了 —— 真出了问题无从对账。
+    """
+    try:
+        bad = path.with_name(f"{path.name}.corrupt-{int(time.time())}")
+        path.replace(bad)
+        _LOGGER.warning("水位文件损坏，已另存为 %s：%s", bad.name, err)
+    except OSError:
+        _LOGGER.warning("水位文件损坏且无法另存：%s", err)
+
+
 def save_state(data_dir: Path, st: dict[str, Any]) -> None:
-    """原子写回（tmp + replace，防写一半损坏）。"""
+    """原子写回（tmp + replace，防写一半损坏）。
+
+    tmp 名带 pid 与毫秒时间戳：固定 `.tmp` 名在「面板 + CLI 同时写」时会互相踩 ——
+    两个进程各写一半到同一个临时文件，再先后 replace，谁都没报错，内容却是混合的。
+    """
     p = state_path(data_dir)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(p)
+    tmp = p.with_name(f"{p.name}.{os.getpid()}.{int(time.time() * 1000)}.tmp")
+    try:
+        tmp.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(p)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 def record_ingest(st: dict[str, Any], *, ts: Optional[float] = None,

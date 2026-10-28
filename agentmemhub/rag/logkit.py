@@ -11,7 +11,10 @@ from pathlib import Path
 
 _MAX_BYTES = 5 * 1024 * 1024
 _BACKUP_COUNT = 3
-_FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
+#: 统一文本日志格式：**时间 + 等级 + 模块:行号 + 内容**。
+#: 行号（`%(lineno)d`）是本次补上的 —— 没有它，"这条日志到底哪一行打的"
+#: 只能靠 grep 猜；文件名（`name`）只到 logger 粒度，一个模块里几十个打点分不开。
+_FORMAT = "%(asctime)s %(levelname)-5s [%(name)s:%(lineno)d] %(message)s"
 
 
 def get_logger(

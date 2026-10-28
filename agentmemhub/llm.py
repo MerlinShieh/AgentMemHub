@@ -16,14 +16,143 @@ JSON 输出容错：模型常把 JSON 包在 ``` 围栏里或前后加解释文�
 from __future__ import annotations
 
 import json
+import http.client
 import logging
 import re
+import socket
+import threading
 import time
 import unicodedata
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Optional
+
+
+# ---------------------------------------------------------------------------
+# 累计用量统计（成本可见性）
+#
+# 为什么放模块级而不是实例上：`LLMClient` 被刻意设计成"无共享可变状态、
+# 每线程一个实例"（批量编译时每个会话新建一个）。统计必须跨实例汇总，
+# 否则并发跑完各算各的、无法回答"这批花了多少钱"。用锁保护，开销可忽略。
+# ---------------------------------------------------------------------------
+_USAGE_LOCK = threading.Lock()
+_USAGE: dict[str, float] = {
+    "calls": 0, "prompt": 0, "completion": 0, "reasoning": 0,
+    "cached_hit": 0, "cached_miss": 0,
+    # **累计调用耗时**（秒）：只算真正在等 LLM 的时间，不含退避等待。
+    # 为什么必须单独统计：任务汇总里的时长是**墙钟**，机器一休眠就严重失真
+    # —— 实测一次 L2 汇总显示 33052 秒（9.2 小时），其中绝大部分是睡眠时间，
+    # 据此误判成"上游重试了 9 小时"。这个口径反映真实工作量，休眠不干扰
+    # （休眠时不会有请求在跑）。
+    "seconds": 0.0,
+}
+
+
+def usage_snapshot() -> dict[str, float]:
+    """当前累计用量（线程安全）。"""
+    with _USAGE_LOCK:
+        return dict(_USAGE)
+
+
+def usage_reset() -> None:
+    """清零累计用量（测试，或单次批量任务开始前）。"""
+    with _USAGE_LOCK:
+        for k in _USAGE:
+            _USAGE[k] = 0
+
+
+# ---------------------------------------------------------------------------
+# 全局限流闸门（429）
+#
+# 为什么必须**跨线程共享**：并发（会话级 workers × 组级 workers）之后，多个
+# worker 会几乎同时撞上同一个 RPM/TPM 窗口。若各自独立退避，它们会在同一时刻
+# 一起恢复、一起重试，再次撞上限流 —— 即"退避共振"。用一个进程级时间闸门统一
+# 推后，恢复时刻自然错开。
+# ---------------------------------------------------------------------------
+_RATE_GATE = threading.Lock()
+_RATE_UNTIL: float = 0.0
+
+#: 429 未给 `Retry-After` 时的默认推后秒数（RPM 窗口是分钟级，等几秒没意义）
+_RATE_DEFAULT_WAIT = 20.0
+
+#: `Retry-After` 的可接受上限（防服务端给出离谱值把任务卡死）
+_RATE_MAX_WAIT = 300.0
+
+
+def _rate_wait() -> None:
+    """在全局闸门前等待（同进程所有线程共用）。"""
+    while True:
+        with _RATE_GATE:
+            remain = _RATE_UNTIL - time.time()
+        if remain <= 0:
+            return
+        time.sleep(min(remain, 2.0))
+
+
+def _rate_backoff(seconds: float) -> None:
+    """把全局闸门推后（取最大值：只延长、不退让）。"""
+    global _RATE_UNTIL
+    sec = max(0.0, min(float(seconds), _RATE_MAX_WAIT))
+    with _RATE_GATE:
+        _RATE_UNTIL = max(_RATE_UNTIL, time.time() + sec)
+
+
+def _parse_retry_after(headers) -> float | None:
+    """解析 `Retry-After`（秒数或 HTTP-date）；缺失/非法返回 None。"""
+    if headers is None:
+        return None
+    try:
+        raw = headers.get("Retry-After")
+    except Exception:                       # noqa: BLE001
+        return None
+    if not raw:
+        return None
+    raw = str(raw).strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(raw)
+        return None if dt is None else max(0.0, dt.timestamp() - time.time())
+    except Exception:                       # noqa: BLE001
+        return None
+
+
+def _record_usage(usage: dict | None, elapsed: float = 0.0) -> None:
+    """把一次响应的 usage 与耗时计入累计（字段缺失按 0）。
+
+    `elapsed` 与 usage **分开**累计：响应不一定带 usage 字段，但时间是实打实
+    花掉的。所以耗时先记，再按 usage 是否存在决定是否计 `calls`/token。
+    """
+    det = (usage.get("completion_tokens_details") or {}
+           if isinstance(usage, dict) else {})
+    with _USAGE_LOCK:
+        _USAGE["seconds"] += float(elapsed or 0.0)
+        if not isinstance(usage, dict):
+            return
+        _USAGE["calls"] += 1
+        _USAGE["prompt"] += int(usage.get("prompt_tokens") or 0)
+        _USAGE["completion"] += int(usage.get("completion_tokens") or 0)
+        _USAGE["reasoning"] += int(det.get("reasoning_tokens") or 0)
+        _USAGE["cached_hit"] += int(usage.get("prompt_cache_hit_tokens") or 0)
+        _USAGE["cached_miss"] += int(usage.get("prompt_cache_miss_tokens") or 0)
+
+
+def estimate_cost(usage: dict[str, int], *, price_in_miss: float = 2.0,
+                  price_in_hit: float = 0.04, price_out: float = 8.0) -> float:
+    """按"元 / 百万 tokens"估算花费（默认取 DeepSeek **高峰时段**价）。
+
+    注意高峰时段为北京时间周一至周五 9:00-12:00 / 14:00-18:00，其余时段
+    输入输出均为半价。想按空闲价估算就把三个单价都除以 2。
+    """
+    return (
+        usage.get("cached_miss", 0) / 1e6 * price_in_miss
+        + usage.get("cached_hit", 0) / 1e6 * price_in_hit
+        + usage.get("completion", 0) / 1e6 * price_out
+    )
 
 
 class LLMError(Exception):
@@ -35,7 +164,18 @@ class ContentFilterRejected(LLMError):
 
 
 class LLMTransientError(LLMError):
-    """瞬态错误（429/5xx/网络/超时）——可退避重试。"""
+    """瞬态错误（429/5xx/网络/超时）——可退避重试。
+
+    限流（429）额外携带两个信息，供**全局闸门**与重试策略使用：
+      · `is_rate_limit`：是否限流 —— 限流按"窗口"计，值得比普通瞬态多等几轮
+      · `retry_after`：服务端 `Retry-After` 指定的秒数（None = 服务端没给）
+    """
+
+    def __init__(self, message: str = "", *, is_rate_limit: bool = False,
+                 retry_after: float | None = None):
+        super().__init__(message)
+        self.is_rate_limit = is_rate_limit
+        self.retry_after = retry_after
 
 
 #: 内容审核类响应特征（与 scoring.py 同源判定）
@@ -150,6 +290,16 @@ class LLMConfig:
     api_key: str = ""
     model: str = ""
     timeout: float = 60.0
+    #: **单次调用总时长上限**（秒）：`0` = 不限（默认，保持既有行为）。
+    #:
+    #: 为什么需要它、而不能只靠 `timeout`：`timeout` 传到底层是 **socket 空闲
+    #: 超时** —— 它只管"多久没有数据流动"。而 OpenAI 兼容接口是**非流式**的：
+    #: 服务端在算的时候**一个字节都不发**，于是这个超时**完全不触发**。
+    #: 实测 2026-10-20：一次 L2 编译调用跑了 **975.3 秒**才返回（`ok=True`、
+    #: `attempt=1`），`timeout=900` 全程没用上，一轮增量因此白等十几分钟。
+    #: 设了本项就到点**强行断开底层 socket**（见 `_kill_watchdog()`），阻塞在
+    #: `recv` 上的调用立刻抛异常 → 按瞬态错误重试。
+    max_total_seconds: float = 0.0
     max_retries: int = 2          # 仅对瞬态错误生效
     backoff_base: float = 1.5     # 退避基数（秒）：base * 2^attempt
     max_tokens: int = 16384
@@ -159,6 +309,23 @@ class LLMConfig:
     # reasoning 吃满、content 为空（finish_reason=length, reasoning_tokens=8192）。
     # 按生成量计费，上限提高不增加成本（除非真用到），留足更划算。
     temperature: float = 0.0      # 蒸馏/抽取类任务恒 0，保证可复现
+    #: **思考模式开关**（DeepSeek 系）：`""`=不传（用 provider 默认，即开启）、
+    #: `"enabled"` / `"disabled"`。请求体顶层发 `{"thinking": {"type": ...}}`。
+    #: 为什么要这个开关：思考模式下思维链（reasoning token）**计入输出计费**，
+    #: 实测在一次 45 条记忆的编译里 reasoning 占 completion 的 67%（21483/32002）；
+    #: 而"归纳 / 整理 / 改写"类任务并不需要深度推理——关闭可省约一半以上成本。
+    #: 注意：思考模式下 `temperature` 不生效（传入不报错但被忽略），关闭后才生效。
+    thinking: str = ""
+    #: 思考强度（仅思考模式生效）：low / medium / high / xhigh / max；`""`=不传。
+    #: Command Code 只接受这五档（传 none 直接 400），DeepSeek 官方只认 low/high/max。
+    reasoning_effort: str = ""
+    #: **格式修复模型**：主模型返回了内容、但 JSON 解析失败时，把**原始输出**
+    #: 交给它转成规范 JSON（留空 = 不修复，保持原来的"直接抛错"行为）。
+    #:
+    #: 为什么值得单配一个：便宜的主模型偶发用 ```json 围栏包裹、或输出被截断，
+    #: 但**内容本身是有价值的** —— 丢弃或退化成拼接都可惜。而"把已有内容转成
+    #: 指定格式"对强模型是简单任务，且只在失败时才触发，成本可以忽略。
+    repair_model: str = ""
     #: provider 特定的额外请求头（配置驱动，不硬编码在客户端里）。
     #: 实测 OpenCode Go（opencode.ai/zen/go）需要 User-Agent（过 Cloudflare 1010）
     #: 与 x-opencode-session（路由亲和，缺失时 400 MissingSessionID）。
@@ -180,15 +347,28 @@ class LLMConfig:
         d = dict(cfg or {})
         d.update({k: v for k, v in overrides.items() if v is not None})
         headers = d.get("headers") or {}
+        thinking = str(d.get("thinking") or "").strip().lower()
+        if thinking and thinking not in ("enabled", "disabled"):
+            raise ValueError(
+                f"llm.thinking 只能是 enabled / disabled（或留空不传），收到：{thinking!r}")
+        effort = str(d.get("reasoning_effort") or "").strip().lower()
+        if effort and effort not in ("low", "medium", "high", "xhigh", "max"):
+            raise ValueError(
+                "llm.reasoning_effort 只能是 low / medium / high / xhigh / max"
+                f"（或留空不传），收到：{effort!r}")
         return cls(
             endpoint=str(d.get("endpoint") or ""),
             api_key=str(d.get("api_key") or ""),
             model=str(d.get("model") or ""),
             timeout=float(d.get("timeout") or 60.0),
+            max_total_seconds=float(d.get("max_total_seconds") or 0.0),
             max_retries=int(d.get("max_retries") if d.get("max_retries") is not None else 2),
             backoff_base=float(d.get("backoff_base") or 1.5),
             max_tokens=int(d.get("max_tokens") or 16384),
             temperature=float(d.get("temperature") if d.get("temperature") is not None else 0.0),
+            thinking=thinking,
+            reasoning_effort=effort,
+            repair_model=str(d.get("repair_model") or ""),
             headers={str(k): str(v) for k, v in headers.items()} if isinstance(headers, dict) else {},
         )
 
@@ -210,6 +390,58 @@ class LLMClient:
     # -- 单次请求 --------------------------------------------------------
 
     def _post(self, body: dict, timeout: float) -> dict:
+        """发一次请求并解析 JSON —— **含「总时长上限」**。
+
+        两种超时是**两件事**，别混：
+
+        · `timeout` 传到底层是 **socket 空闲超时**：只管"多久没有数据流动"；
+        · `max_total_seconds` 是"这一次调用最多等多久"，由本方法实现。
+
+        为什么必须用「工作线程 + join」而不是装个看门狗去关 socket：
+        OpenAI 兼容接口是**非流式**的，服务端在算的时候**一个字节都不发** ——
+        空闲超时全程不触发（实测 2026-10-20：一次 L2 编译调用跑了 **975.3 秒**
+        才返回，而 `timeout` 配的是 900）。而**在 Windows 上 `socket.shutdown()`
+        无法中断已经在阻塞的 `recv`**（实测：0.5 秒时 shutdown 已成功返回，
+        `read()` 仍等到服务端 3 秒后才抛 BrokenPipeError）。把请求放进工作线程、
+        主线程只 `join` 到点，是唯一可靠的做法。
+
+        代价：被放弃的调用线程会**滞留到 socket 超时**才结束（daemon，不阻塞
+        进程退出）；数量受 `max_retries` 约束，可接受。
+        """
+        total_limit = float(getattr(self.cfg, "max_total_seconds", 0.0) or 0.0)
+        if total_limit <= 0:
+            return self._post_once(body, timeout)
+        box: dict[str, Any] = {}
+        th = threading.Thread(target=self._post_once_into,
+                              args=(body, timeout, box), daemon=True)
+        th.start()
+        th.join(total_limit)
+        if th.is_alive():
+            raise LLMTransientError(
+                "单次调用总时长超过 %.0fs 上限，已放弃等待（配置 "
+                "llm.max_total_seconds）—— 别指望 `timeout` 兜住它：那是 socket "
+                "空闲超时，对非流式调用无效。上游可能仍在执行这次请求。"
+                % total_limit)
+        err = box.get("error")
+        if err is not None:
+            raise err
+        return box.get("data") or {}
+
+    def _post_once_into(self, body: dict, timeout: float,
+                        box: dict[str, Any]) -> None:
+        """工作线程体：把结果或异常放进 box。
+
+        异常**原样保留类型**：`LLMTransientError` / `ContentFilterRejected` /
+        `LLMError` 的分类不能被降级成通用异常，否则上层的重试与中止策略全乱。
+        """
+        try:
+            box["data"] = self._post_once(body, timeout)
+        except BaseException as e:          # noqa: BLE001 —— 类型要原样传给上层
+            box["error"] = e
+
+    def _post_once(self, body: dict, timeout: float) -> dict:
+        """真正发一次请求并解析 JSON（不含总时长控制）。"""
+        _rate_wait()                      # 全局限流闸门（429 后所有线程一起等）
         headers = {"Content-Type": "application/json",
                    "Authorization": f"Bearer {self.cfg.api_key}"}
         if self.cfg.headers:
@@ -223,9 +455,19 @@ class LLMClient:
         except ValueError as e:
             # endpoint 非法（缺协议头等）——配置错误，不重试
             raise LLMError(f"LLM endpoint 非法（检查配置）：{e}") from None
+        # 计时用 perf_counter（高精度）：Windows 上 monotonic() 基于
+        # GetTickCount64，精度只有约 15.6ms —— 短请求会测出 0.0（实测踩到）
+        t0 = time.perf_counter()
+        resp = None
         try:
-            with self._opener.open(req, timeout=timeout) as r:
-                return json.loads(r.read().decode("utf-8"))
+            resp = self._opener.open(req, timeout=timeout)
+            data = json.loads(resp.read().decode("utf-8"))
+            # 成本可见性：累计用量 + **累计调用耗时**
+            # （任务汇总里的时长是墙钟，机器休眠会严重失真；这个口径才是
+            #   真实工作量）
+            _record_usage(data.get("usage"),
+                          elapsed=time.perf_counter() - t0)
+            return data
         except urllib.error.HTTPError as e:
             detail = ""
             try:
@@ -236,12 +478,85 @@ class LLMClient:
                 raise ContentFilterRejected(
                     f"内容审核拒评（HTTP {e.code}）：{detail[:160]}") from None
             if e.code in (408, 409, 425, 429, 500, 502, 503, 504):
-                raise LLMTransientError(f"HTTP {e.code}：{detail[:200]}") from None
+                rate = (e.code == 429)
+                retry_after = _parse_retry_after(getattr(e, "headers", None))
+                if rate:
+                    # 推后全局闸门 —— 并发的其它 worker 也会因此一起等待，
+                    # 避免"各自退避、同时恢复、再次撞限"的退避共振
+                    _rate_backoff(retry_after if retry_after is not None
+                                  else _RATE_DEFAULT_WAIT)
+                raise LLMTransientError(
+                    f"HTTP {e.code}：{detail[:200]}",
+                    is_rate_limit=rate, retry_after=retry_after) from None
             raise LLMError(f"HTTP {e.code}：{detail[:200]}") from None
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
+        except (urllib.error.URLError, TimeoutError, OSError,
+                http.client.HTTPException) as e:
+            # HTTPException 必须一并算瞬态：`IncompleteRead`（响应读了一半连接就断）
+            # 继承自它而**不是** OSError —— 漏掉的话网络抖一下就直接判失败、
+            # 一次都不重试（实测切网时因此丢了好几组）。
             raise LLMTransientError(f"{type(e).__name__}: {e}") from None
+        finally:
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:           # noqa: BLE001 —— 关闭失败无关紧要
+                    pass
 
     # -- 对外：取结构化 JSON ---------------------------------------------
+
+    #: 格式修复提示词：**只转格式，不重新生成内容**。把任务要求也给它是为了让
+    #: 它知道"该转成什么形状"，而不是自由发挥。
+    _REPAIR_SYSTEM = """你是格式修复器。下面给出一次 LLM 调用的**任务要求**和它
+返回的**原始内容**。原始内容里已经有需要的信息，只是格式不符合要求。
+
+请把原始内容转换成任务要求的 JSON：
+1. **只做格式转换，不要增删信息** —— 不要自己编造字段或内容。
+2. 如果原始内容被截断（JSON 不完整），尽力从已有部分恢复出完整对象；
+   确实无法恢复的部分，宁缺勿滥。
+3. **只输出 JSON**，不要解释、不要 markdown 围栏。"""
+
+    def _repair_json(self, system: str, user: str, raw: str,
+                     max_tokens: int | None = None) -> Optional[dict]:
+        """把"有内容但格式不对"的原始输出交给 `repair_model` 转成 JSON。
+
+        只在 `complete_json` 解析失败时触发，且**不再递归修复**（内部直接用
+        `_post` + `extract_json`），避免无限套娃。任何失败都返回 None，
+        让调用方走原有路径（抛错 / 跳过），绝不改变"失败"的语义。
+        """
+        model = (self.cfg.repair_model or "").strip()
+        raw = (raw or "").strip()
+        if not model or not raw:
+            return None
+        # 任务输入截断：修复器只需要知道"要转成什么形状"，
+        # 不必把几万字的原始输入整份再喂一遍（那是成本大头）。
+        ctx = user if len(user) <= 4000 else user[:4000] + "\n…（任务输入过长，已截断）"
+        if len(raw) > 20000:
+            raw = raw[:20000] + "\n…（原始内容过长，已截断）"
+        body = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": self._REPAIR_SYSTEM},
+                {"role": "user", "content": scrub_text(
+                    "【任务要求（system）】\n%s\n\n【任务输入（节选）】\n%s\n\n"
+                    "【主模型返回的原始内容】\n%s" % (system, ctx, raw))},
+            ],
+            "temperature": 0.0,
+            "max_tokens": int(max_tokens or self.cfg.max_tokens),
+        }
+        try:
+            data = self._post(body, self.cfg.timeout)
+            choices = data.get("choices") or []
+            if not choices:
+                return None
+            content = ((choices[0].get("message") or {}).get("content") or "")
+            out = extract_json(content)
+            self.log.info("格式修复成功：repair_model=%s，原始内容 %d 字",
+                          model, len(raw))
+            return out
+        except Exception as e:
+            self.log.warning("格式修复失败（repair_model=%s）：%s", model,
+                             str(e)[:150])
+            return None
 
     def complete_json(self, system: str, user: str, *,
                       max_tokens: int | None = None,
@@ -263,23 +578,46 @@ class LLMClient:
                             else float(temperature)),
             "max_tokens": int(max_tokens or self.cfg.max_tokens),
         }
+        # 思考模式（DeepSeek 系）：请求体顶层 `thinking`。留空则完全不下发，
+        # 用 provider 默认（DeepSeek 默认 **开启** 且 effort=high）。
+        if self.cfg.thinking:
+            body["thinking"] = {"type": self.cfg.thinking}
+        if self.cfg.reasoning_effort:
+            body["reasoning_effort"] = self.cfg.reasoning_effort
         last: Optional[Exception] = None
-        for attempt in range(self.cfg.max_retries + 1):
+        attempt = 0
+        max_attempts = self.cfg.max_retries + 1
+        while attempt < max_attempts:
             try:
                 data = self._post(body, self.cfg.timeout)
                 choices = data.get("choices") or []
                 if not choices:
                     raise LLMTransientError(f"响应缺少 choices：{str(data)[:200]}")
                 content = ((choices[0].get("message") or {}).get("content") or "")
-                return extract_json(content)
+                try:
+                    return extract_json(content)
+                except ValueError:
+                    # 有内容但格式不对 → 交给修复模型转格式（未配置则维持原行为）
+                    repaired = self._repair_json(system, user, content, max_tokens)
+                    if repaired is not None:
+                        return repaired
+                    raise
             except ContentFilterRejected:
                 raise
             except LLMTransientError as e:
                 last = e
-                if attempt < self.cfg.max_retries:
-                    delay = self.cfg.backoff_base * (2 ** attempt)
+                attempt += 1
+                if getattr(e, "is_rate_limit", False):
+                    # 限流按"窗口"计（RPM/TPM 通常分钟级），默认 3 次尝试常常不够；
+                    # 全局闸门已把等待拉长，这里再多给 2 轮**重试**
+                    # （总尝试次数 = max_retries + 1 + 2）
+                    max_attempts = max(max_attempts, self.cfg.max_retries + 1 + 2)
+                if attempt < max_attempts:
+                    delay = getattr(e, "retry_after", None)
+                    if not delay:
+                        delay = self.cfg.backoff_base * (2 ** (attempt - 1))
                     self.log.warning("LLM 瞬态错误（第 %d 次），%.1fs 后重试：%s",
-                                     attempt + 1, delay, e)
+                                     attempt, delay, e)
                     time.sleep(delay)
         raise last or LLMError("LLM 调用失败")
 

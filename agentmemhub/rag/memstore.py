@@ -3,24 +3,24 @@
 分工铁律：引擎「存值不判值」——本模块只做确定性算术（feedback 聚合、
 幂等锚、级联存储），谁来决定 value（LLM 评分）永远在 AgentMemHub 策略层。
 
-MemOS 语义兼容点（迁移/回退依赖）：
-- 原子记忆：source='memory'、conversation_id='mcp'（对应 MemOS episodeId/sessionId="mcp"）；
+语义兼容点（历史迁移依赖）：
+- 原子记忆：source='memory'、conversation_id='mcp'（沿用旧引擎的 episodeId/sessionId="mcp"）；
 - 幂等锚：src_id = "mcp_" + sha256(content)[:16]，与 mcp_server._save 现行算法逐字一致；
 - feedback 聚合：value = r_human = clamp(Σsigned/Σmag, ±1)，priority = max(old, |value|)
-  （MemOS memory-core.ts:2465-2478 同源规则）。
+  （上游同源规则）。
 """
 from __future__ import annotations
 
 import hashlib
 
-import numpy as np
 import sqlite3
 import time
 from typing import Sequence
 
 from .config import Settings
 from .embedder import Embedder
-from .ingest import ensure_vec_table, open_index
+from .ingest import (
+    encode_for_write, ensure_vec_table, open_index, put_vecs, write_models)
 from .runtime import get_active_embedder
 
 MEMSTORE_SCHEMA = """
@@ -111,7 +111,10 @@ def save_memory(
     spec = settings.active_spec
     try:
         ensure_memstore_schema(conn)
-        ensure_vec_table(conn, spec)
+        # 向量表要对**每个**配置模型都在（不只 active）：只写 active 会让其余
+        # 模型永久缺这一行，多模型召回静默少一路通道。
+        for _s in write_models(settings):
+            ensure_vec_table(conn, _s)
         hit = conn.execute(
             "SELECT id FROM units WHERE source='memory' AND src_id=?",
             (src_id,)).fetchone()
@@ -119,6 +122,9 @@ def save_memory(
             return {"unit_id": hit[0], "created": False, "src_id": src_id}
         emb = embedder or get_active_embedder(settings)
         vec = emb.encode_passages([text])[0]
+        # 其余模型的向量：单条写入也必须写全 —— `ingest --model` 的候选来自源库
+        # events，补不上 units 里的行，只有整表 reembed 能补（代价 19 分钟）。
+        multi = encode_for_write(settings, [text])
         ts = int(ts if ts is not None else time.time())
         with conn:  # 单事务：units+vec 原子落库
             seq = conn.execute(
@@ -130,9 +136,8 @@ def save_memory(
                 " VALUES('memory','mcp',?,?,'mcp',?,?,?,?,?,?)",
                 (seq, "user", src_id, ts, title or "记忆", text, len(text),
                  int(time.time())))
-            conn.execute(
-                f"INSERT INTO {spec.vec_table}(rowid, embedding) VALUES(?,?)",
-                (cur.lastrowid, np.ascontiguousarray(vec, dtype=np.float32).tobytes()))
+            put_vecs(conn, cur.lastrowid,
+                     [(spec, vec)] + [(s, vs[0]) for s, vs in multi])
         ensure_base_value(conn, cur.lastrowid, BASE_VALUE_AGENT_WRITE)
         return {"unit_id": cur.lastrowid, "created": True, "src_id": src_id}
     finally:
@@ -199,7 +204,7 @@ def set_user_feedback(
     polarity=None → 取消（删除既有反馈后重算）。
 
     与 put_feedback 的语义差异（两者并存、各司其职）：
-    - put_feedback：**历史累加**（MemOS 同源：多条证据累积取有符号均值），
+    - put_feedback：**历史累加**（上游同源：多条证据累积取有符号均值），
       MCP memory_score / 批量评分沿用——同一条多个 harness 反复表态是证据；
     - set_user_feedback：**当前表态**（面板 👍/👎）。反复点不应叠加稀释
       （均值会越点越钝），取消即干净回退——按钮态与库内状态一一对应。
@@ -264,7 +269,7 @@ def put_feedback(
     channel: str = "explicit",
     ts: int | None = None,
 ) -> dict:
-    """写反馈并即时聚合（MemOS 同源规则）。unit 不存在 → KeyError（404 语义）。"""
+    """写反馈并即时聚合（上游同源规则）。unit 不存在 → KeyError（404 语义）。"""
     if polarity not in POLARITY_SIGN:
         raise ValueError(f"非法 polarity: {polarity!r}")
     ensure_memstore_schema(conn)

@@ -1,0 +1,68 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [5 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Title (PDF table routing fixture) /CreationDate (D:20260101120000Z) >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 897 >>
+stream
+0.8 w
+72 596 m 72 700 l S
+202 596 m 202 700 l S
+332 596 m 332 700 l S
+462 596 m 462 700 l S
+72 700 m 462 700 l S
+72 674 m 462 674 l S
+72 648 m 462 648 l S
+72 622 m 462 622 l S
+72 596 m 462 596 l S
+BT /F1 10 Tf 78 682 Td (Region) Tj ET
+BT /F1 10 Tf 208 682 Td (Revenue) Tj ET
+BT /F1 10 Tf 338 682 Td (Growth) Tj ET
+BT /F1 10 Tf 78 656 Td (North) Tj ET
+BT /F1 10 Tf 208 656 Td (1280) Tj ET
+BT /F1 10 Tf 338 656 Td (+12%) Tj ET
+BT /F1 10 Tf 78 630 Td (South) Tj ET
+BT /F1 10 Tf 208 630 Td (940) Tj ET
+BT /F1 10 Tf 338 630 Td (-3%) Tj ET
+BT /F1 10 Tf 78 604 Td (West) Tj ET
+BT /F1 10 Tf 208 604 Td (1510) Tj ET
+BT /F1 10 Tf 338 604 Td (+21%) Tj ET
+BT /F1 13 Tf 72 726 Td (Quarterly numbers by region) Tj ET
+BT
+/F1 12 Tf
+72 520 Td
+(The paragraph below the table must still be) Tj
+0 -18 Td
+(extracted: a table-aware route that loses the) Tj
+0 -18 Td
+(surrounding prose is a regression, not a win.) Tj
+ET
+endstream
+endobj
+xref
+0 7
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000191 00000 n 
+0000000281 00000 n 
+0000000407 00000 n 
+trailer
+<< /Size 7 /Root 1 0 R /Info 4 0 R >>
+startxref
+1355
+%%EOF

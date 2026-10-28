@@ -1,0 +1,33 @@
+# 二进制夹具不做行尾转换
+#
+# 为什么必须**显式**声明：Windows 上 `core.autocrlf=true` 会把"看起来是文本"的文件
+# 在 checkout 时注入 CR。PDF 的 xref 是一张**字节偏移表**，换行被改写会让整个结构错位 ——
+# 表现为"夹具在本机能读、在别人机器上损坏"，而本地测试**永远发现不了**
+# （2026-10-14 提交 M4 的 PDF 夹具时踩到：`pdf_text.pdf`/`pdf_table.pdf` 是纯 ASCII 内容的
+# PDF，git 自动判定为文本，`git ls-files --eol` 显示 `i/lf` ⇒ checkout 会变成 CRLF）。
+#
+# 含 NUL 字节的（`pdf_scanned.pdf`/`sample.docx`）git 会自己判成二进制，但**不能靠运气**：
+# 判据是文件内容，同一类夹具换个生成方式就可能翻转。
+*.pdf   -text
+*.docx  -text
+*.doc   -text
+*.png   -text
+*.jpg   -text
+*.jpeg  -text
+*.gif   -text
+*.webp  -text
+*.zip   -text
+*.gz    -text
+# 办公三件套的另外两件与思维导图：**都是 ZIP**，行尾转换会直接损坏压缩数据。
+# XLSX 夹具（`tests/fixtures/feed/sample.xlsx`）含 NUL、git 大概率判成二进制，
+# 但如上所述"不能靠运气" —— 同后缀换个生成方式（比如内容全是 ASCII 的极小工作簿）
+# 就可能翻转，而损坏只在**别人的 checkout** 上出现、本地测试永远发现不了。
+*.xlsx  -text
+*.xlsm  -text
+*.xltx  -text
+*.xltm  -text
+*.xls   -text
+*.pptx  -text
+*.pptm  -text
+*.ppsx  -text
+*.xmind -text

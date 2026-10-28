@@ -7,7 +7,7 @@ action 收尾日志统一走本模块 _action_log（延迟导入 cli._cli_log，
 去耦约定：
 - 不出现任何绝对路径：数据位置走 Store 默认解析（HOME / 环境变量），
   看板端口走 AGENTMEMHUB_PORT（默认 8086）。
-- 引擎状态一律经 memos_daemon.daemon_status() 获取（rag 后端为进程内直调，
+- 引擎状态一律经 engine_api.daemon_status() 获取（rag 后端为进程内直调，
   不发 HTTP、无守护进程可启停）。
 - 不 import web 模块本身（看板用独立子进程启动，避免阻塞菜单）。
 
@@ -66,11 +66,11 @@ def env_snapshot() -> dict:
     引擎状态只取 daemon_status() 一处真相（rag 后端下它是进程内直调，
     不探 18800）；不再额外发 HTTP 二次探测。
     """
-    from agentmemhub import memos_daemon
+    from agentmemhub import engine_api
     return {
         "adapters": [a.describe() for a in adapters.all_adapters()],
         "stats": _store_stats_safe(),
-        "engine": memos_daemon.daemon_status(),
+        "engine": engine_api.daemon_status(),
     }
 
 
@@ -88,29 +88,19 @@ def _render_snapshot(s: dict) -> str:
         lines.append("  本地库: （空 —— 建议先执行 [1] 提取入库）")
     eng = s.get("engine") or {}
     summ = eng.get("summary") or {}
-    if eng.get("backend") == "rag":
-        # 内置引擎：随进程启动，无守护/无端口；就绪即可 [3] 写入
-        if eng.get("online"):
-            traces = summ.get("traces")
-            model = summ.get("embedding_model")
-            cov = summ.get("coverage")
-            detail = "，".join(x for x in (
-                f"{traces} 条记忆" if traces is not None else "",
-                f"模型 {model}" if model else "",
-                f"向量覆盖 {(cov * 100):.0f}%" if cov is not None else "",
-            ) if x)
-            lines.append("  记忆索引: 就绪（内置引擎）" + (f" · {detail}" if detail else ""))
-        else:
-            lines.append("  记忆索引: 不可用 —— 检查 database/session_rag.db 与 models/")
-        return "\n".join(lines)
+    # 内置引擎：随进程启动，无守护/无端口；就绪即可 [3] 写入
     if eng.get("online"):
-        managed = "，本工具托管" if eng.get("managed") else ""
-        pid = f" PID {eng['pid']}" if eng.get("pid") else ""
         traces = summ.get("traces")
-        extra = f"，{traces} 条记忆" if traces is not None else ""
-        lines.append(f"  记忆引擎: 运行中{pid}{managed}{extra}（{eng.get('base_url') or ''}）")
+        model = summ.get("embedding_model")
+        cov = summ.get("coverage")
+        detail = "，".join(x for x in (
+            f"{traces} 条记忆" if traces is not None else "",
+            f"模型 {model}" if model else "",
+            f"向量覆盖 {(cov * 100):.0f}%" if cov is not None else "",
+        ) if x)
+        lines.append("  记忆索引: 就绪（内置引擎）" + (f" · {detail}" if detail else ""))
     else:
-        lines.append("  记忆引擎: 已停止（backend=memos 回退模式，需外部引擎）")
+        lines.append("  记忆索引: 不可用 —— 检查 database/session_rag.db 与 models/")
     return "\n".join(lines)
 
 
@@ -139,11 +129,24 @@ MENU = """
 
 
 def _choose_source() -> str:
-    """选择来源：直接回车 = 全部；输入 source 名 = 单个。"""
+    """选择来源：直接回车 = 全部；输入 source 名 = 单个。
+
+    拼错**必须说出来并重新问**：原先错名被静默回落成 `""`（= 全部源），
+    想只提取 `cla` 结果把全量重跑一遍，且没有任何提示。
+    """
     srcs = [a.source for a in adapters.all_adapters()]
     _out(f"  可选 source: {', '.join(srcs)}（回车 = 全部）")
-    raw = input("  source> ").strip().lower()
-    return raw if raw in srcs else ""
+    for _ in range(3):
+        raw = input("  source> ").strip().lower()
+        if not raw:
+            return ""
+        if raw in srcs:
+            return raw
+        near = [s for s in srcs if s.startswith(raw) or raw in s]
+        hint = f"（是不是 {near[0]}？）" if len(near) == 1 else ""
+        _out(f"  ✗ 没有名为 {raw!r} 的 source{hint}，请重输或直接回车=全部")
+    _out("  已放弃选择，按「全部源」处理 —— 若不想全量，请重开菜单")
+    return ""
 
 
 def _ask(prompt: str, default: str = "") -> str:
@@ -172,7 +175,24 @@ def action_search() -> None:
         return
     source = _choose_source()
     role = _ask("  角色（user/assistant/tool/reasoning，回车=全部）> ").lower()
+    if role and role not in ("user", "assistant", "tool", "reasoning"):
+        # 不校验的表现是：拼错就静默 0 命中，用户以为"库里没这条"
+        _out(f"  ✗ 角色只能是 user/assistant/tool/reasoning，已按全部处理")
+        role = ""
     run_search_text(query, source=source, role=role, limit=20)
+
+
+def _wait_port(port: int, timeout: float = 15.0, proc=None) -> bool:
+    """等端口真的能连上（进程中途退出则立刻返回 False）。"""
+    import time as _t
+    deadline = _t.time() + timeout
+    while _t.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            return False
+        if _port_listening(port):
+            return True
+        _t.sleep(0.2)
+    return _port_listening(port)
 
 
 def action_dashboard() -> None:
@@ -187,6 +207,13 @@ def action_dashboard() -> None:
         return
     port = dashboard_port()
     if _port_listening(port):
+        if _is_our_dashboard(port):
+            # 非 Windows 上没法枚举进程（见 `_find_serve_processes`），若不
+            # "认领"一下，用户第二次按 [6] 就会被劝"端口被别人占了" —— 而
+            # 那个"别人"正是自己刚启动的看板，提示完全指错方向。
+            _out(f"  看板已在运行 → http://127.0.0.1:{port}/")
+            _out("  （当前平台无法枚举进程归属，停止看板请用 [7] 或手动结束该进程）")
+            return
         _out(f"  端口 {port} 已被其他程序占用，看板无法启动；"
              f"可换端口启动：python -m agentmemhub serve --port <端口>")
         return
@@ -197,6 +224,14 @@ def action_dashboard() -> None:
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
     _out(f"  看板启动中（PID {proc.pid}）→ http://127.0.0.1:{port}/")
+    # 不能说完就不管：端口被占、依赖缺失都会让子进程立刻退出，而它的
+    # stderr 被 DEVNULL 吞掉 —— 用户看到的只有"打不开"，且反复按 [6]
+    # 会堆一串失败进程。所以等一下端口真的通，再宣布成功。
+    if _wait_port(port, timeout=15.0, proc=proc):
+        _out("  ✓ 看板已就绪")
+    else:
+        _out(f"  ✗ 看板 15 秒内没有起来（PID {proc.pid}，端口 {port}）")
+        _out("    请前台跑一次看报错：python -m agentmemhub serve --port <端口>")
     _out("  （在浏览器打开上面的地址；停止看板可用 [7] 或关闭该进程）")
     _action_log(f"看板启动（控制台）→ PID {proc.pid} 端口 {port}")
 
@@ -206,6 +241,23 @@ def _port_listening(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.5)
         return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _is_our_dashboard(port: int, timeout: float = 1.0) -> bool:
+    """端口上跑的是不是我们自己的看板。
+
+    靠 `/api/health` 的返回结构认领（它必带 `healthy` 字段）。探测失败一律
+    当作"不是"，因为这里的用途只是**避免误报**，不能反过来把真占用说成自己人。
+    """
+    import json
+    import urllib.request
+    try:
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/health", timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:                       # noqa: BLE001 —— 探不通就按"不是"处理
+        return False
+    return isinstance(data, dict) and "healthy" in data
 
 
 _PS_FIND_SERVE = ("Get-CimInstance Win32_Process | "
@@ -280,6 +332,39 @@ def _dashboard_pid(port: int) -> Optional[int]:
     return None
 
 
+_PS_CMDLINE = (
+    "$p = Get-CimInstance Win32_Process -Filter 'ProcessId={pid}' "
+    "-ErrorAction SilentlyContinue; if ($p) { $p.CommandLine }")
+
+
+def _process_cmdline(pid: int) -> str:
+    """取进程命令行 —— 用来回答"这个 PID 到底是谁"。取不到返回空串。"""
+    if os.name == "nt":
+        try:
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 _PS_CMDLINE.format(pid=pid)],
+                capture_output=True, text=True, errors="replace", timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        return (out.stdout or "").strip()
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            return fh.read().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+    except OSError:
+        return ""
+
+
+def _looks_like_dashboard(cmdline: str) -> bool:
+    """命令行像不像"本项目的看板进程"。
+
+    两个词都要有：只认 `agentmemhub`，`python -c "import agentmemhub"` 也会中；
+    只看 `serve`，`python -m http.server` 更不沾边。
+    """
+    low = f" {cmdline.lower()} "
+    return "agentmemhub" in low and " serve " in low
+
+
 def action_dashboard_stop() -> None:
     """停止网页看板：按进程特征找 serve 进程结束之（确认后执行）。"""
     import time as _t
@@ -293,6 +378,15 @@ def action_dashboard_stop() -> None:
         pid = _dashboard_pid(port)
         if pid is None:
             _out(f"  端口 {port} 被占用但未能解析进程 PID，请手动关闭占用进程")
+            return
+        # ⚠️ 端口占用 ≠ 看板占用。这条兜底路径上的 PID 只有一个来源（谁在监听
+        # 这个端口），没有任何归属信息 —— 原先直接 taskkill，端口被别家服务
+        # 占着就会把别人杀了。所以先问一句"你是谁"。
+        cmd = _process_cmdline(pid)
+        if not _looks_like_dashboard(cmd):
+            _out(f"  ✗ 端口 {port} 被 PID {pid} 占用，但它不是看板进程："
+                 f"{cmd[:80] or '（命令行取不到）'}")
+            _out("    拒绝误杀 —— 请自行确认那个进程后再处理")
             return
         procs = [{"pid": pid, "port": port}]
     where = "、".join(f"PID {p['pid']}（端口 {p['port']}）" for p in procs)
@@ -397,7 +491,7 @@ def action_distill() -> None:
     _action_log(f"蒸馏记忆（控制台）→ {r}")
 
 
-def action_memos() -> None:
+def action_memory_write() -> None:
     """写入记忆：把采集库的会话向量化写入记忆索引（小模型先跑完即可检索）。"""
     from agentmemhub.cli import _vectorize_stage
     if not _confirm("  开始向量化写入记忆索引？"):
@@ -423,7 +517,7 @@ ACTIONS = {
     "1": ("提取会话入库", action_ingest),
     "2": ("清洗数据", action_clean),
     "3": ("蒸馏记忆", action_distill),
-    "4": ("写入记忆", action_memos),
+    "4": ("写入记忆", action_memory_write),
     # 「自动评分」入口已隐藏（action_score 保留，供 CLI score 与将来恢复）
     "5": ("检索关键字", action_search),
     "6": ("启动网页看板", action_dashboard),

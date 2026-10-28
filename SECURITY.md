@@ -4,9 +4,10 @@ AgentMemHub 是一个**本地运行**的工具，会被推送到公开仓库的�
 
 ## 数据流边界
 
-- 所有 Agent 对话历史**只在本机读取**，写入本地 SQLite（默认 `~/.agentmemhub/agentmemhub.db`）。
+- 所有 Agent 对话历史**只在本机读取**，写入本地 SQLite（默认 `<项目根>/database/agentmemhub.db`，
+  可用 `AGENTMEM_HUB_DATA_DIR` 或 yaml 的 `data_dir` 改到别处）。
 - 工具不会将任何会话数据上传云端；也无遥测。
-- 只有你显式执行的 `export` / `memos --push` 才会把**脱敏后的结构化数据**写到本地文件或你本机运行的 MemOS 服务。
+- 只有你显式执行的 `export` 才会把**脱敏后的结构化数据**写到本地文件。
 
 ## 公开仓库脱敏规则
 
@@ -24,7 +25,7 @@ AgentMemHub 是一个**本地运行**的工具，会被推送到公开仓库的�
 
 - 运行所需的敏感配置一律用**示例文件**给出，真实值从本地环境变量或 `Path.home()` 探索得到，不落盘到仓库：
   - `.env.example` —— 环境变量占位说明
-  - `.env.example` —— 数据源配置示例（路径留空）
+  - `agentmemhub.yaml.example` —— 完整配置示例（**密钥一律留空**）
 - 例如 `~/.zcode/cli/db/db.sqlite` 这类路径由 adapter 的 `candidate_paths()` 在**运行时**通过 `Path.home()` 计算，代码里不硬编码真实用户名或绝对路径。
 
 ## 安全注意事项（使用者）

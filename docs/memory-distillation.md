@@ -33,7 +33,7 @@
 [S3 跨会话去重] 纯本地：入库前向量化近邻查询，三档标记 new/similar/duplicate
    ▼
 [S4 入库] ────── memories 表（真相源）+ units 投影（source='distilled'）
-                 → 三路召回 / MCP / 面板零改动；脱敏正则在入库前兜底
+                 → 六路通道召回 / MCP / 面板零改动；脱敏正则在入库前兜底
 ```
 
 幂等基石：**content_hash**（会话/切片内容指纹）。同内容重跑零重复；
@@ -97,7 +97,8 @@
 ### 1.5 配置现状与 D2 修复
 
 `agentmemhub.yaml` 早有 `llm:` 段，但 `config.py` 原先**未解析**它；
-`scoring.read_engine_llm()` 读的是回退引擎的配置文件（memos 时代路径）——
+`scoring.read_engine_llm()` 读的是回退引擎的配置文件（memos 时代路径；该路径已随
+v2.8 移除 MemOS 一并删除）——
 rag 主线因此没有统一的 LLM 配置源。
 
 → **D2 已修复**：`config.py` 新增 `llm` 与 `distillation` 两个属性
@@ -324,7 +325,7 @@ distilled_memories(status IN ('new','similar'))
           text=('topic：' if topic else '') + content,
           title=会话标题,
           updated_at=写入/改写时刻)             ← time 是**事件时间**，两者语义不同
-  → FTS 触发器自动同步 → 三路召回 / MCP / 面板全部沿用现有管线
+  → FTS 触发器自动同步 → 六路通道召回 / MCP / 面板全部沿用现有管线
 ```
 
 **关键决策：用 `units.role='distilled'` 而不是独立 `source`。** 现有排除
@@ -408,6 +409,8 @@ distillation:
     per_message_cap: 2000          # 单条消息入 prompt 时的截断
   merge:
     enabled: true                  # 同会话多片合并沉淀
+    max_chars: 8000                # 层级合并的单批字符预算
+    max_rounds: 6                  # 层级合并的最大轮数（不收敛就升级重试）
   dedup:
     cosine_duplicate: 0.92         # ≥ 此值判重复（丢弃+指向）
     cosine_similar: 0.80           # ≥ 此值判相似（入库+打标互链）
@@ -420,7 +423,9 @@ distillation:
 ```
 
 **配套基础设施（D2）**：`config.py` 解析顶层 `llm` 段与 `distillation` 段；
-`agentmemhub.yaml.example` 同步补两段（现状 example 缺 llm 段）。
+`agentmemhub.yaml.example` **已补齐两段**（2026-10-04 核对：example 现含
+`data_dir` / `agents` / `web` / `rag` / `llm` / `llm_batch` / `wiki` /
+`distillation` / `snapshot` / `notify` / `logs` 共 12 段，密钥一律留空）。
 
 ---
 

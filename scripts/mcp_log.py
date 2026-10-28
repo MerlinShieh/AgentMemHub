@@ -114,6 +114,10 @@ def main() -> int:
         records = [r for r in records if _match(r, args.grep)]
 
     total = len(records)
+    # `records[-limit:]` 对 0 是"全部"、对负数是"从倒数第 N 条起"，
+    # 两种都跟 `--limit 0` / `--limit -5` 的字面意思完全相反
+    if args.limit <= 0:
+        raise SystemExit("--limit 必须是正整数（0 会被切片当成'全部'，负数会从末尾倒数）")
     shown = records[-args.limit:]
     if args.json:
         print(json.dumps(shown, ensure_ascii=False, indent=2))

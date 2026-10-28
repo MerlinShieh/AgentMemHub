@@ -1,6 +1,6 @@
 """R3 rag 后端派发层测试：backend 开关、engine_request 路由、状态语义、sync 向量化分支。
 
-约定（tests/conftest.py）：存量套件整体钉 memos；本文件逐测试显式 opt-in rag。
+约定：引擎只剩进程内一种后端（回退路径已移除），本文件是派发层的专项测试。
 全部使用 tmp 沙箱索引库（rag_bridge.configure），绝不触碰真实 session_rag.db。
 """
 from __future__ import annotations
@@ -11,7 +11,7 @@ import logging
 
 import pytest
 
-from agentmemhub import memos_daemon, rag_bridge
+from agentmemhub import engine_api, rag_bridge
 from agentmemhub.config import Config
 from agentmemhub.rag.config import load_settings
 
@@ -33,21 +33,7 @@ def rag_env(tmp_path, monkeypatch):
 
 # ── backend 开关解析 ───────────────────────────────────────────────────
 
-def test_backend_default_and_overrides():
-    assert Config(env={}).memory_backend == "rag"
-    assert Config(env={"AGENTMEMHUB_BACKEND": "memos"}).memory_backend == "memos"
-    assert Config(env={"AGENTMEMHUB_BACKEND": "RAG"}).memory_backend == "rag"
-    assert Config(env={"AGENTMEMHUB_BACKEND": "nonsense"}).memory_backend == "rag"
 
-
-def test_stub_config_without_attr_is_memos(monkeypatch):
-    class _Stub:
-        pass
-    monkeypatch.setattr("agentmemhub.config.config", lambda: _Stub())
-    assert memos_daemon._backend_is_rag() is False
-
-
-# ── engine_request 路由（派发表全覆盖 + 未知路径炸） ────────────────────
 
 def test_dispatch_routes(rag_env, monkeypatch):
     calls = {}
@@ -58,19 +44,18 @@ def test_dispatch_routes(rag_env, monkeypatch):
     monkeypatch.setattr(rag_bridge, "traces_list",
                         lambda limit, offset: {"traces": [], "limit": limit,
                                                "offset": offset})
-    monkeypatch.setattr(rag_bridge, "import_bundle",
-                        lambda traces: {"imported": len(traces), "skipped": 0})
     monkeypatch.setattr(rag_bridge, "feedback",
                         lambda tid, pol, **k: {"ok": 1, "t": tid})
     monkeypatch.setattr(rag_bridge, "rebuild_embeddings",
                         lambda mode="repair": {"done": True})
-    er = memos_daemon.engine_request
+    er = engine_api.engine_request
     assert er("POST", "/api/v1/memory/search", {"agent": "a", "query": "问题"})["hits"] == []
     assert calls["search"] == "问题"
     assert er("GET", "/api/v1/overview")["ok"] is True
     assert er("GET", "/api/v1/traces?limit=5&offset=10")["offset"] == 10
-    assert er("POST", "/api/v1/import",
-              {"traces": [{"id": "x", "userText": "内容"}]})["imported"] == 1
+    # /api/v1/import 随 MemOS 一并移除：直写改走 save_memory_trace，端点须明确报未实现
+    with pytest.raises(RuntimeError, match="未实现"):
+        er("POST", "/api/v1/import", {"traces": []})
     assert er("POST", "/api/v1/feedback",
               {"traceId": "x", "polarity": "positive"})["ok"] == 1
     assert er("POST", "/api/v1/embeddings/rebuild", {"mode": "repair"})["done"] is True
@@ -83,12 +68,11 @@ def test_dispatch_routes(rag_env, monkeypatch):
 # ── 真实桥端到端（tmp 库，不 mock bridge 内部） ─────────────────────────
 
 def test_end_to_end_save_search_score_recent(rag_env):
-    er = memos_daemon.engine_request
-    r = er("POST", "/api/v1/import", {"traces": [{
-        "id": "mcp_e2e", "episodeId": "mcp", "sessionId": "mcp",
-        "ts": 1786000000000, "userText": "SQLite WAL 文件膨胀拖慢写入",
-        "agentText": "TRUNCATE checkpoint 归零解决", "value": 0.5}]})
-    assert r == {"imported": 1, "skipped": 0}
+    er = engine_api.engine_request
+    r = rag_bridge.save_memory_trace(
+        "SQLite WAL 文件膨胀拖慢写入：TRUNCATE checkpoint 归零解决",
+        tid="mcp_e2e", ts=1786000000000, value=0.5)
+    assert r["imported"] == 1 and r["skipped"] == 0
     hits = er("POST", "/api/v1/memory/search",
               {"agent": "a", "query": "数据库日志文件变大写入慢"})["hits"]
     assert hits and hits[0]["refId"] == "mcp_e2e"
@@ -111,31 +95,27 @@ def test_feedback_unknown_id_raises(rag_env):
 # ── 状态语义：auth_state / daemon_status / probe ───────────────────────
 
 def test_auth_state_and_daemon_status_rag(rag_env, monkeypatch):
-    st = memos_daemon.auth_state()
+    st = engine_api.auth_state()
     assert st and st["authenticated"] is True          # 沙箱库可开 → 在线
-    ds = memos_daemon.daemon_status()
+    ds = engine_api.daemon_status()
     assert ds["online"] is True and ds["backend"] == "rag"
     assert ds["managed"] is False and ds["pid"] is None
     assert ds["summary"]["traces"] >= 0
-    start = memos_daemon.daemon_start()
-    assert start["started"] is False and start["reason"] == "rag-in-process"
 
 
 def test_auth_state_offline_when_bridge_broken(rag_env, monkeypatch):
     monkeypatch.setattr(rag_bridge, "probe",
                         lambda: {"online": False, "error": "db missing"})
-    assert memos_daemon.auth_state() is None
-    assert memos_daemon.daemon_status()["online"] is False
+    assert engine_api.auth_state() is None
+    assert engine_api.daemon_status()["online"] is False
 
 
 # ── scoring 派发（memos 直读 vs rag bridge） ───────────────────────────
 
 def test_scoring_enumeration_via_bridge(rag_env, monkeypatch):
     from agentmemhub import scoring
-    rag_bridge.import_bundle([
-        {"id": "mcp_s1", "userText": "第一条待评记忆", "ts": 1},
-        {"id": "mcp_s2", "userText": "第二条待评记忆", "ts": 2},
-    ])
+    rag_bridge.save_memory_trace("第一条待评记忆", tid="mcp_s1", ts=1)
+    rag_bridge.save_memory_trace("第二条待评记忆", tid="mcp_s2", ts=2)
     assert {t["id"] for t in scoring.list_all_traces()} == {"mcp_s1", "mcp_s2"}
     assert set(scoring.list_trace_ids()) == {"mcp_s1", "mcp_s2"}
     got = scoring.list_traces_by_ids({"mcp_s1"})
@@ -159,7 +139,7 @@ def test_run_sync_rag_vectorize_stage(rag_env, monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli, "_vectorize_stage", fake_vectorize)
     monkeypatch.setattr(cli, "run_ingest", lambda *a, **k: None)
-    monkeypatch.setattr(memos_daemon, "auth_state", lambda: {"authenticated": True})
+    monkeypatch.setattr(engine_api, "auth_state", lambda: {"authenticated": True})
     monkeypatch.setattr(cli, "Store", lambda *a, **k: _FakeStore())
 
     def mark(s, key):
@@ -169,10 +149,8 @@ def test_run_sync_rag_vectorize_stage(rag_env, monkeypatch, tmp_path):
     monkeypatch.setattr(watermarks, "save_state", lambda *a: None)
     monkeypatch.setattr(watermarks, "pending_for", lambda s, k: [])
 
-    monkeypatch.setattr(cli, "push_to_memos",
-                        lambda *a, **k: (_ for _ in ()).throw(
-                            AssertionError("rag 下不得走 push_to_memos")))
-    cli.run_sync(push="rag")
+    assert not hasattr(cli, "push_to_memos"), "MemOS 推送路径应已整体移除"
+    cli.run_sync(vectorize=True)
     assert vec.get("called") is True
     assert state_calls.get("push") == 1
 
@@ -190,19 +168,34 @@ class _FakeStore:
 
 # ── R5.1 验收修复回归 ──────────────────────────────────────────────────
 
-def test_search_curate_truncates_by_relevance_not_hard_5(rag_env):
-    """机械终审：按 ≥0.7×top 截断；上限放宽到 SEARCH_MAX_HITS=20（R6 体验反馈：
-    硬砍 5 条让用户以为"只有这么点相关"，改为相关度截断）。"""
-    rag_bridge.import_bundle([
-        {"id": f"mcp_c{i}", "userText": f"终审验证条目 编号{i} 内容递增一点点{i * 7}",
-         "ts": 100 + i} for i in range(8)])
-    all_hits = rag_bridge.search("h", "终审验证条目", k=8, curate=False)["hits"]
-    curated = rag_bridge.search("h", "终审验证条目", k=8, curate=True)["hits"]
-    assert len(all_hits) == 8
-    assert len(curated) <= rag_bridge.SEARCH_MAX_HITS
-    assert len(curated) > 5 or len(curated) == len(all_hits), "不再硬砍到 5 条"
-    top = curated[0]["score"]
-    assert all(h["score"] >= 0.7 * top - 1e-9 for h in curated)
+def test_search_curate_truncates_by_relevance_not_hard_5(tmp_path, monkeypatch):
+    """机械终审：按相对阈值截断，但上限放宽到 SEARCH_MAX_HITS=20（R6 体验反馈：
+    硬砍 5 条让用户以为"只有这么点相关"，改为相关度截断）。
+
+    本用例**显式固定最宽松档**（recall_level=5，终审阈值 0.7）：它验证的是
+    "上限不是硬编码 5"，与严格档无关——在默认的最严格档（0.9×top）下，
+    分数跨度大的构造数据本就只该保留 1 条。
+    """
+    monkeypatch.setenv("AGENTMEMHUB_BACKEND", "rag")
+    base = load_settings()
+    rag_bridge.configure(dataclasses.replace(
+        base, index_db=tmp_path / "rag.db", source_db=tmp_path / "src.db",
+        log_dir=tmp_path / "logs",
+        retrieval={**base.retrieval, "recall_level": 5}))
+    try:
+        for i in range(8):
+            rag_bridge.save_memory_trace(
+                f"终审验证条目 编号{i} 内容递增一点点{i * 7}",
+                tid=f"mcp_c{i}", ts=100 + i)
+        all_hits = rag_bridge.search("h", "终审验证条目", k=8, curate=False)["hits"]
+        curated = rag_bridge.search("h", "终审验证条目", k=8, curate=True)["hits"]
+        assert len(all_hits) == 8
+        assert len(curated) <= rag_bridge.SEARCH_MAX_HITS
+        assert len(curated) > 5 or len(curated) == len(all_hits), "不再硬砍到 5 条"
+        top = curated[0]["score"]
+        assert all(h["score"] >= 0.7 * top - 1e-9 for h in curated)
+    finally:
+        rag_bridge.reset_settings()
 
 
 def test_search_hits_include_conversation_location(rag_env):
@@ -230,29 +223,44 @@ def test_search_hits_include_conversation_location(rag_env):
     assert h["source"] and h["conversationId"], "会话定位字段不得为空"
     assert "turnKey" in h and "title" in h
 
-    rag_bridge.import_bundle([{"id": "mcp_loc", "userText": "定位测试原子记忆",
-                              "ts": 1}])
+    rag_bridge.save_memory_trace("定位测试原子记忆", tid="mcp_loc", ts=1)
     res2 = rag_bridge.search("h", "定位测试原子记忆", k=5)
     atomic = [h for h in res2["hits"] if h["atomic"]]
     assert atomic, "原子记忆须标记 atomic=True（无对应会话）"
 
 
-def test_import_bundle_stores_tags(rag_env):
+def test_save_memory_trace_stores_tags(rag_env):
     """MCP memory_save 的 tags 落进 units.tags（JSON 数组文本）；缺省为 NULL。
 
     tags 是纯透传字段（引擎不解释语义），供面板筛选与溯源使用。
     """
-    rag_bridge.import_bundle([
-        {"id": "mcp_tags_a", "userText": "带标签的原子记忆", "ts": 1,
-         "tags": ["dsh", "mcp"]},
-        {"id": "mcp_tags_b", "userText": "无标签的原子记忆", "ts": 2},
-    ])
+    rag_bridge.save_memory_trace("带标签的原子记忆", tid="mcp_tags_a", ts=1,
+                                 tags=["dsh", "mcp"])
+    rag_bridge.save_memory_trace("无标签的原子记忆", tid="mcp_tags_b", ts=2)
     conn = rag_bridge._conn()
     rows = dict(conn.execute(
         "SELECT legacy_id, tags FROM units"
         " WHERE legacy_id IN ('mcp_tags_a','mcp_tags_b')").fetchall())
     assert json.loads(rows["mcp_tags_a"]) == ["dsh", "mcp"]
     assert rows["mcp_tags_b"] is None, "未传 tags 应保持 NULL，而不是空字符串"
+
+
+def test_save_memory_trace_可声明外部来源(rag_env):
+    """Agent 直写外部知识时能声明 origin='external'；缺省仍是 native（行为不变）。
+
+    为什么需要它：Agent 用 Read 工具读完 PDF/图片后把结论写回时，走的是**直写通路**
+    （`save_memory_trace`）——而那条路原先硬编码 source='memory' 且**不写 origin**，
+    于是外部知识会被标成"自有沉淀"（M0 地基的第三处缺口）。
+    """
+    rag_bridge.save_memory_trace("外部投喂进来的一条结论", tid="mcp_ext_1", ts=1,
+                                 origin="external")
+    rag_bridge.save_memory_trace("自有沉淀的一条结论", tid="mcp_nat_1", ts=2)
+    conn = rag_bridge._conn()
+    rows = dict(conn.execute(
+        "SELECT legacy_id, origin FROM units"
+        " WHERE legacy_id IN ('mcp_ext_1','mcp_nat_1')").fetchall())
+    assert rows["mcp_ext_1"] == "external"
+    assert rows["mcp_nat_1"] == "native", "缺省必须仍是 native（不破坏既有行为）"
 
 
 def test_safe_cutoff_hits_rules():
@@ -264,7 +272,40 @@ def test_safe_cutoff_hits_rules():
     assert rag_bridge.safe_cutoff_hits(one) == one[:1]
 
 
-def test_web_push_button_vectorizes_not_bundles(rag_env, monkeypatch):
+def test_safe_cutoff_hits_页面免分数门限():
+    """页面曾被 0.5×top 的宽松例外伺候 → 实测 12/12 查询都出现页面、平均 4.2 条。
+    现在"该不该进结果"由 search.apply_page_policy 按**证据类型**判定（分数对
+    页面不可用：相关页 0.21×top、噪声页 0.63×top），这里只执行配额。"""
+    hits = [{"score": 1.0, "kind": "memory"},
+            {"score": 0.3, "kind": "page"},      # 低分但有跨池证据 → 保留
+            {"score": 0.2, "kind": "page"}]
+    kept = rag_bridge.safe_cutoff_hits(hits, max_keep=10)
+    assert [h["kind"] for h in kept] == ["memory", "page", "page"]
+    # 非页面仍走 0.7×top 截断
+    mixed = [{"score": 1.0, "kind": "memory"}, {"score": 0.5, "kind": "memory"}]
+    assert len(rag_bridge.safe_cutoff_hits(mixed, max_keep=10)) == 1
+
+
+def test_safe_cutoff_hits_页面不受窗口截断():
+    """页面分数天然低、排在末尾；按 `hits[:max_keep]` 窗口切会正好切掉它。
+    实测：k=20 时页面掉出窗口而消失（k=8 时正常）。页面占名额、总数守恒。"""
+    hits = ([{"score": 1.0, "kind": "memory"}]
+            + [{"score": 0.9 - i * 0.01, "kind": "message"} for i in range(5)]
+            + [{"score": 0.2, "kind": "page"}])
+    kept = rag_bridge.safe_cutoff_hits(hits, max_keep=3)
+    assert [h["kind"] for h in kept] == ["memory", "message", "page"]
+    assert len(kept) == 3                       # 总数守恒（页面占掉 1 个名额）
+    assert kept == sorted(kept, key=lambda h: -h["score"])
+
+
+def test_safe_cutoff_hits_页面只受配额约束():
+    hits = [{"score": 1.0, "kind": "memory"}] + [
+        {"score": 0.9 - i * 0.01, "kind": "page"} for i in range(5)]
+    kept = rag_bridge.safe_cutoff_hits(hits, max_keep=2)
+    assert sum(1 for h in kept if h["kind"] == "page") == 3     # 配额 3
+
+
+def test_web_push_button_vectorizes_only(rag_env, monkeypatch):
     """面板「推送记忆」按钮在 rag 后端必须转向量化（走 bundle 会重复落 memory 单元）。"""
     from agentmemhub.web import app
 
@@ -292,8 +333,8 @@ def test_llm_availability_probe_honest(rag_env, monkeypatch):
     assert isinstance(v, bool)     # 读不到配置就是 False，不装样子
 
 
-def test_import_bundle_writes_all_write_order_models(rag_env, tmp_path):
-    """import_bundle 按 rag.write.order 逐模型写向量。
+def test_save_memory_trace_writes_all_write_order_models(rag_env, tmp_path):
+    """save_memory_trace 按 rag.write.order 逐模型写向量。
 
     修复前只写 active 一张表 → 写入进程缓存旧 active 时，新记忆会落进
     另一张表在召回侧隐形（2026-09-11 实测：27 条 MCP 记忆因此搜不到）。
@@ -311,8 +352,8 @@ def test_import_bundle_writes_all_write_order_models(rag_env, tmp_path):
         models={**base.models, m2.id: m2},
         write={**base.write, "order": [base.active_model, m2.id]})
     rag_bridge.configure(st)
-    r = rag_bridge.import_bundle(
-        [{"id": "probe-w1", "userText": "多模型写入探针：应同时落两张向量表"}])
+    r = rag_bridge.save_memory_trace(
+        "多模型写入探针：应同时落两张向量表", tid="probe-w1")
     assert r["imported"] == 1
     conn = open_index(st.index_db)
     try:
@@ -324,3 +365,167 @@ def test_import_bundle_writes_all_write_order_models(rag_env, tmp_path):
             assert row, f"{spec.id} 的向量表应有该单元"
     finally:
         conn.close()
+
+
+def test_rebuild_repairs_all_models(rag_env, tmp_path):
+    """`rebuild --mode repair` 要给**每个**配置模型补缺失行，不只 active。
+
+    实测触发场景：写入侧修好之前落的那批记忆，small 全覆盖而 base 缺 1 条。
+    只补 active 时这个缺口永远补不上（`ingest --model` 的候选来自源库 events，
+    补不到 units 里的行），而缺一路向量不会报错 —— 只会让那部分内容在另一个
+    模型下"隐形"。
+    """
+    import dataclasses
+
+    from agentmemhub.rag.config import load_settings
+    from agentmemhub.rag.ingest import open_index
+
+    base = load_settings()
+    m2 = dataclasses.replace(base.active_spec, id="probe-m2-repair")
+    st = dataclasses.replace(
+        base, index_db=tmp_path / "idx_repair.db", source_db=tmp_path / "src.db",
+        log_dir=tmp_path / "logs",
+        models={**base.models, m2.id: m2},
+        write={**base.write, "order": [base.active_model, m2.id]})
+    rag_bridge.configure(st)
+    rag_bridge.save_memory_trace("补向量探针：两个模型都该被补齐", tid="probe-r1")
+
+    conn = open_index(st.index_db)
+    try:
+        uid = conn.execute("SELECT id FROM units WHERE legacy_id='probe-r1'"
+                           ).fetchone()[0]
+        with conn:                      # 模拟"历史遗留"：非 active 模型的向量缺失
+            conn.execute(f"DELETE FROM {m2.vec_table} WHERE rowid=?", (uid,))
+    finally:
+        conn.close()
+
+    assert rag_bridge.rebuild_embeddings("repair")["updated"] == 1
+
+    conn = open_index(st.index_db)
+    try:
+        for spec in (base.active_spec, m2):
+            assert conn.execute(f"SELECT 1 FROM {spec.vec_table} WHERE rowid=?",
+                                (uid,)).fetchone(), f"{spec.id} 的向量应被 repair 补回"
+    finally:
+        conn.close()
+
+
+# ── 终审（safe_cutoff_hits）：高分优先 + 低分字面兜底 ──────────────────
+#
+# 2026-09-22 实测发现：**页面层早已有"低分字面兜底席"，非页面层没有** ——
+# 于是同一次召回里出现荒谬的不对称：
+#     页面 0.195（有字面证据）→ 进了结果
+#     记忆 0.701（有字面证据）→ 被切掉
+# 根因是本函数只用一条**乘性相对门限**（`score ≥ floor_ratio × top`），而 top
+# 本身可能是噪声：拼错查询 `windowsctrol` 的 top1 是完全无关的字面命中(1.238)，
+# 门限因此被抬到 0.990，24 条候选只剩 4 条，真相关的
+# 「WindowsControl 项目架构与技术栈」(0.701，命中 fts+vec) 白白被切。
+#
+# 规则与页面层**同构**（用户验收标准同样是"不遗漏 > 排序靠前 > 噪声可容忍"）：
+#   ① 高分（≥ 门限）优先，但给字面兜底**留出席位**；
+#   ② 低分但**命中字面通道**（fts / ident / phrase）的，用兜底席救回；
+#   ③ 只救有字面证据的 —— 低分且只有向量分的仍然切掉（否则等于取消门限）。
+
+def _h(score, *, kind="memory", ref="x", signals=(), snippet=""):
+    return {"score": score, "kind": kind, "refId": ref,
+            "signals": list(signals), "snippet": snippet}
+
+
+def test_终审_低分真相关不被分数门限误杀():
+    """回归：有字面证据的低分条目必须被兜底席救回。"""
+    hits = [
+        _h(1.238, ref="noise", signals=["fts"]),         # 噪声当锚 → 门限 0.990
+        _h(0.701, ref="truth", signals=["fts", "vec"]),  # 真相关，有字面证据
+        _h(0.400, ref="lowvec", signals=["vec"]),        # 低分且无字面证据
+    ]
+    refs = [h["refId"] for h in rag_bridge.safe_cutoff_hits(
+        hits, max_keep=20, floor_ratio=0.8, page_max_keep=3)]
+    assert "truth" in refs, "低分但有字面证据的真相关不应被切掉"
+    assert "lowvec" not in refs, \
+        "低分且无字面证据的仍应被切（否则等于取消门限）"
+
+
+def test_终审_兜底席不挤掉高分条目():
+    """兜底席是"留出席位"，不是"插队" —— 高分条目必须还在。"""
+    hits = [
+        _h(1.000, ref="high1", signals=["vec"]),
+        _h(0.950, ref="high2", signals=["vec"]),
+        _h(0.300, ref="lit", signals=["ident"]),
+    ]
+    refs = [h["refId"] for h in rag_bridge.safe_cutoff_hits(
+        hits, max_keep=20, floor_ratio=0.8, page_max_keep=3)]
+    assert refs == ["high1", "high2", "lit"]
+
+
+def test_终审_全部高分时行为不变():
+    """纯回归保护：没有低分条目时，新逻辑不该改变结果。"""
+    hits = [_h(1.0, ref="a", signals=["vec"]), _h(0.9, ref="b", signals=["vec"])]
+    refs = [h["refId"] for h in rag_bridge.safe_cutoff_hits(
+        hits, max_keep=20, floor_ratio=0.8, page_max_keep=3)]
+    assert refs == ["a", "b"]
+
+
+def test_终审_页面只受配额不受分数门限():
+    """页面走自己的准入策略（apply_page_policy 已判定过），这里只执行配额。"""
+    hits = [
+        _h(1.000, ref="m1", signals=["vec"]),
+        _h(0.500, ref="p1", kind="page", signals=["page_fts"]),
+        _h(0.300, ref="m2", signals=["fts"]),
+    ]
+    refs = [h["refId"] for h in rag_bridge.safe_cutoff_hits(
+        hits, max_keep=20, floor_ratio=0.8, page_max_keep=3)]
+    assert "p1" in refs, "页面不套分数门限"
+
+
+# ── 同内容双投影去重（_dedupe_projections）─────────────────────────────
+#
+# 2026-09-22 实测：Agent 直写记忆在召回面有**两份内容相同**的单元 ——
+# `mcp_<hash>`（memory_save 写引擎时产生）与 `dst_<hash>`（蒸馏 S4 投影），
+# 两者用同一个内容 hash。后果：结果里同一条重复出现，而且**各占一个席位**
+# （实测把"低分字面兜底席"都吃掉了，挤掉别的条目）。
+
+class _Proj:
+    """最小 Hit 替身（去重只看 unit_id / kind / text）。"""
+
+    def __init__(self, uid, kind="memory", text=""):
+        self.unit_id = uid
+        self.kind = kind
+        self.text = text
+
+
+def test_去重_同内容双投影只保留一条():
+    hits = [_Proj(1), _Proj(2)]              # 按分数降序，1 分更高
+    refmap = {1: {"srcId": "mcp_abc123"}, 2: {"srcId": "dst_abc123"}}
+    out = rag_bridge._dedupe_projections(hits, refmap)
+    assert [h.unit_id for h in out] == [1], "应保留分数高的那份"
+
+
+def test_去重_hash分叉时用正文兜底():
+    """hash 会因入库脱敏而分叉 —— 实测 114 条 mcp_ 单元里有 11 条如此
+    （`content_anchor` 用原始内容、`fingerprint` 用规范化后内容）。
+    这类只能靠正文比对合并。"""
+    hits = [_Proj(1, text="同一段内容"), _Proj(2, text="同一段内容")]
+    refmap = {1: {"srcId": "mcp_aaa"}, 2: {"srcId": "dst_bbb"}}   # hash 不同
+    assert len(rag_bridge._dedupe_projections(hits, refmap)) == 1
+
+
+def test_去重_不同内容不合并():
+    hits = [_Proj(1, text="甲"), _Proj(2, text="乙")]
+    refmap = {1: {"srcId": "mcp_aaa"}, 2: {"srcId": "dst_bbb"}}
+    assert len(rag_bridge._dedupe_projections(hits, refmap)) == 2
+
+
+def test_去重_消息层与页面层不受影响():
+    """它们没有 mcp_/dst_ 配对；同文重复若出现，成因不同，不在此处合并。"""
+    hits = [_Proj(1, "message", "同样的话"), _Proj(2, "message", "同样的话"),
+            _Proj(3, "page", "同样的话"), _Proj(4, "page", "同样的话")]
+    refmap = {1: {"srcId": "mcp_aaa"}, 2: {"srcId": "dst_aaa"},
+              3: {"srcId": "wiki_x"}, 4: {"srcId": "wiki_x"}}
+    assert len(rag_bridge._dedupe_projections(hits, refmap)) == 4
+
+
+def test_去重_没有srcId且正文为空时不误删():
+    """老库/异常数据既缺 src_id 又没有正文时不能把条目误判成重复删掉。"""
+    hits = [_Proj(1), _Proj(2)]
+    refmap = {1: {}, 2: {"srcId": ""}}
+    assert len(rag_bridge._dedupe_projections(hits, refmap)) == 2

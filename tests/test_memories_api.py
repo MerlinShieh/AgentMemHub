@@ -22,8 +22,9 @@ def memories_env(tmp_path, monkeypatch):
     from pathlib import Path
 
     from agentmemhub.rag.config import load_settings
-    from agentmemhub.rag.ingest import open_index
+    from agentmemhub.rag.ingest import open_index, ensure_bridge_schema
     from agentmemhub.distill import ensure_distill_schema
+    from agentmemhub.rag.memstore import ensure_memstore_schema
 
     src_path = tmp_path / "agentmemhub.db"
     store = Store(src_path)
@@ -38,8 +39,8 @@ def memories_env(tmp_path, monkeypatch):
     conn = open_index(idx_path)
     conn.row_factory = sqlite3.Row
     ensure_distill_schema(conn)
-    from agentmemhub.rag.memstore import ensure_memstore_schema
     ensure_memstore_schema(conn)
+    ensure_bridge_schema(conn)   # units.legacy_id/tags 补列——api_memories 去重依赖
     # 两条蒸馏记忆（不同会话/类型）+ 一条手动记忆
     for i, (cid, mtype, content) in enumerate(
             (("c1", "decision", "会话一的蒸馏结论"),
@@ -56,16 +57,16 @@ def memories_env(tmp_path, monkeypatch):
     for i, h in enumerate(("h0", "h1")):
         cur = conn.execute(
             "INSERT INTO units(source, conversation_id, seq, role, turn_key,"
-            " src_id, time, text, chars) VALUES(?,?,?,?,?,?,?,?,?)",
+            " src_id, time, text, chars, legacy_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
             ("zcode", "c1", -1 - i, "distilled", f"tk{i}", f"dst_{h}",
-             1000 + i, f"投影条目{i}", 5))
+             1000 + i, f"投影条目{i}", 5, f"mcp_leg{i}"))
         conn.execute(
             "INSERT INTO unit_values(unit_id, value, updated_at) VALUES(?,?,?)",
             (cur.lastrowid, 0.3, 1000))
     cur = conn.execute(
         "INSERT INTO units(source, conversation_id, seq, role, turn_key,"
-        " src_id, time, text, chars) VALUES('memory','mcp',1,'user','mcp',"
-        "'mcp_manual1',500,'Agent 手动写入的记忆',9)")
+        " src_id, time, text, chars, legacy_id) VALUES('memory','mcp',1,'user','mcp',"
+        "'mcp_manual1',500,'Agent 手动写入的记忆',9,'mcp_manual1')")
     conn.execute(
         "INSERT INTO unit_values(unit_id, value, updated_at) VALUES(?,?,?)",
         (cur.lastrowid, 0.6, 500))
@@ -228,17 +229,76 @@ def test_memories_conversation_flag_and_feedback_state(memories_env, monkeypatch
     assert all(i["fb_polarity"] is None for i in d["items"])
 
     uid = by["会话一的蒸馏结论"]["unit_id"]
-    r = client.post("/api/memos/feedback",
+    r = client.post("/api/engine/feedback",
                     params={"traceId": f"unit:{uid}", "polarity": "positive"})
     assert r.status_code == 200, r.text
     d2 = client.get("/api/memories", params={"status": "all"}).json()
     m2 = {i["content"]: i for i in d2["items"]}["会话一的蒸馏结论"]
     assert m2["fb_polarity"] == "positive" and m2["value"] == 1.0
 
-    r2 = client.post("/api/memos/feedback",
+    r2 = client.post("/api/engine/feedback",
                      params={"traceId": f"unit:{uid}", "revoke": True})
     assert r2.status_code == 200, r2.text
     d3 = client.get("/api/memories", params={"status": "all"}).json()
     m3 = {i["content"]: i for i in d3["items"]}["会话一的蒸馏结论"]
     assert m3["fb_polarity"] is None
     assert m3["value"] == 0.3, "取消后回蒸馏来源初始分"
+
+
+# ----------------------------------------------------------------------
+# 单条记忆详情（/api/memories/{mid}）：wiki 正文里的 [mNNN] 点开看的就是它
+# ----------------------------------------------------------------------
+
+def test_memory_detail_带完整溯源(memories_env):
+    """能落回"哪条会话、第几轮、索引侧哪个 unit" —— 这是可点引用的全部意义。"""
+    client, _ = memories_env
+    d = client.get("/api/memories/1").json()
+    assert d["id"] == 1
+    assert d["content"] == "会话一的蒸馏结论"
+    assert d["source"] == "zcode"
+    assert d["type"] == "decision" and d["topic"] == "主题0"
+    # 采集库里确有 c1 → 会话标题可如实给前端
+    assert d["has_conversation"] is True
+    assert d["conversation_title"] == "会话甲"
+    # 字段存在即可（fixture 的 replace_source 不一定写 session_uid）
+    assert "session_uid" in d
+    # 索引侧：h0 已投影成 dst_h0，应能定位到 unit 与价值分
+    assert d["unit_id"] is not None
+    assert abs(d["value"] - 0.3) < 1e-9
+    # 未被归并 → 不该冒出 merged_into
+    assert d["merged_into"] is None
+
+
+def test_memory_detail_无会话记忆(memories_env):
+    """c2 不在采集库（MCP 直写同理）→ has_conversation=False。
+
+    前端据此外**不渲染**会话链接：`mcp` / `direct-*` 这类 conversation_id
+    是占位值，点进去只会 404，比不给链接更让人困惑。
+    """
+    client, _ = memories_env
+    d = client.get("/api/memories/3").json()
+    assert d["has_conversation"] is False
+    assert d["conversation_title"] == ""
+    # h2 没有投影行 → 索引侧字段全空，但接口照样 200（不能因缺投影就 500）
+    assert d["unit_id"] is None and d["value"] is None
+
+
+def test_memory_detail_不存在404(memories_env):
+    client, _ = memories_env
+    r = client.get("/api/memories/99999")
+    assert r.status_code == 404
+    assert "不存在" in r.json()["detail"]
+
+
+def test_memory_detail_归并给出主记忆(memories_env):
+    """被归并的行要指回主记忆：否则读者点开一条"已并走"的记忆会以为内容丢了。"""
+    client, paths = memories_env
+    conn = sqlite3.connect(paths["idx"])
+    conn.execute("UPDATE distilled_memories SET status='merged', dedup_of=1 WHERE id=3")
+    conn.commit()
+    conn.close()
+
+    d = client.get("/api/memories/3").json()
+    assert d["status"] == "merged"
+    assert d["merged_into"] == 1
+

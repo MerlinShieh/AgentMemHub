@@ -63,10 +63,19 @@ def _load_titles(source_db: Path) -> dict[tuple[str, str], str]:
 
 
 def export(out_dir: Path, *, include_all: bool = False,
-           with_sqlite: bool = False) -> int:
+           with_sqlite: bool = False, force: bool = False) -> int:
     from agentmemhub import rag_bridge
     s = rag_bridge.settings()
     out_dir.mkdir(parents=True, exist_ok=True)
+    # 默认目录带时间戳，撞不上；但 `--out` 指到上次的备份目录时，
+    # `jsonl.open("w")` 会**静默覆盖**，旧 sha256 与 manifest 一起被换掉，
+    # 等发现时已经没有任何一份可比对。所以非空就要明确的 --force。
+    if not force:
+        clash = sorted(p.name for p in out_dir.iterdir() if p.is_file())
+        if clash:
+            raise SystemExit(
+                "目标目录已有文件（%s%s）。为避免覆盖既有备份，请换目录或加 --force"
+                % (", ".join(clash[:3]), "…" if len(clash) > 3 else ""))
     titles = _load_titles(s.source_db)
 
     conn = sqlite3.connect(f"file:{s.index_db.as_posix()}?mode=ro", uri=True)
@@ -165,11 +174,14 @@ def main() -> int:
     ap.add_argument("--all", action="store_true",
                     help="含被归档的段级条目（默认只导出 new/similar 终稿）")
     ap.add_argument("--sqlite", action="store_true", help="追加导出完整索引库副本")
+    ap.add_argument("--force", action="store_true",
+                    help="目标目录非空时也覆盖（默认拒绝，避免把旧备份冲掉）")
     args = ap.parse_args()
 
     out = Path(args.out) if args.out else (
         PROJECT_ROOT / "exports" / f"memories-{time.strftime('%Y%m%d-%H%M%S')}")
-    return export(out, include_all=args.all, with_sqlite=args.sqlite)
+    return export(out, include_all=args.all, with_sqlite=args.sqlite,
+                  force=args.force)
 
 
 if __name__ == "__main__":

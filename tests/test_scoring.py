@@ -1,4 +1,4 @@
-﻿"""批量自动评分（scoring）单元测试：verdict 解析 / LLM 调用 / 批量循环 / 面板端点。"""
+"""批量自动评分（scoring）单元测试：verdict 解析 / LLM 调用 / 批量循环 / 面板端点。"""
 from __future__ import annotations
 
 import json
@@ -53,7 +53,7 @@ def test_neutral_marked_scored_not_reevaluated(tmp_path, monkeypatch):
               {"id": "n2", "userText": "无结论", "agentText": "再说"}]
     with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
          mock.patch("agentmemhub.scoring.evaluate_trace", return_value="neutral"), \
-         mock.patch("agentmemhub.memos_daemon.engine_request") as er:
+         mock.patch("agentmemhub.engine_api.engine_request") as er:
         r = run_score_all(traces=traces)
     assert r["neutral"] == 2 and r["errors"] == 0
     # neutral 不写 feedback
@@ -69,7 +69,7 @@ def test_neutral_marked_scored_not_reevaluated(tmp_path, monkeypatch):
     scoring.clear_scored()
     with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
          mock.patch("agentmemhub.scoring.evaluate_trace", return_value="neutral"), \
-         mock.patch("agentmemhub.memos_daemon.engine_request"):
+         mock.patch("agentmemhub.engine_api.engine_request"):
         run_score_all(traces=traces, dry_run=True)
     assert scoring._load_scored() == set()
 
@@ -139,7 +139,7 @@ def test_content_filter_neutral_marked_not_error(tmp_path, monkeypatch):
         raise scoring.ContentFilterRejected("1301")
     with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
          mock.patch("agentmemhub.scoring.evaluate_trace", side_effect=blocked), \
-         mock.patch("agentmemhub.memos_daemon.engine_request") as er:
+         mock.patch("agentmemhub.engine_api.engine_request") as er:
         r = scoring.run_score_all(traces=traces)
     assert r["neutral"] == 1 and r["errors"] == 0
     assert not [c for c in er.call_args_list if c[0][0] == "POST"]   # 不写 value
@@ -160,7 +160,7 @@ def test_run_score_all_skips_scored(tmp_path, monkeypatch):
     with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
          mock.patch("agentmemhub.scoring.evaluate_trace", return_value="positive"), \
          mock.patch("agentmemhub.scoring.sync_episode_r_task", return_value=0), \
-         mock.patch("agentmemhub.memos_daemon.engine_request", side_effect=fake_er) as er:
+         mock.patch("agentmemhub.engine_api.engine_request", side_effect=fake_er) as er:
         r = run_score_all(emit=lines.append, base_url="http://127.0.0.1:1",
                           workers=2, traces=traces)
     assert r["evaluated"] == 2 and r["skipped"] == 1      # t1 跳过，t2 评估
@@ -176,7 +176,7 @@ def test_run_score_all_dry_run_not_mark(tmp_path, monkeypatch):
     llm = {"endpoint": "https://x", "api_key": "k", "model": "m"}
     with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
          mock.patch("agentmemhub.scoring.evaluate_trace", return_value="positive"), \
-         mock.patch("agentmemhub.memos_daemon.engine_request") as er:
+         mock.patch("agentmemhub.engine_api.engine_request") as er:
         er.return_value = {"id": "fb"}                    # 仅 feedback 写入分支
         r = run_score_all(limit=1, dry_run=True,
                           traces=[{"id": "t1", "userText": "a", "agentText": "b"}])
@@ -257,7 +257,7 @@ def test_run_score_all_batch_loop():
          mock.patch("agentmemhub.scoring.evaluate_trace",
                     side_effect=lambda t, c: next(verdicts)), \
          mock.patch("agentmemhub.scoring.sync_episode_r_task", return_value=0), \
-         mock.patch("agentmemhub.memos_daemon.engine_request", side_effect=fake_er) as er:
+         mock.patch("agentmemhub.engine_api.engine_request", side_effect=fake_er) as er:
         r = run_score_all(emit=lines.append, base_url="http://127.0.0.1:1",
                           traces=traces)
     assert r["evaluated"] == 3 and r["positive"] == 1 and r["neutral"] == 1
@@ -282,7 +282,7 @@ def test_run_score_all_dry_run_skips_write():
          mock.patch("agentmemhub.scoring.evaluate_trace", return_value="positive"), \
          mock.patch("agentmemhub.scoring.list_trace_ids", return_value=["t1", "t2"]), \
          mock.patch("agentmemhub.scoring.list_traces_by_ids", return_value=traces), \
-         mock.patch("agentmemhub.memos_daemon.engine_request") as er:
+         mock.patch("agentmemhub.engine_api.engine_request") as er:
         er.side_effect = []
         r = run_score_all(limit=1, dry_run=True)
     assert r["evaluated"] == 1 and r["dryRun"] is True
@@ -302,7 +302,7 @@ def test_run_score_all_full_reads_only_unscored():
          mock.patch("agentmemhub.scoring.list_trace_ids",
                     return_value=["t1", "t2", "t3"]), \
          mock.patch("agentmemhub.scoring.list_traces_by_ids") as by_ids, \
-         mock.patch("agentmemhub.memos_daemon.engine_request") as er:
+         mock.patch("agentmemhub.engine_api.engine_request") as er:
         er.return_value = {"id": "fb"}
         by_ids.return_value = [{"id": "t2", "userText": "c", "agentText": "d"},
                                {"id": "t3", "userText": "e", "agentText": "f"}]
@@ -327,31 +327,13 @@ def test_run_score_all_only_ids_targeted_no_full_scan():
                     side_effect=AssertionError("定点路径不应全表枚举")), \
          mock.patch("agentmemhub.scoring.list_traces_by_ids",
                     return_value=[{"id": "t1", "userText": "a", "agentText": "b"}]) as by_ids, \
-         mock.patch("agentmemhub.memos_daemon.engine_request") as er:
+         mock.patch("agentmemhub.engine_api.engine_request") as er:
         er.return_value = {"id": "fb"}
         r = run_score_all(only_ids={"t1", "ghost"})
     by_ids.assert_called_once_with({"t1", "ghost"})
     assert r["evaluated"] == 1 and r["missing"] == 1     # ghost 库中无 → 计入 missing
 
 
-def test_list_traces_by_ids_subset_and_missing(tmp_path):
-    """定点读：命中子集按 ts 升序返回；不存在的 id 静默缺失（由调用方 diff missing）。"""
-    import sqlite3
-    from agentmemhub import scoring
-    db = tmp_path / "memos.db"
-    conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE traces (id TEXT PRIMARY KEY, user_text TEXT, "
-                 "agent_text TEXT, ts INTEGER)")
-    conn.executemany("INSERT INTO traces VALUES (?,?,?,?)",
-                     [("a", "A用", "A答", 1), ("b", "B用", "B答", 2),
-                      ("c", "C用", "C答", 3)])
-    conn.commit()
-    conn.close()
-    with mock.patch("agentmemhub.scoring._engine_db_path", return_value=db):
-        rows = scoring.list_traces_by_ids({"c", "a", "nope"})
-        assert [r["id"] for r in rows] == ["a", "c"]      # ts 升序，nope 缺失
-        assert rows[0]["userText"] == "A用"
-        assert scoring.list_trace_ids() == ["a", "b", "c"]
 
 
 def _incr_cfg(tmp_path, monkeypatch):
@@ -481,7 +463,7 @@ def test_run_score_all_concurrent_workers():
     with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
          mock.patch("agentmemhub.scoring.evaluate_trace", return_value="positive"), \
          mock.patch("agentmemhub.scoring.sync_episode_r_task", return_value=0), \
-         mock.patch("agentmemhub.memos_daemon.engine_request", side_effect=fake_er) as er:
+         mock.patch("agentmemhub.engine_api.engine_request", side_effect=fake_er) as er:
         r = run_score_all(emit=lines.append, base_url="http://127.0.0.1:1",
                           workers=4, traces=traces)
     assert r["evaluated"] == 4 and r["positive"] == 4 and r["errors"] == 0
@@ -491,28 +473,11 @@ def test_run_score_all_concurrent_workers():
     assert len(fb) == 4
 
 
-def test_lists_all_traces_from_engine_db(tmp_path):
-    """只读枚举全部 trace（绕开 listTraces 500 窗口）——列名/内容正确。"""
-    import sqlite3
-    from agentmemhub import scoring
-    db = tmp_path / "memos.db"
-    conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE traces (id TEXT PRIMARY KEY, user_text TEXT, "
-                 "agent_text TEXT, ts INTEGER)")
-    conn.executemany("INSERT INTO traces VALUES (?,?,?,?)",
-                     [("t1", "你好", "回复", 1), ("t2", None, "只有助手", 2)])
-    conn.commit()
-    conn.close()
-    with mock.patch("agentmemhub.scoring._engine_db_path", return_value=db):
-        rows = scoring.list_all_traces()
-    assert len(rows) == 2
-    assert rows[0] == {"id": "t1", "userText": "你好", "agentText": "回复"}
-    assert rows[1] == {"id": "t2", "userText": "", "agentText": "只有助手"}   # None → 空串
 
 
 def test_admin_score_offline_503():
     c = _client()
-    with mock.patch("agentmemhub.memos_daemon.auth_state", return_value=None):
+    with mock.patch("agentmemhub.engine_api.auth_state", return_value=None):
         r = c.post("/api/admin/score")
     assert r.status_code == 503
     assert "记忆索引不可用" in r.json()["detail"]
@@ -520,7 +485,7 @@ def test_admin_score_offline_503():
 
 def test_admin_score_job_runs():
     c = _client()
-    with mock.patch("agentmemhub.memos_daemon.auth_state", return_value={}), \
+    with mock.patch("agentmemhub.engine_api.auth_state", return_value={}), \
          mock.patch("agentmemhub.scoring.run_score_all") as rsa:
         def fake_run(*a, **k):
             prog = k.get("on_progress")    # 面板进度条走结构化 progress
@@ -584,24 +549,6 @@ def test_read_engine_llm_prefers_hub_yaml(monkeypatch):
     assert cfg["headers"] == {"User-Agent": "AgentMemHub/1.0"}
 
 
-def test_read_engine_llm_falls_back_to_memos_engine(monkeypatch, tmp_path):
-    """agentmemhub.yaml 的 llm 段为空时，回退 MemOS 引擎 config.yaml（旧环境兼容）。"""
-    from agentmemhub import config as hub_config
-    from agentmemhub import scoring
-
-    class _Empty:
-        llm = {}
-
-    monkeypatch.setattr(hub_config, "config", lambda: _Empty())
-    home = tmp_path / "engine_home"
-    home.mkdir()
-    (home / "config.yaml").write_text(
-        "llm:\n  endpoint: https://engine.example/v1\n  apiKey: ek-test\n  model: em\n",
-        encoding="utf-8")
-    monkeypatch.setattr(scoring.memos_daemon, "engine_home", lambda: home)
-    cfg = scoring.read_engine_llm()
-    assert cfg["endpoint"] == "https://engine.example/v1"
-    assert cfg["api_key"] == "ek-test" and cfg["model"] == "em"
 
 
 def test_read_engine_llm_raises_with_clear_hint_when_unconfigured(monkeypatch):
@@ -614,6 +561,5 @@ def test_read_engine_llm_raises_with_clear_hint_when_unconfigured(monkeypatch):
         llm = {}
 
     monkeypatch.setattr(hub_config, "config", lambda: _Empty())
-    monkeypatch.setattr(scoring.memos_daemon, "engine_home", lambda: None)
     with pytest.raises(RuntimeError, match="agentmemhub.yaml"):
         scoring.read_engine_llm()

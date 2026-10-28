@@ -14,6 +14,14 @@ from pydantic import BaseModel
 
 from agentmemhub.store import Store
 
+# ⚠️ **`UploadFile` 必须在这里（模块顶层）导入**，不能像其它 fastapi 名字那样写在
+# `create_app()` 里面：app.py 启用了 `from __future__ import annotations`，
+# 路由函数的**类型注解是字符串**，FastAPI 从**模块全局命名空间**解析它 ——
+# 函数内 import 解析不到，会抛
+# `PydanticUserError: TypeAdapter[Annotated[ForwardRef('UploadFile')…]] is not fully defined`。
+# （2026-10-15 加 `/api/feed/upload` 时实测撞上，正是第 25 行那条警告说的情形。）
+from fastapi import UploadFile  # noqa: F401
+
 # ---- 截断规则（与静态快照流水线口径一致，防止巨大 payload）----
 _CAP_CONTENT = 320
 _CAP_OUTPUT = 200
@@ -59,6 +67,59 @@ _SORTABLE = {
 }
 
 
+# ---- 外部投喂（feed）用的请求模型 ----
+# ⚠️ 必须定义在**模块顶层**（见上面第 25 行的说明）：app.py 启用了
+# `from __future__ import annotations`，FastAPI 从模块全局命名空间解析类型注解，
+# 嵌套在工厂函数里的模型会让 body 参数被当成必需查询参数（422 missing body）。
+
+
+class FeedAddIn(BaseModel):
+    """投喂一项。**四种输入形态**（2026-10-15 用户要求明确区分"传的是二进制 / 路径 / 链接"，
+    2026-10-16 补上第四种 `text`）：
+
+    · `input="path"` —— `value` 是**服务器本机**文件路径（转换器自己去 open/read）；
+    · `input="data"` —— `value` 是**二进制内容**，已由调用方读好（`open(p,"rb").read()`）。
+      JSON 装不下裸字节，所以要么 `encoding="base64"` 传 base64，要么直接用
+      `POST /api/feed/upload` 走 multipart。**此形态必须给 `filename`** ——
+      扩展名是判格式与认领转换器的依据，裸字节没有名字；
+    · `input="url"` —— `value` 是网页链接（取回层出网抓）；
+    · `input="text"` —— `value` 直接是**正文**（粘一段内容），`filename` 兼作标题。
+      与 CLI 的 `feed add --stdin` 等价；单列它是为了让 HTTP / MCP 两条入口
+      不必各自去 base64 硬凑一条"字符串 → 字节"的路。
+    """
+    input: str = "path"
+    value: str = ""
+    filename: str = ""
+    encoding: str = ""          # "" | "base64"
+    kind: str = ""
+    force: bool = False
+    dry_run: bool = False
+
+
+class FeedBatchIn(BaseModel):
+    """批量投喂。`roots` 是目录/文件（**按格式白名单筛**），`paths` 是显式清单。"""
+    roots: list[str] = []
+    paths: list[str] = []
+    recursive: bool = True
+    force: bool = False
+    dry_run: bool = False
+    limit: int = 0
+
+
+class FeedFormatsIn(BaseModel):
+    """调整允许投喂的格式。
+
+    `exts=None`（不传）= **清除运行时覆盖**，回到 yaml / 转换器默认。
+    想临时只放开某几种就传具体清单（如 `[".pdf", ".docx"]`）。
+    """
+    exts: Optional[list[str]] = None
+
+
+class FeedIdIn(BaseModel):
+    doc_id: str = ""
+    purge: bool = False
+
+
 def _exclusions_map(store) -> dict:
     """全库排除态映射：(source, id) → {"whole": bool, "turns": int}。
 
@@ -83,13 +144,13 @@ def _index_counts(source: str, cid: str,
                   whole: bool = False) -> tuple[int, int]:
     """(该会话当前已入库单元数, 被排除轮次影响过的单元数)。
 
-    用于面板展示「已写入 N 条 / 已排除影响 M 条」；memos 后端返回 (0, 0)。
+    用于面板展示「已写入 N 条 / 已排除影响 M 条」；旧回退后端返回 (0, 0)。
     turn_keys/whole 由调用方从采集库的排除表读出后传入（排除表在采集库，
     索引库里没有它）。
     """
     try:
-        from agentmemhub import memos_daemon
-        if not memos_daemon._backend_is_rag():
+        from agentmemhub import engine_api
+        if not engine_api._backend_is_rag():
             return 0, 0
         import sqlite3
 
@@ -119,12 +180,12 @@ def _index_counts(source: str, cid: str,
 def _purge_index(source: str, cid: str, turn_key: str | None = None) -> int:
     """索引库级联清理（R6）：会话删除/排除后同步移除派生记忆。
 
-    rag 后端下直接删 units+vec+FTS；memos 回退后端无本地索引，返回 0。
+    直接删 units+vec+FTS；旧回退后端无本地索引，返回 0。
     失败不抛（面板操作不该因索引异常而整体失败），仅记日志。
     """
     try:
-        from agentmemhub import memos_daemon
-        if not memos_daemon._backend_is_rag():
+        from agentmemhub import engine_api
+        if not engine_api._backend_is_rag():
             return 0
         from agentmemhub import rag_bridge
         from agentmemhub.rag.ingest import (
@@ -214,24 +275,12 @@ def _run_ingest_fn(cli, adapters, source: str, signature: str):
 
 
 def _run_push_fn(cli, source: str):
-    """看板「推送记忆」后台动作：按 source 幂等推送 + 补向量（不 ingest）。"""
-    from agentmemhub import adapters, memos_daemon
-    from agentmemhub.store import Store
+    """看板「推送记忆」后台动作：会话轨迹由向量化直采源库（push 语义 = 向量化）。
 
+    `source` 保留在签名里仅为兼容调用方——直采是全量 keyset 增量，不按 source 分批。
+    """
     def _run() -> None:
-        if memos_daemon._backend_is_rag():
-            # rag 后端：会话轨迹由向量化直采源库（push 语义 = 向量化；
-            # 走 bundle 会把 trac_ 轨迹二次落成 memory 单元造成重复）
-            return cli._vectorize_stage(stdout=print)
-        store = Store()
-        try:
-            batches = ([source] if source
-                       else [a.source for a in adapters.all_adapters() if a.locate()])
-            # stdout=print：_DualWriter 实时捕获每行（推送批/rebuild 进度）→ 面板逐行显示
-            cli.push_to_memos(store, sources=batches,
-                              base_url=memos_daemon.base_url(), stdout=print)
-        finally:
-            store.close()
+        cli._vectorize_stage(stdout=print)
     return _emit_task(_run)
 
 
@@ -341,16 +390,82 @@ def _run_clean_fn(cli, source: str):
 
 
 def _run_rebuild_fn(mode: str):
-    """看板「补向量」后台动作：引擎 embedding rebuild（逐轮进度）。"""
-    from agentmemhub import memos_daemon
-    from agentmemhub.memos import rebuild_embeddings
+    """看板「补向量」后台动作：内置引擎补嵌（逐轮进度）。"""
+    from agentmemhub import rag_bridge
 
     def _run() -> None:
-        r = rebuild_embeddings(base_url=memos_daemon.base_url(),
-                               mode=mode,
-                               on_progress=lambda s: print(s))
+        r = rag_bridge.rebuild_embeddings(mode=mode,
+                                          on_progress=lambda s: print(s))
         print(f"补向量完成({mode}): {r}")
     return _emit_task(_run)
+
+
+def _run_wiki_retry_fn(out: str, stage: str, src: str, workers: int):
+    """看板「LLM Wiki 补跑」后台动作：只重跑失败清单里未解决的项。
+
+    与服务层 `agentmemhub.wiki` 共用同一份实现 —— CLI、面板、脚本三条入口
+    走的是同一个补跑逻辑，不各写一份。
+    """
+    import json as _json
+
+    from agentmemhub import wiki
+
+    def _run(emit, _meta) -> str:
+        def prog(line: str) -> None:
+            emit(str(line))
+
+        if stage == "l1":
+            r = wiki.retry_failed(stage="l1", out_dir=out, workers=workers,
+                                  on_progress=prog)
+        elif stage == "l2":
+            r = wiki.retry_failed(stage="l2", out_dir=out, src=src,
+                                  workers=workers, on_progress=prog)
+        else:
+            r = wiki.retry_all(out_dir=out, src=src, workers=workers,
+                               on_progress=prog)
+        emit(_json.dumps(r, ensure_ascii=False, default=str))
+        return "补跑结束：%s" % r
+
+    return _run
+
+
+def _wiki_out_guard(p: str, key: str) -> str:
+    """wiki 产物目录必须落在配置的 `wiki.out_l1` / `wiki.out_l2` 同根之下。
+
+    `wiki.update()` 会往这两个目录写 L1/L2 页与编译清单；网关层若原样透传，
+    任意路径都能被写（`?l1=C:\\Windows`）。配置值是唯一可信来源 ——
+    真要换目录试跑请走 CLI，不要在 HTTP 上开这个口子。
+    """
+    from pathlib import Path
+
+    from fastapi import HTTPException
+
+    from agentmemhub.config import config as _cfg
+
+    raw = str(p or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail=f"{key} 不能为空")
+    cfg_val = str((_cfg().wiki or {}).get(key) or "").strip()
+    if not cfg_val:
+        return raw                        # 没配就不设限（保持旧行为）
+    root = Path(cfg_val).resolve().parent
+    target = Path(raw).resolve()
+    try:
+        target.relative_to(root)          # 正常情形：与配置同根
+        return raw
+    except ValueError:
+        pass
+    # 相对路径允许（落在当前工作目录下，`wiki.update` 自己会建）；但它
+    # resolve 后仍必须在本进程 CWD 之内 —— `../../etc` 这类逃逸照样拒。
+    if not Path(raw).is_absolute():
+        try:
+            target.relative_to(Path.cwd().resolve())
+            return raw
+        except ValueError:
+            pass
+    raise HTTPException(
+        status_code=400,
+        detail=f"{key} 必须落在 {root} 之下（实际收到：{raw}）") from None
 
 
 def _logged_task(name: str, fn) -> Any:
@@ -372,6 +487,88 @@ def _logged_task(name: str, fn) -> Any:
             logs.record(f"失败：{name}（id={meta['id']}）→ {e}", level="error")
             raise
     return _do
+
+
+def _tail_wiki_log(emit, stop, job_id: str = "") -> None:
+    """把 `logs/wiki.log` 的新增进度事件实时 emit 出去（供长任务显示日志 + 进度条）。
+
+    为什么用 tail 而不是给下层加回调（2026-10-18 实测确认）：
+      · `wiki_compile` / `wiki_aggregate` 的进度**只写审计流**（`logs/wiki.log` 的
+        `progress` / `call` / `domain_planned` / `run_*` 事件），没有 `on_progress` 参数；
+      · `wiki.update(on_progress=...)` 这个参数**收了却从没调用过**（签名有、体内零调用）。
+    与其为"一次展示"去改两个核心脚本模块，不如读它们**本来就在写的**权威流水 ——
+    日志是既有的事实来源，任务日志与它同源也不会出现两套进度口径。
+
+    `job_id` 给了就**顺带回填进度条**：进度消息里通常带 `[N/M]`（如 `[12/84]`），
+    解析出来交给 `tasks.set_progress` —— 否则前端只能看到"已运行 N 秒"在涨、
+    百分比永远是 0（用户实测："感觉过了很长时间，好像一直没有变化"）。
+
+    `stop` 是 `threading.Event`：任务结束后置位，tail 线程自己退出。
+    """
+    import json as _json
+    import re as _re
+    from pathlib import Path as _Path
+
+    from agentmemhub.logs import log_dir
+
+    p = _Path(log_dir()) / "wiki.log"
+    try:
+        off = p.stat().st_size if p.exists() else 0
+    except OSError:
+        off = 0
+    while not stop.wait(1.0):
+        try:
+            if not p.exists():
+                continue
+            if p.stat().st_size <= off:
+                continue
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(off)
+                chunk = f.read()
+                off = f.tell()
+        except OSError:
+            continue
+        for line in chunk.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = _json.loads(line)
+            except ValueError:
+                continue
+            ev = str(d.get("event") or "")
+            if ev == "progress":
+                msg = str(d.get("message") or "").strip()
+                if not msg:
+                    continue
+                emit(msg)
+                m = _re.search(r"\[(\d+)/(\d+)\]", msg)
+                if m and job_id:
+                    try:
+                        from agentmemhub.web import tasks as _tasks
+                        done, total = int(m.group(1)), int(m.group(2))
+                        _tasks.set_progress(job_id, {
+                            "done": done, "total": total,
+                            "pct": round(done * 100.0 / total, 1) if total else 0,
+                            "label": msg[:60]})
+                    except Exception:      # noqa: BLE001 —— 回填失败不影响日志
+                        pass
+            elif ev == "call":
+                tag = str(d.get("tag") or "").strip()
+                if not tag:
+                    continue
+                if d.get("ok"):
+                    emit("  ✓ %s %.0fs" % (tag, float(d.get("seconds") or 0)))
+                else:
+                    emit("  ✗ %s %.0fs  %s"
+                         % (tag, float(d.get("seconds") or 0),
+                            str(d.get("error") or "")[:90]))
+            elif ev in ("run_start", "run_end", "run_aborted", "domain_planned",
+                        "session_done", "manifest"):
+                detail = {k: v for k, v in d.items()
+                          if k not in ("ts", "event", "module", "line", "level",
+                                       "usage", "msg")}
+                emit("[%s] %s" % (ev, _json.dumps(detail, ensure_ascii=False)[:200]))
 
 
 def _conv_to_dict(c: Any, *, excl_map: Optional[dict] = None) -> dict[str, Any]:
@@ -469,7 +666,7 @@ def create_app(db_path: Path | None = None):
     """创建 FastAPI 应用（独立于核心功能，serve 子命令调用）。"""
     import threading
 
-    from fastapi import FastAPI, HTTPException, Query
+    from fastapi import Body, FastAPI, File, Form, HTTPException, Query, UploadFile
     from fastapi.middleware.gzip import GZipMiddleware
     from fastapi.responses import JSONResponse
     from fastapi.staticfiles import StaticFiles
@@ -490,6 +687,31 @@ def create_app(db_path: Path | None = None):
         openapi_url="/api/openapi.json",
     )
     app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+    @app.middleware("http")
+    async def _same_site_guard(request, call_next):
+        """拒绝跨站发起的写请求（CSRF）。
+
+        本地面板不做鉴权的前提是「只绑 127.0.0.1」，但那**挡不住 CSRF**：
+        浏览器里任意网页都能用 `<form method=POST action="http://127.0.0.1:8765/…">`
+        发起简单请求（不带预检），副作用照样执行 —— 而这里的副作用是覆盖索引库、
+        `rmtree` 产物目录、删投喂素材。
+
+        判据：只对非只读方法、且浏览器**自己声明了来源**的请求校验同源。
+        `curl` / CLI / MCP 不带这些头，放行（它们不是浏览器，没有 CSRF 面）。
+        """
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            origin = (request.headers.get("origin") or "").strip()
+            site = (request.headers.get("sec-fetch-site") or "").strip().lower()
+            host = (request.headers.get("host") or "").strip()
+            if origin and host and origin not in ("http://" + host,
+                                                  "https://" + host):
+                return JSONResponse({"detail": "拒绝跨站请求：Origin 不匹配"},
+                                    status_code=403)
+            if site and site not in ("same-origin", "none"):
+                return JSONResponse({"detail": "拒绝跨站请求：Sec-Fetch-Site=%s" % site},
+                                    status_code=403)
+        return await call_next(request)
 
     def _invalidate():
         agg.invalidate()
@@ -734,17 +956,17 @@ def create_app(db_path: Path | None = None):
     # 不碰本地采集库、不持 _LOCK；不可用时透明降级并回 503
     # ------------------------------------------------------------------
 
-    @app.get("/api/memos/status", summary="记忆引擎状态")
-    def api_memos_status():
-        from agentmemhub import memos_daemon
-        return JSONResponse(memos_daemon.daemon_status())
+    @app.get("/api/engine/status", summary="记忆引擎状态")
+    def api_engine_status():
+        from agentmemhub import engine_api
+        return JSONResponse(engine_api.daemon_status())
 
     @app.get("/api/health", summary="记忆库一致性巡检")
     def api_health():
         """记忆库一致性指标（只读）。引擎离线时 503。"""
-        from agentmemhub import memos_daemon
+        from agentmemhub import engine_api
         try:
-            return JSONResponse(memos_daemon.engine_request(
+            return JSONResponse(engine_api.engine_request(
                 "GET", "/api/v1/health", timeout=15))
         except Exception as e:
             raise HTTPException(status_code=503, detail=f"health check failed: {e}")
@@ -752,35 +974,39 @@ def create_app(db_path: Path | None = None):
     @app.post("/api/health/reclaim", summary="回收孤儿投影（清理 units 已不存在的向量）")
     def api_health_reclaim():
         """回收滞留投影（幂等）——与蒸馏流程里自动执行的是同一个函数。"""
-        from agentmemhub import memos_daemon
+        from agentmemhub import engine_api
         try:
-            return JSONResponse(memos_daemon.engine_request(
+            return JSONResponse(engine_api.engine_request(
                 "POST", "/api/v1/health/reclaim", timeout=60))
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"reclaim failed: {e}")
 
     def _require_engine() -> dict:
         """引擎在线且鉴权可过则返回 overview；否则 503（detail 含原因）。"""
-        from agentmemhub import memos_daemon
+        from agentmemhub import engine_api
         try:
-            return memos_daemon.engine_request("GET", "/api/v1/overview", timeout=15)
-        except memos_daemon.EngineAuthError as e:
+            return engine_api.engine_request("GET", "/api/v1/overview", timeout=15)
+        except engine_api.EngineAuthError as e:
             raise HTTPException(status_code=503, detail=str(e))
         except Exception:
             raise HTTPException(status_code=503, detail="memory engine offline")
 
-    @app.get("/api/memos/search", summary="语义检索记忆（三路融合召回）")
-    def api_memos_search(q: str = Query(default="", min_length=1, description="检索词"),
+    @app.get("/api/engine/search", summary="语义检索记忆（三路融合召回）")
+    def api_engine_search(q: str = Query(default="", min_length=1, description="检索词"),
                          top: int = Query(default=20, ge=1, le=50, description="返回条数上限（1~50）")):
         """语义检索：返回 hits（含会话定位信息，前端可点击跳转）。"""
         import json as _json
-        from agentmemhub import memos_daemon
+        from agentmemhub import engine_api
         ov = _require_engine()
         try:
-            res = memos_daemon.engine_request(
-                "POST", "/api/v1/memory/search",
-                body={"agent": "hermes", "query": q}, timeout=30)
-        except memos_daemon.EngineAuthError as e:
+            # 标注调用方：**用户主动查询**希望"尽量不遗漏"，可以比 Agent 自动
+            # 召回配得更宽松（对应 `rag.retrieval.callers.panel`）
+            from agentmemhub.rag.config import retrieval_caller
+            with retrieval_caller("panel"):
+                res = engine_api.engine_request(
+                    "POST", "/api/v1/memory/search",
+                    body={"agent": "hermes", "query": q}, timeout=30)
+        except engine_api.EngineAuthError as e:
             raise HTTPException(status_code=503, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"engine query failed: {e}")
@@ -796,13 +1022,25 @@ def create_app(db_path: Path | None = None):
              "atomic": bool(h.get("atomic"))}
             for h in (res.get("hits") or [])[:top]
         ]
+        # 记忆操作事实流：面板检索同样留痕（与 MCP 检索同一条事实流，用 path 区分）
+        try:
+            from collections import Counter
+            from agentmemhub import logs as _logs
+            _logs.audit_memory({
+                "event": "read", "path": "http", "actor": "panel", "query": q,
+                "top": top, "hits": len(hits),
+                "kinds": dict(Counter((h.get("kind") or "message")
+                                      for h in (res.get("hits") or [])[:top])),
+            })
+        except Exception:                   # noqa: BLE001 —— 审计旁路
+            pass
         return JSONResponse({"query": q, "hits": hits,
                              "injectedContext": res.get("injectedContext") or "",
                              "episodes": ov.get("episodes"),
                              "traces": ov.get("traces")})
 
-    @app.post("/api/memos/feedback", summary="记忆反馈 👍/👎（状态式，可撤销）")
-    def api_memos_feedback(traceId: str = Query(..., description="记忆 id（mcp_* / dst_* / msg:* 等）"),
+    @app.post("/api/engine/feedback", summary="记忆反馈 👍/👎（状态式，可撤销）")
+    def api_engine_feedback(traceId: str = Query(..., description="记忆 id（mcp_* / dst_* / msg:* 等）"),
                            polarity: str = Query(default="neutral", pattern="^(positive|negative|neutral)$", description="极性：positive / negative / neutral"),
                            magnitude: float = Query(default=1.0, description="强度（越大影响越显著）"),
                            channel: str = Query(default="explicit", description="反馈渠道：explicit（面板）/ implicit（行为推断）"),
@@ -813,16 +1051,16 @@ def create_app(db_path: Path | None = None):
         state=true（面板默认）：**状态式可撤销**——同一 unit 只保留一条当前
         表态；再次点击同极性 = revoke 取消，回退到来源初始分（蒸馏 0.3 /
         Agent 写入 0.6）。这解决"反复点赞只是历史均值被稀释、且无法取消"。
-        state=false：历史累加语义（MemOS 同源，MCP memory_score 走它）。
+        state=false：历史累加语义（上游同源，MCP memory_score 走它）。
         """
-        from agentmemhub import logs, memos_daemon
+        from agentmemhub import logs, engine_api
         body = {"channel": channel, "polarity": polarity,
                 "magnitude": magnitude, "traceId": traceId,
                 "state": state, "revoke": revoke}
         try:
-            res = memos_daemon.engine_request(
+            res = engine_api.engine_request(
                 "POST", "/api/v1/feedback", body=body, timeout=15)
-        except memos_daemon.EngineAuthError as e:
+        except engine_api.EngineAuthError as e:
             raise HTTPException(status_code=503, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"engine feedback failed: {e}")
@@ -915,7 +1153,14 @@ def create_app(db_path: Path | None = None):
                 " u.id AS unit_id, v.value AS value,"
                 " v.manual_value AS manual_value," + title_col
                 + " FROM units u LEFT JOIN unit_values v ON v.unit_id = u.id"
-                + conv_m + " WHERE u.source='memory'")
+                + conv_m + " WHERE u.source='memory'"
+                # memory_save 落蒸馏表后（save_direct_memory，slice_key='mcp:<tid>'），
+                # 同一条记忆会同时出现在 manual 路（units 投影）与蒸馏路 —— 面板
+                # 只显示蒸馏行（元数据更全）。关联锚必须是 **legacy_id**（引擎存的
+                # trace id，= memory_save 的 tid）：units.src_id 是内容锚
+                #（content_anchor，另一套 hash），用它永远匹配不上（实测踩坑）。
+                + " AND NOT EXISTS (SELECT 1 FROM distilled_memories dm"
+                "   WHERE dm.slice_key = 'mcp:' || substr(u.legacy_id, 5))")
 
             where, args = [], []
             srcs = [x.strip() for x in (source or "").split(",") if x.strip()]
@@ -1025,8 +1270,91 @@ def create_app(db_path: Path | None = None):
         return JSONResponse({"items": items, "total": total, "page": page,
                              "pageSize": page_size, "stats": stats})
 
-    @app.post("/api/memos/weight", summary="记忆手动加权 ⭐（锁定不衰减）")
-    def api_memos_weight(traceId: str = Query(..., description="记忆 id"),
+    @app.get("/api/config", summary="统一配置只读视图（含 yaml 注释与生效覆盖）")
+    def api_config_view():
+        """把 `agentmemhub.yaml` 连同它的注释一起读给面板看。
+
+        设计取舍（2026-10-23）：
+        - **只读**。写 yaml 会丢注释（`yaml.safe_dump` 整篇重写），而本项目的
+          注释恰好承载了"为什么这么配、改了会怎样"；要写就得做文本级定点替换，
+          风险与收益不成比例 —— 面板给「看 + 体检」，改配置仍走编辑器。
+        - 因此也**不拆** `config/` 目录：拆分要动加载路径、全部 `_get` 调用点、
+          文档与测试；而唯一真实痛点（注释丢失）只在「面板写 yaml」时出现，
+          不写就没有该痛点。
+        - `env_overrides` 里标出运行期会被环境变量顶掉的键（`active=True` 时
+          文件里的值**不生效**），避免用户改完发现"没生效"被误判成 bug。
+        - `drift` 是 **example ↔ 本地** 的键集对比（`config_doc.diff_example`）：
+          升级后新增的键、本地已过时的键、以及两边值不同的键。同样只报告、
+          不写文件 —— 拆 `config/` 目录解决不了"人来合并配置"这件事，但这份
+          对比能把它从"手工对照"降级成"按清单确认"。
+        """
+        import os as _os
+
+        from agentmemhub import config_doc
+        d = config_doc.load_annotated()
+        for o in d.get("env_overrides", []):
+            v = _os.environ.get(o["env"], "")
+            o["active"] = bool(v.strip())
+            o["value"] = v
+        d["config_env"] = _os.environ.get("AGENTMEMHUB_CONFIG", "")
+        # 体检：example ↔ 本地。只报告不改文件 —— 升级后"哪些新键没跟上"
+        # 靠人整篇覆盖/手工对照很容易漏，漏了还不报错（键安静地取默认值）。
+        d["drift"] = config_doc.diff_example()
+        return JSONResponse(d)
+
+    @app.get("/api/memories/{mid}", summary="单条记忆详情（含溯源，供 wiki 引用与时间线跳转）")
+    def api_memory_detail(mid: int):
+        """按 `distilled_memories.id` 取单条记忆的全文与完整溯源。
+
+        wiki 页面正文里的 `[m<id>]` 就是这张表的主键 —— 面板据此把引用做成可点，
+        读者从知识页一眼能落回"这条说法来自哪条记忆、哪次会话、哪一轮"。
+
+        附加字段：
+        - `session_uid` / `conversation_title` / `has_conversation`：来自采集库。
+          MCP 直写的记忆 `conversation_id` 是占位值（`mcp`/`direct-*`），
+          `has_conversation=false` —— 前端**不得**把它渲染成可点会话链接（会 404）
+        - `unit_id` / `value` / `manual_value`：记忆索引侧定位与分值，与记忆报表
+          同一套锚（`unit:<id>` 是稳定引用）
+        - `merged_into`：`status != 'new'` 时指向被归并进的主记忆 id，让读者知道
+          "你点的这条其实已经并到另一条了"，而不是以为它凭空消失
+        """
+        import sqlite3 as _sq
+
+        from agentmemhub import rag_bridge
+        from agentmemhub.distill import DISTILLED_SRC_PREFIX
+        st = rag_bridge.settings()
+        idx = _sq.connect(f"file:{Path(st.index_db).as_posix()}?mode=ro", uri=True)
+        idx.row_factory = _sq.Row
+        src = _sq.connect(f"file:{Path(store.db_path).as_posix()}?mode=ro", uri=True)
+        src.row_factory = _sq.Row
+        try:
+            row = idx.execute(
+                "SELECT m.id, m.source, m.conversation_id, m.slice_key, m.turn_key,"
+                " m.type, m.topic, m.content, m.confidence, m.status, m.dedup_of,"
+                " m.content_hash, m.model, m.created_at, m.wiki_ignore_at,"
+                " u.id AS unit_id, v.value AS value, v.manual_value AS manual_value"
+                " FROM distilled_memories m"
+                f" LEFT JOIN units u ON u.src_id = ('{DISTILLED_SRC_PREFIX}' || m.content_hash)"
+                " LEFT JOIN unit_values v ON v.unit_id = u.id"
+                " WHERE m.id = ?", (mid,)).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail=f"记忆 #{mid} 不存在")
+            out = dict(row)
+            meta = src.execute(
+                "SELECT session_uid, title FROM conversations"
+                " WHERE source = ? AND id = ?",
+                (out["source"], out["conversation_id"])).fetchone()
+            out["session_uid"] = meta["session_uid"] if meta else None
+            out["conversation_title"] = (meta["title"] or "") if meta else ""
+            out["has_conversation"] = meta is not None
+            out["merged_into"] = out["dedup_of"] if out["status"] != "new" else None
+        finally:
+            idx.close()
+            src.close()
+        return JSONResponse(out)
+
+    @app.post("/api/engine/weight", summary="记忆手动加权 ⭐（锁定不衰减）")
+    def api_engine_weight(traceId: str = Query(..., description="记忆 id"),
                          value: float | None = Query(default=None,
                                                      ge=0.0, le=1.0,
                                                      description="权重 0~1；不传=仅查看当前权重")):
@@ -1038,10 +1366,10 @@ def create_app(db_path: Path | None = None):
         """
         import sqlite3 as _sq
 
-        from agentmemhub import logs, memos_daemon
+        from agentmemhub import logs, engine_api
         from agentmemhub.rag import memstore
         from agentmemhub import rag_bridge
-        if memos_daemon.auth_state() is None:
+        if engine_api.auth_state() is None:
             raise HTTPException(
                 status_code=503,
                 detail="记忆索引不可用（检查 database/session_rag.db 与 models/）")
@@ -1058,17 +1386,17 @@ def create_app(db_path: Path | None = None):
                     + ("清除手动设定" if value is None else f"锁定 {value}"))
         return JSONResponse({"ok": True, "traceId": traceId, **r})
 
-    @app.get("/api/memos/traces", summary="近期记忆轨迹")
-    def api_memos_traces(limit: int = Query(default=8, ge=1, le=50, description="返回条数（1~50）"),
+    @app.get("/api/engine/traces", summary="近期记忆轨迹")
+    def api_engine_traces(limit: int = Query(default=8, ge=1, le=50, description="返回条数（1~50）"),
                          offset: int = Query(default=0, ge=0, description="跳过前 N 条（分页）")):
         """转发最近记忆列表（时间线，纯 SQL 侧）。"""
-        from agentmemhub import memos_daemon
+        from agentmemhub import engine_api
         _require_engine()
         try:
-            res = memos_daemon.engine_request(
+            res = engine_api.engine_request(
                 "GET", f"/api/v1/traces?limit={limit}&offset={offset}&groupByTurn=1",
                 timeout=15)
-        except memos_daemon.EngineAuthError as e:
+        except engine_api.EngineAuthError as e:
             raise HTTPException(status_code=503, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"engine query failed: {e}")
@@ -1105,10 +1433,10 @@ def create_app(db_path: Path | None = None):
     @app.post("/api/admin/push", summary="向量化写入记忆索引（长任务）")
     def api_admin_push(source: str = Query(default="", description="限定某个 Agent 来源（留空=全部）")):
         """写入记忆：把采集库会话向量化写入记忆索引（后台任务）。"""
-        from agentmemhub import cli, memos_daemon
+        from agentmemhub import cli, engine_api
         from agentmemhub import logs
         from agentmemhub.web import tasks
-        if memos_daemon.auth_state() is None:
+        if engine_api.auth_state() is None:
             raise HTTPException(status_code=503, detail="记忆索引不可用（检查 database/session_rag.db 与 models/）")
         name = f"写入记忆索引{'（' + source + '）' if source else ''}"
         job = tasks.submit(name, _logged_task(name, _run_push_fn(cli, source)))
@@ -1122,13 +1450,30 @@ def create_app(db_path: Path | None = None):
         from agentmemhub.web import tasks
         return JSONResponse({"job": tasks.status()})
 
+    @app.post("/api/admin/job/cancel", summary="请求取消当前长任务（协作式）")
+    def api_admin_job_cancel(job_id: str = Query(default="", description="任务 id（空=当前任务）")):
+        """请求取消当前长任务。
+
+        **不是立刻停**：`tasks.cancel()` 只置旗标，任务在下一个检查点（循环迭代）退出。
+        这样做的理由写在 `web/tasks.py` 的模块 docstring 里 —— Python 无法安全终止
+        线程，硬杀一个正在写 sqlite 事务的线程就是库损坏；而且单槽必须等线程真正
+        结束才释放，否则"取消 + 立即提交新任务"会变成两个线程写同一份产物。
+        """
+        from agentmemhub import logs
+        from agentmemhub.web import tasks
+        out = tasks.cancel(job_id)
+        if not out.get("ok"):
+            raise HTTPException(status_code=409, detail=out.get("reason") or "无法取消")
+        logs.record(f"请求取消任务：{out['id']}")
+        return JSONResponse(out)
+
     @app.post("/api/admin/score", summary="LLM 批量评分（长任务；当前入口已隐藏）")
     def api_admin_score(limit: int = Query(default=0, ge=0, description="最多评多少条（0=全部）"),
                         dryRun: bool = Query(default=False, description="只评估不写分")):
         """LLM 批量自动评分历史记忆（后台任务，实时进度）。需记忆索引可用且已配置 LLM。"""
-        from agentmemhub import cli, logs, memos_daemon
+        from agentmemhub import cli, logs, engine_api
         from agentmemhub.web import tasks
-        if memos_daemon.auth_state() is None:
+        if engine_api.auth_state() is None:
             raise HTTPException(status_code=503, detail="记忆索引不可用（检查 database/session_rag.db 与 models/）")
         name = f"自动评分历史记忆{'（上限 ' + str(limit) + ' 条）' if limit else ''}"
         job = tasks.submit(name, _logged_task(
@@ -1173,9 +1518,9 @@ def create_app(db_path: Path | None = None):
 
         需 llm 段已配置；幂等（重跑跳过已完成切片），失败切片不登记、重跑可补。
         """
-        from agentmemhub import logs, memos_daemon
+        from agentmemhub import logs, engine_api
         from agentmemhub.web import tasks
-        if memos_daemon.auth_state() is None:
+        if engine_api.auth_state() is None:
             raise HTTPException(
                 status_code=503,
                 detail="记忆索引不可用（检查 database/session_rag.db 与 models/）")
@@ -1193,9 +1538,9 @@ def create_app(db_path: Path | None = None):
                                             pattern="^(repair|rebuild)$",
                                             description="repair=只补缺失向量；rebuild=全量重算")):
         """补向量：给缺向量的记忆补嵌（后台任务，逐轮进度）。"""
-        from agentmemhub import logs, memos_daemon
+        from agentmemhub import logs, engine_api
         from agentmemhub.web import tasks
-        if memos_daemon.auth_state() is None:
+        if engine_api.auth_state() is None:
             raise HTTPException(status_code=503, detail="记忆索引不可用（检查 database/session_rag.db 与 models/）")
         name = f"补向量（{mode}）"
         job = tasks.submit(name, _logged_task(name, _run_rebuild_fn(mode)))
@@ -1204,11 +1549,577 @@ def create_app(db_path: Path | None = None):
         logs.record(f"提交任务：{name}（id={job['id']}）")
         return JSONResponse({"job": job})
 
+    # ---- 知识库浏览（面板「wiki知识库」页）--------------------------------
+    # 与上面这组"运维动作"（补跑/丢弃/触发器/批次）不同：这里是**读**，
+    # 数据来自磁盘上的页面产物，不碰索引库、不触发任何重编。
+    @app.get("/api/wiki/pages", summary="知识库页面清单（L2 蒸馏 + 外部投喂，按域分组）")
+    def api_wiki_pages(
+        origin: str = Query(default="",
+                            description="native=蒸馏L2 | external=外部投喂 | 留空=全部"),
+        domain: str = Query(default="", description="域（目录名）；留空=全部"),
+        q: str = Query(default="", description="标题关键字"),
+        page: int = Query(default=1, ge=1, description="页码，从 1 起"),
+        page_size: int = Query(default=100, ge=1, le=500, description="每页条数"),
+    ):
+        """知识库页面清单 —— **以磁盘为准**（不查投影表）。
+
+        为什么不用索引库：投影（`wiki --action index-pages`）是**运维动作、会滞后** ——
+        2026-10-18 实测：磁盘 424 页 / 投影 399 行。面板要看的是**知识库本身**，
+        不该随"有没有跑过投影"起落；"能不能被召回"是另一件事。
+        """
+        from agentmemhub.web import wiki_pages
+        try:
+            return JSONResponse(wiki_pages.list_pages(
+                origin=origin, domain=domain, q=q,
+                page=page, page_size=page_size))
+        except wiki_pages.WikiPageError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.get("/api/wiki/page", summary="读一页知识库正文（markdown → HTML）")
+    def api_wiki_page(path: str = Query(...,
+                                        description="页面绝对路径（必须在知识库根内）")):
+        """读单页：返回 frontmatter + 原始 markdown + 渲染后的 HTML 片段。
+
+        ⚠️ `path` **只允许在 `page_roots()` 之内** —— 面板是本地服务，
+        但"能读任意路径"这种口子不该存在（`?path=C:\\Windows\\win.ini` 直接 400）。
+        """
+        from agentmemhub.web import wiki_pages
+        try:
+            return JSONResponse(wiki_pages.read_page(path))
+        except wiki_pages.WikiPageError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.get("/api/wiki/failures", summary="查询 LLM Wiki 失败清单（按原因分类）")
+    def api_wiki_failures(out: str = Query(..., description="wiki 产出目录（失败清单在其下）"),
+                          stage: str = Query(default="", description="l1 / l2；留空=全部阶段")):
+        """查 LLM Wiki 编译的失败清单（结构化）。
+
+        `needs_manual=True` 表示存在 quota/auth/model 这类**重试无意义**的错误，
+        调用方应直接提示用户去处理，而不是继续补跑。
+        """
+        from agentmemhub import wiki
+        return JSONResponse(wiki.failures_summary(out, stage))
+
+    @app.post("/api/wiki/retry", summary="定向补跑 wiki 失败项（长任务）")
+    def api_wiki_retry(out: str = Query(..., description="wiki 产出目录（失败清单在其下）"),
+                       stage: str = Query(default="", description="l1 / l2；留空=按依赖顺序补两级"),
+                       src: str = Query(default="", description="第二级补跑必需：第一级产出目录"),
+                       workers: int = Query(default=0, ge=0, description="并发数（0=用配置）")):
+        """定向补跑 wiki 失败项（后台任务，实时进度）。
+
+        只重跑失败清单里**未解决**的目标，不全量重来。
+        stage 留空 = 按依赖顺序补跑两级（第一级在前，它的产出是第二级的输入）。
+        """
+        from agentmemhub import logs, wiki
+        from agentmemhub.web import tasks
+        if stage == "l2" and not src:
+            raise HTTPException(status_code=400,
+                                detail="第二级补跑需要 src（第一级产出目录）")
+        name = f"LLM Wiki 补跑失败项（{stage or '全部'}）"
+        job = tasks.submit(name, _logged_task(
+            name, _run_wiki_retry_fn(out, stage, src, workers)))
+        if job is None:
+            raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
+        logs.record(f"提交任务：{name}（id={job['id']}）")
+        return JSONResponse({"job": job})
+
+    @app.get("/api/wiki/align", summary="对齐审计：wiki 产物与索引库的差距（只读）")
+    def api_wiki_align(out: str = Query(default="", description="单个产出目录（L1 或 L2）"),
+                       stage: str = Query(default="", description="l1 / l2；留空=按目录全查"),
+                       db: str = Query(default="", description="索引库路径；留空=用配置默认"),
+                       l1: str = Query(default="", description="第一级产出目录（与 l2 一起给=两级对齐）"),
+                       l2: str = Query(default="", description="第二级产出目录")):
+        """审计 wiki 与 RAG 库的对齐状态：引用有效性、覆盖度、编译后库的变更。
+
+        有编译清单（manifest_*.json）时能精确 diff 出 新增/变更/失去输入 的记忆
+        与脏会话，并给出 `needs_recompile`；无清单则退回引用反推模式。
+        只读操作，同步返回。
+
+        **两级要看同步性就同时给 `l1` + `l2`**：两级产物分居两个目录，manifest 名
+        固定是 `<目录>/manifest_<stage>.json`，只给一个 `out` 必然只能对上其中一级。
+        返回里的 `consistency` 给出同步判定（`l1_ahead` = L2 落后、需要重编 L2）。
+        三者都不给则按配置的 `wiki.out_l1` / `wiki.out_l2` 解析。
+        """
+        from agentmemhub import wiki
+        return JSONResponse(wiki.align(out, stage, db, l1_dir=l1, l2_dir=l2))
+
+    # ---- 待更新记忆的查看与删除（软删除=不进 wiki；硬删除=真删）----------
+    # 与 align 的分工：align 回答"差多少"（只有 id 列表、且会截断），
+    # 这一组回答"具体是哪几条、内容是什么" —— 让人能判断该不该删。
+    # **边界**：只处理**尚未进 wiki** 的记忆。已进 wiki 的硬删会产生死引用，
+    # 那属于 docs/memory-deletion.md 的范畴（墓碑 + 引用重映射），此处直接拒绝。
+
+    @app.get("/api/wiki/pending", summary="待 wiki 更新的记忆明细（只读）")
+    def api_wiki_pending(out: str = Query(default="", description="L1 产出目录；留空=用配置 wiki.out_l1"),
+                         limit: int = Query(default=0, ge=0, description="最多返回几条（0=全部）")):
+        from agentmemhub import wiki_pending
+        return JSONResponse(wiki_pending.pending(l1_dir=out, limit=limit))
+
+    @app.post("/api/wiki/pending/drop", summary="删除待更新的记忆（soft=不进 wiki / hard=真删）")
+    def api_wiki_pending_drop(payload: dict = Body(...)):
+        """body：`{"ids": [...], "mode": "soft"|"hard", "confirm": bool, "out": "..."}`
+
+        · `soft`：写 `wiki_ignore_at` 标记 —— 记忆**仍然存在、仍然能被召回**，
+          只是不再参与 wiki 编译；可 `restore` 取消。
+        · `hard`：真删（蒸馏表 + units 投影 + 向量），**不可恢复**，必须
+          `confirm: true`。
+        """
+        from agentmemhub import wiki_pending
+        try:
+            ids = [int(x) for x in (payload.get("ids") or [])]
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="ids 必须是整数数组")
+        return JSONResponse(wiki_pending.drop(
+            ids=ids, mode=str(payload.get("mode") or "soft"),
+            confirm=bool(payload.get("confirm")),
+            l1_dir=str(payload.get("out") or "")))
+
+    @app.get("/api/wiki/pending/ignored", summary="已软删除（不进 wiki）的记忆")
+    def api_wiki_pending_ignored(out: str = Query(default=""),
+                                 limit: int = Query(default=0, ge=0)):
+        from agentmemhub import wiki_pending
+        return JSONResponse(wiki_pending.ignored(l1_dir=out, limit=limit))
+
+    @app.post("/api/wiki/pending/restore", summary="取消软删除（重新变回待更新）")
+    def api_wiki_pending_restore(payload: dict = Body(...)):
+        """body：`{"ids": [...], "out": "..."}`"""
+        from agentmemhub import wiki_pending
+        try:
+            ids = [int(x) for x in (payload.get("ids") or [])]
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="ids 必须是整数数组")
+        return JSONResponse(wiki_pending.restore(ids=ids,
+                                                 l1_dir=str(payload.get("out") or "")))
+
+    @app.post("/api/wiki/update", summary="增量更新 wiki（长任务：只重编脏会话与受影响域）")
+    def api_wiki_update(l1: str = Query(..., description="第一级产出目录"),
+                        l2: str = Query(..., description="第二级产出目录"),
+                        db: str = Query(default="", description="索引库路径；留空=用配置默认"),
+                        workers: int = Query(default=0, ge=0, description="并发数（0=用配置）")):
+        """RAG 库变化后的增量更新：只重编脏会话的 L1 页与受影响的 L2 域。
+
+        前提：两级都有编译清单（manifest_*.json）。链路：
+        align 定位脏会话 → L1 整页重编 → 域映射定位脏域 → L2 增量重编
+        → linkfix → manifest 刷新。长任务，后台执行。
+        """
+        from agentmemhub import logs, wiki
+        from agentmemhub.web import tasks
+        l1 = _wiki_out_guard(l1, "out_l1")
+        l2 = _wiki_out_guard(l2, "out_l2")
+        name = "LLM Wiki 增量更新"
+
+        # ⚠️ `tasks.submit` 的契约是 **`fn(emit, meta)`**（见 `web/tasks.py`），
+        # 而 `_logged_task` 内部还会再调 `fn(emit_full, meta)` —— 所以这里
+        # **必须收两个参数**。2026-10-18 实测事故：写成零参 lambda ⇒ 真机点
+        # 「增量更新」立刻报 `lambda() takes 0 positional arguments but 2 were given`
+        # （此前前端没接，这条路径从没被真实调用过，测试也覆盖不到）。
+        def _run(emit, _meta):
+            import json as _json
+            import threading
+
+            from agentmemhub import wiki_triggers
+            emit("[i] 开始增量更新：L1=%s / L2=%s" % (l1, l2))
+            # 进度来自 `logs/wiki.log`（下层只写审计流、没有回调参数，见 `_tail_wiki_log`）
+            stop = threading.Event()
+            th = threading.Thread(
+                target=_tail_wiki_log,
+                args=(emit, stop, (_meta or {}).get("id", "")),
+                daemon=True)
+            th.start()
+            # 状态文件留痕：此前面板/CLI 直调 `wiki.update()` **完全不留痕**，
+            # 「上次更新」一直显示上一轮（2026-10-19 实测：当天跑过，仍是 10-15）。
+            # 标记与触发器路径共用同一套函数（`wiki_triggers.mark_update_*`）。
+            wiki_triggers.mark_update_started("manual")
+            r: dict = {}
+            try:
+                r = wiki.update(l1_dir=l1, l2_dir=l2, db=db, workers=workers,
+                                should_stop=(_meta or {}).get("should_stop"))
+            except Exception as e:              # noqa: BLE001 —— 留痕后原样抛给任务层
+                wiki_triggers.mark_update_failed(e)
+                raise
+            finally:
+                stop.set()
+                th.join(timeout=2)
+            # 只有**真的更新了**才刷新 `last_update_at`（空跑不算，否则触发器
+            # 会误判"今天已经更新过"而跳过当天真正需要的更新）
+            wiki_triggers.mark_update_finished(
+                hook="manual", updated=bool((r or {}).get("updated")))
+            if (r or {}).get("aborted"):
+                emit("[!] " + str(r["aborted"]))
+            emit(_json.dumps(r, ensure_ascii=False, default=str))
+            return "增量更新结束"
+
+        # 两小时上限：正常一轮（12 条新记忆）实测 L1 约 33 分钟 + L2 约 50 分钟，
+        # 留一倍余量。超时不会杀线程，只在阶段边界收工（见 tasks.py）。
+        job = tasks.submit(name, _logged_task(name, _run), timeout_s=7200)
+        if job is None:
+            raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
+        logs.record(f"提交任务：{name}")
+        return JSONResponse({"job": job})
+
+    @app.get("/api/wiki/triggers", summary="查看 wiki 增量更新触发器的配置与状态")
+    def api_wiki_triggers_get():
+        """触发规则（时点档/定量阈值/每日首次）、当前状态与目标目录。
+
+        规则修改走 PUT 本接口（运行时覆盖，优先级最高，不改动 yaml 文件）。
+        检测本身挂在蒸馏写入时，没有后台定时任务。
+        """
+        from agentmemhub import wiki_triggers
+        return JSONResponse(wiki_triggers.status())
+
+    @app.put("/api/wiki/triggers", summary="编辑 wiki 增量更新触发规则")
+    def api_wiki_triggers_put(patch: dict = Body(...)):
+        """运行时覆盖触发规则（写入状态文件的 overrides 段）。
+
+        可编辑字段：`enabled`、`schedule`（HH:MM 列表）、
+        `dirty_memories`（脏记忆阈值）、`first_write_daily`。
+        """
+        from agentmemhub import wiki_triggers
+        try:
+            cfg = wiki_triggers.set_overrides(patch)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        return JSONResponse({"config": cfg})
+
+    @app.post("/api/wiki/trigger/run", summary="手动执行一次触发检测（可强制）")
+    def api_wiki_trigger_run(force: bool = Query(default=False, description="绕过规则强制更新")):
+        """立即做一次检测；命中规则（或 force）则执行增量更新（同步，分钟级）。
+
+        常规触发挂在蒸馏写入时，此接口用于手动补一次。
+        """
+        from agentmemhub import wiki_triggers
+        return JSONResponse(wiki_triggers.run_manual(force=force))
+
+    # ---- 离线批处理（MiMo Batch API）----
+    # 装配与动作都在 `agentmemhub/batch_ops.py`（与 CLI 共用），这里只做"HTTP 语义 +
+    # 渲染"。⚠️ `batch-run` 是**长任务**（落盘含页面投影 + linkfix，实测 90 秒级）→
+    # 走后台任务设施，调用方轮询 `/api/admin/job`。
+    @app.get("/api/wiki/batch/status", summary="离线批处理：在飞任务状态（只读）")
+    def api_wiki_batch_status():
+        """在飞任务 + 厂商侧状态 + 进度 + `decide()` 建议。**只读**，不改状态。"""
+        from agentmemhub import batch_ops
+        try:
+            return JSONResponse(batch_ops.status())
+        except batch_ops.BatchOpsError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
+    @app.post("/api/wiki/batch/run", summary="离线批处理：推进一段（长任务）")
+    def api_wiki_batch_run(
+            deadline: float = Query(default=0.0, ge=0,
+                                    description="等待厂商的预算秒数（0=不限时）"),
+            offline_plan: bool = Query(default=False,
+                                       description="细分也走离线（两段式）")):
+        """**推进一段**：无在飞 → 提交轮；结果到位 → 交下一段 / 落盘。
+
+        状态机自己判断该做哪一段，所以本接口可反复调（幂等、不会重复付费）。
+        """
+        from agentmemhub import batch_ops, logs
+        from agentmemhub.web import tasks
+        try:
+            # 前置条件（目录 + 凭据）**在起任务之前**校验：否则只能得到"任务失败"
+            batch_ops.precheck()
+        except batch_ops.BatchOpsError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        name = "离线批处理：推进一段"
+
+        def _run(emit, _meta):      # 同 `api_wiki_update`：tasks.submit 契约是 (emit, meta)
+            import json as _json
+            import threading
+            emit("[i] 推进离线批处理（状态机自判段位）…")
+            stop = threading.Event()
+            th = threading.Thread(
+                target=_tail_wiki_log,
+                args=(emit, stop, (_meta or {}).get("id", "")),
+                daemon=True)
+            th.start()
+            try:
+                r = batch_ops.run(deadline_s=deadline, offline_plan=offline_plan)
+            finally:
+                stop.set()
+                th.join(timeout=2)
+            emit(_json.dumps(r, ensure_ascii=False, default=str))
+            return "离线批处理推进结束"
+
+        # 批量推进本身有 deadline 兜底，但**没接入**协作式取消（`batch_ops.run`
+        # 内部没有可以安全收工的阶段边界）—— 标成不可取消，免得按钮点了没反应。
+        job = tasks.submit(name, _logged_task(name, _run), cancelable=False)
+        if job is None:
+            raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
+        logs.record("提交任务：%s" % name)
+        return JSONResponse({"job": job})
+
+    @app.post("/api/wiki/batch/cancel", summary="离线批处理：取消并作废所有在飞任务")
+    def api_wiki_batch_cancel():
+        """取消厂商侧任务并作废本地标记；覆盖的域回到待更新池。"""
+        from agentmemhub import batch_ops
+        try:
+            return JSONResponse(batch_ops.cancel())
+        except batch_ops.BatchOpsError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
+    @app.post("/api/wiki/batch/resubmit",
+              summary="离线批处理：用原输入文件重提已终局任务")
+    def api_wiki_batch_resubmit():
+        """平台侧 `validation_failed` / `expired` 后，用**原输入文件**重建任务 ——
+        不重跑 L1 编译与归域（那会白花一次实时的钱）。"""
+        from agentmemhub import batch_ops
+        try:
+            return JSONResponse(batch_ops.resubmit())
+        except batch_ops.BatchOpsError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
+    @app.get("/api/wiki/batch/checks", summary="离线批处理：检测流水（排障）")
+    def api_wiki_batch_checks(limit: int = Query(default=50, ge=1, le=500)):
+        """每次收割的流水（何时、跳过原因、结果、耗时）。
+
+        队列快照只有"现在"、没有"历史" —— "上次什么时候查的、为什么没动"靠它。
+        """
+        from agentmemhub import batch_ops
+        try:
+            return JSONResponse(batch_ops.checks(limit=limit))
+        except batch_ops.BatchOpsError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
+    @app.get("/api/snapshots", summary="列出可回滚快照（索引库 + wiki 产物）")
+    def api_snapshots_list():
+        """当前全部快照（最新在前）：id、时间、原因、包含部件、大小。
+
+        一份快照 = 索引库整库（蒸馏表/units/评分/向量）+ wiki 产物全目录，
+        回滚时作为整体恢复——所有跨库引用关系（dst_ 锚、[m<id>] 溯源、
+        manifest 指纹）随之回到同一时点。
+
+        `keep` = 生效的保留上限（配置 snapshot.keep，默认 5），超出自动删最旧。
+        """
+        from agentmemhub import snapshot
+        return JSONResponse({"snapshots": snapshot.list_snapshots(),
+                             "keep": snapshot.keep_count()})
+
+    @app.post("/api/snapshots/create", summary="创建快照（同步，秒级）")
+    def api_snapshots_create(reason: str = Query(default="", description="快照原因（记录在 meta）")):
+        """手动创建一份快照。增量更新前会自动创建，此接口用于其它关键操作前。"""
+        from agentmemhub import snapshot
+        return JSONResponse(snapshot.create(reason=reason or "手动（面板）"))
+
+    @app.post("/api/snapshots/restore", summary="回滚到指定快照（长任务）")
+    def api_snapshots_restore(
+            snapshot_id: str = Query(..., description="目标快照 id（见 /api/snapshots）"),
+            wiki_only: bool = Query(default=False, description="只回滚 wiki 产物"),
+            db_only: bool = Query(default=False, description="只回滚索引库")):
+        """回滚 = 索引库整库覆盖 + wiki 产物目录整体替换（先自动保存当前状态
+        为保护快照，防误恢复不可逆）。
+
+        ⚠️ 回滚会覆盖索引库文件——执行前请确保 MCP server 无并发写入；
+        面板 serve 自身持有的是短连接，后台任务内执行安全。"""
+        from agentmemhub import snapshot
+        from agentmemhub.web import tasks
+
+        def _do(emit, meta) -> str:
+            import json as _j
+            emit(f"回滚到快照 {snapshot_id} …")
+            # force=True：面板**自己**就长期持有索引库连接，`_assert_db_idle`
+            # 必然判"被占用"。面板侧的并发保护靠 tasks 单槽互斥（同一时刻
+            # 只有一个长任务在跑），不靠这道闸。
+            r = snapshot.restore(snapshot_id, wiki_only=wiki_only, db_only=db_only,
+                                 force=True)
+            emit(f"已恢复：{r['restored']}")
+            return _j.dumps(r, ensure_ascii=False)
+
+        # 回滚**不可取消**：半途停下会留下"半个库 + 半个 wiki"，比跑完危险得多。
+        job = tasks.submit(f"回滚快照（{snapshot_id}）", _logged_task("回滚快照", _do),
+                           cancelable=False)
+        if job is None:
+            raise HTTPException(status_code=409, detail="已有任务在运行，请等待完成")
+        return JSONResponse({"job": job})
+
     @app.get("/api/logs", summary="近期操作日志")
     def api_logs(limit: int = Query(default=100, ge=1, le=500, description="返回条数（上限 500）")):
         """统一操作日志（面板控制/任务执行的最近记录，内存 + JSONL 留痕）。"""
         from agentmemhub import logs
         return JSONResponse({"logs": logs.recent(limit)})
+
+    # ---- 外部投喂（feed）----
+    # 装配与动作都在 `agentmemhub/feed/service.py`（与 CLI 共用），这里只做
+    # "HTTP 语义 + 渲染" —— 与 `batch_ops` 同一套分工，不在网关里重写流程。
+    # ⚠️ 单条投喂是秒级 → 同步返回；**批量是长任务**（几百个文件、分钟级）→
+    # 走后台任务设施，调用方轮询 `/api/admin/job`（与 `/api/admin/*` 同约定）。
+    @app.get("/api/feed/formats", summary="投喂：当前允许的格式（看板渲染勾选项）")
+    def api_feed_formats():
+        """返回**生效清单 + 来源 + 三层原始值** —— 看板要能显示"这是谁定的"。"""
+        from agentmemhub.feed import formats as F
+        return JSONResponse(F.state())
+
+    @app.put("/api/feed/formats", summary="投喂：调整允许的格式（写运行时覆盖）")
+    def api_feed_formats_put(payload: FeedFormatsIn):
+        """运行时覆盖（写状态文件，**不改用户的 yaml**）。
+
+        `exts` 不传 = 清除覆盖回到 yaml/默认；传清单 = 只允许这些（后缀，大小写不敏感）。
+        """
+        from agentmemhub.feed import formats as F
+        return JSONResponse(F.set_overrides(payload.exts))
+
+    @app.post("/api/feed/add", summary="投喂：投喂一项（path / data / url / text 四种形态）")
+    def api_feed_add(payload: FeedAddIn):
+        from agentmemhub.feed import service as svc
+        lines: list[str] = []
+        r = svc.ingest_any(source=payload.input, value=payload.value,
+                           filename=payload.filename, encoding=payload.encoding,
+                           kind=payload.kind, force=payload.force,
+                           dry_run=payload.dry_run, log=lines.append)
+        # 失败也返回 200 + `ok=false`：投喂失败是**业务结果**不是传输错误，
+        # 调用方要看的是 `error_kind`（决定处置），不该被 HTTP 状态码绕一层。
+        return JSONResponse({**r, "log": lines})
+
+    @app.post("/api/feed/upload", summary="投喂：直接上传文件字节（multipart）")
+    async def api_feed_upload(file: UploadFile = File(...),
+                              kind: str = Form(default=""),
+                              force: bool = Form(default=False),
+                              dry_run: bool = Form(default=False)):
+        """二进制直传通道 —— 客户端不必自己 base64（大文件省 1/3 体积）。"""
+        from agentmemhub.feed import service as svc
+        blob = await file.read()
+        lines: list[str] = []
+        r = svc.ingest_any(source="data", value=blob,
+                           filename=file.filename or "", kind=kind,
+                           force=force, dry_run=dry_run, log=lines.append)
+        return JSONResponse({**r, "log": lines})
+
+    @app.post("/api/feed/scan", summary="投喂：扫描目录列可投喂项（只读，不写盘）")
+    def api_feed_scan(payload: FeedBatchIn):
+        """先给人看"哪些能进、哪些被格式挡掉、各多少"，再决定投不投。
+
+        用户明确要求"先筛选再落库"，所以这一步与投喂**分开**。
+        """
+        from agentmemhub.feed import service as svc
+        return JSONResponse(svc.scan_targets(
+            roots=payload.roots or payload.paths,
+            recursive=payload.recursive, limit=payload.limit))
+
+    @app.post("/api/feed/batch", summary="投喂：批量投喂（**长任务**）")
+    def api_feed_batch(payload: FeedBatchIn):
+        import json as _json
+
+        from agentmemhub.feed import service as svc
+        from agentmemhub.web import tasks
+
+        def run(emit, meta):
+            job_id = meta["id"]
+
+            def on_progress(done: int, total: int, label: str) -> None:
+                tasks.set_progress(job_id, {
+                    "done": done, "total": total,
+                    "pct": int(done * 100 / max(1, total)), "label": label})
+                if done:
+                    emit("[%d/%d] %s" % (done, total, label))
+                else:
+                    emit("开始批量投喂：共 %d 项" % total)
+
+            out = svc.ingest_batch(
+                roots=payload.roots or None, paths=payload.paths or None,
+                recursive=payload.recursive, force=payload.force,
+                dry_run=payload.dry_run, limit=payload.limit,
+                on_progress=on_progress, log=lambda s: emit(str(s)))
+            for e in out["errors"][:50]:
+                emit("[x] %s：[%s] %s" % (e["path"], e["error_kind"], e["error"][:120]))
+            emit("完成：成功 %d / 幂等跳过 %d / 失败 %d（共 %d）%s"
+                 % (out["ok"], out["skipped"], out["failed"], out["total"],
+                    "（dry-run 未写盘）" if out["dryRun"] else ""))
+            # 终态结构化结果（前端从 job.output 之外还能拿到机器可读的汇总）
+            return _json.dumps({"total": out["total"], "ok": out["ok"],
+                                "skipped": out["skipped"], "failed": out["failed"],
+                                "dryRun": out["dryRun"],
+                                "byExt": out["byExt"],
+                                "errors": out["errors"][:50]},
+                               ensure_ascii=False, indent=2)
+
+        # 投喂批量跑的是"逐个素材转译+落库"，中途停下会让素材停在半转换态，
+        # 所以不接协作式取消（用户要撤可用单个素材的"撤下"）。
+        job = tasks.submit("feed-batch", run, cancelable=False)
+        if job is None:
+            raise HTTPException(status_code=409, detail="已有长任务在运行")
+        return JSONResponse({"job": job})
+
+    @app.get("/api/feed/list", summary="投喂：素材列表")
+    def api_feed_list(status: str = Query(default="", description="按状态筛"),
+                      low_quality: bool = Query(default=False, description="只列低质量/有告警"),
+                      limit: int = Query(default=0, description="最多几条（0=全部）")):
+        from agentmemhub.feed import service as svc
+        return JSONResponse({"items": svc.list_materials(
+            status=status, low_quality=low_quality, limit=limit)})
+
+    @app.get("/api/feed/show/{doc_id}", summary="投喂：单条详情")
+    def api_feed_show(doc_id: str):
+        from agentmemhub.feed import service as svc
+        m = svc.get_material(doc_id)
+        if not m:
+            raise HTTPException(status_code=404, detail="没有这条素材：%s" % doc_id)
+        return JSONResponse(m)
+
+    @app.get("/api/feed/content/{doc_id}",
+             summary="投喂：转换后的正文（服务端渲染为 HTML）")
+    def api_feed_content(doc_id: str):
+        """把交付物 md 渲染成 HTML，供详情页直接展示。
+
+        为什么服务端渲染而不是让前端取 md 自己转：面板里没有 markdown 渲染器，
+        浏览页的正文一直是 `mdmini` 渲染好再返回的。再引一套前端渲染器，
+        markdown 就有两处真相，必然漂移（本项目在"两处各写一份"上踩过多次）。
+        """
+        from fastapi import HTTPException
+
+        from agentmemhub import mdmini
+        from agentmemhub.config import config as _cfg
+        from agentmemhub.feed import service as svc
+        from agentmemhub.web import wiki_pages as _wiki_pages
+
+        m = svc.get_material(doc_id)
+        if not m:
+            raise HTTPException(status_code=404, detail="没有这条素材：%s" % doc_id)
+        kb = str(m.get("kb_path") or "").strip()
+        if not kb:
+            raise HTTPException(
+                status_code=409,
+                detail="这条素材还没有交付物（状态：%s）" % (m.get("status") or "未知"))
+        # kb_path 来自登记表，登记表是**可写数据** —— 不能当可信输入直接用
+        root = _cfg().feed_paths()["kb"].resolve()
+        target = Path(kb).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="交付物路径越界：%s" % kb)
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail="交付物文件不在了：%s" % kb)
+        text = target.read_text(encoding="utf-8", errors="replace")
+        # 交付物是「frontmatter + 正文」；frontmatter 是给下游读的溯源字段，
+        # 直接丢给 mdmini 会渲染成一串 `---` 和 `title: ...` 段落（浏览页早就
+        # 剥掉了，这里必须一致）。
+        meta, body = _wiki_pages._split_frontmatter(text)
+        return JSONResponse({
+            "doc_id": doc_id,
+            "title": m.get("title") or "",
+            "chars": len(body),
+            "frontmatter": meta,
+            "html": mdmini.render(body, title=str(m.get("title") or "")),
+        })
+
+    @app.post("/api/feed/retry", summary="投喂：重转（来源不可达时自动回落原件）")
+    def api_feed_retry(payload: FeedIdIn):
+        from agentmemhub.feed import service as svc
+        return JSONResponse(svc.retry(payload.doc_id, log=lambda *_: None))
+
+    @app.post("/api/feed/retract", summary="投喂：撤下（可恢复；原件保留）")
+    def api_feed_retract(payload: FeedIdIn):
+        from agentmemhub.feed import service as svc
+        return JSONResponse(svc.retract(payload.doc_id, log=lambda *_: None))
+
+    @app.post("/api/feed/forget", summary="投喂：清除登记（purge=true 才连原件删）")
+    def api_feed_forget(payload: FeedIdIn):
+        from agentmemhub.feed import service as svc
+        return JSONResponse(svc.forget(payload.doc_id, purge=payload.purge,
+                                       log=lambda *_: None))
+
+    @app.get("/api/feed/lint", summary="投喂：确定性体检（P0>0 表示数据不一致）")
+    def api_feed_lint(with_index: bool = Query(default=True, description="是否检查投影")):
+        from agentmemhub.feed import lint as L
+        return JSONResponse(L.run_lint(with_index=with_index))
 
     # ---- 静态页面（index.html 由 StaticFiles html=True 自动兜底 /）----
     static_dir = Path(__file__).resolve().parent / "static"

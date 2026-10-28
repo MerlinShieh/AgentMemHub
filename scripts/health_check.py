@@ -78,8 +78,10 @@ def main() -> int:
         conn.close()
 
     if args.json:
+        # 退出码与文本模式保持一致：`--json` 是给 CI / 脚本消费的，
+        # 恒返回 0 等于让所有自动化检查永远"通过"
         print(json.dumps(m, ensure_ascii=False, indent=2))
-        return 0
+        return 0 if m["healthy"] else 1
     print(render(m, settings.index_db))
     return 0 if m["healthy"] else 1
 

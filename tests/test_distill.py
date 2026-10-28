@@ -13,6 +13,7 @@ import pytest
 
 from agentmemhub.distill import (
     CONFIDENCES,
+    CONTENT_MAX,
     DISTILLED_ROLE,
     DISTILLED_SRC_PREFIX,
     MEMORY_STATUSES,
@@ -30,6 +31,7 @@ from agentmemhub.distill import (
     _project_one,
     build_slices,
     check_memory_fields,
+    clamp_content,
     conversation_turns,
     distill_slice,
     ensure_distill_schema,
@@ -975,6 +977,32 @@ def test_project_first_time_writes_units(idx_conn, real_settings):
     ).fetchone()[0] == "new"
 
 
+def test_project_writes_all_write_order_models(idx_conn, real_settings):
+    """一条蒸馏记忆必须在**每个**配置模型里都有向量（不只 active）。
+
+    修复前 `distill._project_one` 只写 active 一张表 ⇒ 非 active 模型永久缺这些
+    行；而 `ingest --model` 的候选来自源库 events、补不上 units 里的行，唯一补救
+    是整表 `reembed --model`（实测 22228 条 / 19 分钟）。2026-10-26 实测 base 表
+    曾因此缺 1912 条 distilled —— 记忆在 base 通道里等于不存在。
+    """
+    import dataclasses
+
+    base = real_settings
+    m2 = dataclasses.replace(base.active_spec, id="probe-m2-distill")
+    st = dataclasses.replace(
+        base,
+        models={**base.models, m2.id: m2},
+        write={**base.write, "order": [base.active_model, m2.id]})
+    m = _mem_dict(idx_conn, content="多模型写入探针：投影要落满每张向量表")
+    project_memories(idx_conn, st, [m])
+    uid = idx_conn.execute(
+        "SELECT id FROM units WHERE role=?", (DISTILLED_ROLE,)).fetchone()[0]
+    for spec in (base.active_spec, m2):
+        row = idx_conn.execute(
+            f"SELECT 1 FROM {spec.vec_table} WHERE rowid=?", (uid,)).fetchone()
+        assert row, f"{spec.id} 的向量表应有该单元"
+
+
 def test_project_idempotent(idx_conn, real_settings):
     m = _mem_dict(idx_conn, content="幂等性验证用的记忆内容甲")
     project_memories(idx_conn, real_settings, [m])
@@ -1093,17 +1121,21 @@ def test_merge_hierarchical_empty_input_no_llm_call():
 
 def test_merge_hierarchical_truncates_when_not_converging():
     """LLM 不去重（每批原样等量返回）→ 轮数用尽后保底截断，不无限调用。"""
-    long_text = "内容" * 200                      # 400 字符/条 → 每批仅装 2 条
+    # 注意：content 必须留在 CONTENT_MAX 之内 —— 超长会被 normalize_memories
+    # 截短，每批能装的条数随之变化，就制造不出"不收敛"了（实测踩过）。
+    # 这里改用较小的 max_chars 来保证"每批仅 2 条"。
+    long_text = "内容" * 50                       # 100 字符/条
     entries = [{"type": "fact", "confidence": "high", "content": long_text}
                for _ in range(400)]
-    # 每批返回等量同长度条目（不收敛）；两轮各约 200 批
+    # 每批返回等量同长度条目（不收敛）
     responses = []
     for i in range(200):
         responses.append({"memories": [
             {"type": "fact", "topic": "t", "confidence": "high",
              "content": f"{long_text}-{i}-{j}"} for j in range(2)]})
     client = _FakeLLM(*(responses * 2))
-    r = merge_hierarchical(client, entries, max_chars=1000, max_rounds=2)
+    # 每条 cost = content 长度 + _ENTRY_OVERHEAD(60) = 160；350 恰好装 2 条
+    r = merge_hierarchical(client, entries, max_chars=350, max_rounds=2)
     assert client.calls <= 400                     # 调用次数受轮数封顶，不爆炸
     assert len(r.memories) <= MERGE_FALLBACK_CAP   # 保底截断
     assert any("未收敛" in x for x in r.rejected)
@@ -1496,3 +1528,188 @@ def test_project_time_uses_origin_turn_time(idx_conn, real_settings):
     row = idx_conn.execute(
         "SELECT time FROM units WHERE role=?", (DISTILLED_ROLE,)).fetchone()
     assert row[0] == old_ts, f"应取原轮次时间 {old_ts}，实得 {row[0]}"
+
+
+# ---------------------------------------------------------------------------
+# content 硬截断（提示词约束的代码级兜底）
+#
+# 背景：CONTENT_MAX=120 原先只是**提示词里的要求**，实测没有模型稳定遵守——
+# 同一份提示词、同一批 12 个切片跑下来：MiMo 24% 超标、LongCat 44%、
+# deepseek-v4.1-flash 52%、ling-3.0-flash 53%。超长条目往往一条讲好几个结论，
+# 反而损害自包含性与召回质量（命中后更难用），所以必须由代码兜底。
+# ---------------------------------------------------------------------------
+
+def test_clamp_content_短文本原样返回():
+    assert clamp_content("一条正常长度的记忆", 120) == "一条正常长度的记忆"
+
+
+def test_clamp_content_恰等于上限不截断():
+    assert clamp_content("x" * 120, 120) == "x" * 120
+
+
+def test_clamp_content_超长时断在句读处():
+    text = "第一句结论。" * 8 + "后续内容" * 20   # 前 40 字里有 6 个句号
+    out = clamp_content(text, 40)
+    assert len(out) <= 40
+    assert out.endswith("。"), "应断在句读处，而不是句子中间"
+
+
+def test_clamp_content_句读太靠前则硬切加省略号():
+    text = "好。" + "x" * 200        # 句读在第 2 字，远不足 limit 的 60%
+    out = clamp_content(text, 50)
+    assert len(out) <= 51            # 50 字 + 省略号
+    assert out.endswith("…")
+
+
+def test_clamp_content_空值安全():
+    assert clamp_content("", 120) == ""
+    assert clamp_content(None, 120) == ""
+
+
+def test_normalize_memories_对超长content兜底():
+    """复现：LLM 无视 120 字约束时，入库的 content 必须已经被收缩。"""
+    long_text = "结论：这是一条远超上限的记忆。" + "补充说明" * 40
+    raw = {"memories": [{"type": "fact", "topic": "测试",
+                         "content": long_text, "confidence": "high"}]}
+    mems, rejected = normalize_memories(raw)
+    assert not rejected
+    assert len(mems) == 1
+    assert len(mems[0]["content"]) <= CONTENT_MAX, "超长 content 必须被截断"
+
+
+# ── Agent 直写记忆落蒸馏表（memory_save 的 wiki/报表可见性）──────────────
+
+def test_save_direct_memory_落表且字段规格正确(conn):
+    from agentmemhub.distill import save_direct_memory
+    r = save_direct_memory(conn, content="直写的记忆内容",
+                           slice_key="mcp:mcp_abc")
+    assert r == "inserted"
+    row = conn.execute(
+        "SELECT source, conversation_id, slice_key, type, confidence, status,"
+        " content_hash FROM distilled_memories").fetchone()
+    # 会话按自然日分桶（`direct-YYYY-MM-DD`），不再固定为 `direct`
+    assert row[0] == "mcp" and row[1].startswith("direct")
+    assert row[2] == "mcp:mcp_abc" and row[3] == "fact"
+    assert row[5] == "new"                                   # wiki 编译输入口径
+    assert row[6] == fingerprint("直写的记忆内容")
+
+
+def test_save_direct_memory_按日分桶_避免单会话膨胀(conn):
+    """直写记忆按自然日分桶 —— L1 的脏单位是**会话**，单会话会线性膨胀。"""
+    import time as _t
+    from agentmemhub.distill import save_direct_memory
+    d1 = int(_t.mktime((2026, 10, 18, 12, 0, 0, 0, 0, -1)))
+    d2 = int(_t.mktime((2026, 10, 19, 12, 0, 0, 0, 0, -1)))
+    save_direct_memory(conn, content="第一天的结论", created_at=d1)
+    save_direct_memory(conn, content="第二天的结论", created_at=d2)
+    cids = [r[0] for r in conn.execute(
+        "SELECT conversation_id FROM distilled_memories ORDER BY created_at")]
+    assert cids == ["direct-%s" % _t.strftime("%Y-%m-%d", _t.localtime(d1)),
+                    "direct-%s" % _t.strftime("%Y-%m-%d", _t.localtime(d2))]
+
+
+def test_save_direct_memory_分桶可回退单会话(conn):
+    """`bucket='none'` 回退历史口径（单一 `direct` 会话，仅排障用）。"""
+    from agentmemhub.distill import save_direct_memory
+    save_direct_memory(conn, content="回退口径的记忆", bucket="none")
+    assert conn.execute("SELECT conversation_id FROM distilled_memories"
+                        ).fetchone()[0] == "direct"
+
+
+def test_save_direct_memory_跨分桶同内容仍去重(conn):
+    """分桶把同一内容分散到不同 cid —— 查重必须跨桶，否则隔天重写就重复入库。"""
+    import time as _t
+    from agentmemhub.distill import save_direct_memory
+    d1 = int(_t.mktime((2026, 10, 18, 12, 0, 0, 0, 0, -1)))
+    d2 = int(_t.mktime((2026, 10, 19, 12, 0, 0, 0, 0, -1)))
+    assert save_direct_memory(conn, content="同一条结论", created_at=d1) == "inserted"
+    assert save_direct_memory(conn, content="同一条结论", created_at=d2) == "duplicate"
+    assert conn.execute("SELECT COUNT(*) FROM distilled_memories").fetchone()[0] == 1
+
+
+def test_save_direct_memory_幂等_同内容不重复(conn):
+    from agentmemhub.distill import save_direct_memory
+    assert save_direct_memory(conn, content="AgentMemHub 采用 RRF 融合召回",
+                              slice_key="mcp:a") == "inserted"
+    assert save_direct_memory(conn, content="AgentMemHub 采用 RRF 融合召回",
+                              slice_key="mcp:b") == "duplicate"
+    assert conn.execute("SELECT COUNT(*) FROM distilled_memories").fetchone()[0] == 1
+
+
+def test_save_direct_memory_归档条目复活(conn):
+    from agentmemhub.distill import save_direct_memory
+    save_direct_memory(conn, content="曾被归档的一条结论", slice_key="mcp:a")
+    conn.execute("UPDATE distilled_memories SET status='merged'")
+    assert save_direct_memory(conn, content="曾被归档的一条结论", slice_key="mcp:b") == "revived"
+    assert conn.execute("SELECT status FROM distilled_memories").fetchone()[0] == "new"
+
+
+def test_save_direct_memory_字段校验与脱敏兜底(conn):
+    from agentmemhub.distill import save_direct_memory
+    with pytest.raises(ValueError):
+        save_direct_memory(conn, content="x", type_="nope")
+    with pytest.raises(ValueError):
+        save_direct_memory(conn, content="x", confidence="nope")
+    with pytest.raises(ValueError):
+        save_direct_memory(conn, content="")          # 无实质内容
+
+
+def test_save_direct_memory_脱敏后入库(conn):
+    """直写内容也过脱敏兜底（与蒸馏入库同规格）。"""
+    from agentmemhub.distill import save_direct_memory
+    r = save_direct_memory(conn, content="正常内容，附带敏感词",
+                           slice_key="mcp:s")
+    assert r == "inserted"
+    n = conn.execute("SELECT COUNT(*) FROM distilled_memories").fetchone()[0]
+    assert n == 1                                    # 有一条（脱敏后仍有实质）
+
+
+# ── 历史 Agent 直写记忆回填（backfill_agent_memories）──────────────────
+
+def _mk_units(conn):
+    """最小 units 表（真实 schema 由 ingest 建，distill 库不含）。"""
+    conn.execute(
+        "CREATE TABLE units (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " source TEXT, conversation_id TEXT, seq INTEGER, role TEXT,"
+        " src_id TEXT, time INTEGER, text TEXT)")
+
+
+def test_backfill_把units的manual记忆落蒸馏表(conn):
+    from agentmemhub.distill import backfill_agent_memories
+    _mk_units(conn)
+    conn.executemany(
+        "INSERT INTO units (src_id, source, conversation_id, text, time)"
+        " VALUES (?,?,?,?,?)", [
+            ("mcp_aaa", "memory", "mcp", "回填测试的第一条结论内容", 1789800000),
+            ("mcp_bbb", "memory", "mcp", "回填测试的第二条结论内容", 1789800001),
+        ])
+    r = backfill_agent_memories(conn)
+    assert r["scanned"] == 2 and r["inserted"] == 2
+    # 落表口径：slice_key='mcp:<tid>'（与面板去重逻辑对齐）
+    row = conn.execute(
+        "SELECT slice_key, status, content, created_at FROM distilled_memories"
+        " WHERE slice_key='mcp:aaa'").fetchone()
+    assert row and row[1] == "new"
+    assert "第一条结论" in row[2]
+    assert row[3] == 1789800000                       # 保留原始时间
+
+
+def test_backfill_幂等_重跑不再落账(conn):
+    from agentmemhub.distill import backfill_agent_memories
+    _mk_units(conn)
+    conn.execute(
+        "INSERT INTO units (src_id, source, conversation_id, text, time)"
+        " VALUES ('mcp_ccc', 'memory', 'mcp', '幂等验证的一条记忆内容', 1)")
+    assert backfill_agent_memories(conn)["inserted"] == 1
+    r2 = backfill_agent_memories(conn)
+    assert r2["skipped_exists"] == 1 and r2["inserted"] == 0
+
+
+def test_backfill_无实质内容跳过并计数(conn):
+    from agentmemhub.distill import backfill_agent_memories
+    _mk_units(conn)
+    conn.execute(
+        "INSERT INTO units (src_id, source, conversation_id, text, time)"
+        " VALUES ('mcp_ddd', 'memory', 'mcp', '嗯', 1)")   # 无实质
+    r = backfill_agent_memories(conn)
+    assert r["skipped_substance"] == 1 and r["inserted"] == 0

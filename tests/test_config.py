@@ -8,32 +8,76 @@ def _cfg(env=None, path=None):
     return C.Config(env=env or {}, path=path)
 
 
+def test_llm_effective_标出继承与覆盖(tmp_path):
+    """`llm-config` 视图：把四个使用点的生效配置拼好，并标出每项来源。
+
+    动机：LLM 的覆盖项是**就地**的（`wiki.llm` / `distillation.llm`），
+    与 `logs.files.<name>`、`retrieval.callers.<name>` 的集中式覆盖不同 ——
+    不拼一下根本看不出来"谁在用什么、哪些是继承的"。
+    """
+    f = tmp_path / "agentmemhub.yaml"
+    f.write_text(
+        "llm:\n  endpoint: https://top/v1\n  api_key: sk-secret\n  model: m\n"
+        "distillation:\n  enabled: true\n"
+        "wiki:\n  llm:\n    timeout: 900\n"
+        "  l2:\n    llm:\n      reasoning_effort: low\n", encoding="utf-8")
+    data = C.llm_effective(_cfg(path=f))
+
+    assert data["top"]["values"]["model"] == "m"
+    by_name = {u["name"]: u for u in data["users"]}
+
+    # 蒸馏：完全继承顶层
+    d = by_name["记忆蒸馏"]
+    assert d["overrides"] == []
+    assert "model" in d["inherits"]
+
+    # Wiki 第一级：只覆盖 timeout
+    w1 = by_name["Wiki 第一级"]
+    assert w1["overrides"] == ["timeout"]
+    assert w1["values"]["timeout"] == 900
+    assert "model" in w1["inherits"], "未覆盖的字段应标记为继承"
+
+    # Wiki 第二级：**只**覆盖 reasoning_effort —— 它刻意跳过 wiki.llm
+    # （继承链是「顶层 llm → wiki.l2.llm」），所以**不会**继承 DEFAULT_WIKI 里
+    # 给第一级的 timeout=900。级联继承会让第一级换 provider 牵连第二级（实测踩过）。
+    w2 = by_name["Wiki 第二级"]
+    assert w2["overrides"] == ["reasoning_effort"]
+    assert "timeout" not in w2["values"], "不应从 wiki.llm 继承 timeout"
+
+
+def test_llm_effective_绝不回显密钥(tmp_path):
+    """视图是给人看配置的，api_key 只报存在性。"""
+    f = tmp_path / "agentmemhub.yaml"
+    f.write_text("llm:\n  endpoint: https://top/v1\n  api_key: sk-secret\n",
+                 encoding="utf-8")
+    data = C.llm_effective(_cfg(path=f))
+    assert data["top"]["values"]["api_key"] == "（已设置）"
+    assert "sk-secret" not in str(data)
+
+
+def test_llm_effective_未配置时也不炸(tmp_path):
+    f = tmp_path / "agentmemhub.yaml"
+    f.write_text("llm: {}\n", encoding="utf-8")
+    data = C.llm_effective(_cfg(path=f))
+    assert len(data["users"]) == 4
+    assert data["top"]["values"]["api_key"] == "（未设置）"
+
+
 def test_defaults():
     c = _cfg()
     # 默认数据目录在项目内（database/，随项目走便于备份迁移）
     assert c.data_dir == C.PROJECT_ROOT / "database"
     assert c.db_path == C.PROJECT_ROOT / "database" / "agentmemhub.db"
     assert c.web_port == 8086
-    # MemOS repo 默认 = 项目根/memOS
-    assert c.memos_repo_dir == C.PROJECT_ROOT / "memOS"
-    assert c.memos_base_url == "http://127.0.0.1:18800"
-    # 默认推导路径正确（memOS/ 是否已平移由环境决定，存在性不在此断言）
-    assert c.memos_plugin_dir == C.PROJECT_ROOT / "memOS" / "apps" / "memos-local-plugin"
-    assert c.memos_password == ""
-    assert c.memos_lightweight is None
 
 
 def test_env_overrides():
     c = _cfg(env={
         "AGENTMEMHUB_DB": "D:/x/y.db",
         "AGENTMEMHUB_PORT": "9000",
-        "MEMOS_REPO_DIR": "D:/memos",
-        "MEMOS_BASE_URL": "http://127.0.0.1:9999",
     })
     assert c.db_path == Path("D:/x/y.db")
     assert c.web_port == 9000
-    assert c.memos_repo_dir == Path("D:/memos")
-    assert c.memos_base_url == "http://127.0.0.1:9999"
 
 
 def test_yaml_file_and_derivation(tmp_path):
@@ -45,10 +89,6 @@ web:
   port: 9001
 agents:
   hermes: "~/hermes-custom/state.db"
-memos:
-  repo_dir: "~/memos-place"
-  password: "sekrit"
-  lightweight: false
 """, encoding="utf-8")
     c = _cfg(path=f)
     assert c.data_dir == C.PROJECT_ROOT / "custom-data"
@@ -56,10 +96,6 @@ memos:
     assert c.web_port == 9001
     assert c.agent_path("hermes") == Path.home() / "hermes-custom" / "state.db"
     assert c.agent_path("zcode") is None
-    assert c.memos_repo_dir == Path.home() / "memos-place"
-    assert c.memos_plugin_dir == Path.home() / "memos-place" / "apps" / "memos-local-plugin"
-    assert c.memos_password == "sekrit"
-    assert c.memos_lightweight is False
 
 
 # ── LLM 配置（蒸馏 / 评分共用）─────────────────────────────────────────
@@ -133,8 +169,11 @@ def test_distillation_llm_inherits_top_level(tmp_path):
         "llm:\n  endpoint: https://top/v1\n  api_key: k\n  model: m\n"
         "distillation:\n  enabled: true\n", encoding="utf-8")
     c = _cfg(path=f)
-    assert c.distillation["llm"] == {"endpoint": "https://top/v1",
-                                     "api_key": "k", "model": "m"}
+    # 逐字段断言，不用整字典相等 —— 否则每加一个可选 llm 字段都要改这条测试
+    d = c.distillation["llm"]
+    assert d["endpoint"] == "https://top/v1"
+    assert d["api_key"] == "k"
+    assert d["model"] == "m"
 
 
 def test_distillation_llm_partially_overrides_top_level(tmp_path):
@@ -199,3 +238,29 @@ def test_distillation_headers_merge_child_wins(tmp_path):
     h = c.distillation["llm"]["headers"]
     assert h["User-Agent"] == "top-ua"          # 顶层独有 → 保留
     assert h["x-opencode-session"] == "child"   # 子段覆盖
+
+def test_llm_白名单要透传控制超时与重试的键(tmp_path):
+    """`_merge_llm` 是**白名单过滤** —— 漏加的键会静默失效（yaml 写了读不到）。
+
+    实测踩过两次：`thinking` / `reasoning_effort`。2026-10-22 加
+    `max_total_seconds`（单次调用总时长上限）时又差点漏 —— 漏了的话看门狗
+    永远不会启用，而配置看起来"已经配好"，排查成本极高。
+    `max_retries` / `backoff_base` 同批补上（它们也是 `LLMConfig` 的字段）。
+    """
+    p = tmp_path / "agentmemhub.yaml"
+    p.write_text(
+        "llm:\n"
+        "  max_total_seconds: 600\n"
+        "  max_retries: 1\n"
+        "  backoff_base: 2.5\n"
+        "wiki:\n"
+        "  l2:\n"
+        "    llm:\n"
+        "      max_total_seconds: 300\n", encoding="utf-8")
+    c = _cfg(path=p)
+    assert c.llm["max_total_seconds"] == 600
+    assert c.llm["max_retries"] == 1
+    assert c.llm["backoff_base"] == 2.5
+    # 子段（wiki.l2.llm）覆盖顶层，其余字段仍继承
+    assert c.wiki_l2["llm"]["max_total_seconds"] == 300
+    assert c.wiki_l2["llm"]["max_retries"] == 1

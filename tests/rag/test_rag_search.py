@@ -1,4 +1,4 @@
-﻿"""混合召回测试：FTS 懒建/触发器同步/trigram+LIKE、RRF、向量路、端到端与溯源日志。"""
+"""混合召回测试：FTS 懒建/触发器同步/trigram+LIKE、RRF、向量路、端到端与溯源日志。"""
 from __future__ import annotations
 
 import dataclasses

@@ -69,7 +69,7 @@ def test_snapshot_diff_events(tmp_path, monkeypatch):
     sessions = TraeAdapter().load(appdata)
     assert len(sessions) == 1
     s = sessions[0]
-    assert s["source"] == "trae" and s["id"] == sid
+    assert s["source"] == "trae" and s["id"] == f"snap:{sid}"
     assert s["meta"]["sandbox"]["name"] == "my-sandbox"
 
     patches = [e for e in s["events"] if e.role == "patch"]
@@ -99,15 +99,17 @@ def test_solo_and_project_memory(tmp_path, monkeypatch):
 
     sessions = TraeAdapter().load(appdata)
     by_id = {s["id"]: s for s in sessions}
-    assert set(by_id) == {"task1234", "-d-data-demo"}
+    # id 带类别前缀（snap: / solo: / mem:）—— 三类数据共用 source="trae"，
+    # 而库主键是 (source, id)，不加前缀同名会互相覆盖
+    assert set(by_id) == {"solo:task1234", "mem:-d-data-demo"}
 
-    solo = by_id["task1234"]
+    solo = by_id["solo:task1234"]
     assert solo["title"].startswith("Trae SOLO 任务")
     assert solo["meta"] == {"kind": "solo_task"}
     assert "analyze_data.py" in solo["events"][0].content
     assert "out.csv" in solo["events"][0].content
 
-    mem = by_id["-d-data-demo"]
+    mem = by_id["mem:-d-data-demo"]
     ev = mem["events"][0]
     assert ev.role == "user" and ev.is_system is False
     assert "使用 uv 管理" in ev.content

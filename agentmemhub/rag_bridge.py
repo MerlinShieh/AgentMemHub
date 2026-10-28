@@ -1,7 +1,7 @@
-"""AgentMemHub ↔ agentmemhub.rag 协议桥（R3）：以 MemOS 端点语义实现替换 HTTP 引擎。
+"""AgentMemHub ↔ agentmemhub.rag 协议桥（R3）：以 /api/v1 端点语义在进程内实现（取代 HTTP 引擎）。
 
 设计（详见 docs/rag-bridge-switch-plan.md）：
-- 唯一接缝：memos_daemon.engine_request/auth_state/daemon_status 在 backend=rag 时
+- 唯一接缝：engine_api.engine_request/auth_state/daemon_status 在 backend=rag 时
   派发进本模块——MCP 五工具、web 网关、cli 的调用方代码与响应形状零改动；
 - trace 语义 = 轮次视图（units 按 turn_key 聚合），refId 解析序：
   legacy_id → src_id → 数字 unit_id（保证 memory_score 跨系统回指）；
@@ -23,6 +23,7 @@ from agentmemhub.rag.ingest import (
     ensure_bridge_schema,
     ensure_vec_table,
     open_index,
+    write_models,
 )
 from agentmemhub.rag.memstore import (
     content_anchor,
@@ -123,7 +124,7 @@ def _group_key(r: sqlite3.Row) -> str:
 
 
 def _rows_to_traces(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
-    """units(+values) → MemOS TraceDTO 形状的轮次视图（ts 毫秒，对齐旧口径）。"""
+    """units(+values) → TraceDTO 形状的轮次视图（ts 毫秒，对齐旧口径）。"""
     groups: dict[str, list[sqlite3.Row]] = {}
     for r in rows:
         groups.setdefault(_group_key(r), []).append(r)
@@ -159,14 +160,87 @@ _SELECT_TRACE = (
     " FROM units u LEFT JOIN unit_values v ON v.unit_id = u.id")
 
 
+#: 非页面层的**字面证据**信号集合 —— 与页面层同源（`search._PAGE_LITERAL_SIGNALS`）。
+#: 命中这些通道说明"查询词真的出现在文本里"，是拼错/近义查询下真相关的关键线索。
+_LITERAL_SIGNALS = frozenset({"phrase", "ident", "fts"})
+
+
+def _has_literal(h: dict) -> bool:
+    """该条目是否命中字面通道（查询词真的出现在文本里）。"""
+    return bool(set(h.get("signals") or ()) & _LITERAL_SIGNALS)
+
+
 def safe_cutoff_hits(hits: list[dict], *, max_keep: int = 5,
-                     floor_ratio: float = 0.7) -> list[dict]:
-    """机械终审（dict 版 ext.safe_cutoff 同规则）：≥0.7×top 且 ≤max_keep，至少保 1。"""
+                     floor_ratio: float = 0.7,
+                     page_max_keep: int = 3,
+                     literal_seats: int = 1) -> list[dict]:
+    """终审：**高分优先 + 低分字面兜底**（与页面层同构）。
+
+    **页面层准入**（kind='page'）：这里曾是页面刷屏的直接推手——给页面
+    0.5×top 的宽松门限，并且**从 max_keep 之外把页面捞回结果**，等于"页面
+    永远进结果"。实测（12 个真实查询）：12/12 出现页面、结果里平均 4.2 条
+    是页面，与知识库无关的查询也整条全是页面。
+
+    现在分两步：**该不该进结果**已由 `search.apply_page_policy` 用"证据类型"
+    判定（分数不可用——页面融合分与相关性甚至反相关：相关页 0.21×top、
+    噪声页 0.63×top）。所以这里对页面**不再套分数门限**，只执行配额，并且
+    **不参与 `max_keep` 窗口截断**——页面分数天然低、排在末尾，按窗口切会
+    正好把它切掉（实测：k=20 时页面掉出 `hits[:20]` 窗口而消失，k=8 时正常）。
+
+    **非页面层的字面兜底席**（2026-09-22 补）：本函数此前对非页面只套一条
+    乘性相对门限 `score ≥ floor_ratio × top`，而 **top 本身可能是噪声**——
+    拼错查询 `windowsctrol` 的 top1 是完全无关的字面命中（1.238），门限因此
+    被抬到 0.990，24 条候选只剩 4 条，真相关的「WindowsControl 项目架构与
+    技术栈」(0.701，命中 fts+vec) 被白白切掉。而**同一批结果里页面**因为有
+    字面兜底席，连 0.195 的真相关页都进了结果——**这个不对称本身就是缺陷**。
+
+    所以规则与页面层对齐（用户验收标准同样是"不遗漏 > 排序靠前 > 噪声可容忍"）：
+      ① 高分（≥ 门限）优先，但为字面兜底**留出席位**；
+      ② 低分但命中字面通道的，用兜底席救回；
+      ③ **只救有字面证据的**——低分且只有向量分的仍然切掉，否则等于取消门限。
+    """
     if not hits:
         return []
-    top = max(h["score"] for h in hits[:1]) or 0.0
-    kept = [h for h in hits[:max_keep] if h["score"] >= floor_ratio * top]
-    return kept or [hits[0]]
+    top = hits[0]["score"] or 0.0
+    thr = floor_ratio * top
+    pages = [h for h in hits if h.get("kind") == "page"][:page_max_keep]
+    others = [h for h in hits if h.get("kind") != "page"]
+    # 页面占名额（不是额外叠加），总数守恒 ≤ max_keep——否则调用方按 max_keep
+    # 再截一次就会把末尾的页面切掉（面板 top 截断实测踩过）
+    room = max(max_keep - len(pages), 0)
+
+    high = [h for h in others if (h["score"] or 0.0) >= thr]
+    low_lit = [h for h in others
+               if (h["score"] or 0.0) < thr and _has_literal(h)]
+
+    picked: list[dict] = []
+    seen: set[tuple] = set()
+
+    def take(lst: list[dict], cap: int) -> None:
+        for h in lst:
+            if len(picked) >= cap:
+                return
+            # 去重键：优先 refId（同一 unit 不重复入选）；**缺失时退回对象身份**。
+            # 不能写成 `(h.get("refId"), h.get("kind"))` —— 那样所有没有 refId 的
+            # 条目都成了同一个键 (None, None)，会被误判成重复而**静默只剩第一条**
+            # （既有测试 test_safe_cutoff_hits_rules 当场抓到）。
+            key = h.get("refId") or id(h)
+            if key in seen:
+                continue
+            picked.append(h)
+            seen.add(key)
+
+    seats = min(max(literal_seats, 0), room)
+    take(high, room - seats)      # ① 高分优先，给字面兜底留出席位
+    take(low_lit, room)           # ② 低分但有字面证据的模糊匹配
+    take(high, room)              # ③ 某一类不足时另一类补齐
+
+    out = sorted(picked + pages, key=lambda h: -(h["score"] or 0.0))
+    if out:
+        return out
+    # 兜底：非页面条目即使低于门限也保 1 条（"至少给一条"的既有语义）；
+    # 一条都没有时不硬塞噪声页。
+    return others[:1]
 
 
 # ── 端点语义实现 ───────────────────────────────────────────────────────
@@ -175,23 +249,80 @@ def safe_cutoff_hits(hits: list[dict], *, max_keep: int = 5,
 #: 用户搜东西期望看到"有哪些相关"，5 条过少（R6 体验反馈）。
 SEARCH_MAX_HITS = 20
 
+#: 召回面上"同内容双投影"的两种前缀：Agent 直写落账（`mcp_`）与蒸馏投影（`dst_`）。
+_PROJECTION_PREFIXES = ("mcp_", "dst_")
+
+
+def _dedupe_projections(hits: list, refmap: dict) -> list:
+    """把"同一条内容的双投影"合并成一条（保留分数最高的那份）。
+
+    背景（2026-09-22 实测）：Agent 直写记忆在召回面有**两份内容相同**的单元 ——
+    `mcp_<hash>`（`memory_save` 写引擎时产生）与 `dst_<hash>`（蒸馏 S4 投影）。
+    后果有两个：
+
+      · 结果里同一条**重复出现**（用户可见）；
+      · 更麻烦的是它们**各占一个席位** —— 实测会把"低分字面兜底席"也吃掉，
+        把别的条目挤出去。
+
+    **两个判据都用**（任一命中即视为同一条）：
+
+    ① **src_id 里的内容 hash 配对**。注意这依赖一个**未写在文档里的巧合**：
+       `content_anchor()` 用**原始**内容算 `sha256[:16]`，而
+       `distilled_memories.content_hash`（`fingerprint()`）用**规范化后**的内容 ——
+       两者只在"入库时内容没被改动"时才相同。实测 114 条 `mcp_` 单元里
+       **11 条 hash 分叉**（入库时 `sanitize.redact` 改动了内容），所以光靠 hash
+       会漏。
+    ② **正文归一化后比对**兜底 —— 实测配对成功的那些**正文 100% 相同**，
+       正好补上 ① 漏掉的 11 条。跨会话同内容不会误伤：`dst_` 锚不含会话，
+       同 hash 本来就只有一个投影行。
+
+    只对 `kind == "memory"` 生效 —— 消息层/页面层的同文重复另有成因，不在本函数
+    范围。`hits` 已按分数降序，所以保留的自然是分数高的那份（实测 `mcp_` 侧因
+    Agent 写入基础分更高而胜出，符合预期）。
+    """
+    seen_key: set[str] = set()
+    seen_text: set[str] = set()
+    out: list = []
+    for h in hits:
+        if h.kind == "memory":
+            src = (refmap.get(h.unit_id) or {}).get("srcId", "")
+            key = ""
+            for p in _PROJECTION_PREFIXES:
+                if src.startswith(p):
+                    key = src[len(p):]
+                    break
+            txt = " ".join((h.text or "").split())
+            if (key and key in seen_key) or (txt and txt in seen_text):
+                continue
+            if key:
+                seen_key.add(key)
+            if txt:
+                seen_text.add(txt)
+        out.append(h)
+    return out
+
 
 def search(agent: str, query: str, *, k: int = SEARCH_MAX_HITS,
-           curate: bool = True,
+           curate: bool = True, origin: str = "",
            exclude_session: tuple[str, str] | None = None) -> dict:
     """POST /api/v1/memory/search 的 rag 实现（hits 形状对齐 RetrievalResultDTO）。
 
     额外带回会话定位信息（source/conversationId/turnKey/title），
-    让面板能把命中项点开跳回对应会话的对应轮次。
+    让面板能把命中项点开跳回对应会话的对应轮次；并带回**层级**（kind：
+    page/memory/message）与**来源**（origin：native 自有沉淀 / external 外投）。
+    origin 可用于只召回某一来源（空=全部）。
     """
     t0 = time.perf_counter()
     st = settings()
     vstore = memstore.ValueStore(st.index_db)
+    # 候选宽度与相对阈值由**召回档位**（rag.retrieval.recall_level）统一给，
+    # 这里不再自行推算，避免"代码里的隐式默认"与配置里的档位各说各话。
     hits = hybrid_search(
-        st, query, k=k, candidate_k=max(k * 4, 30), expand_turns=False,
+        st, query, k=k, expand_turns=False,
         exclude_session=exclude_session,
         value_provider=vstore,
         no_decay_ids=vstore.no_decay_ids,
+        origin=origin,
         log=_log())
     refmap: dict = {}
     if hits:
@@ -204,6 +335,8 @@ def search(agent: str, query: str, *, k: int = SEARCH_MAX_HITS,
                 [h.unit_id for h in hits]):
                 refmap[r["id"]] = {
                     "refId": r["legacy_id"] or r["src_id"] or f"unit:{r['id']}",
+                    # src_id 用于"同内容双投影"去重（见 _dedupe_projections）
+                    "srcId": r["src_id"] or "",
                     "source": r["source"],
                     "conversationId": r["conversation_id"],
                     "turnKey": r["turn_key"] or "",
@@ -211,24 +344,49 @@ def search(agent: str, query: str, *, k: int = SEARCH_MAX_HITS,
                 }
         finally:
             conn.close()
+    # 同一条直写记忆在召回面有两份投影 → 先合并再成型（否则结果里重复、且各占席位）
+    hits = _dedupe_projections(hits, refmap)
     dto_hits = []
     for h in hits:
         m = refmap.get(h.unit_id) or {}
+        # 页面层（L2 知识页）：snippet 用摘要（聚合答案的要点，比截断正文更
+        # 可读）；正文按 wikiPath 按需读（两阶段召回）。其余层保持原样。
+        if h.kind == "page":
+            snippet = h.summary or h.text[:200]
+        else:
+            snippet = (h.title + " | " if h.title else "") + h.text[:200]
         dto_hits.append({
             "tier": 2, "refKind": "trace",
             "refId": m.get("refId", f"unit:{h.unit_id}"),
             "score": round(h.score, 4),
-            "snippet": (h.title + " | " if h.title else "") + h.text[:200],
+            "snippet": snippet,
             # 会话定位（面板点击跳转用）；原子记忆（source='memory'）无会话
             "source": m.get("source", ""),
             "conversationId": m.get("conversationId", ""),
             "turnKey": m.get("turnKey", ""),
             "title": m.get("title", ""),
             "atomic": m.get("source") == "memory",
+            # 知识层级（page/memory/message）：页面是聚合答案、记忆是具体
+            # 结论、消息是原始细节——调用方据此决定呈现与是否下钻
+            "kind": h.kind,
+            "wikiPath": h.wiki_path or "",
+            "summary": h.summary or "",
+            # 数据来源：native=自有记忆沉淀 / external=外部投喂
+            "origin": h.origin,
+            # 命中的通道集合。字面通道（fts/ident/phrase）说明**查询词真的出现
+            # 在文本里** —— 终审的"低分字面兜底席"靠它判定（见 safe_cutoff_hits）
+            "signals": sorted(h.signals),
         })
     if curate:
-        # 相关度截断（≥0.7×top）但不再硬砍到 5 条，上限放宽到 SEARCH_MAX_HITS
-        dto_hits = safe_cutoff_hits(dto_hits, max_keep=SEARCH_MAX_HITS)
+        # 相关度截断：阈值与席位都来自**召回档位**（rag.retrieval.recall_level）
+        # ——档位越高越宽松（详见 rag/config.py 的 RECALL_LEVELS）
+        policy = st.page_policy
+        profile = st.recall_profile
+        dto_hits = safe_cutoff_hits(
+            dto_hits, max_keep=SEARCH_MAX_HITS,
+            floor_ratio=float(profile.get("curate_floor", 0.7)),
+            page_max_keep=int(policy.get("max_in_results", 5)),
+            literal_seats=int(profile.get("nonpage_literal_seats", 1)))
     ctx = "\n".join(f"- {d['snippet'][:160]}" for d in dto_hits[:3])
     return {"hits": dto_hits, "injectedContext": ctx,
             "tierLatencyMs": {"rag": round((time.perf_counter() - t0) * 1000)}}
@@ -249,82 +407,77 @@ def traces_list(limit: int = 20, offset: int = 0) -> dict:
         conn.close()
 
 
-def import_bundle(traces: list[dict], *, embedder=None) -> dict:
-    """POST /api/v1/import 的 rag 实现：按 legacy_id 幂等（与 MemOS 行为对齐）。
+def save_memory_trace(
+    text: str,
+    *,
+    tid: str = "",
+    ts: int | None = None,
+    value: float = 0.0,
+    priority: float | None = None,
+    tags: list[str] | None = None,
+    origin: str = "native",
+    embedder=None,
+) -> dict:
+    """写入一条 Agent 直写记忆（units + 多模型向量 + 可选初始分）。
 
-    处理的是「记忆型 trace DTO」（userText/agentText/summary + value 预置）；
-    会话轨迹在 rag 后端下由 run_ingest 直采源库，不经此路径。
+    这是 MCP `memory_save` 的唯一写入口（v2.8 起不再经 bundle/HTTP 导入语义）：
+
+    - **幂等**：`tid` 落 `legacy_id`，同 id 重放返回 `skipped`；不带 tid 则总是新增。
+    - **多模型**：按 `rag.write.order` 逐模型嵌入并写各自向量表（与 `run_ingest`
+      同语义）——只写 active 一个模型时，一旦配置换模型（而进程仍缓存旧 active），
+      新记忆会落进另一张表、在召回侧"隐形"。
+    - **origin 逐条可声明**：`external`=外部投喂 / 缺省 `native`=自有沉淀。Agent 用
+      Read 读完 PDF/图片后把结论写回走的正是这条通路，不写 origin 会让外部知识被
+      标成"自有沉淀"（2026-10-10 实测缺口）。取值非法回落 `native`，不写脏值。
+    - **tags**：只透传（引擎不解释语义），存 JSON 数组文本供面板筛选与溯源。
     """
+    text = (text or "").strip()
+    if not text:
+        return {"imported": 0, "skipped": 1}
     st = settings()
     conn = _conn()
-    imported = skipped = 0
     try:
+        if tid and conn.execute("SELECT 1 FROM units WHERE legacy_id=?",
+                                (tid,)).fetchone():
+            return {"imported": 0, "skipped": 1}
         emb = embedder or get_active_embedder(st)
-        spec = st.active_spec
-        ensure_vec_table(conn, spec)
-        pend_texts: list[str] = []
-        pend_dtos: list[dict] = []
-        for t in traces or []:
-            lid = str(t.get("id") or "").strip()
-            text = (t.get("userText") or "").strip() or \
-                   (t.get("agentText") or "").strip() or \
-                   (t.get("summary") or "").strip()
-            if not lid or not text:
-                skipped += 1
-                continue
-            if conn.execute("SELECT 1 FROM units WHERE legacy_id=?",
-                            (lid,)).fetchone():
-                skipped += 1
-                continue
-            pend_texts.append(text)
-            pend_dtos.append({**t, "_text": text})
-        if pend_texts:
-            # 多模型写入：按 rag.write.order 逐模型嵌入并写各自向量表
-            # （与 run_ingest 的多模型编排同语义）——只写 active 一个模型时，
-            # 一旦配置换模型（而写入进程仍缓存旧 active），新记忆就会落进
-            # 另一张表、在召回侧"隐形"；多写一份即消除该结构性风险。
-            multi: list[tuple] = []
-            for mid in st.write_order:
-                s = st.model(mid)
-                ensure_vec_table(conn, s)
-                em = emb if mid == st.active_model else get_embedder(s, settings=st)
-                multi.append((s, em.encode_passages(pend_texts)))
-            with conn:
-                seq = conn.execute(
-                    "SELECT COALESCE(MAX(seq),0) FROM units"
-                    " WHERE source='memory'").fetchone()[0]
-                for i, d in enumerate(pend_dtos):
-                    seq += 1
-                    ts = int((d.get("ts") or time.time() * 1000) // 1000)
-                    # 标签：MCP memory_save 的可选 tags → 存 JSON 数组文本；其它来源为 NULL。
-                    # 只接受序列，避免 bundle 里出现任意类型时写出脏数据。
-                    raw_tags = d.get("tags")
-                    tags_json = None
-                    if isinstance(raw_tags, (list, tuple)) and raw_tags:
-                        tags_json = json.dumps([str(x) for x in raw_tags],
-                                               ensure_ascii=False)
-                    cur = conn.execute(
-                        "INSERT INTO units(source, conversation_id, seq, role,"
-                        " turn_key, src_id, time, title, text, chars, legacy_id,"
-                        " tags, updated_at)"
-                        " VALUES('memory','mcp',?,'user','mcp',?,?,?,?,?,?,?,?)",
-                        (seq, content_anchor(d["_text"]), ts,
-                         "记忆", d["_text"], len(d["_text"]), d["id"], tags_json,
-                         int(time.time())))
-                    for s, vecs in multi:
-                        conn.execute(
-                            f"INSERT OR REPLACE INTO {s.vec_table}"
-                            "(rowid, embedding) VALUES(?,?)",
-                            (cur.lastrowid, bytes(vecs[i])))
-                    value = float(d.get("value") or 0.0)
-                    if value:
-                        conn.execute(
-                            "INSERT OR REPLACE INTO unit_values(unit_id, value,"
-                            " r_human, priority, updated_at) VALUES(?,?,?,?,?)",
-                            (cur.lastrowid, value, None,
-                             float(d.get("priority") or abs(value)), int(time.time())))
-                    imported += 1
-        return {"imported": imported, "skipped": skipped}
+        ensure_vec_table(conn, st.active_spec)
+        multi: list[tuple] = []
+        for mid in st.write_order:
+            s = st.model(mid)
+            ensure_vec_table(conn, s)
+            em = emb if mid == st.active_model else get_embedder(s, settings=st)
+            multi.append((s, em.encode_passages([text])))
+        tags_json = None
+        if tags:
+            tags_json = json.dumps([str(x) for x in tags], ensure_ascii=False)
+        _origin = origin if origin in ("native", "external") else "native"
+        ts_s = int((ts or time.time() * 1000) // 1000)
+        with conn:
+            seq = conn.execute(
+                "SELECT COALESCE(MAX(seq),0)+1 FROM units"
+                " WHERE source='memory'").fetchone()[0]
+            cur = conn.execute(
+                "INSERT INTO units(source, conversation_id, seq, role,"
+                " turn_key, src_id, time, title, text, chars, legacy_id,"
+                " tags, origin, updated_at)"
+                " VALUES('memory','mcp',?,'user','mcp',?,?,?,?,?,?,?,?,?)",
+                (seq, content_anchor(text), ts_s, "记忆", text, len(text),
+                 tid or None, tags_json, _origin, int(time.time())))
+            for s, vecs in multi:
+                conn.execute(
+                    f"INSERT OR REPLACE INTO {s.vec_table}"
+                    "(rowid, embedding) VALUES(?,?)",
+                    (cur.lastrowid, bytes(vecs[0])))
+            v = float(value or 0.0)
+            if v:
+                conn.execute(
+                    "INSERT OR REPLACE INTO unit_values(unit_id, value,"
+                    " r_human, priority, updated_at) VALUES(?,?,?,?,?)",
+                    (cur.lastrowid, v, None,
+                     float(priority if priority is not None else abs(v)),
+                     int(time.time())))
+        return {"imported": 1, "skipped": 0, "unit_id": cur.lastrowid}
     finally:
         conn.close()
 
@@ -336,7 +489,7 @@ def feedback(trace_id: str, polarity: str, *, magnitude: float = 1.0,
 
     state=True：**面板状态式反馈**（先清后写；revoke=True 表示仅清除取消）——
     一个 unit 一条当前表态，反复点不叠加、可干净回退；
-    默认 False：**历史累加**语义（MemOS 同源，MCP memory_score / 批量评分沿用）。
+    默认 False：**历史累加**语义（上游同源，MCP memory_score / 批量评分沿用）。
     """
     conn = _conn()
     try:
@@ -369,40 +522,55 @@ def feedback(trace_id: str, polarity: str, *, magnitude: float = 1.0,
 
 
 def rebuild_embeddings(mode: str = "repair", limit: int = 500,
-                       offset: int = 0) -> dict:
+                       offset: int = 0, on_progress=None) -> dict:
     """POST /api/v1/embeddings/rebuild 的 rag 实现。
 
-    rag 写入即嵌入：repair = 给 active 表缺向量的 units 补嵌；
+    rag 写入即嵌入：repair = 给**每个配置模型**的向量表补缺失行；
     rebuild = 无需动作（全量重嵌是 reembed --model 的职责）。
+
+    ⚠️ 必须逐个模型补，不能只补 active：各模型的缺失集合**不一样**
+    （实测 small 全覆盖而 base 缺 1 条历史行 —— 写入侧修好之前落的那批）。
+    只补 active 会让其余模型永久缺行，而召回是融合多路的，缺一路不会报错，
+    只会让那部分内容在另一模型下"隐形"。
     """
     st = settings()
     conn = _conn()
     try:
-        spec = st.active_spec
-        ensure_vec_table(conn, spec)
-        missing = [r[0] for r in conn.execute(
-            f"SELECT u.id FROM units u LEFT JOIN {spec.vec_table} v ON v.rowid=u.id"
-            " WHERE v.rowid IS NULL")]
+        specs = write_models(st)
+        for _s in specs:
+            ensure_vec_table(conn, _s)
         updated = 0
-        if mode == "repair" and missing:
-            emb = get_active_embedder(st)      # 注意：签名收 Settings（曾误传 spec 致 AttributeError）
-            tables = [spec.vec_table]
-            for chunk_i in range(0, len(missing), 64):
-                ids = missing[chunk_i:chunk_i + 64]
-                rows = conn.execute(
-                    "SELECT id, text FROM units WHERE id IN (" +
-                    ",".join("?" * len(ids)) + ") ORDER BY id", ids).fetchall()
-                vecs = emb.encode_passages([r[1] for r in rows])
-                with conn:
-                    for (uid, _), v in zip(rows, vecs):
-                        conn.execute(
-                            f"INSERT OR REPLACE INTO {spec.vec_table}(rowid,"
-                            " embedding) VALUES(?,?)", (uid, bytes(v)))
-                        updated += 1
+        missing_total = 0
+        if mode == "repair":
+            for spec in specs:
+                missing = [r[0] for r in conn.execute(
+                    f"SELECT u.id FROM units u LEFT JOIN {spec.vec_table} v"
+                    " ON v.rowid=u.id WHERE v.rowid IS NULL")]
+                missing_total += len(missing)
+                if not missing:
+                    continue
+                # active 模型直接用调用方可能已缓存的 embedder；其余现取
+                emb = (get_active_embedder(st) if spec.id == st.active_model
+                       else get_embedder(spec, settings=st))
+                for chunk_i in range(0, len(missing), 64):
+                    ids = missing[chunk_i:chunk_i + 64]
+                    rows = conn.execute(
+                        "SELECT id, text FROM units WHERE id IN (" +
+                        ",".join("?" * len(ids)) + ") ORDER BY id", ids).fetchall()
+                    vecs = emb.encode_passages([r[1] for r in rows])
+                    with conn:
+                        for (uid, _), v in zip(rows, vecs):
+                            conn.execute(
+                                f"INSERT OR REPLACE INTO {spec.vec_table}(rowid,"
+                                " embedding) VALUES(?,?)", (uid, bytes(v)))
+                            updated += 1
+                    if on_progress is not None:
+                        on_progress(f"补向量 {spec.id}: {updated}/{missing_total}")
         total = conn.execute("SELECT COUNT(*) FROM units").fetchone()[0]
         return {"processed": total, "updated": updated, "failed": 0,
                 "done": True, "nextOffset": 0,
-                "statsAfter": {"total": total, "missing": len(missing) - updated}}
+                "statsAfter": {"total": total,
+                               "missing": max(0, missing_total - updated)}}
     finally:
         conn.close()
 
@@ -416,14 +584,14 @@ def overview() -> dict:
         convs = conn.execute(
             "SELECT COUNT(DISTINCT source||'/'||conversation_id) FROM units"
             " WHERE source<>'memory'").fetchone()[0]
-        memos = conn.execute(
+        memory_units = conn.execute(
             "SELECT COUNT(*) FROM units WHERE source='memory'").fetchone()[0]
         vt = st.active_spec.vec_table
         has = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE name=?", (vt,)).fetchone()
         vecs = conn.execute(f"SELECT COUNT(*) FROM {vt}").fetchone()[0] if has else 0
         return {"ok": True, "episodes": convs, "traces": units,
-                "memory_units": memos, "skills": {"total": 0},
+                "memory_units": memory_units, "skills": {"total": 0},
                 "policies": 0, "worldModels": 0,
                 "embedder": {"available": units == 0 or vecs > 0,
                              "model": st.active_model},
@@ -514,7 +682,7 @@ def sync_episode_r_task(trace_ids=None) -> dict:
 
 def unscored_traces(*, exclude_ids: set[str] | None = None,
                     limit: int | None = None) -> list[dict]:
-    """评分枚举（取代 scoring 直连 memos.db）：无 value 的轮次视图，ts 升序。"""
+    """评分枚举（取代 scoring 直连旧库）：无 value 的轮次视图，ts 升序。"""
     conn = _conn()
     try:
         rows = conn.execute(
@@ -528,7 +696,7 @@ def unscored_traces(*, exclude_ids: set[str] | None = None,
 
 
 def traces_by_ids(ids: set[str]) -> list[dict]:
-    """定点读轮次视图（scoring 增量路径，取代 memos.db 直读）。
+    """定点读轮次视图（scoring 增量路径，取代旧库直读）。
 
     每个 id 先解析到 unit，再展开其所在轮次的全部 units——
     非锚点 unit（如轮内 assistant 消息）被引用时同样能取回完整轮。

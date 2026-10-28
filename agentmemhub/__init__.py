@@ -2,7 +2,7 @@
 
 从所有 Agent Harness 读取完整对话历史 → 归一为全量事件流
 （user/assistant/tool/reasoning/patch，含工具链、思维链、Shell 执行）
-→ 本地 SQLite 存储可检索 → 导出 JSONL/Markdown → 桥接 MemOS 生成记忆。
+→ 本地 SQLite 存储可检索 → 导出 JSONL/Markdown → 桥接记忆引擎生成记忆。
 
 使用：python -m agentmemhub <command>
 """

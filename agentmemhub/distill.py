@@ -12,7 +12,7 @@
 - `distill_hashes`：幂等层。内容 hash + prompt_ver 相同 → 重跑跳过
   （用户要求：同一会话重复执行不得产生重复记忆）；
 - `distilled_memories`：蒸馏真相源（type/topic/confidence/去重链完整保留）；
-- `units`（source='distilled'）：检索投影 —— 走既有三路召回 / MCP / 面板，
+- `units`（source='distilled'）：检索投影 —— 走既有六路通道召回 / MCP / 面板，
   召回侧零改动。
 
 表名用 `distilled_memories` 而非 `memories`：与 `memstore.py` 的手动原子记忆
@@ -33,7 +33,8 @@ import numpy as np
 # 话题边界检测复用 FTS 侧的分词口径（3-gram 步长 1 + 中文噪音表），
 # 保证"切片看到的话题"与"检索命中时看到的话题"是同一套词法。
 from agentmemhub.rag.search import TRIGRAM_MIN_LEN, _CJK_NOISE
-from agentmemhub.rag.memstore import BASE_VALUE_DISTILLED, ensure_base_value
+from agentmemhub.rag.memstore import (
+    BASE_VALUE_AGENT_WRITE, BASE_VALUE_DISTILLED, ensure_base_value)
 
 #: 记忆类型枚举（LLM 输出受限，避免自由发挥导致分类不可用）
 MEMORY_TYPES = ("decision", "fact", "preference", "lesson")
@@ -94,8 +95,20 @@ CREATE INDEX IF NOT EXISTS idx_dm_hash   ON distilled_memories(content_hash);
 
 
 def ensure_distill_schema(conn: sqlite3.Connection) -> None:
-    """幂等建表（重复调用安全；与 open_index 的 schema 并行不冲突）。"""
+    """幂等建表 + 幂等补列（重复调用安全；与 open_index 的 schema 并行不冲突）。"""
     conn.executescript(_SCHEMA_DISTILL)
+    # 补列：`CREATE TABLE IF NOT EXISTS` **不会**给已存在的表加新列，所以新列
+    # 必须单独 ALTER（照 rag/ingest.ensure_bridge_schema 的做法）。
+    #
+    # wiki_ignore_at：**"不进 wiki"标记**（软删除）。
+    # 语义与"删记忆"（deleted_at）不同 —— 那条记忆仍然存在、**仍然能被召回**，
+    # 只是不参与 wiki 编译（用户看了待更新列表后判定"这条不该进知识库"）。
+    # 用独立列而不是复用 status，是为了**保留原状态**（new/similar 的区别），
+    # 取消忽略时能精确还原。
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(distilled_memories)")}
+    if "wiki_ignore_at" not in cols:
+        conn.execute(
+            "ALTER TABLE distilled_memories ADD COLUMN wiki_ignore_at INTEGER")
     conn.commit()
 
 
@@ -495,6 +508,33 @@ class DistillResult:
     rejected: list[str]       # 被丢弃的非法条目及原因
 
 
+#: content 收缩时优先断开的句读 —— 保留完整句子优于硬切
+_BREAK_CHARS = "。！？；!?;\n"
+
+
+def clamp_content(text: str, limit: int = CONTENT_MAX) -> str:
+    """把 content 收缩到 limit 字以内（超长时在句读处断开）。
+
+    提示词里写了 120 字上限，但**实测没有任何模型稳定遵守**：同一份提示词、
+    同一批 12 个切片，MiMo 24% 超标、LongCat 44%、deepseek 52%、ling 53%。
+    超长条目会同时损害自包含性与召回质量——一条记忆讲了好几个结论，
+    检索命中后反而更难用。所以这里做**代码级兜底**，不再指望提示词。
+
+    优先在窗口内**最后一个句读**处断开（尽量不破坏句子）；若句读太靠前
+    （不足 limit 的 60%）则退化为硬切并加省略号——宁可截断，也不放一条
+    300 字的记忆进库。
+    """
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    cut = max(head.rfind(ch) for ch in _BREAK_CHARS)
+    if cut >= int(limit * 0.6):
+        return head[:cut + 1].strip()
+    # 硬切要给省略号留出位置，否则结果会是 limit+1 字（实测踩过）
+    return head[:limit - 1].rstrip() + "…"
+
+
 def normalize_memories(raw: object) -> tuple[list[dict], list[str]]:
     """校验并规范化 LLM 输出。返回 (合法条目, 拒绝原因列表)。
 
@@ -524,6 +564,7 @@ def normalize_memories(raw: object) -> tuple[list[dict], list[str]]:
         if not content:
             rejected.append(f"[{i}] content 为空")
             continue
+        content = clamp_content(content)
         out.append({"type": mtype, "topic": topic,
                     "content": content, "confidence": conf})
     return out, rejected
@@ -601,6 +642,37 @@ def mark_slice_done(idx: sqlite3.Connection, sl: Slice, *, prompt_ver: int,
                sl.content_hash, prompt_ver, model, created_at)
 
 
+def _audit_memory_write(*, memory_id: int | None, content: str, content_hash: str,
+                        source: str, conversation_id: str, type_: str,
+                        confidence: str, result: str, slice_key: str = "",
+                        topic: str | None = None, path: str = "",
+                        extra: dict | None = None) -> None:
+    """把一次记忆**落表**记进 `logs/memory.log`（审计旁路，失败绝不影响落库）。
+
+    为什么记在数据层（而不是各个端各自记）：落表是所有写入路径的**唯一汇合点**
+    —— Agent 直写（MCP）、面板推送、蒸馏批量、CLI 导入都会经过这里，记一处即可
+    全覆盖；"这次从哪条路径来"由协议层用 `logs.memory_path()` 标记。
+    """
+    try:
+        from agentmemhub import logs
+        entry = {
+            "event": "write", "ts": round(time.time(), 3),
+            "memory_id": memory_id, "content_hash": content_hash,
+            "source": source, "conversation_id": conversation_id,
+            "type": type_, "confidence": confidence, "topic": topic,
+            "result": result,               # inserted | revived | duplicate
+            "slice_key": slice_key,
+            "content": content, "chars": len(content or ""),
+        }
+        if path:
+            entry["path"] = path
+        if extra:
+            entry.update(extra)
+        logs.audit_memory(entry)
+    except Exception:                       # noqa: BLE001
+        pass
+
+
 def save_memories(idx: sqlite3.Connection, sl: Slice, result: DistillResult,
                   *, prompt_ver: int = PROMPT_VER, model: str = "",
                   sanitize_enabled: bool = True,
@@ -648,8 +720,25 @@ def save_memories(idx: sqlite3.Connection, sl: Slice, result: DistillResult,
                          m.get("topic") or None, m["confidence"], prompt_ver,
                          model, ts, exist[0]))
                     inserted += 1
+                    _audit_memory_write(
+                        memory_id=exist[0], content=content, content_hash=h,
+                        source=sl.source, conversation_id=sl.conversation_id,
+                        type_=m["type"], confidence=m["confidence"],
+                        result="revived", slice_key=sl.slice_key,
+                        path="distill",
+                        topic=m.get("topic") or None)
+                else:
+                    # 同内容已有效存在：也记一次（"什么时候写过什么"要完整，
+                    # 重复写入尝试同样是事实）
+                    _audit_memory_write(
+                        memory_id=exist[0], content=content, content_hash=h,
+                        source=sl.source, conversation_id=sl.conversation_id,
+                        type_=m["type"], confidence=m["confidence"],
+                        result="duplicate", slice_key=sl.slice_key,
+                        path="distill",
+                        topic=m.get("topic") or None)
                 continue
-            idx.execute(
+            cur = idx.execute(
                 "INSERT INTO distilled_memories"
                 "(source, conversation_id, slice_key, turn_key, type, topic,"
                 " content, confidence, status, content_hash, prompt_ver, model,"
@@ -658,6 +747,13 @@ def save_memories(idx: sqlite3.Connection, sl: Slice, result: DistillResult,
                  m["type"], m.get("topic") or None, content, m["confidence"],
                  "new", h, prompt_ver, model, ts))
             inserted += 1
+            _audit_memory_write(
+                memory_id=cur.lastrowid, content=content, content_hash=h,
+                source=sl.source, conversation_id=sl.conversation_id,
+                type_=m["type"], confidence=m["confidence"],
+                result="inserted", slice_key=sl.slice_key,
+                path="distill",
+                topic=m.get("topic") or None)
         idx.execute(
             "INSERT OR IGNORE INTO distill_hashes"
             "(source, conversation_id, slice_key, content_hash, prompt_ver,"
@@ -665,6 +761,164 @@ def save_memories(idx: sqlite3.Connection, sl: Slice, result: DistillResult,
             (sl.source, sl.conversation_id, sl.slice_key, sl.content_hash,
              prompt_ver, model, ts))
     return {"inserted": inserted, "sanitized": sanitized, "dropped": dropped}
+
+
+#: Agent 直写记忆的默认分桶策略（`distillation.direct_bucket` 可覆盖）
+DIRECT_BUCKET_DEFAULT = "daily"
+
+#: 分桶关闭时的固定会话名（历史口径，仅排障/回退用）
+DIRECT_SESSION_SINGLE = "direct"
+
+
+def _direct_bucket(ts: float, bucket: str | None = None) -> str:
+    """Agent 直写记忆的虚拟会话名 —— **按自然日分桶**。
+
+    背景（2026-10-19 实测）：`memory_save` 直写的记忆此前全部归入固定的
+    `direct` 会话，已积累 210 条 / **84 个 L1 页**。而 L1 编译的**脏单位是
+    会话**：任何一条新记忆都会让整个 `direct` 变脏 → 每轮增量都要重编全部
+    84 页，再连带触发 3 个域共 **270 个 L2 页**重编。12 条新增记忆跑近 1 小时，
+    放大近 30 倍，且开销随记忆总量**线性增长**（越用越慢）。
+
+    分桶后新记忆进 `direct-YYYY-MM-DD`，一轮增量只重编当天那个桶（几十条 →
+    3~5 页）。**编译逻辑一字未改**（仍是整会话重编），只是会话说小了；跨天的
+    同主题记忆仍会在 L2 域聚合时合并到同一页，因此**不损失合并机会**。
+
+    取值：`daily`（默认）/ `none`（回退单一 `direct` 会话）。未知值一律按
+    默认处理 —— 配置写错不该让记忆写不进去（写入路径必须 fail-open）。
+    """
+    pol = str(bucket or DIRECT_BUCKET_DEFAULT).strip().lower()
+    if pol in ("none", "single", "off", "false", "0"):
+        return DIRECT_SESSION_SINGLE
+    return "%s-%s" % (DIRECT_SESSION_SINGLE,
+                      time.strftime("%Y-%m-%d", time.localtime(ts)))
+
+
+def _direct_bucket_policy() -> str:
+    """从配置读分桶策略（读不到就用默认值，绝不抛 —— 写入路径 fail-open）。"""
+    try:
+        from agentmemhub import config as _hub
+        return str((_hub.config().distillation or {}).get("direct_bucket")
+                   or DIRECT_BUCKET_DEFAULT)
+    except Exception:                           # noqa: BLE001
+        return DIRECT_BUCKET_DEFAULT
+
+
+def save_direct_memory(idx: sqlite3.Connection, *, content: str,
+                       type_: str = "fact", confidence: str = "medium",
+                       topic: str | None = None, model: str = "",
+                       source: str = "mcp", conversation_id: str = "",
+                       slice_key: str = "", created_at: int | None = None,
+                       bucket: str | None = None,
+                       audit_extra: dict | None = None) -> str:
+    """Agent 直写记忆落蒸馏表（`memory_save` 的 wiki/报表可见性缺口修复）。
+
+    背景：MCP `memory_save` 此前只写引擎与消息层投影（units 有 `mcp_` 前缀
+    投影），**不进 `distilled_memories`** —— 记忆报表看不见它，wiki 编译输入
+    （`status IN ('new','similar')`）更是完全不可见：直写的记忆永远进不了 wiki。
+
+    规格：与 `save_memories` 同口径 —— 脱敏兜底、内容指纹幂等、归档条目复活。
+    会话语义：直写记忆**按自然日分桶**（`direct-YYYY-MM-DD`，见 `_direct_bucket()`），
+    wiki L1 按"当天那个桶"编译，slice_key 携带 trace_id 可溯源。分桶只影响
+    **会话归属**，不影响入库与召回 —— 同一内容仍全局去重一次（见下）。
+
+    幂等：查重范围是 **(source, content_hash)**，**跨分桶**生效。为什么必须跨桶：
+    分桶让同一内容在不同日期落到不同 `conversation_id`，若仍按
+    (source, conversation_id, content_hash) 查，同一条结论隔天再写就会**重复入库**
+    （库里两行、wiki 两处引用）。唯一索引仍是三列（历史口径不动），查重前移即可。
+
+    返回 "inserted" | "revived" | "duplicate"；投影不在此处做（units 向量由
+    下一次蒸馏的 S4 阶段统一补齐，`_pending_projection` 会捞到 status='new'）。
+    抛出 ValueError 表示字段非法/无实质内容，调用方决定是否吞掉。
+    """
+    from agentmemhub import sanitize
+    if type_ not in MEMORY_TYPES:
+        raise ValueError(f"type 非法：{type_!r}（允许 {MEMORY_TYPES}）")
+    if confidence not in CONFIDENCES:
+        raise ValueError(f"confidence 非法：{confidence!r}（允许 {CONFIDENCES}）")
+    content, findings = sanitize.redact(" ".join((content or "").split()))
+    if findings:
+        pass                                    # 直写场景：脱敏后继续（内容是 Agent 精炼过的）
+    if not sanitize.has_substance(content):
+        raise ValueError("脱敏后无实质内容，拒绝入库")
+    ensure_distill_schema(idx)
+    h = fingerprint(content)
+    ts = int(created_at or time.time())
+    # 会话归属：显式指定优先；否则按 `bucket` 策略分桶（默认按自然日）
+    cid = conversation_id or _direct_bucket(ts, bucket if bucket is not None
+                                            else _direct_bucket_policy())
+    with idx:
+        # **跨分桶查重**（理由见 docstring）：只在同会话内查的话，隔天重写同一条
+        # 结论会插第二行 —— 分桶把"同一内容"分散到不同 cid，必须前移到全局口径。
+        exist = idx.execute(
+            "SELECT id, status FROM distilled_memories"
+            " WHERE source=? AND content_hash=? ORDER BY id LIMIT 1",
+            (source, h)).fetchone()
+        if exist:
+            if exist[1] in ("merged", "duplicate"):
+                idx.execute(
+                    "UPDATE distilled_memories SET status='new', type=?,"
+                    " confidence=?, created_at=? WHERE id=?",
+                    (type_, confidence, ts, exist[0]))
+                _audit_memory_write(
+                    memory_id=exist[0], content=content, content_hash=h,
+                    source=source, conversation_id=cid,
+                    type_=type_, confidence=confidence, result="revived",
+                    slice_key=slice_key, topic=topic, extra=audit_extra)
+                return "revived"
+            _audit_memory_write(
+                memory_id=exist[0], content=content, content_hash=h,
+                source=source, conversation_id=cid,
+                type_=type_, confidence=confidence, result="duplicate",
+                slice_key=slice_key, topic=topic, extra=audit_extra)
+            return "duplicate"
+        cur = idx.execute(
+            "INSERT INTO distilled_memories"
+            "(source, conversation_id, slice_key, turn_key, type, topic,"
+            " content, confidence, status, content_hash, prompt_ver, model,"
+            " created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (source, cid, slice_key, None, type_, topic, content,
+             confidence, "new", h, PROMPT_VER, model, ts))
+        _audit_memory_write(
+            memory_id=cur.lastrowid, content=content, content_hash=h,
+            source=source, conversation_id=cid, type_=type_,
+            confidence=confidence, result="inserted", slice_key=slice_key,
+            topic=topic, extra=audit_extra)
+        return "inserted"
+
+
+def backfill_agent_memories(idx: sqlite3.Connection) -> dict[str, int]:
+    """历史 Agent 直写记忆回填蒸馏表（一次性补账，幂等可重跑）。
+
+    背景：`memory_save` 落蒸馏表是后来才通的——之前的直写记忆只存在于
+    引擎 traces 与 units（source='memory'，src_id='mcp_<trace_id>'）投影，
+    蒸馏表无行 → wiki 编译不可见。本函数把它们按原样落账（**不经 LLM**，
+    内容本就是记忆形态），与面板去重逻辑（slice_key='mcp:<tid>'）对齐。
+
+    幂等：已落账（slice_key 命中）跳过；内容重复走 save_direct_memory 的
+    duplicate；脱敏后无实质的跳过并计数。逐条独立事务，部分失败可重跑。
+    """
+    rows = idx.execute(
+        "SELECT src_id, text, time FROM units"
+        " WHERE source='memory' AND src_id LIKE 'mcp\\_%' ESCAPE '\\'"
+        " ORDER BY time").fetchall()
+    stats = {"scanned": len(rows), "inserted": 0, "revived": 0,
+             "duplicate": 0, "skipped_substance": 0, "skipped_exists": 0}
+    for src_id, text, ts in rows:
+        tid = src_id[4:]
+        if idx.execute(
+                "SELECT 1 FROM distilled_memories WHERE slice_key=?",
+                (f"mcp:{tid}",)).fetchone():
+            stats["skipped_exists"] += 1
+            continue
+        try:
+            r = save_direct_memory(
+                idx, content=text or "", slice_key=f"mcp:{tid}",
+                created_at=ts, model="backfill")
+        except ValueError:
+            stats["skipped_substance"] += 1     # 脱敏后无实质（极少数）
+            continue
+        stats[r] = stats.get(r, 0) + 1
+    return stats
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1096,7 +1350,7 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
                 stats["reclaimed"] += rc
                 emit(f"回收已归档条目的滞留投影 {rc} 条")
 
-        # ── 阶段 D：跨会话去重 + 投影进 units（走既有三路召回）──
+        # ── 阶段 D：跨会话去重 + 投影进 units（走既有六路通道召回）──
         if not dry_run:
             todo = _pending_projection(idx)
             if todo:
@@ -1118,6 +1372,31 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
         stats["seconds"] = round(time.perf_counter() - t0, 1)
         if dry_run:
             stats["samples"] = stats["samples"][:SAMPLE_CAP]
+
+        # 写入钩子：wiki 增量更新触发器。检测（align 毫秒级只读）挂在写入时，
+        # 满足规则（时点档/定量阈值/每日首次）才同步跑 update；全程旁路，
+        # 任何异常都不影响蒸馏结果。
+        if not dry_run and stats.get("memories_new"):
+            # **记忆写入通知**（`notify.push_when.memory_write`，**默认关着**）：
+            # 这里发的是**本轮汇总**而不是"每条记忆一条" —— 后者一旦打开就是刷屏，
+            # 而 Pushplus 是推微信，刷屏的代价远大于"少知道一条"。
+            try:
+                from agentmemhub import notify as _notify
+                _notify.info("memory", "蒸馏写入记忆",
+                        "本轮写入 %d 条新记忆（来源：%s）。"
+                        % (stats.get("memories_new"), source or "全部"),
+                        meta={"memories_new": stats.get("memories_new"),
+                              "source": source or "",
+                              "seconds": stats.get("seconds")})
+            except Exception:               # noqa: BLE001 —— 旁路
+                pass
+            from agentmemhub import wiki_triggers
+            tr = wiki_triggers.on_memories_written()
+            if tr.get("checked") and tr.get("should_run"):
+                emit("wiki 增量更新已触发（%s）"
+                     % "；".join(tr.get("reasons") or []))
+            elif tr.get("error"):
+                emit(f"wiki 触发器检测异常（不影响蒸馏）：{tr['error']}")
         return stats
     finally:
         idx.close()
@@ -1125,7 +1404,7 @@ def run_distill(settings, *, source: str = "", only=None, limit: int = 0,
 
 
 # ══════════════════════════════════════════════════════════════════════
-# S3 跨会话去重 + S4 投影（写进 units，走既有三路召回）
+# S3 跨会话去重 + S4 投影（写进 units，走既有六路通道召回）
 #
 # 去重池 = **已投影的蒸馏条目**（它们已在 units 里带向量），因此：
 #   · 不需要额外的向量表；
@@ -1201,15 +1480,20 @@ def _has_units(idx: sqlite3.Connection) -> bool:
     ).fetchone() is not None
 
 
-def drop_projection(idx: sqlite3.Connection, content_hash: str) -> int:
-    """回收某个内容 hash 在 units 里的蒸馏投影（含向量）。返回删除条数。
+#: Agent 直写记忆在引擎侧的单元前缀（`memory_save` 的幂等锚：`mcp_<内容hash>`）。
+#: **与 `dst_<内容hash>` 用同一个 hash** —— 所以同一条直写记忆在召回面会有两份
+#: 内容相同的单元（见 `drop_agent_write_unit` 与 `rag_bridge.search` 的去重）。
+AGENT_WRITE_SRC_PREFIX = "mcp_"
+
+
+def drop_unit_by_src_id(idx: sqlite3.Connection, src_id: str) -> int:
+    """按 src_id 删除一个召回单元（含向量）。返回删除条数。
 
     FTS 由 units 上的触发器随 DELETE 同步；vec0 无触发器，必须显式删。
     """
     if not _has_units(idx):
         return 0
-    row = idx.execute("SELECT id FROM units WHERE src_id=?",
-                      (DISTILLED_SRC_PREFIX + content_hash,)).fetchone()
+    row = idx.execute("SELECT id FROM units WHERE src_id=?", (src_id,)).fetchone()
     if not row:
         return 0
     uid = int(row[0])
@@ -1217,6 +1501,26 @@ def drop_projection(idx: sqlite3.Connection, content_hash: str) -> int:
     for vt in _vec_tables(idx):
         idx.execute(f"DELETE FROM {vt} WHERE rowid=?", (uid,))
     return 1
+
+
+def drop_projection(idx: sqlite3.Connection, content_hash: str) -> int:
+    """回收某个内容 hash 在 units 里的**蒸馏投影**（`dst_`，含向量）。
+
+    FTS 由 units 上的触发器随 DELETE 同步；vec0 无触发器，必须显式删。
+    """
+    return drop_unit_by_src_id(idx, DISTILLED_SRC_PREFIX + content_hash)
+
+
+def drop_agent_write_unit(idx: sqlite3.Connection, content_hash: str) -> int:
+    """回收某个内容 hash 的 **Agent 直写落账单元**（`mcp_`，含向量）。
+
+    为什么硬删除必须带上它：直写记忆在召回面有**两份**投影 —— `mcp_`（memory_save
+    写引擎时产生，价值分 0.6 起）与 `dst_`（蒸馏 S4 投影，0.3）。此前
+    `drop_projection` 只清后者，于是"硬删除"之后那条记忆**仍然能被召回** ——
+    表现为"删了还能搜到"（2026-09-22 实测：删掉 id=4459 后，`mcp_21966322e734b36c`
+    仍在 units 里，依旧命中查询）。
+    """
+    return drop_unit_by_src_id(idx, AGENT_WRITE_SRC_PREFIX + content_hash)
 
 
 def _hash_still_needed(idx: sqlite3.Connection, content_hash: str) -> bool:
@@ -1291,13 +1595,23 @@ def purge_stale_memories(idx: sqlite3.Connection, settings, prompt_ver: int,
 
 
 def _project_one(idx: sqlite3.Connection, m: dict, vec: np.ndarray,
-                 spec) -> int:
+                 spec, *, extra: list[tuple] | None = None) -> int:
     """把一条蒸馏记忆投影进 units（幂等：src_id 命中则更新）。
 
     units.source/conversation_id 用**原会话**的值 → 排除与删除机制天然覆盖。
     seq 取负值（-memory_id）：既不与采集事件的正 seq 冲突，又保证同会话唯一。
+
+    `extra` 是其余配置模型的该条向量 `[(ModelSpec, ndarray)]` —— 一条记忆必须在
+    **每个**配置模型里都有向量，否则多模型召回会静默少一路通道。
     """
+    from agentmemhub.rag.ingest import put_vecs
     src_id = DISTILLED_SRC_PREFIX + (m.get("content_hash") or fingerprint(m["content"]))
+    # 本函数要写 origin（来源维度）——列不存在时先幂等补列（极简测试库/老库）。
+    # 用 PRAGMA 判断而非无条件调用：批量投影时不希望每行都做一次全量补列。
+    _cols = {r[1] for r in idx.execute("PRAGMA table_info(units)")}
+    if "origin" not in _cols:
+        from agentmemhub.rag.ingest import ensure_bridge_schema
+        ensure_bridge_schema(idx)
     topic = m.get("topic") or ""
     text = m["content"]
     body = f"{topic}：{text}" if topic and topic not in text else text
@@ -1306,33 +1620,39 @@ def _project_one(idx: sqlite3.Connection, m: dict, vec: np.ndarray,
     # 不是蒸馏/整理时刻。用蒸馏时刻会让全部历史记忆显得"刚写入"，
     # 时间衰减与"新记忆 vs 整理记忆"的区分全部失效。
     origin_time = _origin_time(idx, m)
+    # 数据来源维度（与 role 的层级维度正交）：投喂素材的记忆标 external，
+    # 其余（会话蒸馏、Agent 直写）是自有沉淀 native。
+    # ⚠️ 口径与**采集层共用同一个函数**（`rag.ingest.origin_of`）——两处各写一份
+    # 必然漂移，而漂移的后果就是"同一条投喂数据在原始段落层标 native、
+    # 在蒸馏层标 external"（2026-10-10 实测缺口，M0 地基）。
+    from agentmemhub.rag.ingest import origin_of
+    origin = origin_of(m["source"])
     existing = idx.execute("SELECT id FROM units WHERE src_id=?", (src_id,)).fetchone()
     if existing:
         uid = int(existing[0])
         idx.execute(
             "UPDATE units SET text=?, chars=?, title=?, turn_key=?, time=?,"
-            " updated_at=? WHERE id=?",
+            " origin=?, updated_at=? WHERE id=?",
             (body, len(body), title, m.get("turn_key"), origin_time,
-             int(time.time()), uid))
+             origin, int(time.time()), uid))
         # 自愈：旧版本投影的记忆可能缺来源初始分（列后加/逻辑后补），幂等补上
         ensure_base_value(idx, uid, BASE_VALUE_DISTILLED)
-        # vec0 是虚拟表，**不支持 INSERT OR REPLACE 的主键替换语义**（同一
-        # rowid 重复插入直接抛 UNIQUE 冲突）。原地更新必须先显式删掉旧向量，
-        # 否则这条 UPDATE 分支一旦被走到就会让整个投影阶段中断。
-        idx.execute(f"DELETE FROM {spec.vec_table} WHERE rowid=?", (uid,))
     else:
         uid = int(idx.execute(
             "INSERT INTO units(source, conversation_id, seq, role, turn_key,"
-            " src_id, time, title, text, chars, updated_at)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            " src_id, time, title, text, chars, origin, updated_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (m["source"], m["conversation_id"], -abs(int(m["id"])),
              DISTILLED_ROLE, m.get("turn_key"), src_id, origin_time, title,
-             body, len(body), int(time.time()))).lastrowid)
-    # 来源初始置信度：离线蒸馏默认中等（Agent 主动写入的更高，见 memstore 常量）
-    ensure_base_value(idx, uid, BASE_VALUE_DISTILLED)
-    idx.execute(
-        f"INSERT OR REPLACE INTO {spec.vec_table}(rowid, embedding) VALUES(?,?)",
-        (uid, np.ascontiguousarray(vec, dtype=np.float32).tobytes()))
+             body, len(body), origin, int(time.time()))).lastrowid)
+    # 来源初始分：按来源语义区分 —— Agent 主动写入（0.6，有明确人工意图）
+    # 高于离线蒸馏（0.3，默认中等靠使用升降）。直写记忆被错当蒸馏产物压到
+    # 0.3 会系统性低估用户亲自保存的内容（实测反馈）。
+    base = BASE_VALUE_AGENT_WRITE if m["source"] == "mcp" else BASE_VALUE_DISTILLED
+    ensure_base_value(idx, uid, base)
+    # 写**全部**配置模型的向量（active + extra）：只写 active 会让其余模型永久
+    # 缺这一行，而 ingest 的候选来自源库 events、补不上 units 里的行。
+    put_vecs(idx, uid, [(spec, vec)] + list(extra or ()))
     return uid
 
 
@@ -1379,7 +1699,8 @@ def project_memories(idx: sqlite3.Connection, settings, memories: list[dict], *,
     memories：来自 distilled_memories 的条目（需含 id/source/conversation_id/
     content/type 等字段；可选 topic/turn_key/title/created_at）。
     """
-    from agentmemhub.rag.ingest import ensure_vec_table
+    from agentmemhub.rag.ingest import (
+        encode_for_write, ensure_bridge_schema, ensure_vec_table, write_models)
     from agentmemhub.rag.runtime import get_active_embedder
     from agentmemhub.rag.search import ensure_search_schema, vector_search
 
@@ -1387,13 +1708,22 @@ def project_memories(idx: sqlite3.Connection, settings, memories: list[dict], *,
     stats = {"projected": 0, "similar": 0, "duplicate": 0}
     if not memories:
         return stats
+    # 投影要写 origin（来源维度）等桥接列——保证列在（幂等补列，测试库同样受益）
+    ensure_bridge_schema(idx)
     spec = settings.active_spec
-    ensure_vec_table(idx, spec)
+    # 向量表要对**每个**配置模型都在，不只 active：投影是"新行入库"的主要入口，
+    # 只写 active 会让其余模型永久缺这些行的向量，而 `ingest --model` 的候选来自
+    # 源库 events、补不上 units 里的行（实测 base 表曾因此缺 1912 条 distilled）。
+    for _s in write_models(settings):
+        ensure_vec_table(idx, _s)
     ensure_search_schema(idx)          # FTS 触发器随投影自动同步
     embedder = get_active_embedder(settings)
-    vecs = embedder.encode_passages([m["content"] for m in memories])
+    texts = [m["content"] for m in memories]
+    vecs = embedder.encode_passages(texts)
+    # 其余模型的整批向量：判重与检索只要 active，但**写入必须全模型**
+    multi = encode_for_write(settings, texts)
 
-    for m, vec in zip(memories, vecs):
+    for i, (m, vec) in enumerate(zip(memories, vecs)):
         best_sim, best_anchor = 0.0, None
         for uid, sim in vector_search(idx, spec.vec_table, vec, k=8):
             row = idx.execute(
@@ -1414,7 +1744,8 @@ def project_memories(idx: sqlite3.Connection, settings, memories: list[dict], *,
                 status = "similar"
                 dedup_of = _memory_id_by_anchor(idx, best_anchor)
                 stats["similar"] += 1
-            _project_one(idx, m, vec, spec)
+            _project_one(idx, m, vec, spec,
+                         extra=[(s, vs[i]) for s, vs in multi])
             stats["projected"] += 1
         idx.execute(
             "UPDATE distilled_memories SET status=?, dedup_of=? WHERE id=?",

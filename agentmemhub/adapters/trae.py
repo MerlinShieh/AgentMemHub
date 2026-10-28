@@ -34,6 +34,8 @@ MAX_FILES_PER_TURN = 20
 MAX_MEM_CHARS = 8000
 #: SOLO 任务产物清单最多列出的文件数
 MAX_SOLO_FILES = 50
+#: 单个项目记忆目录最多入库的文件数（原先是行内硬编码 20，第 21 个静默丢）
+MAX_MEM_FILES = 20
 
 
 def _git(args: list[str], cwd: Path, git_exe: str) -> Optional[str]:
@@ -117,7 +119,10 @@ class TraeAdapter(AgentAdapter):
             mtime = max((p.stat().st_mtime for p in sid_dir.rglob("*") if p.is_file()),
                         default=0)
             sessions.append({
-                "source": self.source, "id": sid,
+                # id 带类别前缀：三类数据（快照 / SOLO / 项目记忆）共用
+                # source="trae"，而库主键是 (source, id) —— 不加前缀时同名的
+                # 快照目录与 SOLO 任务会整会话互相覆盖（后写的赢）。
+                "source": self.source, "id": f"snap:{sid}",
                 "title": f"Trae AI 会话 {sid[:8]}",
                 "cwd": "", "created_at": 0, "updated_at": mtime,
                 "model": "",
@@ -176,7 +181,7 @@ class TraeAdapter(AgentAdapter):
                                     src_id=f"solo:{task.name}:index",
                                     time=task.stat().st_mtime))
             sessions.append({
-                "source": self.source, "id": task.name,
+                "source": self.source, "id": f"solo:{task.name}",
                 "title": f"Trae SOLO 任务 {task.name[:8]}",
                 "cwd": "", "created_at": 0, "updated_at": task.stat().st_mtime,
                 "model": "", "meta": {"kind": "solo_task"}, "events": events,
@@ -185,7 +190,7 @@ class TraeAdapter(AgentAdapter):
 
     # -------------------------------------------------------------- 项目记忆
     def _load_memory(self, mem_dir: Path) -> list[dict[str, Any]]:
-        """Trae 项目记忆：每条 Markdown 一条 user 事件（可入 MemOS 被检索）。"""
+        """Trae 项目记忆：每条 Markdown 一条 user 事件（可入记忆索引被检索）。"""
         if not mem_dir.is_dir():
             return []
         sessions: list[dict[str, Any]] = []
@@ -193,7 +198,7 @@ class TraeAdapter(AgentAdapter):
             if not proj.is_dir():
                 continue
             events: list[Event] = []
-            for f in sorted(proj.rglob("*.md"))[:20]:
+            for f in sorted(proj.rglob("*.md"))[:MAX_MEM_FILES]:
                 try:
                     text = f.read_text(encoding="utf-8", errors="ignore")
                 except Exception:
@@ -210,7 +215,7 @@ class TraeAdapter(AgentAdapter):
             if not events:
                 continue
             sessions.append({
-                "source": self.source, "id": proj.name,
+                "source": self.source, "id": f"mem:{proj.name}",
                 "title": f"Trae 项目记忆 {proj.name[:40]}",
                 "cwd": "", "created_at": 0,
                 "updated_at": max(e.time or 0 for e in events),

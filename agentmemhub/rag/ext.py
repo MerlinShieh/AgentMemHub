@@ -1,6 +1,6 @@
 """P2 外置接口（接线契约层）：引擎本体零 LLM、零评分依赖，能力全部由调用方注入。
 
-设计对齐 MemOS 机制分析（docs/recall-roadmap.md）：
+设计对齐早期机制分析（docs/recall-roadmap.md）：
 - Judge：召回后的"终审"阶段。LLMJudge 走调用方注入的后端协议；
   fail-closed —— 后端异常/输出畸形时退回机械安全截断（safe_cutoff），绝不放大故障。
 - ValueProvider：记忆价值分的"读侧 join 钩子"。评分归 AgentMemHub 写策略层，
@@ -10,7 +10,7 @@
 
 接线示例（AgentMemHub 读侧）：
     judge = LLMFinalJudge(backend=my_llm_backend, max_keep=5)
-    vp    = DictValueProvider(memos_load_values(unit_ids))
+    vp    = DictValueProvider(load_unit_values(unit_ids))
     hits  = hybrid_search(settings, q, judge=judge, value_provider=vp,
                           exclude_session=(source, conv_id))
 """
@@ -111,7 +111,7 @@ class DictValueProvider:
 
 
 HALF_LIFE_DAYS = 30.0
-BOOST_CAP = 0.3  # MemOS ranker.ts:449 同源结论：价值只做有界 tie-breaker
+BOOST_CAP = 0.3  # 上游同源结论：价值只做有界 tie-breaker
 
 
 def decayed_value(value: float, age_seconds: float,

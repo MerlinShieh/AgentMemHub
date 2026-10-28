@@ -138,13 +138,13 @@ def test_run_clean_apply_deletes(capsys):
 
 
 @mock.patch.object(cli, "run_ingest", return_value=(0, 0))
-@mock.patch("agentmemhub.memos_daemon.auth_state", return_value=None)
+@mock.patch("agentmemhub.engine_api.auth_state", return_value=None)
 def test_run_sync_offline_skips_push(_auth, _ingest, capsys):
-    """引擎离线：ingest 照常，推送跳过并提示，不触碰 bundle/push。"""
+    """索引不可用：ingest 照常，向量化跳过并提示，不打开 store。"""
     with mock.patch.object(cli, "Store") as mstore:
-        cli.run_sync(push="http://127.0.0.1:18800")
+        cli.run_sync(vectorize=True)
         out = capsys.readouterr().out
-        assert "ingest 已完成，跳过推送" in out
+        assert "记忆索引不可用" in out
         # 未进入 push 阶段（Store 未再打开）
         assert not mstore.called
 
@@ -164,12 +164,16 @@ class _FakeStore:
         self.new_ts = _t.time() - 100          # 新会话（锚后）
         self.old_ts = _t.time() - 2000         # 旧会话（锚前）
         self.closed = False
+        self.deleted = []
 
     def list_conversations(self, src=None):
         return [{"source": "zcode", "updated_at": self.new_ts},
                 {"source": "zcode", "updated_at": self.old_ts}]
 
     def delete_system_events(self, source=None, *, conversations=None):
+        if conversations:
+            self.deleted.append(list(conversations))
+            return (len(conversations) * 2, len(conversations))
         return (0, 0)
 
     def close(self):
@@ -191,76 +195,54 @@ def _wm_setup(tmp_path, monkeypatch, changed):
 
 
 @mock.patch.object(cli, "run_ingest", return_value=(0, 0))
-@mock.patch("agentmemhub.memos_daemon.auth_state", return_value={})
-def test_run_sync_incremental_pushes_only_delta(_auth, _ingest, tmp_path, monkeypatch, capsys):
-    """增量：delta 会话以 only= 精确下推 push_to_memos；成功后标记消费并入队评分。"""
+@mock.patch("agentmemhub.engine_api.auth_state", return_value={})
+def test_run_sync_incremental_cleans_then_vectorizes(_auth, _ingest, tmp_path, monkeypatch, capsys):
+    """增量：delta 会话先精确清洗注入事件，再由内置引擎向量化（MemOS 推送路径已移除）。"""
     from agentmemhub import watermarks
     _wm_setup(tmp_path, monkeypatch,
               [{"source": "zcode", "id": "conv_new", "status": "added"}])
     fake = _FakeStore()
     with mock.patch.object(cli, "Store", return_value=fake), \
-         mock.patch.object(cli, "push_to_memos", return_value={
-             "imported": 5, "skipped": 0, "lines": [], "rebuilt": None,
-             "failed": 0, "pushed_ids": ["trac_1", "trac_2"]}) as pm:
-        cli.run_sync(push="http://127.0.0.1:18800")
-    assert pm.called
-    assert pm.call_args.kwargs["only"] == {"zcode": {"conv_new"}}   # delta 精确过滤
-    assert pm.call_args.kwargs.get("since_ts") is None
+         mock.patch.object(cli, "_vectorize_stage",
+                           return_value={"failed": 0, "embedded": 5}) as vec:
+        cli.run_sync(vectorize=True)
+    assert vec.called
+    assert fake.deleted == [[("zcode", "conv_new")]]       # delta 精确清洗，不动全库
     assert fake.closed
     st = watermarks.load_state(tmp_path)
     assert st["consumed"]["push"] >= 1000.0                # delta 已标记消费
-    assert st["pending_score"] == ["trac_1", "trac_2"]     # 推送 trace 入队评分
 
 
 @mock.patch.object(cli, "run_ingest", return_value=(0, 0))
-@mock.patch("agentmemhub.memos_daemon.auth_state", return_value={})
-def test_run_sync_incremental_skips_when_nothing_pending(_auth, _ingest, tmp_path, monkeypatch, capsys):
-    """增量：delta 已消费/为空 → 跳过推送（不调 push_to_memos）。"""
-    from agentmemhub import watermarks
-    st = _wm_setup(tmp_path, monkeypatch,
-                   [{"source": "zcode", "id": "conv_new", "status": "added"}])
-    watermarks.mark_consumed(st, "push")
-    watermarks.save_state(tmp_path, st)
-
-    with mock.patch.object(cli, "Store", return_value=_FakeStore()), \
-         mock.patch.object(cli, "push_to_memos") as pm:
-        cli.run_sync(push="http://127.0.0.1:18800")
-    out = capsys.readouterr().out
-    assert "无待推送变更" in out
-    assert not pm.called
-
-
-@mock.patch.object(cli, "run_ingest", return_value=(0, 0))
-@mock.patch("agentmemhub.memos_daemon.auth_state", return_value={})
+@mock.patch("agentmemhub.engine_api.auth_state", return_value={})
 def test_run_sync_failure_keeps_delta(_auth, _ingest, tmp_path, monkeypatch, capsys):
-    """推送有失败 → 不标记 delta 消费（下次 sync 重试失败批次，不丢数据）。"""
+    """向量化有失败 → 不标记 delta 消费（下次 sync 重试，不丢数据）。"""
     from agentmemhub import watermarks
     _wm_setup(tmp_path, monkeypatch,
               [{"source": "zcode", "id": "conv_new", "status": "added"}])
     with mock.patch.object(cli, "Store", return_value=_FakeStore()), \
-         mock.patch.object(cli, "push_to_memos", return_value={
-             "imported": 0, "skipped": 0, "lines": [], "rebuilt": None,
-             "failed": 1, "pushed_ids": []}) as pm:
-        cli.run_sync(push="http://127.0.0.1:18800")
+         mock.patch.object(cli, "_vectorize_stage",
+                           return_value={"failed": 1}) as vec:
+        cli.run_sync(vectorize=True)
     out = capsys.readouterr().out
+    assert vec.called
     assert "变更集未标记消费" in out
     st = watermarks.load_state(tmp_path)
     assert st["consumed"].get("push", 0) < 1000.0          # 未标记消费
-    assert st["pending_score"] == []                        # 失败批次不入评分队列
 
 
 @mock.patch.object(cli, "run_ingest", return_value=(0, 0))
-@mock.patch("agentmemhub.memos_daemon.auth_state", return_value={})
+@mock.patch("agentmemhub.engine_api.auth_state", return_value={})
 def test_run_sync_full_ignores_delta(_auth, _ingest, tmp_path, monkeypatch, capsys):
-    """--full 强制全量推送（only=None），并跳过 delta 清洗。"""
+    """--full 强制全量（不做 delta 清洗），仍走向量化。"""
     from agentmemhub import watermarks
     _wm_setup(tmp_path, monkeypatch,
               [{"source": "zcode", "id": "conv_new", "status": "added"}])
     fake = _FakeStore()
     with mock.patch.object(cli, "Store", return_value=fake), \
-         mock.patch.object(cli, "push_to_memos", return_value={
-             "imported": 5, "skipped": 0, "lines": [], "rebuilt": None,
-             "failed": 0, "pushed_ids": []}) as pm:
-        cli.run_sync(push="http://127.0.0.1:18800", full=True)
+         mock.patch.object(cli, "_vectorize_stage",
+                           return_value={"failed": 0}) as vec:
+        cli.run_sync(vectorize=True, full=True)
     assert _ingest.call_args.kwargs.get("full") is True
-    assert pm.call_args.kwargs.get("only") is None          # 全量，不走 delta 过滤
+    assert vec.called
+    assert fake.deleted == []                              # --full 跳过 delta 清洗

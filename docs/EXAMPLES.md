@@ -1,8 +1,8 @@
 # AgentMemHub 查询示例
 
 数据库（默认 `database/agentmemhub.db`，可用 `agentmemhub.yaml` 的 `data_dir` 覆盖）的三张核心表：
-- `conversations` — 会话元数据（source / id / title / cwd / model / 时间 / event_count）
-- `events` — 全量事件流（role / content / tool / reasoning / patch / shell / raw_json）
+- `conversations` — 会话元数据（`source` / `id` / `title` / `cwd` / `model` / `created_at` / `updated_at` / `event_count` / `roles_json` / `meta_json` / `signature` / `session_key` / `session_uid` / `title_custom`）
+- `events` — 全量事件流（`seq` / `role` / `content` / `tool_name` / `tool_input_json` / `tool_output` / `tool_status` / `reasoning` / `patch_file` / `patch_diff` / `shell_cmd` / `shell_output` / `shell_cwd` / `parent_id` / `time` / `model` / `raw_json` / `src_id` / `turn_key` / `is_system`）
 - `events_fts` — FTS5 全文索引
 
 下面每个场景给 **CLI / Python / SQL** 三种查询方式（SQL 用 `sqlite3 agentmemhub.db` 或 Python `sqlite3` 模块）。
@@ -171,7 +171,6 @@ GROUP BY role ORDER BY 2 DESC;
 ```bash
 uv run python -m agentmemhub export --format jsonl    --out exports/
 uv run python -m agentmemhub export --format markdown --out exports_md/
-uv run python -m agentmemhub memos --out exports/memos_bundle.json
 ```
 
 ```python
@@ -194,4 +193,3 @@ export_jsonl(store, "exports/")
 | 按文件夹跨 Agent 统计 | `folders [--source] [--limit]` |
 | 全文搜索 | `search <词> [--source] [--role]` |
 | 导出 JSONL/Markdown | `export --format jsonl\|markdown --out dir` |
-| 生成 MemOS bundle | `memos --out x.json` |

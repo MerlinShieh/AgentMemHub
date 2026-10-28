@@ -12,7 +12,7 @@ from unittest import mock
 
 import pytest
 
-from agentmemhub import memos_daemon
+from agentmemhub import engine_api
 from agentmemhub.logs import read_mcp_audit as _audit_lines
 from agentmemhub.mcp_server import MCPHandler, _engine_hint, run_stdio
 from agentmemhub.rag.memstore import AGENT_IMPORTANCE_VALUES, BASE_VALUE_AGENT_WRITE
@@ -22,6 +22,14 @@ def _handler() -> tuple[MCPHandler, io.StringIO]:
     out = io.StringIO()
     h = MCPHandler(stdin=io.StringIO(), stdout=out)
     return h, out
+
+
+def _saved_trace(mock_fn) -> dict:
+    """把 save_memory_trace 的调用参数还原成旧的 trace 形状，让断言改动最小。"""
+    a, k = mock_fn.call_args
+    return {"id": k["tid"], "userText": a[0],
+            "value": k["value"], "priority": k["priority"],
+            "tags": k["tags"] or []}
 
 
 def _call(h: MCPHandler, line: str) -> dict | None:
@@ -96,7 +104,10 @@ def test_tools_list_contract():
     h, _ = _handler()
     r = _call(h, _req("tools/list"))
     tools = {t["name"]: t for t in r["result"]["tools"]}
-    assert set(tools) == {"memory_search", "memory_recent", "memory_stats", "memory_save", "memory_score"}
+    # **原有五个必须在**（Skill 侧强依赖它们的 schema）—— 但**总数不写死**：
+    # feed 三个是后来加的独立工具（见 `test_mcp_feed.py`），列表允许增长。
+    assert {"memory_search", "memory_recent", "memory_stats",
+            "memory_save", "memory_score"} <= set(tools)
     # memory_search 的 query 必填
     assert tools["memory_search"]["inputSchema"]["required"] == ["query"]
     assert "topK" in tools["memory_search"]["inputSchema"]["properties"]
@@ -115,7 +126,7 @@ def test_tools_list_contract():
 # 引擎离线：所有工具统一 isError + 启动指引
 # ---------------------------------------------------------------------------
 
-@mock.patch.object(memos_daemon, "auth_state", return_value=None)
+@mock.patch.object(engine_api, "auth_state", return_value=None)
 def test_tools_offline_return_engine_hint(_auth):
     """引擎离线：所有工具统一 isError + 后端相关的排障指引。"""
     h, _ = _handler()
@@ -126,16 +137,17 @@ def test_tools_offline_return_engine_hint(_auth):
         r = _call(h, _req("tools/call", {"name": tool, "arguments": args}, mid=7))
         assert r["result"]["isError"] is True
         text = r["result"]["content"][0]["text"]
-        # 提示文案按后端区分（memos 后端=daemon；rag 后端=索引库/sync）
-        assert ("记忆引擎未运行" in text) or ("记忆索引不可用" in text)
+        # 提示指向索引库与 sync；回退后端已移除，不该再出现守护进程指引
+        assert "记忆索引不可用" in text
+        assert "memos-daemon" not in text
 
 
 # ---------------------------------------------------------------------------
 # 引擎在线（mock 转发）
 # ---------------------------------------------------------------------------
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
-@mock.patch.object(memos_daemon, "engine_request")
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "engine_request")
 def test_memory_search_online(engine_request, _auth):
     engine_request.side_effect = [
         {"hits": [{"score": 0.87, "tier": "traces", "refKind": "episode",
@@ -158,8 +170,8 @@ def test_memory_search_online(engine_request, _auth):
     assert kwargs["body"] == {"agent": "hermes", "query": "语言偏好"}
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
-@mock.patch.object(memos_daemon, "engine_request")
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "engine_request")
 def test_memory_recent_online(engine_request, _auth):
     engine_request.return_value = {"traces": [
         {"ts": 1750000000000, "value": 0.6, "userText": "修好了登录 bug",
@@ -171,8 +183,8 @@ def test_memory_recent_online(engine_request, _auth):
     assert "事件监听器" in text
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
-@mock.patch.object(memos_daemon, "daemon_status")
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "daemon_status")
 def test_memory_stats_online(status, _auth):
     status.return_value = {
         "online": True, "base_url": "http://127.0.0.1:18800",
@@ -188,35 +200,32 @@ def test_memory_stats_online(status, _auth):
     assert "all-MiniLM-L6-v2" in text and "完整进化" in text
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
-@mock.patch.object(memos_daemon, "engine_request")
-@mock.patch("agentmemhub.memos.push_bundle")
-def test_memory_save_online(push_bundle, engine_request, _auth):
-    push_bundle.return_value = {"imported": 1, "skipped": 0}
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "engine_request")
+@mock.patch("agentmemhub.rag_bridge.save_memory_trace")
+def test_memory_save_online(save_trace, engine_request, _auth):
+    save_trace.return_value = {"imported": 1, "skipped": 0}
     engine_request.return_value = {}          # rebuild repair
     h, _ = _handler()
     r = _call(h, _req("tools/call", {"name": "memory_save",
                                      "arguments": {"content": "登录 bug 根因：事件监听器未解绑"}}))
     text = r["result"]["content"][0]["text"]
     assert "记忆已写入" in text and "imported=1" in text
-    bundle = push_bundle.call_args[0][0]
-    trace = bundle["traces"][0]
+    trace = _saved_trace(save_trace)
     assert trace["userText"] == "登录 bug 根因：事件监听器未解绑"
     assert trace["id"].startswith("mcp_")
     # 初始价值必须与引擎常量一致（历史 bug：此处曾硬编码 0.5，比设计值低 0.1）
     assert trace["value"] == BASE_VALUE_AGENT_WRITE
     assert trace["priority"] == BASE_VALUE_AGENT_WRITE
-    # 幂等：同内容同时间 → 同 id
-    assert trace["id"] == bundle["traces"][0]["id"]
-    # 写入后补向量（repair 模式）
-    assert engine_request.call_args[0] == ("POST", "/api/v1/embeddings/rebuild")
-    assert engine_request.call_args.kwargs["body"] == {"mode": "repair"}
+    # 直写路径已按 rag.write.order 写完多模型向量，不再补 embeddings/rebuild
+    # （回归：确保修复期逻辑没有残留）
+    assert engine_request.call_count == 0
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
-@mock.patch.object(memos_daemon, "engine_request")
-@mock.patch("agentmemhub.memos.push_bundle")
-def test_memory_save_initial_value_is_agent_tier(push_bundle, engine_request, _auth):
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "engine_request")
+@mock.patch("agentmemhub.rag_bridge.save_memory_trace")
+def test_memory_save_initial_value_is_agent_tier(save_trace, engine_request, _auth):
     """回归：MCP 写入的初始价值必须等同引擎的「Agent 主动写入」档位。
 
     历史 bug：``_save`` 把 value/priority 硬编码为 0.5，与
@@ -226,13 +235,13 @@ def test_memory_save_initial_value_is_agent_tier(push_bundle, engine_request, _a
     """
     assert BASE_VALUE_AGENT_WRITE == 0.6, "Agent 写入档位口径变更，请同步本测试与文档"
 
-    push_bundle.return_value = {"imported": 1, "skipped": 0}
+    save_trace.return_value = {"imported": 1, "skipped": 0}
     engine_request.return_value = {}
     h, _ = _handler()
     _call(h, _req("tools/call", {"name": "memory_save",
                                  "arguments": {"content": "初始价值契约"}}))
 
-    trace = push_bundle.call_args[0][0]["traces"][0]
+    trace = _saved_trace(save_trace)
     assert trace["value"] == BASE_VALUE_AGENT_WRITE
     assert trace["priority"] == BASE_VALUE_AGENT_WRITE
     assert trace["value"] > 0.5, "不得回退到旧的硬编码 0.5"
@@ -244,13 +253,13 @@ def test_memory_save_initial_value_is_agent_tier(push_bundle, engine_request, _a
     ("low", 0.4),
     (None, BASE_VALUE_AGENT_WRITE),      # 不传 = normal，与历史行为一致
 ])
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
-@mock.patch.object(memos_daemon, "engine_request")
-@mock.patch("agentmemhub.memos.push_bundle")
-def test_memory_save_importance_tiers(push_bundle, engine_request, _auth,
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "engine_request")
+@mock.patch("agentmemhub.rag_bridge.save_memory_trace")
+def test_memory_save_importance_tiers(save_trace, engine_request, _auth,
                                       importance, expected):
     """importance 档位 → 初始价值；不传等价 normal（向后兼容）。"""
-    push_bundle.return_value = {"imported": 1, "skipped": 0}
+    save_trace.return_value = {"imported": 1, "skipped": 0}
     engine_request.return_value = {}
     h, _ = _handler()
     args: dict = {"content": f"档位测试 {importance}"}
@@ -258,9 +267,37 @@ def test_memory_save_importance_tiers(push_bundle, engine_request, _auth,
         args["importance"] = importance
     _call(h, _req("tools/call", {"name": "memory_save", "arguments": args}))
 
-    trace = push_bundle.call_args[0][0]["traces"][0]
+    trace = _saved_trace(save_trace)
     assert trace["value"] == expected
     assert trace["priority"] == expected
+
+
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "engine_request")
+@mock.patch("agentmemhub.rag_bridge.save_memory_trace")
+@mock.patch("agentmemhub.distill._pending_projection", return_value=[])
+@mock.patch("agentmemhub.distill.save_direct_memory", return_value="inserted")
+@mock.patch("agentmemhub.rag.ingest.open_index")
+def test_memory_save_importance_commits(open_index, _sdm, _pend, save_trace,
+                                        engine_request, _auth):
+    """importance 的 UPDATE 必须显式 `commit()`。
+
+    `sqlite3` 的隐式事务在 `close()` 时**回滚** —— 少了这一行，档位
+    0.8/0.6/0.4 永远落不了库（实测 225 条记忆的 value 全是 0.6，
+    面板上"标记重要"从未生效）。这条测试守的是"提交"这个动作本身。
+    """
+    save_trace.return_value = {"imported": 1, "skipped": 0}
+    engine_request.return_value = {}
+    idx = mock.MagicMock()
+    open_index.return_value = idx
+
+    h, _ = _handler()
+    _call(h, _req("tools/call", {"name": "memory_save",
+                                 "arguments": {"content": "提交测试", "importance": "high"}}))
+
+    sql = str(idx.execute.call_args[0][0])
+    assert "UPDATE unit_values" in sql, "没走到 importance 的落库分支"
+    assert idx.commit.called, "UPDATE 之后必须 commit，否则 close() 回滚"
 
 
 def test_importance_tiers_are_ordered_and_disjoint():
@@ -271,7 +308,7 @@ def test_importance_tiers_are_ordered_and_disjoint():
     assert vals["normal"] == BASE_VALUE_AGENT_WRITE
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
+@mock.patch.object(engine_api, "auth_state", return_value={})
 def test_memory_save_rejects_unknown_importance(_auth):
     """非法档位报参数错误，不静默落到默认值。"""
     h, _ = _handler()
@@ -282,26 +319,26 @@ def test_memory_save_rejects_unknown_importance(_auth):
     assert "importance" in r["result"]["content"][0]["text"]
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
-@mock.patch.object(memos_daemon, "engine_request")
-@mock.patch("agentmemhub.memos.push_bundle")
-def test_memory_save_passes_tags(push_bundle, engine_request, _auth):
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "engine_request")
+@mock.patch("agentmemhub.rag_bridge.save_memory_trace")
+def test_memory_save_passes_tags(save_trace, engine_request, _auth):
     """tags 透传进 bundle：去空白、去空串；非序列一律忽略（不写脏数据）。"""
-    push_bundle.return_value = {"imported": 1, "skipped": 0}
+    save_trace.return_value = {"imported": 1, "skipped": 0}
     engine_request.return_value = {}
     h, _ = _handler()
     _call(h, _req("tools/call", {"name": "memory_save",
                                  "arguments": {"content": "带标签",
                                                "tags": ["dsh", " mcp ", "", "  "]}}))
-    assert push_bundle.call_args[0][0]["traces"][0]["tags"] == ["dsh", "mcp"]
+    assert _saved_trace(save_trace)["tags"] == ["dsh", "mcp"]
 
     _call(h, _req("tools/call", {"name": "memory_save",
                                  "arguments": {"content": "标签类型非法",
                                                "tags": "dsh"}}))
-    assert push_bundle.call_args[0][0]["traces"][0]["tags"] == []
+    assert _saved_trace(save_trace)["tags"] == []
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
+@mock.patch.object(engine_api, "auth_state", return_value={})
 def test_memory_save_requires_content(_auth):
     """参数校验优先：引擎在线时缺 content 报参数错误（离线时统一报引擎未运行）。"""
     h, _ = _handler()
@@ -369,8 +406,8 @@ def test_run_stdio_roundtrips_chinese_over_locale_streams(monkeypatch):
 # 与"没记"。放在 _tools_call（stdio 与 HTTP 的唯一分发点）即 100% 覆盖。
 # ---------------------------------------------------------------------------
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
-@mock.patch.object(memos_daemon, "engine_request")
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "engine_request")
 def test_audit_records_call_and_result(engine_request, _auth, audit_dir):
     """每次工具调用记两条（call / result），以 call_id 关联。
 
@@ -393,8 +430,8 @@ def test_audit_records_call_and_result(engine_request, _auth, audit_dir):
     assert lines[0]["ts"] <= lines[1]["ts"]
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
-@mock.patch.object(memos_daemon, "engine_request")
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "engine_request")
 def test_audit_records_failure(engine_request, _auth, audit_dir):
     """失败调用同样留痕（ok=False + 错误摘要）——失败比成功更需要溯源。"""
     engine_request.side_effect = RuntimeError("engine down")
@@ -408,7 +445,7 @@ def test_audit_records_failure(engine_request, _auth, audit_dir):
     assert "engine down" in lines[1]["error"]
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value=None)
+@mock.patch.object(engine_api, "auth_state", return_value=None)
 def test_audit_records_call_even_when_engine_offline(_auth, audit_dir):
     """引擎离线导致调用被拒，也算一次留痕（否则"没做"与"做了但失败"无从区分）。"""
     h, _ = _handler()
@@ -419,10 +456,10 @@ def test_audit_records_call_even_when_engine_offline(_auth, audit_dir):
     assert lines[1]["ok"] is False
 
 
-@mock.patch.object(memos_daemon, "auth_state", return_value={})
-@mock.patch.object(memos_daemon, "engine_request")
-@mock.patch("agentmemhub.memos.push_bundle")
-def test_audit_truncates_content(push_bundle, engine_request, _auth, audit_dir):
+@mock.patch.object(engine_api, "auth_state", return_value={})
+@mock.patch.object(engine_api, "engine_request")
+@mock.patch("agentmemhub.rag_bridge.save_memory_trace")
+def test_audit_truncates_content(save_trace, engine_request, _auth, audit_dir):
     """正文只留摘要 + 字数：不重复存全文，也不让敏感内容二次落盘。"""
     engine_request.return_value = {"imported": 1}
     body = "很长的正文" * 300

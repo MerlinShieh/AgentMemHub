@@ -33,6 +33,20 @@ def _stdout(s: str) -> None:
     print(s)
 
 
+def _force_utf8_stdio() -> None:
+    """CLI 入口统一强制 UTF-8（errors=replace 兜底）。
+
+    Windows 控制台默认 GBK，输出含 ✓ ✅ ¥ 这类字符直接 UnicodeEncodeError，
+    把本已算完、正要打印的结果整个丢掉 —— 此坑已在脚本/审计/MCP 三处踩过，
+    这里在唯一入口一次修掉，各命令不再各自设防。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def _cli_log(msg: str, level: str = "info") -> None:
     """CLI/控制台操作落盘（logs/cli.log），不干扰终端输出。"""
     try:
@@ -69,77 +83,81 @@ def run_ingest(sources: list[str], signature: str = "", *,
     now = time.time()
     wm_state = watermarks.load_state(config.config().data_dir)
 
-    for src in sources:
-        a = adapters.get_adapter(src)
-        if a is None:
-            out(f"[{src}] 未知 source")
-            continue
-        p = a.locate()
-        if p is None:
-            out(f"[{src}] 未找到数据源")
-            continue
-        sig = signature or ""
-        if full:
-            sessions = a.load(p)
-            n = store.replace_source(src, sessions, signature=sig)
-            total_conv += len(sessions)
-            total_ev += n
-            changed.extend({"source": src, "id": str(s["id"]), "status": "updated"}
-                           for s in sessions)
-            source_counts[src] = {"ts": now, "counts": {
-                "added": len(sessions), "updated": 0, "unchanged": 0}}
-            out(f"[{src}] 全量重建 {len(sessions)} 会话, {n} 事件")
-            continue
-
-        wm_ts = float((wm_state.get("last_ingest", {}).get("sources", {})
-                       .get(src, {}) or {}).get("ts") or 0)
-        fresh = a.source_freshness(p)
-        listed = a.list_sessions(p)
-        force = False
-        only_ids: Optional[set[str]] = None
-        plan: dict[str, str] = {}          # sid -> 预期状态（对比阶段）
-        if fresh is not None and wm_ts and fresh > wm_ts + 1.0:
-            force = True                    # 清单看不见的变更 → 整源重扫
-        elif listed is None:
-            pass                            # 无轻量清单 → 整源重扫（幂等对比）
-        else:
-            stored = {r["id"]: (r["updated_at"] or 0)
-                      for r in store.list_conversations(src)}
-            for entry in listed:
-                sid = str(entry["id"])
-                ts = entry.get("updated_at") or 0
-                if sid not in stored:
-                    plan[sid] = "added"
-                elif ts > stored[sid] + _MTIME_TOL:
-                    plan[sid] = "updated"
-            if not plan:
-                source_counts[src] = {"ts": now, "counts": {
-                    "added": 0, "updated": 0, "unchanged": len(listed)}}
-                out(f"[{src}] 无变化（{len(listed)} 会话跳过重读）")
+    try:
+        for src in sources:
+            a = adapters.get_adapter(src)
+            if a is None:
+                out(f"[{src}] 未知 source")
                 continue
-            only_ids = set(plan)
+            p = a.locate()
+            if p is None:
+                out(f"[{src}] 未找到数据源")
+                continue
+            sig = signature or ""
+            if full:
+                sessions = a.load(p)
+                n = store.replace_source(src, sessions, signature=sig)
+                total_conv += len(sessions)
+                total_ev += n
+                changed.extend({"source": src, "id": str(s["id"]), "status": "updated"}
+                               for s in sessions)
+                source_counts[src] = {"ts": now, "counts": {
+                    "added": len(sessions), "updated": 0, "unchanged": 0}}
+                out(f"[{src}] 全量重建 {len(sessions)} 会话, {n} 事件")
+                continue
 
-        sessions = a.load(p, only_ids=only_ids)
-        r = store.upsert_sessions(src, sessions, signature=sig, force=force)
-        total_conv += r["added"] + r["updated"]
-        total_ev += r["events"]
-        if force or listed is None:
-            changed.extend({"source": src, "id": str(s["id"]), "status": "updated"}
-                           for s in sessions)
-            label = "信号触发整源重扫" if force else "整源重扫"
-            out(f"[{src}] {label}: 新增 {r['added']}, 更新 {r['updated']}, "
-                f"未变 {r['unchanged']}（{r['events']} 事件）")
-        else:
-            changed.extend({"source": src, "id": sid, "status": stt}
-                           for sid, stt in plan.items())
-            skipped = (len(listed) - len(plan)) + r["unchanged"]
-            out(f"[{src}] 增量: 新增 {r['added']}, 更新 {r['updated']}, "
-                f"未变 {skipped}（{r['events']} 事件）")
-        source_counts[src] = {"ts": now, "counts": {
-            "added": r["added"], "updated": r["updated"],
-            "unchanged": r["unchanged"]}}
+            wm_ts = float((wm_state.get("last_ingest", {}).get("sources", {})
+                           .get(src, {}) or {}).get("ts") or 0)
+            fresh = a.source_freshness(p)
+            listed = a.list_sessions(p)
+            force = False
+            only_ids: Optional[set[str]] = None
+            plan: dict[str, str] = {}      # sid -> 预期状态（对比阶段）
+            if fresh is not None and wm_ts and fresh > wm_ts + 1.0:
+                force = True                # 清单看不见的变更 → 整源重扫
+            elif listed is None:
+                pass                        # 无轻量清单 → 整源重扫（幂等对比）
+            else:
+                stored = {r["id"]: (r["updated_at"] or 0)
+                          for r in store.list_conversations(src)}
+                for entry in listed:
+                    sid = str(entry["id"])
+                    ts = entry.get("updated_at") or 0
+                    if sid not in stored:
+                        plan[sid] = "added"
+                    elif ts > stored[sid] + _MTIME_TOL:
+                        plan[sid] = "updated"
+                if not plan:
+                    source_counts[src] = {"ts": now, "counts": {
+                        "added": 0, "updated": 0, "unchanged": len(listed)}}
+                    out(f"[{src}] 无变化（{len(listed)} 会话跳过重读）")
+                    continue
+                only_ids = set(plan)
 
-    store.close()
+            sessions = a.load(p, only_ids=only_ids)
+            r = store.upsert_sessions(src, sessions, signature=sig, force=force)
+            total_conv += r["added"] + r["updated"]
+            total_ev += r["events"]
+            if force or listed is None:
+                changed.extend({"source": src, "id": str(s["id"]), "status": "updated"}
+                               for s in sessions)
+                label = "信号触发整源重扫" if force else "整源重扫"
+                out(f"[{src}] {label}: 新增 {r['added']}, 更新 {r['updated']}, "
+                    f"未变 {r['unchanged']}（{r['events']} 事件）")
+            else:
+                changed.extend({"source": src, "id": sid, "status": stt}
+                               for sid, stt in plan.items())
+                skipped = (len(listed) - len(plan)) + r["unchanged"]
+                out(f"[{src}] 增量: 新增 {r['added']}, 更新 {r['updated']}, "
+                    f"未变 {skipped}（{r['events']} 事件）")
+            source_counts[src] = {"ts": now, "counts": {
+                "added": r["added"], "updated": r["updated"],
+                "unchanged": r["unchanged"]}}
+    finally:
+        # 任一 adapter 抛错也必须关库：`Store` 持着写锁，不关会让下一次 ingest
+        # 撞 busy；而**水位不落是有意的** —— 没读完就别记"已同步"，
+        # 否则下次增量会跳过这轮根本没读到的部分。
+        store.close()
     watermarks.record_ingest(wm_state, ts=now, source_counts=source_counts,
                              changed=changed)
     watermarks.save_state(config.config().data_dir, wm_state)
@@ -148,23 +166,37 @@ def run_ingest(sources: list[str], signature: str = "", *,
     return total_conv, total_ev
 
 
-def cmd_ingest(args) -> None:
-    sources = [args.source] if args.source else [a.source for a in adapters.all_adapters()]
+def cmd_ingest(args) -> int:
+    known = {a.source for a in adapters.all_adapters()}
+    sources = [args.source] if args.source else sorted(known)
+    unknown = [s for s in sources if s not in known]
+    if unknown:
+        # 原先只打印一行"未知 source"然后继续跑到 `完成: 0 会话, 0 事件`，
+        # 退出码还是 0 —— 拼错一个字母看起来像"这个源今天没数据"
+        _stdout("未知 source：%s（可选：%s）"
+                % ("、".join(unknown), "、".join(sorted(known))))
+        return 2
     total_conv, total_ev = run_ingest(sources, signature=args.signature,
                                       full=args.full)
     _stdout(f"完成: {total_conv} 会话, {total_ev} 事件")
+    return 0
 
 
 def cmd_list(args) -> None:
     store = Store()
-    convs = store.list_conversations(args.source)
-    if not convs:
-        _stdout("（空）")
-        return
-    for c in convs:
-        title = (c["title"] or "")[:40]
-        _stdout(f"[{c['source']}] {c['id'][:24]} | {title} | {c['event_count']} 事件")
-    store.close()
+    # 用 try/finally 而不是"每条路径都记得 close"：空结果那次提前 return
+    # 就漏掉了 close，连接与写锁留在进程里，`list` 之后紧接着跑 `ingest`
+    # 会撞 busy —— 而 `list` 看起来是纯读命令，没人会想到它是元凶
+    try:
+        convs = store.list_conversations(args.source)
+        if not convs:
+            _stdout("（空）")
+            return
+        for c in convs:
+            title = (c["title"] or "")[:40]
+            _stdout(f"[{c['source']}] {c['id'][:24]} | {title} | {c['event_count']} 事件")
+    finally:
+        store.close()
 
 
 def cmd_show(args) -> None:
@@ -202,13 +234,17 @@ def cmd_search(args) -> None:
 def cmd_export(args) -> None:
     from agentmemhub.export import export_jsonl, export_markdown
     store = Store()
-    out = Path(args.out)
-    if args.format == "jsonl":
-        n = export_jsonl(store, out, args.source)
-    else:
-        n = export_markdown(store, out, args.source)
+    try:
+        out = Path(args.out)
+        if args.format == "jsonl":
+            n = export_jsonl(store, out, args.source)
+        else:
+            n = export_markdown(store, out, args.source)
+    finally:
+        # 导出中途抛错（磁盘满、目录无权限）也必须关库，否则同进程后续
+        # 操作全撞在未释放的锁上
+        store.close()
     _stdout(f"已导出 {n} 个会话 → {out}")
-    store.close()
 
 
 def cmd_stats(args) -> None:
@@ -245,171 +281,22 @@ def cmd_folders(args) -> None:
 
 
 def cmd_serve(args) -> None:
-    """启动本地 Web 页面加载统一会话库。"""
-    from agentmemhub.web import run_server
-    run_server(port=args.port, open_browser=args.open,
-               db=args.db or None)
+    """启动本地 Web 页面加载统一会话库。
 
-
-def cmd_adapters(args) -> None:
-    for a in adapters.all_adapters():
-        d = a.describe()
-        _stdout(f"[{d['source']}] {d['label']}: {'✓ ' + (d['path'] or '') if d['located'] else '✗ 未找到'}")
-
-
-def cmd_serve(args) -> None:
-    """启动本地 Web 页面加载统一会话库。"""
-    from agentmemhub.web import run_server
-    run_server(port=args.port, open_browser=args.open,
-               db=args.db or None)
-
-
-def cmd_adapters(args) -> None:
-    for a in adapters.all_adapters():
-        d = a.describe()
-        _stdout(f"[{d['source']}] {d['label']}: {'✓ ' + (d['path'] or '') if d['located'] else '✗ 未找到'}")
-
-
-def cmd_memos_daemon(args) -> None:
-    """MemOS 记忆引擎 daemon 管理（启动/停止/巡检/日志/配置）。"""
-    import json as _json
-    from agentmemhub import memos_daemon
-    if args.set_dir:
-        try:
-            p = memos_daemon.save_plugin_dir(args.set_dir)
-            _stdout(f"已保存 MemOS 插件目录 → {p}")
-        except Exception as e:
-            _stdout(f"保存失败: {e}")
-        return
-    if args.lightweight is not None:
-        from agentmemhub import memos_daemon as _md
-        p = _md.set_lightweight(args.lightweight == "on")
-        _stdout(f"已写入引擎配置 → {p}（轻量模式={'ON' if args.lightweight=='on' else 'OFF（完整进化链）'}；"
-                f"引擎重启后生效，如引擎在运行请先 [7] 停止再启动）")
-        return
-    if args.set_password:
-        memos_daemon.save_password(args.set_password)
-        ok = memos_daemon._login()
-        _stdout("密码已保存" + ("，登录成功 ✓" if ok else "（暂未能验证登录：引擎可能离线或密码不符）"))
-        return
-    if args.action == "start":
-        r = memos_daemon.daemon_start(agent=args.agent, plugin_dir=args.plugin_dir or None)
-    elif args.action == "stop":
-        r = memos_daemon.daemon_stop()
-    elif args.action == "logs":
-        lf = memos_daemon._log_file()
-        if not lf.exists():
-            _stdout("（暂无日志）")
-            return
-        text = lf.read_text(encoding="utf-8", errors="replace")
-        _stdout("\n".join(text.splitlines()[-int(args.lines):]))
-        return
-    else:  # status
-        r = memos_daemon.daemon_status()
-    _stdout(_json.dumps(r, ensure_ascii=False, indent=1))
-
-
-def push_to_memos(store: Store, *, sources: list[str], base_url: str,
-                  no_rebuild: bool = False, rebuild_mode: str = "repair",
-                  stdout: Any = None,
-                  since_ts: Optional[float] = None,
-                  only: Optional[dict[str, set[str]]] = None) -> dict[str, Any]:
-    """构建并幂等推送 MemOS bundle（按 source 分批，失败批次继续），可选补向量。
-
-    MemOS /api/v1/import 上限 64 MiB——全量 bundle 可能超限（实测 90+MB），
-    因此按 source 分批 POST。trace id 由 src_id 派生 → 幂等（重复=skipped）。
-    since_ts：按会话 updated_at 时间窗过滤（旧增量锚模式）。
-    only：{source: {conversation_id}} —— delta 精确过滤（watermarks 模式），
-    只构建/推送变更会话；与 since_ts 可叠加（交集生效）。
-    每批推送与 rebuild 进度**实时**经 stdout 输出（web 任务据此实时回显，
-    避免"导入汇总已完成"后看起来卡住）；lines 同时收集终态文本供日志。
-    返回 {imported, skipped, lines, rebuilt, failed, pushed_ids}；
-    pushed_ids = 推送成功批次的 trace id（供 score --pending 入队）；
-    rebuilt 失败/跳过时为 None。
+    端口优先命令行，其次配置 `web.port`：原先 argparse 写死 8086，改了配置
+    面板却还开在 8086，而控制台按配置端口拼 URL ⇒ 打开的是个空地址。
     """
-    from agentmemhub.memos import build_bundle, push_bundle, rebuild_embeddings
-    out = stdout or print
-    lines: list[str] = []
-
-    def emit(s: str) -> None:
-        lines.append(s)
-        try:
-            out(s)
-        except Exception:
-            pass
-
-    total_ok = total_skip = 0
-    failed = 0                                # 失败批次计数（决定增量锚是否可推进）
-    pushed_ids: list[str] = []
-    chunk_size = 200                          # 单批 trace 上限：大 source 整包导入会超引擎
-                                              # HTTP 请求窗口（~300s）被服务端断连（实测 10053）
-    for src in sources:
-        b = build_bundle(store, src, since_ts=since_ts,
-                         only_ids=(only or {}).get(src))
-        traces = b.get("traces") or []
-        if not traces:
-            continue
-        chunks = [traces[i:i + chunk_size] for i in range(0, len(traces), chunk_size)]
-        for ci, chunk in enumerate(chunks):
-            payload = dict(b, traces=chunk)
-            label = f"[{src}]" if len(chunks) == 1 else f"[{src}/{ci + 1}]"
-            try:
-                resp = push_bundle(payload, base_url)
-                total_ok += resp.get("imported", 0)
-                total_skip += resp.get("skipped", 0)
-                pushed_ids.extend(str(t["id"]) for t in chunk if t.get("id"))
-                emit(f"{label} 推送 ok: imported={resp.get('imported')} "
-                     f"skipped={resp.get('skipped')}")
-            except Exception as e:
-                failed += 1
-                emit(f"{label} 推送失败（继续下一批）: {e}")
-    rebuilt = None
-    if total_ok and not no_rebuild:
-        try:
-            # rebuild 是任务最耗时阶段（本地 embedding 计算可数分钟）——
-            # 先提示再逐轮打印进度，杜绝"看起来卡住"
-            emit(f"正在补向量（embedding {rebuild_mode}，本地计算可能耗时数分钟）…")
-            rebuilt = rebuild_embeddings(base_url, mode=rebuild_mode,
-                                         on_progress=lambda s: emit(s))
-            emit(f"已补向量({rebuild_mode}): {rebuilt}")
-        except Exception as e:
-            emit(f"embedding rebuild 失败（可用 --no-rebuild 跳过）: {e}")
-    emit(f"MemOS 导入汇总: imported={total_ok}, skipped={total_skip}"
-         + (f"，{failed} 个批次失败" if failed else ""))
-    return {"imported": total_ok, "skipped": total_skip,
-            "lines": lines, "rebuilt": rebuilt, "failed": failed,
-            "pushed_ids": pushed_ids}
+    from agentmemhub.config import config
+    from agentmemhub.web import run_server
+    port = args.port or config().web_port
+    run_server(port=port, open_browser=args.open,
+               db=args.db or None)
 
 
-def run_memos(*, source: str = "", out: str = "exports/memos_bundle.json",
-              push: str = "", no_rebuild: bool = False,
-              rebuild_mode: str = "repair") -> None:
-    """提取记忆 bundle + 可选推送 MemOS（CLI 与控制台共用）。"""
-    from agentmemhub.memos import build_bundle, write_bundle
-    store = Store()
-    bundle = build_bundle(store, source)
-    _stdout(f"生成 bundle: {len(bundle['traces'])} traces")
-    write_bundle(bundle, Path(out))
-    _stdout(f"已写入 → {out}")
-    if push:
-        try:
-            if source:
-                batches = [source]
-            else:
-                # bundle 从 store 构建——按 store 中实际存在的源推送。
-                # 不能用 adapter.locate() 过滤：恢复/迁移环境下源文件可能已不在
-                # 磁盘，但 store 里的数据必须完整推送（否则整源静默丢失）。
-                batches = sorted({c["source"] for c in store.list_conversations()})
-            # 进展已实时输出（stdout=_stdout），无需再循环打印 lines
-            r = push_to_memos(store, sources=batches, base_url=push,
-                              no_rebuild=no_rebuild, rebuild_mode=rebuild_mode,
-                              stdout=_stdout)
-            _cli_log(f"memos push → imported={r['imported']}, skipped={r['skipped']}")
-        except Exception as e:
-            _stdout(f"推送失败（MemOS 可能在运行?）: {e}")
-            _cli_log(f"memos push 失败 → {e}", level="error")
-    store.close()
-    _cli_log(f"memos bundle 生成 → {out}（{len(bundle['traces'])} traces）")
+def cmd_adapters(args) -> None:
+    for a in adapters.all_adapters():
+        d = a.describe()
+        _stdout(f"[{d['source']}] {d['label']}: {'✓ ' + (d['path'] or '') if d['located'] else '✗ 未找到'}")
 
 
 def _vectorize_stage(*, stdout=None) -> dict:
@@ -456,131 +343,65 @@ def _rag_log():
     return logging.getLogger("asrag.cli-sync")
 
 
-def run_sync(*, source: str = "", push: str = "", no_rebuild: bool = False,
-             rebuild_mode: str = "repair", full: bool = False) -> None:
+def run_sync(*, source: str = "", vectorize: bool = True,
+             full: bool = False) -> None:
     """增量同步：ingest（会话级增量）→ 清洗 delta 注入事件 → 只推送变更会话。
 
     全链路围绕 <data_dir>/watermarks.json 的变更集（delta）：
     - ingest：list_sessions 对比库内 updated_at，只重读变化会话并 upsert；
     - clean：只清 delta 会话的系统注入事件（--full / oversized 时跳过，
       手动 `clean --apply` 仍为全库清理）；
-    - push：rag 后端 = 向量化阶段（源库→session_rag.db 增量嵌入，keyset 水位自带幂等）；
-      memos 后端 = 只构建/推送 delta 会话的 traces（trace id 幂等，引擎去重）；
+    - vectorize：向量化阶段（源库→session_rag.db 增量嵌入，keyset 水位自带幂等）；
     - 推送成功的 trace id 入 pending_score 队列，评分入口（score / 面板 / 控制台）
       增量优先消费（sync 不自动评分——LLM 成本由用户显式触发）。
-    delta 缺失/oversized 时推送回退全量（幂等兜底）。引擎离线：ingest 照常
-    完成，推送跳过（delta 保留，下次 sync 补推）。推送有失败批次时 delta
+    delta 缺失/oversized 时回退全量（幂等兜底）。索引不可用：ingest 照常
+    完成，向量化跳过（delta 保留，下次 sync 补做）。向量化有失败时 delta
     不标记消费，下次 sync 重试。
     """
-    from agentmemhub import adapters, config, memos_daemon, watermarks
+    from agentmemhub import adapters, config, engine_api, watermarks
 
     sources = [source] if source else [a.source for a in adapters.all_adapters()]
     run_ingest(sources, full=full)
-    if not push:
+    if not vectorize:
         return
-    rag_backend = memos_daemon._backend_is_rag()
-    if memos_daemon.auth_state() is None:
-        if rag_backend:
-            _stdout("记忆索引不可用（检查 database/session_rag.db 与 models/）——"
-                    "ingest 已完成，跳过向量化。")
-        else:
-            _stdout("外部记忆引擎未运行——ingest 已完成，跳过推送"
-                    "（变更集保留，下次 sync 补做）。")
-        _cli_log("sync 跳过%s（引擎不可用）" % ("向量化" if rag_backend else "推送"),
-                 level="warn")
+    if engine_api.auth_state() is None:
+        _stdout("记忆索引不可用（检查 database/session_rag.db 与 models/）——"
+                "ingest 已完成，跳过向量化。")
+        _cli_log("sync 跳过向量化（索引不可用）", level="warn")
         return
     data_dir = config.config().data_dir
     state = watermarks.load_state(data_dir)
     pending = watermarks.pending_for(state, "push")
     if full:
-        pending = None                     # --full 强制全量推送
+        pending = None                     # --full 强制全量
 
-    if rag_backend:
-        # rag：清洗变更会话（注入事件不入库）→ keyset 水位向量化（自带幂等，
-        # 不依赖 delta）→ 消费登记；评分不自动跑（LLM 成本用户显式触发）
-        store = Store()
-        try:
-            if pending is not None and not full:
-                pairs = [(c["source"], c["id"]) for c in pending]
-                if pairs:
-                    deleted, convs = store.delete_system_events(conversations=pairs)
-                    if deleted:
-                        _stdout(f"已清洗 {deleted} 条注入事件（{convs} 个会话）")
-            _vectorize_stage(stdout=_stdout)
-            watermarks.mark_consumed(state, "push")
-            if pending is not None:
-                watermarks.mark_consumed(state, "clean")
-            watermarks.save_state(data_dir, state)
-        finally:
-            store.close()
-        return
-
+    # 内置引擎：清洗变更会话（注入事件不入库）→ keyset 水位向量化
+    #（自带幂等，不依赖 delta）→ 消费登记；评分不自动跑（LLM 成本用户显式触发）
     store = Store()
     try:
-        batches = ([source] if source
-                   else sorted({c["source"] for c in store.list_conversations()}))
-        only: Optional[dict[str, set[str]]] = None
         if pending is not None:
-            if not pending:
-                _stdout("增量：无待推送变更，跳过推送（--full 强制全量）")
-                watermarks.mark_consumed(state, "push")
-                watermarks.mark_consumed(state, "clean")
-                watermarks.save_state(data_dir, state)
-                return
-            only = {}
-            for c in pending:
-                if source and c["source"] != source:
-                    continue
-                only.setdefault(c["source"], set()).add(c["id"])
-            only = {k: v for k, v in only.items() if v}
-            if not only:
-                _stdout("增量：无待推送变更，跳过推送")
-                watermarks.mark_consumed(state, "push")
-                watermarks.mark_consumed(state, "clean")
-                watermarks.save_state(data_dir, state)
-                return
-            _stdout(f"增量：{sum(len(v) for v in only.values())} 个变更会话"
-                    f"（清洗注入事件 → 推送）…")
-            # delta 增量清洗：只清变更会话的系统注入事件（不动全库）
-            pairs = [(s, cid) for s, ids in only.items() for cid in ids]
-            deleted, convs = store.delete_system_events(conversations=pairs)
-            if deleted:
-                _stdout(f"已清洗 {deleted} 条注入事件（{convs} 个变更会话）")
-        if memos_daemon._backend_is_rag():
-            r = _vectorize_stage(stdout=_stdout)
-        else:
-            # 进展实时输出（stdout=_stdout），无需再循环打印 lines
-            r = push_to_memos(store, sources=batches, base_url=push,
-                              no_rebuild=no_rebuild, rebuild_mode=rebuild_mode,
-                              stdout=_stdout, only=only)
-        # delta 只在【无失败】时标记消费；有失败保留 → 下次 sync 重试失败批次
+            pairs = [(c["source"], c["id"]) for c in pending]
+            if pairs:
+                deleted, convs = store.delete_system_events(conversations=pairs)
+                if deleted:
+                    _stdout(f"已清洗 {deleted} 条注入事件（{convs} 个会话）")
+        r = _vectorize_stage(stdout=_stdout)
         if r.get("failed", 0) == 0:
             watermarks.mark_consumed(state, "push")
             if pending is not None:        # clean 只在 delta 模式实际执行过
                 watermarks.mark_consumed(state, "clean")
-            watermarks.add_pending_score(state, r.get("pushed_ids") or [])
             watermarks.save_state(data_dir, state)
-            if r.get("pushed_ids"):
-                _stdout(f"已入队 {len(r['pushed_ids'])} 条待评分 trace"
-                        f"（下次评分自动增量优先：score / score --pending / 面板评分）")
         else:
-            _stdout("存在推送失败——变更集未标记消费，下次 sync 会重试失败批次")
-        _cli_log(f"sync → imported={r['imported']}, skipped={r['skipped']}, "
-                 f"failed={r.get('failed', 0)}, "
-                 f"pending_score={len(r.get('pushed_ids') or [])}")
+            _stdout("存在失败——变更集未标记消费，下次 sync 会重试")
+        _cli_log(f"sync → embedded={r.get('embedded', 0)}, "
+                 f"skipped_known={r.get('skipped_known', 0)}, "
+                 f"failed={r.get('failed', 0)}")
     finally:
         store.close()
 
 
 def cmd_sync(args) -> None:
-    push = args.push
-    from agentmemhub import memos_daemon
-    if memos_daemon._backend_is_rag():
-        # rag 后端：向量化即 sync 终点，--push 语义转为开关（"" 显式禁用以跳过）
-        push = "rag" if getattr(args, "no_push", False) is False and not push             else ("" if getattr(args, "no_push", False) else push)
-    run_sync(source=args.source, push=push,
-             no_rebuild=args.no_rebuild, rebuild_mode=args.rebuild_mode,
-             full=args.full)
+    run_sync(source=args.source, vectorize=not args.skip_vectorize, full=args.full)
 
 
 def run_clean(store, *, source: str = "", apply: bool = False,
@@ -639,18 +460,15 @@ def cmd_rebuild(args) -> None:
     rag 后端下写入即嵌入，全量重算由 `reembed --model` 负责；rebuild 模式
     在本引擎里等价于 repair（无历史向量需重算）。
     """
-    from agentmemhub import memos_daemon
-    from agentmemhub.memos import rebuild_embeddings
-    if memos_daemon.auth_state() is None:
+    from agentmemhub import engine_api, rag_bridge
+    if engine_api.auth_state() is None:
         _stdout("记忆索引不可用——检查 database/session_rag.db 与 models/ 是否就绪")
         return
 
     def _emit(s: str) -> None:
         _stdout(f"  {s}")
-    backend = "内置引擎" if memos_daemon._backend_is_rag() else "外部引擎"
-    _stdout(f"补向量（{args.mode}，{backend}）…")
-    r = rebuild_embeddings(base_url=memos_daemon.base_url(),
-                           mode=args.mode, on_progress=_emit)
+    _stdout(f"补向量（{args.mode}，内置引擎）…")
+    r = rag_bridge.rebuild_embeddings(mode=args.mode, on_progress=_emit)
     _stdout(f"完成: {r}")
     _cli_log(f"rebuild({args.mode}) → {r}")
 
@@ -675,7 +493,7 @@ def cmd_score(args) -> None:
             return
         _stdout(f"待评分 {len(ids)} 条（pending_score 队列）…")
         try:
-            r = run_score_all(emit=_emit, base_url=args.push,
+            r = run_score_all(emit=_emit,
                               dry_run=args.dry_run, workers=args.workers,
                               only_ids=set(ids))
             _stdout(f"评分完成: evaluated={r['evaluated']} skipped={r['skipped']} "
@@ -693,7 +511,7 @@ def cmd_score(args) -> None:
     if args.unscored_count:
         from agentmemhub.scoring import count_unscored
         try:
-            n = count_unscored(base_url=args.push)
+            n = count_unscored()
             _stdout(f"未评分记忆：{n} 条")
             _cli_log(f"score --unscored-count → {n}")
         except Exception as e:
@@ -716,13 +534,13 @@ def cmd_score(args) -> None:
         _stdout(s)
     try:
         if args.ids:
-            r = run_score_all(emit=_emit, base_url=args.push,
+            r = run_score_all(emit=_emit,
                               limit=args.limit, dry_run=args.dry_run,
                               workers=args.workers, only_ids=args.ids)
             mode = "ids"
         else:
             # 默认走增量优先：pending_score 队列非空只评队列，空则全量筛未评定点读
-            r = run_score_incremental(emit=_emit, base_url=args.push,
+            r = run_score_incremental(emit=_emit,
                                       limit=args.limit, dry_run=args.dry_run,
                                       workers=args.workers)
             mode = r.get("mode", "?")
@@ -813,11 +631,6 @@ def cmd_weight(args) -> None:
         conn.close()
 
 
-def cmd_memos(args) -> None:
-    run_memos(source=args.source, out=args.out, push=args.push,
-              no_rebuild=args.no_rebuild, rebuild_mode=args.rebuild_mode)
-
-
 def cmd_mcp(args) -> None:
     """启动 MCP 记忆网关。
 
@@ -830,6 +643,476 @@ def cmd_mcp(args) -> None:
         run_http(host=args.bind, port=args.port)
     else:
         run_stdio()
+
+
+def cmd_wiki(args) -> int:
+    """LLM Wiki 运维：查看失败清单、定向补跑失败项。
+
+    补跑不该只能靠人敲 `scripts/wiki_*.py` —— 这里与服务层
+    (`agentmemhub.wiki`) 共用同一份实现，面板走的是同一个入口。
+    """
+    import json as _json
+
+    from agentmemhub import wiki
+
+    # `--out` 不是所有动作都需要：triggers/trigger/backfill-manual 完全不用目录，
+    # update 用 --l1/--l2，index-pages 可回落配置。此前 argparse 把它声明成
+    # `required=True`，导致 `wiki --action trigger` 直接报"缺少 --out"而走不通
+    # （实测踩到）。改为按动作校验。
+    if args.action in ("failures", "align", "retry") and not args.out:
+        # align 例外：它可以用 --l1/--l2（两级对齐），也可以什么都不给
+        # （按配置的 wiki.out_l1 / wiki.out_l2 解析）—— 强制 --out 就永远
+        # 只能对上单级，正是"L1 领先 L2 查不出来"的由来。
+        if args.action == "align" and (args.l1 or args.l2):
+            pass
+        elif args.action == "align":
+            pass                      # 交给 wiki.align 按配置解析；解析不到它自己会报
+        else:
+            print("需要 --out 指定 wiki 产出目录（动作：%s）" % args.action)
+            return 2
+
+    if args.action == "failures":
+        s = wiki.failures_summary(args.out, args.stage)
+        if not s["exists"]:
+            print("未找到失败清单：%s" % s["log"])
+            print("（说明还没跑过该产出目录，或那一轮没有失败）")
+            return 0
+        print("失败清单：%s" % s["log"])
+        print("未解决 %d 条：" % s["total"])
+        for k, n in s["by_kind"].items():
+            mark = "   ← 需人工处理" if k in s["fatal"] else ""
+            print("   %-10s %4d%s" % (k, n, mark))
+        if s["stages"]:
+            print("按阶段：")
+            for st, label in wiki.STAGES.items():
+                if s["stages"].get(st):
+                    print("   %-11s %4d  %s" % (st, s["stages"][st], label))
+        if s["needs_manual"]:
+            print()
+            print("❌ 存在 %s 类错误 —— 重试与继续跑都无意义，请先解决再补跑"
+                  % "、".join(s["fatal"]))
+        return 0
+
+    if args.action == "align":
+        r = wiki.align(args.out, args.stage, args.db,
+                       l1_dir=args.l1, l2_dir=args.l2)
+        if r.get("error"):
+            print(r["error"])
+            return 2
+        for st, d in (r.get("dirs") or {}).items():
+            print("对齐审计 %s：%s" % (st, d))
+        print("索引库  ：%s" % r["db"])
+        print("页面引用：%d 个 m-id / %d 个文件" % (r["refs"]["ids"], r["refs"]["files"]))
+        inv = r["invalid_refs"]
+        if inv["missing_total"] or inv["not_input_total"]:
+            print("失效引用：%d 个不存在（库中已删）、%d 个已不是输入（转 merged/duplicate）"
+                  % (inv["missing_total"], inv["not_input_total"]))
+        cov = r["coverage"]
+        if cov["ratio"] is not None:
+            print("正向覆盖：%d/%d = %.1f%%（被至少一个页面引用的当前输入）"
+                  % (cov["covered"], cov["current_inputs"], cov["ratio"] * 100))
+        con = r.get("consistency") or {}
+        if con.get("comparable"):
+            verdict = {"ok": "✓ 两级同步",
+                       "l1_ahead": "⚠️ **L2 落后于 L1**（页面里可能还是旧知识）",
+                       "l2_ahead": "⚠️ L1 落后于 L2（少见）"}.get(
+                           con["verdict"], con["verdict"])
+            print("两级同步：%s（差值 %.1f 秒；输入 %s vs %s%s）"
+                  % (verdict, con["skew_seconds"], con["l1_inputs"], con["l2_inputs"],
+                     "，差 %+d" % con["inputs_delta"]
+                     if con.get("inputs_delta") else ""))
+        elif con.get("reason"):
+            print("两级同步：无法比较 —— %s" % con["reason"])
+        print()
+        for st, s in r["stages"].items():
+            if not s.get("manifest"):
+                # **区分两种情况**，别让"文件在另一个目录"被说成"从来没编译过"
+                # （早先那句"编译于该功能上线前"就是凭空断因，把人带偏）
+                others = [d for k, d in (r.get("dirs") or {}).items() if k != st]
+                hint = ("该阶段未参与本次审计（目录未提供）" if not others
+                        else "该目录下确实没有 manifest_%s.json" % st)
+                print("manifest_%s：缺失（%s）" % (st, s.get("path") or "?"))
+                print("    %s —— 两级产出目录不同，要一起对请传 --l1/--l2" % hint)
+                continue
+            print("manifest_%s（%s 编译，输入 %d 条）：" % (st, s["generated_at"], s["n_inputs"]))
+            print("   新增 %d / 内容变更 %d / 失去输入 %d（其中真删除 %d、状态迁移 %d）"
+                  % (s["added_total"], s["changed_total"], s["removed_total"],
+                     s["removed_total"] - len(s["removed_reclassified"]),
+                     len(s["removed_reclassified"])))
+            if s["dirty_session_total"]:
+                print("   脏会话 %d 个（受影响的会话重编 L1，其所在域重编 L2）"
+                      % s["dirty_session_total"])
+                for sess, d in list(s["dirty_sessions"].items())[:10]:
+                    print("     %-52s +%d ~%d -%d"
+                          % (sess[:52], d["added"], d["changed"], d["removed"]))
+                if s["dirty_session_total"] > 10:
+                    print("     … 其余 %d 个见 JSON 输出" % (s["dirty_session_total"] - 10))
+        print()
+        print(r["message"])
+        return 0
+
+    # ---- pending / ignored / drop / restore（待更新记忆的查看与删除）----
+    # **只处理尚未进 wiki 的记忆**：已进 wiki 的硬删会让页面里的 [m<id>] 变成
+    # 死引用，那属于 docs/memory-deletion.md 的范畴，wiki_pending.drop 会拒绝。
+    if args.action in ("pending", "ignored"):
+        from agentmemhub import wiki_pending
+        fn = (wiki_pending.pending if args.action == "pending"
+              else wiki_pending.ignored)
+        r = fn(l1_dir=args.out, limit=args.limit)
+        if r.get("error"):
+            print("错误：%s" % r["error"])
+            return 2
+        if args.action == "pending":
+            print("待 wiki 更新：%d 条（新增 %d / 变更 %d）"
+                  % (r["count"], r["added_total"], r["changed_total"]))
+            if r.get("dirty_sessions"):
+                print("脏会话：%s" % "、".join(r["dirty_sessions"]))
+        else:
+            print("已软删除（不进 wiki）：%d 条" % r["count"])
+            if r.get("note"):
+                print("（%s）" % r["note"])
+        for it in r["items"]:
+            print()
+            print("  id=%s  %s/%s  type=%s  %d 字  %s"
+                  % (it["id"], it["source"], it["conversation_id"],
+                     it["type"], it["chars"],
+                     time.strftime("%Y-%m-%d %H:%M",
+                                   time.localtime(it["created_at"] or 0))))
+            print("     %s" % it["summary"][:100])
+        if not r["items"]:
+            print("（无）")
+        elif args.action == "pending":
+            print()
+            print("软删除示例：wiki --action drop --ids %s --mode soft"
+                  % ",".join(str(x["id"]) for x in r["items"][:3]))
+        return 0
+
+    if args.action in ("drop", "restore"):
+        from agentmemhub import wiki_pending
+        try:
+            ids = [int(x) for x in (args.ids or "").replace(" ", "").split(",") if x]
+        except ValueError:
+            print("--ids 必须是逗号分隔的整数，例：--ids 4388,4392")
+            return 2
+        if not ids:
+            print("需要 --ids 指定记忆 id（逗号分隔），例：--ids 4388,4392")
+            return 2
+        if args.action == "restore":
+            r = wiki_pending.restore(ids=ids, l1_dir=args.out)
+        else:
+            r = wiki_pending.drop(ids=ids, mode=args.mode,
+                                  confirm=args.confirm, l1_dir=args.out)
+        if r.get("error"):
+            print("错误：%s" % r["error"])
+            if r.get("hint"):
+                print("提示：%s" % r["hint"])
+            for x in (r.get("rejected") or []):
+                print("  拒绝 id=%s：%s" % (x.get("id"), x.get("reason")))
+            return 2
+        if args.action == "restore":
+            print("已取消忽略：%d 条" % r["restored"])
+        else:
+            print("已删除：%d 条（mode=%s）" % (r["dropped"], r["mode"]))
+            if r.get("projections_removed"):
+                print("  同时清理召回投影：%d 条" % r["projections_removed"])
+        if r.get("note"):
+            print("  %s" % r["note"])
+        for x in (r.get("rejected") or []):
+            print("  拒绝 id=%s：%s" % (x.get("id"), x.get("reason")))
+        return 0
+
+    # ---- triggers（触发器查看/手动触发）----
+    if args.action == "triggers":
+        from agentmemhub import wiki_triggers
+        # `--set-batch on|off`：**热改**离线触发器总闸（写 overrides，不用重启）。
+        # 离线那套配置与实时并列，判定顺序是"离线优先 → 实时兜底"。
+        flip = getattr(args, "set_batch", "") or ""
+        if flip:
+            want = (flip == "on")
+            wiki_triggers.set_overrides({"batch": {"enabled": want}})
+            print("离线触发器已 %s（overrides.batch.enabled = %s）"
+                  % ("打开" if want else "关闭", want))
+            print()
+        print(_json.dumps(wiki_triggers.status(), ensure_ascii=False, indent=2, default=str))
+        return 0
+    if args.action == "trigger":
+        from agentmemhub import wiki_triggers
+        res = wiki_triggers.run_manual(force=args.force)
+        print(_json.dumps(res, ensure_ascii=False, indent=2, default=str))
+        return 0
+
+    # ---- index-pages（页面层投影：L2 知识页 → 召回面）----
+    if args.action == "index-pages":
+        from agentmemhub import wiki_index
+        from agentmemhub.rag.config import load_settings
+        from agentmemhub.rag.ingest import open_index
+        from agentmemhub import config as _cfg
+        l2 = args.out or (_cfg.config().wiki.get("out_l2") or "")
+        if not l2:
+            print("需要 --out 指定 L2 产出目录（或在 yaml 配置 wiki.out_l2）")
+            return 2
+        idx = open_index(load_settings().index_db)
+        try:
+            r = wiki_index.project_pages(idx, wiki_index.page_roots(l2))
+        finally:
+            idx.close()
+        print(_json.dumps(r, ensure_ascii=False, indent=2))
+        print("页面层已进召回面：检索时与记忆、原始对话一起融合返回（kind=page）")
+        return 0
+
+    # ---- backfill-manual（历史 Agent 直写记忆回填蒸馏表）----
+    if args.action == "backfill-manual":
+        from agentmemhub import distill as _distill
+        from agentmemhub.rag.config import load_settings
+        from agentmemhub.rag.ingest import open_index
+        idx = open_index(load_settings().index_db)
+        try:
+            res = _distill.backfill_agent_memories(idx)
+        finally:
+            idx.close()
+        print("回填完成：", _json.dumps(res, ensure_ascii=False))
+        print("（幂等，可重复执行；落账条目将由下次蒸馏统一补投影）")
+        return 0
+
+    # ---- update（增量更新）----
+    if args.action == "update":
+        if not (args.l1 and args.l2):
+            print("增量更新需要 --l1（第一级产出目录）与 --l2（第二级产出目录）")
+            return 2
+        import json as _j
+
+        from agentmemhub import wiki_triggers
+        # 状态文件留痕：CLI 直调与面板、触发器共用同一套标记（详见
+        # `wiki_triggers.mark_update_started` 的注释）
+        wiki_triggers.mark_update_started("manual")
+        try:
+            res = wiki.update(l1_dir=args.l1, l2_dir=args.l2, db=args.db,
+                              workers=args.workers)
+        except Exception as e:                  # noqa: BLE001 —— 留痕后原样抛出
+            wiki_triggers.mark_update_failed(e)
+            raise
+        wiki_triggers.mark_update_finished(
+            hook="manual", updated=bool((res or {}).get("updated")))
+        print(_j.dumps(res, ensure_ascii=False, indent=2, default=str))
+        return 0
+
+    # ---- full-run（全量重跑：重新归域 + 全部域重编 + 覆盖写盘）----
+    if args.action == "full-run":
+        from agentmemhub import batch_ops
+        mode = "offline" if args.offline else batch_ops.full_mode()
+        try:
+            res = batch_ops.full_run(mode=mode, db=args.db, workers=args.workers)
+        except batch_ops.BatchOpsError as e:
+            print(str(e))                       # 未配产出目录 / 未配凭据
+            return 2
+        print(_json.dumps(res, ensure_ascii=False, indent=2, default=str))
+        print("\n通道：%s（配置位 wiki.full.mode，可用 --offline 覆盖）" % mode)
+        return 0
+
+    # ---- batch-*（离线批处理的运维动作）----
+    if args.action in ("batch-status", "batch-run", "batch-cancel",
+                       "batch-resubmit"):
+        return _cmd_wiki_batch(args)
+
+    # ---- retry ----
+    if args.stage == "l2" and not args.src:
+        print("第二级补跑需要 --src（第一级产出目录）")
+        return 2
+    print("开始定向补跑（只跑失败项，不全量重来）…")
+    if args.stage == "l1":
+        res = wiki.retry_failed(stage="l1", out_dir=args.out,
+                                workers=args.workers)
+    elif args.stage == "l2":
+        res = wiki.retry_failed(stage="l2", out_dir=args.out, src=args.src,
+                                workers=args.workers)
+    else:
+        res = wiki.retry_all(out_dir=args.out, src=args.src,
+                             workers=args.workers)
+    print(_json.dumps(res, ensure_ascii=False, indent=2, default=str))
+    return 0
+
+
+def _cmd_wiki_batch(args) -> int:
+    """离线批处理（MiMo Batch API）：查状态 / 推进一段 / 取消作废 / 重提。
+
+    与实时路径的关系：请求怎么切分、编号怎么映射、页面怎么组装**全部共用**
+    （见 `scripts/wiki_aggregate.py`），差别只在"谁执行、什么时候执行"。
+
+    `batch-run` 之所以是一个动作而不是"提交 / 回读"两个：状态机会自己判断该做
+    哪一段 —— 无在飞就提交、结果到了就交下一段或落盘。
+
+    **装配与动作都在 `agentmemhub/batch_ops.py`**（CLI 与 HTTP 面板共用），
+    这里只负责取参与渲染。
+    """
+    import json as _j
+
+    from agentmemhub import batch_ops
+
+    batch_ops.set_paths(args.l1, args.l2)   # CLI 的 --l1/--l2 覆盖（面板走配置）
+
+    try:
+        if args.action == "batch-status":
+            r = batch_ops.status()
+            if not r["n"]:
+                print("没有在飞的离线任务 —— 用 `agentmemhub wiki --action batch-run` 发起一轮")
+                return 0
+            print("在飞的离线任务（%d 个）：" % r["n"])
+            for row in r["inflight"]:
+                cnt = row.get("counts") or {}
+                print("  %s  stage=%-9s 厂商状态=%-11s 进度=%s/%s  已等 %.0f 分钟  建议=%s"
+                      % (row["batch_id"], row["stage"], row["provider_status"] or "?",
+                         cnt.get("completed", row["results"]),
+                         cnt.get("total", row["items"]),
+                         row["waited_s"] / 60.0, row["suggestion"]))
+                if row.get("output_file_id"):
+                    print("     成功文件：%s" % row["output_file_id"])
+                if row.get("error_file_id"):
+                    print("     错误文件：%s" % row["error_file_id"])
+                if row.get("error"):
+                    print("     ⚠️ 查状态失败：%s" % row["error"])
+            print("\n下一步：`agentmemhub wiki --action batch-run`"
+                  "（状态机会自己判断推进哪一段）")
+            return 0
+
+        if args.action == "batch-cancel":
+            r = batch_ops.cancel()
+            if not r["cancelled"]:
+                print("没有在飞的离线任务")
+                return 0
+            for d in r["cancelled"]:
+                print("  已取消并作废：%s（%d 个域回到待更新池）"
+                      % (d["batch_id"], d["domains"]))
+            for e in r["errors"]:
+                print("  取消失败（本地标记仍作废）：%s —— %s"
+                      % (e["batch_id"], e["error"]))
+            _cli_log("wiki batch-cancel：作废 %d 个离线任务" % len(r["cancelled"]))
+            return 0
+
+        if args.action == "batch-resubmit":
+            done = batch_ops.resubmit()["resubmitted"]
+            if not done:
+                print("没有需要重提的已终局任务（还在飞的任务不会被重建）")
+                return 0
+            for d in done:
+                print("  重提 %s：%s → %s（%d 条请求，复用输入文件 %s）"
+                      % (d["stage"], d["old"], d["new"], d["n_requests"],
+                         d["input_file_id"]))
+            print("\n用原输入文件重建，**不重跑 L1/归域**（不额外花实时的钱）")
+            _cli_log("wiki batch-resubmit：重建 %d 个任务" % len(done))
+            return 0
+
+        # batch-run：推进一段
+        res = batch_ops.run(deadline_s=float(getattr(args, "deadline", 0) or 0),
+                            db=args.db, workers=args.workers)
+    except batch_ops.BatchOpsError as e:
+        print(str(e))
+        return 2
+
+    print(_j.dumps(res, ensure_ascii=False, indent=2, default=str))
+    step = res.get("step") or ""
+    if not step:
+        # 走的是 `update()` 的正常流程（提交轮），标签要取**厂商那边的 stage**，
+        # 不能写死成 plan —— 默认"只离线编译"时它是 l2compile（2026-10-01 实测：
+        # 写死 plan_submitted 会把"提交了 250 条编译请求"说成细分，误导排查）。
+        sub = (res.get("l2") or {}).get("offline_submitted") or {}
+        step = ("submitted:%s" % sub.get("stage")) if sub.get("stage") else ""
+    print("\n本次推进：%s" % (step or "(未推进)"))
+    _cli_log("wiki batch-run → %s" % (step or "未推进"))
+    return 0
+
+
+def cmd_memory_log(args) -> int:
+    """记忆操作事实流查询：什么时候写了/读了什么记忆（`logs/memory.log`）。
+
+    与 `logs/mcp.log` 的分工：那份记**协议层**（谁调了什么工具、耗时、成败），
+    这份记**数据层**（哪条记忆被写/读，内容是什么、从哪条路径来）。查"某条记忆
+    的来龙去脉"用这份；查"Agent 调了什么、失败没有"用 `scripts/mcp_log.py`。
+    """
+    import json as _json
+    import time as _time
+    from agentmemhub import logs as _logs
+
+    rows = _logs.read_memory_audit()
+    if args.event:
+        rows = [r for r in rows if r.get("event") == args.event]
+    if args.path:
+        rows = [r for r in rows if (r.get("path") or "") == args.path]
+    if args.grep:
+        kw = args.grep.lower()
+        rows = [r for r in rows
+                if kw in _json.dumps(r, ensure_ascii=False).lower()]
+    if args.limit:
+        rows = rows[-args.limit:]
+    if args.json:
+        print(_json.dumps(rows, ensure_ascii=False, indent=2, default=str))
+        return 0
+    if not rows:
+        print("无匹配的记忆操作记录（%s）" % _logs.memory_audit_file())
+        return 0
+    for r in rows:
+        ts = _time.strftime("%m-%d %H:%M:%S",
+                            _time.localtime(float(r.get("ts") or 0)))
+        ev = r.get("event")
+        if ev == "write":
+            print("%s [写·%s] id=%s %s/%s %s ← %s  (%d 字)" % (
+                ts, r.get("path") or "?", r.get("memory_id"),
+                r.get("source") or "?", r.get("type") or "?",
+                (r.get("content") or "").replace("\n", " ")[:64],
+                r.get("result") or "", r.get("chars") or 0))
+        elif ev == "read":
+            print("%s [读·%s] q=%r 命中 %s 条 %s" % (
+                ts, r.get("path") or "?", (r.get("query") or "")[:36],
+                r.get("hits"), r.get("kinds") or ""))
+        else:
+            print("%s [%s] %s" % (ts, ev,
+                                  _json.dumps(r, ensure_ascii=False)[:160]))
+    print("\n共 %d 条（%s）" % (len(rows), _logs.memory_audit_file()))
+    return 0
+
+
+def cmd_snapshot(args) -> int:
+    """快照与回滚：索引库整库（含蒸馏表/units/评分）+ wiki 产物目录。"""
+    import json as _json
+    from agentmemhub import snapshot
+
+    if args.snapshot_action == "create":
+        r = snapshot.create(reason=args.reason or "手动")
+        print(_json.dumps(r, ensure_ascii=False, indent=2))
+        return 0
+    if args.snapshot_action == "list":
+        snaps = snapshot.list_snapshots()
+        if not snaps:
+            print("暂无快照（保留上限 %d 份）" % snapshot.keep_count())
+            return 0
+        for s in snaps:
+            print("%s  %s  %6.1f MB  %s" % (
+                s["id"], (s["reason"] or "")[:24], s["size_mb"],
+                "、".join(s["parts"])))
+        print("共 %d 份；保留上限 %d 份（超出自动删最旧，改配置 snapshot.keep 调整）"
+              % (len(snaps), snapshot.keep_count()))
+        return 0
+    if args.snapshot_action == "restore":
+        if not args.snapshot_id:
+            print("restore 需要 --snapshot-id（用 snapshot --snapshot-action list 查看可用快照）")
+            return 2
+        if args.wiki_only and args.db_only:
+            # 两个都给时 restore() 里两个分支都不进，却照样打印"回滚完成" ——
+            # 实际只多出一份保护快照，什么都没恢复
+            print("--wiki-only 与 --db-only 互斥：只给一个，或都不给（=两者都回滚）")
+            return 2
+        try:
+            r = snapshot.restore(args.snapshot_id, wiki_only=args.wiki_only,
+                                 db_only=args.db_only,
+                                 force=getattr(args, "force", False))
+        except RuntimeError as e:
+            # 「索引库正在被使用」是可预期的拒绝，按用法错误返回 2，
+            # 不要把 traceback 甩给用户
+            print(str(e))
+            return 2
+        print(_json.dumps(r, ensure_ascii=False, indent=2))
+        print("回滚完成。当前状态已自动保存为保护快照：", r["guard_snapshot"])
+        return 0
+    return 2
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -868,20 +1151,12 @@ def build_parser() -> argparse.ArgumentParser:
     pf.add_argument("--limit", type=int, default=20)
 
     pv = sub.add_parser("serve", help="启动本地 Web 页面（可选功能）")
-    pv.add_argument("--port", type=int, default=8086)
+    pv.add_argument("--port", type=int, default=None,
+                    help="监听端口（默认取配置 web.port，再退 8086）")
     pv.add_argument("--db", default="", help="数据库路径（默认 <项目根>/database/agentmemhub.db）")
     # 成对开关：--open / --no-open（默认自动打开浏览器）
     pv.add_argument("--open", action=argparse.BooleanOptionalAction, default=True,
                     help="启动后自动打开浏览器（默认开启；用 --no-open 关闭）")
-
-    pm = sub.add_parser("memos", help="[回退/迁移用] 生成 MemOS 导入 bundle（rag 后端下不需要）")
-    pm.add_argument("--source", default="")
-    pm.add_argument("--out", default="exports/memos_bundle.json")
-    pm.add_argument("--push", default="", help="MemOS base URL，例如 http://127.0.0.1:18800；非空则 POST")
-    pm.add_argument("--no-rebuild", action="store_true",
-                    help="push 后不触发 /api/v1/embeddings/rebuild（默认自动补向量）")
-    pm.add_argument("--rebuild-mode", default="repair", choices=("repair", "rebuild"),
-                    help="embedding rebuild 模式：repair=只补缺失向量（默认），rebuild=全部重算")
 
     pmc = sub.add_parser("mcp", help="启动 MCP 记忆网关（stdio 默认；--http 转 Streamable HTTP 常驻）")
     pmc.add_argument("--http", action="store_true",
@@ -892,14 +1167,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     psy = sub.add_parser("sync", help="增量同步：ingest 增量 → 清洗变更会话 → 向量化写入记忆索引")
     psy.add_argument("--source", default="")
-    psy.add_argument("--push", default="", help="[回退] MemOS base URL（rag 后端下忽略）")
-    psy.add_argument("--no-push", action="store_true",
-                    help="仅 ingest，跳过向量化/推送阶段")
-    psy.add_argument("--no-rebuild", action="store_true",
-                    help="[回退] push 后不触发 embedding rebuild")
-    psy.add_argument("--rebuild-mode", default="repair", choices=("repair", "rebuild"))
+    psy.add_argument("--skip-vectorize", dest="skip_vectorize", action="store_true",
+                     help="只采集入库并清洗系统注入事件，跳过向量化阶段")
     psy.add_argument("--full", action="store_true",
-                     help="强制全量同步（默认按 watermarks 变更集增量推送）")
+                     help="强制全量同步（默认按 watermarks 变更集增量处理）")
 
     pcl = sub.add_parser("clean", help="记忆清洗：删除系统注入事件（is_system；默认预览，--apply 执行）")
     pcl.add_argument("--source", default="")
@@ -908,12 +1179,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     psc = sub.add_parser("score", help="LLM 批量自动评分历史记忆（三轴评估 → feedback 写入，检索排序生效）")
     psc.add_argument("--pending", action="store_true",
-                     help="只评分 sync 推送成功后入队的 trace（pending_score 队列，"
+                     help="只评分 sync 处理后入队的 trace（pending_score 队列，"
                           "成功后消费清空；dry-run 不清空）")
     psc.add_argument("--limit", type=int, default=0, help="最多评分条数（0=全部）")
     psc.add_argument("--dry-run", action="store_true", help="只评估不写入（预览 verdict 分布）")
     psc.add_argument("--workers", type=int, default=4, help="并发评估线程数（默认 4；IO 密集建议 4~8）")
-    psc.add_argument("--push", default="", help="引擎 base URL（默认 18800，一般不用设）")
     psc.add_argument("--ids", type=_csv_ids, default=None,
                      help="只评分指定 trace id（逗号分隔，如 --ids trac_1,trac_2；配合写后即评/锚点）")
     psc.add_argument("--unscored-count", action="store_true",
@@ -938,29 +1208,470 @@ def build_parser() -> argparse.ArgumentParser:
                     help="最多处理多少个会话（按正文量降序，0=全部）")
     pd.add_argument("--dry-run", action="store_true",
                     help="只蒸馏不落库（预览产物与成本，可反复执行）")
+
+    _register_snapshot_parser(sub)
+    _register_memory_log_parser(sub)
+    _register_llm_config_parser(sub)
+
+    pfeed = sub.add_parser(
+        "feed", help="外部投喂：把外部素材转译成统一 md 并登记（含素材库查询）")
+    # 动作既支持自然写法 `feed add <文件>`，也支持项目惯例 `feed --action add`
+    # —— 两种都收在 `args` 里再解析（用 `--action` 单独占一个 dest 会与位置参数打架）
+    pfeed.add_argument("args", nargs="*",
+                       help="动作 + 参数：add <文件…> / list / show <doc_id> / "
+                            "retry <doc_id> / retract <doc_id> / forget <doc_id> / "
+                            "lint / scan <目录> / batch <目录…> / formats")
+    pfeed.add_argument("--action", default="",
+                       choices=["", "add", "list", "show", "retry",
+                                "retract", "forget", "lint",
+                                "scan", "batch", "formats"],
+                       help="动作（与位置写法等价；项目惯例写法）")
+    pfeed.add_argument("--id", default="", help="show/retry/retract/forget 用：doc_id")
+    pfeed.add_argument("--purge", action="store_true",
+                       help="forget 用：**连原件一起删**（默认保留原件，因为它不可再生）")
+    pfeed.add_argument("--stdin", action="store_true",
+                       help="add 用：**兜底通路** —— 从标准输入读正文直接投喂"
+                            "（反爬/另存失败时用）；配合 --title / --source-ref")
+    pfeed.add_argument("--title", default="", help="--stdin 用：标题")
+    pfeed.add_argument("--source-ref", default="",
+                       help="--stdin 用：真实来源（URL 或文件路径），作溯源值")
+    pfeed.add_argument("--kind", default="",
+                       help="显式指定类型（text/url/wechat/pdf/image）")
+    pfeed.add_argument("--force", action="store_true",
+                       help="add/retry 用：同内容已投喂过也重跑")
+    pfeed.add_argument("--from-raw", action="store_true",
+                       help="retry 用：强制用 raw/ 里的原件重转（不碰原始来源）")
+    pfeed.add_argument("--dry-run", action="store_true",
+                       help="add 用：只做查重与认领，不写盘")
+    pfeed.add_argument("--status", default="", help="list 用：按状态筛")
+    pfeed.add_argument("--low-quality", action="store_true",
+                       help="list 用：只列质量偏低或有告警的")
+    pfeed.add_argument("--limit", type=int, default=0,
+                       help="list/scan/batch 用：最多几条（0=全部）")
+    pfeed.add_argument("--apply", action="store_true",
+                       help="batch 用：**真的投喂**。不加则只扫描列清单（默认只看不写）")
+    pfeed.add_argument("--no-recursive", action="store_true",
+                       help="scan/batch 用：只扫目录第一层")
+    pfeed.add_argument("--set-formats", default="",
+                       help="formats 用：设置运行时允许的格式（逗号分隔，如 "
+                            "'.pdf,.docx'）；传 'clear' 清除覆盖回到配置/默认")
+    pfeed.add_argument("--json", action="store_true", help="以 JSON 输出（便于脚本消费）")
+    pwk = sub.add_parser("wiki", help="LLM Wiki 运维：对齐审计 / 增量更新 / 查看失败清单 / 定向补跑")
+    pwk.add_argument("--action", default="failures",
+                     choices=["failures", "retry", "align", "update",
+                              "triggers", "trigger", "backfill-manual",
+                              "index-pages", "pending", "drop", "ignored",
+                              "restore",
+                              "batch-status", "batch-run", "batch-cancel",
+                              "batch-resubmit", "full-run"],
+                     help="failures=查看失败清单（默认）；retry=只重跑失败项；"
+                          "align=审计 wiki 产物与索引库的差距（只读）；"
+                          "update=增量更新（只重编脏会话 L1 与受影响 L2 域）；"
+                          "triggers=查看触发器配置与状态；trigger=手动执行一次触发检测；"
+                          "backfill-manual=历史 Agent 直写记忆回填蒸馏表（幂等）；"
+                          "index-pages=L2 知识页投影进召回面（页级召回）；"
+                          "pending=待更新记忆明细；drop=删除待更新记忆"
+                          "（--mode soft=不进 wiki / hard=真删）；"
+                          "ignored=已软删除的记忆；restore=取消软删除；"
+                          "batch-status=离线批处理任务状态（只读）；"
+                          "batch-run=离线模式推进一段（提交/交编译/落盘，状态机自判）；"
+                          "batch-cancel=取消并作废所有在飞离线任务；"
+                          "batch-resubmit=用**原输入文件**重建已终局的任务"
+                          "（平台侧 validation_failed 时用，不重跑 L1/归域）")
+    pwk.add_argument("--out", default="",
+                     help="wiki 产出目录（failures/align/retry 必需；"
+                          "其余从配置或 --l1/--l2 读）")
+    pwk.add_argument("--set-batch", default="", choices=["", "on", "off"],
+                     help="triggers 用：热改离线触发器总闸（写 overrides，不用重启）。"
+                          "判定顺序：离线优先 → 实时兜底")
+    pwk.add_argument("--stage", default="", choices=["", "l1", "l2"],
+                     help="限定阶段：l1=第一级；l2=第二级；留空=全部")
+    pwk.add_argument("--src", default="", help="第二级补跑必需：第一级产出目录")
+    pwk.add_argument("--l1", default="", help="update/align 用：第一级产出目录")
+    pwk.add_argument("--l2", default="", help="update/align 用：第二级产出目录（与 --l1 同时给 对齐两级的同步性）")
+    pwk.add_argument("--workers", type=int, default=0, help="并发数（0=用配置）")
+    pwk.add_argument("--db", default="", help="索引库路径（align/update 用；默认读配置）")
+    pwk.add_argument("--force", action="store_true",
+                     help="trigger 用：绕过规则强制执行一次增量更新")
+    pwk.add_argument("--deadline", type=float, default=0.0,
+                     help="batch-run 用：等待厂商的预算秒数（0=不限时，默认）")
+    pwk.add_argument("--offline", action="store_true",
+                     help="full-run 用：强制走离线通道（覆盖 wiki.full.mode）")
+    pwk.add_argument("--ids", default="",
+                     help="drop/restore 用：记忆 id 列表，逗号分隔（如 4388,4392）")
+    pwk.add_argument("--mode", default="soft", choices=["soft", "hard"],
+                     help="drop 用：soft=只标记不进 wiki（可恢复，默认）；"
+                          "hard=真删（蒸馏表+投影+向量，不可恢复）")
+    pwk.add_argument("--confirm", action="store_true",
+                     help="drop --mode hard 必须显式加上（二次确认）")
+    pwk.add_argument("--limit", type=int, default=0,
+                     help="pending/ignored 用：最多显示几条（0=全部）")
     return p
 
 
-def main() -> None:
-    args = build_parser().parse_args()
+def _harvest_quietly() -> None:
+    """顺手**收割一次异步任务**（旁路：永不抛、不打印、不改命令行为）。
+
+    为什么挂在 CLI 入口而不是逐个 wiki 动作：离线批次完成时总要有人回读，而项目
+    刻意不做常驻轮询 —— 挂在"用户跑命令"这个天然事件上，**任何一条命令**都会顺带
+    检查。队列空时零成本立即返回（只读一次本地文件，不碰厂商），不影响启动时间。
+
+    放在 `parse_args()` **之后**：`--help` 会 `SystemExit`，不该有副作用。
+    """
+    try:
+        from agentmemhub import wiki_triggers
+        wiki_triggers.harvest_now()
+    except Exception:                       # noqa: BLE001 —— 旁路
+        pass
+
+
+def cmd_feed(args) -> int:
+    """外部投喂（`feed`）：转译 → 登记 → 发布，以及素材库查询。
+
+    四个动作全部走 `agentmemhub.feed.service` 的同一份编排 —— CLI / MCP / 面板
+    只做参数解析与呈现，绝不在各自那里重写流程（wiki 上踩过"两处流程对不齐"的坑）。
+    """
+    import json as _json
+
+    from agentmemhub import feed as _feed
+    from agentmemhub.feed import service as _svc
+
+    action = (getattr(args, "action", "") or "").strip()
+    as_json = bool(getattr(args, "json", False))
+    # 位置写法（`feed add X`）与 `--action add` 等价：首 token 命中动作名就取走。
+    # 不这么做的话 `feed add X` 会把 "add" 当成**文件路径**去投喂 —— 能跑、
+    # 但把用户意图理解错了（实测：报"找不到文件：add"，随后又真的投喂了 X）。
+    tokens = [str(t) for t in (getattr(args, "args", []) or [])]
+    _ACTIONS = ("add", "list", "show", "retry", "retract", "forget", "lint",
+                "scan", "batch", "formats")
+    if not action and tokens and tokens[0] in _ACTIONS:
+        action = tokens.pop(0)
+    action = action or "add"
+    doc_id_arg = (getattr(args, "id", "") or "").strip()
+    if not doc_id_arg and action in ("show", "retry", "retract", "forget") and tokens:
+        doc_id_arg = tokens.pop(0)
+
+    if action == "add":
+        # **兜底通路**：从 stdin 读正文（反爬失败 / 只拿到正文时用）
+        if getattr(args, "stdin", False):
+            import sys as _sys
+            text = _sys.stdin.read()
+            r = _svc.ingest_text(text,
+                                 title=getattr(args, "title", "") or "",
+                                 source_ref=getattr(args, "source_ref", "") or "")
+            if as_json:
+                print(_json.dumps(r, ensure_ascii=False, indent=2))
+            return 0 if r.get("ok") else 1
+        paths = [p for p in tokens if p.strip()]
+        if not paths:
+            print("用法：agentmemhub feed add <文件路径> [更多路径…] "
+                  "[--kind text|pdf|docx|pptx|xmind|html] [--dry-run] [--force]")
+            return 2
+        out = []
+        failed = 0
+        for p in paths:
+            r = _svc.ingest(p, kind=getattr(args, "kind", "") or "",
+                            force=bool(getattr(args, "force", False)),
+                            dry_run=bool(getattr(args, "dry_run", False)))
+            out.append(r)
+            if not r.get("ok"):
+                failed += 1
+        if as_json:
+            print(_json.dumps(out, ensure_ascii=False, indent=2))
+        elif len(out) > 1:
+            print("\n合计：成功 %d / 失败 %d" % (len(out) - failed, failed))
+        return 1 if failed else 0
+
+    if action == "formats":
+        # 格式白名单：查看 / 调整（用户要求"通过调整文档格式参数控制哪些数据支持投喂"）
+        from agentmemhub.feed import formats as _fmt
+        spec = (getattr(args, "set_formats", "") or "").strip()
+        if spec:
+            if spec.lower() == "clear":
+                st = _fmt.clear_overrides()
+            else:
+                st = _fmt.set_overrides([e for e in spec.split(",") if e.strip()])
+        else:
+            st = _fmt.state()
+        if as_json:
+            print(_json.dumps(st, ensure_ascii=False, indent=2))
+            return 0
+        print("当前允许投喂的格式（来源：%s）：" % st["source"])
+        print("  " + "、".join(st["allowed"]) if st["allowed"] else "  （空）")
+        print("  转换器支持：%s" % "、".join(st["supported"]))
+        print("  覆盖文件：%s" % st["stateFile"])
+        return 0
+
+    if action == "scan":
+        roots = [p for p in tokens if p.strip()]
+        if not roots:
+            print("用法：agentmemhub feed scan <目录或文件> [更多路径…] "
+                  "[--no-recursive] [--limit N] [--json]")
+            return 2
+        res = _svc.scan_targets(roots=roots,
+                                recursive=not bool(getattr(args, "no_recursive", False)),
+                                limit=int(getattr(args, "limit", 0) or 0))
+        if as_json:
+            print(_json.dumps(res, ensure_ascii=False, indent=2))
+            return 0
+        print("扫描：可投喂 %d / 被格式挡掉 %d%s"
+              % (res["allowedCount"], res["skippedCount"],
+                 "（已按 --limit 截断）" if res["truncated"] else ""))
+        for ext, n in sorted(res["byExt"].items(), key=lambda x: -x[1]):
+            print("    %-14s %d" % (ext, n))
+        for s in res["skipped"][:10]:
+            print("    [挡] %s（%s）" % (s["path"], s["reason"]))
+        return 0
+
+    if action == "batch":
+        roots = [p for p in tokens if p.strip()]
+        if not roots:
+            print("用法：agentmemhub feed batch <目录或文件> [更多路径…] "
+                  "[--apply] [--dry-run] [--force] [--no-recursive] [--limit N]")
+            print("      **不加 --apply 时只扫描列清单**（默认只看不写）")
+            return 2
+        recursive = not bool(getattr(args, "no_recursive", False))
+        limit = int(getattr(args, "limit", 0) or 0)
+        if not getattr(args, "apply", False):
+            # 默认只看不写：批量影响面大，且用户明确"未筛选的数据禁止入库"
+            res = _svc.scan_targets(roots=roots, recursive=recursive, limit=limit)
+            if as_json:
+                print(_json.dumps(res, ensure_ascii=False, indent=2))
+                return 0
+            print("（只扫描，未投喂）可投喂 %d / 被格式挡掉 %d%s"
+                  % (res["allowedCount"], res["skippedCount"],
+                     "（已按 --limit 截断）" if res["truncated"] else ""))
+            for ext, n in sorted(res["byExt"].items(), key=lambda x: -x[1]):
+                print("    %-14s %d" % (ext, n))
+            print("确认无误后加 `--apply` 真的投喂"
+                  "（想连盘都不写就再加 `--dry-run` 先走一遍全流程）")
+            return 0
+        out = _svc.ingest_batch(roots=roots, recursive=recursive,
+                                force=bool(getattr(args, "force", False)),
+                                dry_run=bool(getattr(args, "dry_run", False)),
+                                limit=limit)
+        if as_json:
+            print(_json.dumps(out, ensure_ascii=False, indent=2))
+        else:
+            print("批量投喂：成功 %d / 幂等跳过 %d / 失败 %d（共 %d）%s"
+                  % (out["ok"], out["skipped"], out["failed"], out["total"],
+                     "（dry-run 未写盘）" if out["dryRun"] else ""))
+            for e in out["errors"][:10]:
+                print("    [x] %s：[%s] %s"
+                      % (e["path"], e["error_kind"], e["error"][:80]))
+        return 1 if out["failed"] else 0
+
+    if action == "list":
+        rows = _svc.list_materials(
+            status=getattr(args, "status", "") or "",
+            low_quality=bool(getattr(args, "low_quality", False)),
+            limit=int(getattr(args, "limit", 0) or 0))
+        if as_json:
+            print(_json.dumps(rows, ensure_ascii=False, indent=2))
+            return 0
+        if not rows:
+            print("（没有已投喂的素材）")
+            return 0
+        print("已投喂素材 %d 条：" % len(rows))
+        print("  %-17s %-6s %-10s %-6s %s" % ("doc_id", "kind", "status",
+                                              "质量", "标题"))
+        for r in rows:
+            print("  %-17s %-6s %-10s %-6.2f %s"
+                  % (r.get("doc_id", ""), r.get("kind", ""), r.get("status", ""),
+                     float(r.get("quality") or 0.0), (r.get("title") or "")[:40]))
+            if r.get("warnings"):
+                print("      ⚠️ %s" % "；".join(r["warnings"])[:100])
+            if r.get("error"):
+                print("      ❌ [%s] %s" % (r.get("error_kind") or "", r["error"][:100]))
+        return 0
+
+    if action == "show":
+        doc_id = doc_id_arg
+        if not doc_id:
+            print("用法：agentmemhub feed show <doc_id>（或 --id <doc_id>）")
+            return 2
+        row = _svc.get_material(doc_id)
+        if not row:
+            print("[x] 没有这条素材：%s" % doc_id)
+            return 1
+        if as_json:
+            print(_json.dumps(row, ensure_ascii=False, indent=2))
+            return 0
+        import time as _t
+        print("doc_id    : %s" % row.get("doc_id"))
+        print("标题      : %s" % (row.get("title") or ""))
+        print("状态      : %s%s" % (row.get("status"),
+                                    ("（%s）" % row["error"]) if row.get("error") else ""))
+        print("类型/转换 : %s / %s" % (row.get("kind"), row.get("converter")))
+        print("来源      : %s" % row.get("source_ref"))
+        print("文档时间  : %s" % _t.strftime("%Y-%m-%d %H:%M",
+                                            _t.localtime(int(row.get("doc_time") or 0))))
+        print("质量      : %.2f%s" % (float(row.get("quality") or 0.0),
+                                      ("  ⚠️ " + "；".join(row["warnings"]))
+                                      if row.get("warnings") else ""))
+        print("原件      : %s" % row.get("raw_path"))
+        print("镜像      : %s" % (row.get("mirror_path") or "（无）"))
+        print("交付物    : %s" % (row.get("kb_path") or "（无）"))
+        return 0
+
+    if action == "retract":
+        doc_id = doc_id_arg
+        if not doc_id:
+            print("用法：agentmemhub feed retract <doc_id>")
+            return 2
+        r = _svc.retract(doc_id)
+        if as_json:
+            print(_json.dumps(r, ensure_ascii=False, indent=2))
+        return 0 if r.get("ok") else 1
+
+    if action == "forget":
+        doc_id = doc_id_arg
+        if not doc_id:
+            print("用法：agentmemhub feed forget <doc_id> [--purge]"
+                  "（--purge 连原件一起删；默认保留原件）")
+            return 2
+        r = _svc.forget(doc_id, purge=bool(getattr(args, "purge", False)))
+        if as_json:
+            print(_json.dumps(r, ensure_ascii=False, indent=2))
+        return 0 if r.get("ok") else 1
+
+    if action == "lint":
+        from agentmemhub.feed.lint import format_report
+        r = _svc.lint()
+        if as_json:
+            print(_json.dumps(r, ensure_ascii=False, indent=2))
+        else:
+            print(format_report(r))
+        # P0 > 0 ⇒ 非零退出码（可直接当提交/巡检门槛，照 lint.py 的做法）
+        return 1 if r.get("p0") else 0
+
+    if action == "retry":
+        doc_id = doc_id_arg
+        if not doc_id:
+            print("用法：agentmemhub feed retry <doc_id>（或 --id <doc_id>）")
+            return 2
+        r = (_svc.reconvert(doc_id) if getattr(args, "from_raw", False)
+             else _svc.retry(doc_id, force=bool(getattr(args, "force", False))))
+        if as_json:
+            print(_json.dumps(r, ensure_ascii=False, indent=2))
+        return 0 if r.get("ok") else 1
+
+    print("未知 feed 动作：%s" % action)
+    return 2
+
+
+def main() -> int:
+    _force_utf8_stdio()
+    parser = build_parser()
+    # argparse **不允许位置参数夹在选项之间**：`feed add --force X` 里的 X 会被判成
+    # "unrecognized arguments"（因为 `args` 是 nargs="*"，遇到 --force 就停止收集）。
+    # 这对 feed 是硬伤（路径与 flag 的书写顺序很自然），所以只对 feed 把落下的
+    # token 补回去；其余子命令**保持严格**，不能把拼错的参数吞掉。
+    args, unknown = parser.parse_known_args()
+    if unknown:
+        if getattr(args, "command", "") == "feed":
+            args.args = list(getattr(args, "args", []) or []) + list(unknown)
+        else:
+            parser.error("unrecognized arguments: %s" % " ".join(unknown))
+    _harvest_quietly()
     if not args.command:
         # 无参数 = 进入交互式控制台（新用户入口）
         from agentmemhub.console import run_console
         run_console()
-        return
+        return 0
     handlers = {
         "ingest": cmd_ingest, "list": cmd_list, "show": cmd_show,
         "search": cmd_search, "export": cmd_export, "stats": cmd_stats,
-        "adapters": cmd_adapters, "memos": cmd_memos, "folders": cmd_folders,
+        "adapters": cmd_adapters, "folders": cmd_folders,
         "serve": cmd_serve, "mcp": cmd_mcp,
         "sync": cmd_sync, "clean": cmd_clean, "score": cmd_score, "rebuild": cmd_rebuild,
         "distill": cmd_distill, "weight": cmd_weight,
+        "wiki": cmd_wiki,
+        "feed": cmd_feed,
+        "snapshot": cmd_snapshot,
+        "memory-log": cmd_memory_log,
+        "llm-config": cmd_llm_config,
     }
     fn = handlers.get(args.command)
     if fn is None:
         build_parser().print_help()
-        return
-    fn(args)
+        return 0
+    # 子命令用返回值表达成败（`feed lint` 的 P0 门槛、`feed add` 的部分失败等）。
+    # 2026-10-26 之前这里直接丢弃返回值、`main()` 也不返回 ⇒ **所有命令退出码恒 0**，
+    # 于是文档里写的"P0>0 ⇒ 退出码 1，可当提交/巡检门槛"从来没生效过。
+    rc = fn(args)
+    return rc if isinstance(rc, int) else 0
+
+
+def cmd_llm_config(args) -> int:
+    """打印各 LLM 使用点**最终生效**的配置，并标出每项是继承还是覆盖。
+
+    为什么需要（2026-09-22）：LLM 的覆盖项是**就地**的（`wiki.llm` /
+    `distillation.llm` / `wiki.l2.llm`），与 `logs.files.<name>`、召回档位的
+    `retrieval.callers.<name>` 那种集中式覆盖不同 —— 想知道"某个调用方到底用
+    哪个模型、哪些参数是继承来的"要翻好几处配置。本命令把结果拼好。
+    """
+    import json as _json
+
+    from agentmemhub import config as hub_config
+
+    data = hub_config.llm_effective()
+    if getattr(args, "json", False):
+        print(_json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+
+    print("LLM 生效配置（%d 个使用点）" % len(data["users"]))
+    print("=" * 76)
+    print("\n【顶层 llm】%s —— 所有调用方的共用默认" % data["top"]["path"])
+    for k, v in data["top"]["values"].items():
+        print("   %-18s %s" % (k, v))
+
+    for u in data["users"]:
+        print("\n【%s】%s" % (u["name"], u["path"]))
+        if not u["overrides"]:
+            print("   （完全继承顶层，无覆盖）")
+        for k, v in u["values"].items():
+            tag = "覆盖" if k in u["overrides"] else "继承"
+            print("   [%s] %-18s %s" % (tag, k, v))
+
+    print("\n注：Wiki 第二级的继承链是「顶层 llm → wiki.l2.llm」，**刻意跳过 "
+          "wiki.llm** ——\n    级联继承会让第一级换 provider 牵连第二级（实测踩过："
+          "第一级切到\n    DeepSeek 官方关推理，第二级因此丢掉了 Command Code 的凭据）。")
+    return 0
+
+
+def _register_llm_config_parser(sub) -> None:
+    pl = sub.add_parser(
+        "llm-config",
+        help="查看各 LLM 使用点最终生效的配置（哪项继承、哪项覆盖）")
+    pl.add_argument("--json", action="store_true", help="输出原始 JSON")
+
+
+def _register_memory_log_parser(sub) -> None:
+    pm = sub.add_parser(
+        "memory-log", help="记忆操作事实流：查什么时候写了/读了什么记忆")
+    pm.add_argument("--limit", type=int, default=50,
+                    help="最多显示多少条（默认 50；0=全部）")
+    pm.add_argument("--event", default="", choices=["", "write", "read"],
+                    help="只看写入 / 只看读取")
+    pm.add_argument("--path", default="",
+                    choices=["", "mcp", "http", "distill", "cli", "unknown"],
+                    help="只看某个来源路径")
+    pm.add_argument("--grep", default="", help="关键词过滤（匹配整条记录）")
+    pm.add_argument("--json", action="store_true", help="输出原始 JSON")
+
+
+def _register_snapshot_parser(sub) -> None:
+    ps = sub.add_parser("snapshot", help="快照与回滚：索引库整库 + wiki 产物目录")
+    ps.add_argument("--snapshot-action", dest="snapshot_action", default="list",
+                    choices=["create", "list", "restore"],
+                    help="create=创建快照（默认 list）；restore=回滚到指定快照")
+    ps.add_argument("--reason", default="", help="create 用：快照原因（记录在 meta）")
+    ps.add_argument("--snapshot-id", default="", help="restore 用：目标快照 id")
+    ps.add_argument("--wiki-only", action="store_true", help="restore 时只回滚 wiki 产物")
+    ps.add_argument("--db-only", action="store_true", help="restore 时只回滚索引库")
+    ps.add_argument("--force", action="store_true",
+                    help="restore 时跳过「索引库正被其它进程使用」的检查（会导致索引分叉，慎用）")
 
 
 if __name__ == "__main__":

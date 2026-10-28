@@ -351,23 +351,7 @@ def test_watermarks_pending_and_oversized(tmp_path):
 
 import argparse  # noqa: E402
 
-from agentmemhub import memos as memos_mod  # noqa: E402
 from agentmemhub import scoring as scoring_mod  # noqa: E402
-from agentmemhub.memos import build_bundle  # noqa: E402
-
-
-def test_build_bundle_only_ids_filter():
-    s = _db()
-    try:
-        s.upsert_sessions("zcode", [
-            _sess("zcode", "s1", 100.0, ["一问", "二问"]),
-            _sess("zcode", "s2", 100.0, ["另一会话"]),
-        ])
-        full = build_bundle(s, "zcode")
-        narrowed = build_bundle(s, "zcode", only_ids={"s1"})
-        assert len(full["traces"]) > len(narrowed["traces"]) > 0
-    finally:
-        s.close()
 
 
 def test_run_clean_delta_narrowing(tmp_path, monkeypatch):
@@ -387,30 +371,6 @@ def test_run_clean_delta_narrowing(tmp_path, monkeypatch):
         # apply 成功 → clean 消费水位已登记（本测试无 ingest，值为当前 delta 的 0）
         st = watermarks.load_state(tmp_path)
         assert "clean" in st["consumed"]
-    finally:
-        s.close()
-
-
-def test_push_to_memos_only_and_pushed_ids(tmp_path, monkeypatch):
-    s = _db()
-    try:
-        s.upsert_sessions("zcode", [
-            _sess("zcode", "s1", 100.0, ["一问", "二问"]),
-            _sess("zcode", "s2", 100.0, ["另一会话"]),
-        ])
-        calls: list[dict] = []
-
-        def fake_push(payload, base_url):
-            calls.append(payload)
-            return {"imported": len(payload["traces"]), "skipped": 0}
-
-        monkeypatch.setattr("agentmemhub.memos.push_bundle", fake_push)
-        r = cli.push_to_memos(s, sources=["zcode"], base_url="http://fake",
-                              no_rebuild=True, only={"zcode": {"s1"}})
-        pushed = [t for p in calls for t in p["traces"]]
-        assert len(r["pushed_ids"]) == len(pushed) > 0
-        # 只构建了 s1 的 traces（s2 未入包）
-        assert r["pushed_ids"] == [t["id"] for t in pushed]
     finally:
         s.close()
 
@@ -460,19 +420,19 @@ def test_run_sync_delta_end_to_end(tmp_path, monkeypatch):
         _sess("fake", "s2", 100.0, ["另一会话"]),
     ]
     dbp = _patch(monkeypatch, tmp_path, fake)
-    monkeypatch.setattr("agentmemhub.memos_daemon.auth_state",
+    monkeypatch.setattr("agentmemhub.engine_api.auth_state",
                         lambda: {"ok": True})
 
     calls: list[dict] = []
 
-    def fake_push(payload, base_url):
-        calls.append(payload)
-        return {"imported": len(payload["traces"]), "skipped": 0}
+    def fake_vectorize(*, stdout=None):
+        calls.append({"stdout": stdout})
+        return {"failed": 0, "embedded": 2}
 
-    monkeypatch.setattr("agentmemhub.memos.push_bundle", fake_push)
-    cli.run_sync(source="fake", push="http://fake", no_rebuild=True)
-    # 推送了全部 2 个会话的 traces；clean 已清注入事件
-    assert len(calls) >= 1
+    monkeypatch.setattr("agentmemhub.cli._vectorize_stage", fake_vectorize)
+    cli.run_sync(source="fake", vectorize=True)
+    # 向量化一次；clean 已清注入事件
+    assert len(calls) == 1
     s = Store(dbp)
     try:
         assert len(s.get_events("fake", "s1")) == 1      # 注入事件已清
@@ -480,12 +440,12 @@ def test_run_sync_delta_end_to_end(tmp_path, monkeypatch):
         s.close()
     st = watermarks.load_state(tmp_path)
     assert st["consumed"]["push"] > 0 and st["consumed"]["clean"] > 0
-    assert len(st["pending_score"]) >= 2                 # 推送 trace 全部入队
+    assert st["pending_score"] == []                     # sync 不再填充评分队列
 
     # 二轮：无变更 → 跳过推送，不产生新的 push 调用，delta 已消费清空
     n_calls = len(calls)
-    cli.run_sync(source="fake", push="http://fake", no_rebuild=True)
-    assert len(calls) == n_calls
+    cli.run_sync(source="fake", vectorize=True)
+    assert len(calls) == n_calls + 1                      # 每次 sync 都向量化（引擎自带幂等）
     st2 = watermarks.load_state(tmp_path)
     assert st2["delta"]["conversations"] == []
     assert st2["pending_score"] == st["pending_score"]   # 队列保留待 score --pending
@@ -495,9 +455,9 @@ def test_run_sync_offline_keeps_delta(tmp_path, monkeypatch):
     fake = _FakeAdapter()
     fake.sessions = [_sess("fake", "s1", 100.0, ["a"])]
     _patch(monkeypatch, tmp_path, fake)
-    monkeypatch.setattr("agentmemhub.memos_daemon.auth_state", lambda: None)
+    monkeypatch.setattr("agentmemhub.engine_api.auth_state", lambda: None)
 
-    cli.run_sync(source="fake", push="http://fake")
+    cli.run_sync(source="fake", vectorize=True)
     st = watermarks.load_state(tmp_path)
     assert st["delta"]["conversations"]                  # delta 保留待补推
     assert st["consumed"].get("push") in (None, 0)       # 未标记消费

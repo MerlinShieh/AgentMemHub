@@ -19,7 +19,7 @@ EVENT_VERSION = 1
 
 # 系统注入消息识别（伪装成 role=user 的 harness 自动注入）。
 # 与前端 index.html isSystemMessage 同规则，另补 task-notification / system-reminder。
-# adapter 层打 is_system 标记 → MemOS 导出跳过这些轮，Web 渲染归 system。
+# adapter 层打 is_system 标记 → 记忆导出跳过这些轮，Web 渲染归 system。
 _SYSTEM_INJECT_RE = re.compile(
     r"^The TodoWrite tool"
     r"|^Current runtime context"
@@ -31,7 +31,15 @@ _SYSTEM_INJECT_RE = re.compile(
     r'|^\{\s*"type"\s*:\s*"session/'
     r"|^<antml:"
     r"|^<task-notification\b|^<system-reminder\b"
-    r"|environment_context|runtime\.context|file\.policy|approval\.policy",
+    # ⚠️ 下面这几个词 2026-10-26 之前是**裸的**（无锚定）：`environment_context`、
+    # `runtime\.context`、`file\.policy`、`approval\.policy` 只要出现在用户正文的
+    # 任意位置就整条判成系统注入。后果不是"少一条系统消息"，而是**真实用户消息被
+    # 当成注入**：`distill.py` / `rag/ingest.py` 都会 `WHERE is_system = 0` 跳过它
+    # （这轮记忆永不生成、且无任何提示），而 `agentmemhub clean --apply` 会
+    # `DELETE FROM events WHERE is_system = 1` 把它们**物理删掉**。
+    # 现在只认它们作为**行首的标签/键**出现（允许前面有空白、引号、列表符）。
+    r"|^[\s\-\*\"'\[(]*(?:environment|runtime|file|approval)[\._ ](?:context|policy)\b"
+    r"|^<(?:environment|runtime)_context\b",
     re.IGNORECASE,
 )
 
@@ -57,7 +65,7 @@ class Event:
     content: Optional[str] = None  # user/assistant/reasoning 的正文
     parent_id: Optional[str] = None
 
-    # 记忆桥接锚（MemOS 导出幂等与轮次分组用）
+    # 记忆桥接锚（导出幂等与轮次分组用）
     src_id: Optional[str] = None   # 事件在源数据里的稳定定位（re-ingest 不变）
     turn_key: Optional[str] = None # 所属轮次的锚（= 该轮根 user 消息的 src_id）
     is_system: Optional[bool] = None  # 源级可识别的系统注入消息（DSH plugin / Qwen system）
@@ -227,16 +235,24 @@ def to_event(
 
 
 def _to_epoch(value: Any) -> Optional[float]:
-    """多格式时间 → Unix 秒（处理毫秒/纳秒/ISO 字符串）。"""
+    """多格式时间 → Unix 秒（处理秒 / 毫秒 / 微秒 / 纳秒 / ISO 字符串）。
+
+    数字按「除以多大规模后能落进合理纪元区间」判断，而不是写死两个阈值：
+    微秒时间戳（≈1.7e15）过去被当成纳秒（`>1e13` 只分得出毫秒与纳秒两档），
+    算出来是 1970 年 —— 于是 `store` 里"时间没变"的判断永不成立，
+    那个会话每次增量都被当成变了而全量重写。
+    """
     if value in (None, ""):
         return None
     if isinstance(value, (int, float)):
         number = float(value)
-        if number > 10_000_000_000_000:   # 纳秒
-            number /= 1_000_000_000
-        elif number > 10_000_000_000:     # 毫秒
-            number /= 1000
-        return number
+        if number <= 0:
+            return number
+        for scale in (1.0, 1e3, 1e6, 1e9):
+            sec = number / scale
+            if 1e8 <= sec <= 4.2e9:          # 约 1973-02 ~ 2103-01
+                return sec
+        return number / 1e9                  # 都不合理：按纳秒收尾，别静默放大
     from datetime import datetime
     text = str(value).strip().replace("Z", "+00:00")
     try:

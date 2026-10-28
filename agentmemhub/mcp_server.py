@@ -1,12 +1,12 @@
 """AgentMemHub MCP 记忆网关（stdio / Streamable HTTP 双传输）。
 
-把本地记忆引擎（MemOS）的语义检索/读写包装成 MCP server，挂在
+把本地记忆引擎的语义检索/读写包装成 MCP server，挂在
 ZCode / OpenCode / Claude Code 等支持 MCP 的 Agent harness 上。
 
 设计原则：
-- 引擎生命周期完全由用户控制（看板 / `agentmemhub memos-daemon`）；
+- 引擎随进程内直调，无守护进程、无端口；
   本网关**只转发请求、从不拉起或停止引擎**，引擎离线时返回明确错误。
-- 业务复用 memos_daemon.engine_request（含自动登录），不写本地库：
+- 业务复用 engine_api.engine_request（含自动登录），不写本地库：
   检索/写入全部实时走引擎 HTTP API。
 - 协议层（JSON-RPC 处理）与传输层分离，两种传输共用同一份逻辑。
 
@@ -23,7 +23,14 @@ Tools:
 - memory_search(query, topK)  语义检索历史记忆（转发 /api/v1/memory/search）
 - memory_recent(limit)        最近记忆时间线（/api/v1/traces）
 - memory_stats()              引擎在线状态与记忆概要
-- memory_save(content, tags)  写入一条记忆（构造 bundle → /api/v1/import）
+- memory_save(content, tags)  写入一条记忆（直写索引库 + 蒸馏表）
+- memory_score(trace_id, p)   写后即评：打极性分（/api/v1/feedback）
+- feed_add(input, value, …)   投喂外部素材（path / url / data / text 四种形态）
+- feed_list(status, …)        列已投喂素材（按状态 / 低质量筛）
+- feed_status(doc_id)         素材库健康快照；给 doc_id 看单条详情
+
+⚠️ **feed 三个工具不依赖记忆引擎**（本地文件处理，与索引无关），其余五个依赖。
+   新增而不改动既有五个的 schema 与返回格式 —— Skill 侧强依赖它们。
 """
 from __future__ import annotations
 
@@ -33,9 +40,10 @@ import re
 import sys
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Callable, Optional
 
-from agentmemhub import memos_daemon
+from agentmemhub import engine_api
 
 # ---- Streamable HTTP 软依赖 ----------------------------------------------
 # fastapi 仅 --http 模式需要；stdio 模式不强制安装。顶部 import 是为了让
@@ -50,25 +58,17 @@ except ImportError:
 
 SERVER_INFO = {"name": "agentmemhub-mcp", "version": "0.1.0"}
 
-#: 引擎记忆空间的 agent 标识（与 web 网关 /api/memos/* 口径一致）
+#: 引擎记忆空间的 agent 标识（与 web 网关 /api/engine/* 口径一致）
 _AGENT = "hermes"
 
 def _engine_hint() -> str:
-    """引擎不可用时的提示（按后端区分：rag 进程内无守护，memos 才有 daemon）。"""
-    from agentmemhub import memos_daemon
-    if memos_daemon._backend_is_rag():
-        return ("记忆索引不可用——检查 database/session_rag.db 与 models/ 是否就绪；"
-                "首次使用先跑 `agentmemhub sync` 建立索引")
-    return ("记忆引擎未运行——先启动：`agentmemhub memos-daemon start`，"
-            "或看板「记忆引擎 → 启动」后重试")
+    """引擎不可用时的提示（内置引擎随进程启动、无守护进程，多半是索引库或模型未就绪）。"""
+    return ("记忆索引不可用——检查 database/session_rag.db 与 models/ 是否就绪；"
+            "首次使用先跑 `agentmemhub sync` 建立索引")
 
 
 def _auth_hint() -> str:
-    from agentmemhub import memos_daemon
-    if memos_daemon._backend_is_rag():
-        return "记忆索引无鉴权面；若持续失败请检查索引库权限"
-    return ("引擎已设密码且网关未登录：先运行 `agentmemhub memos-daemon "
-            "--set-password <密码>` 保存密码后重试")
+    return "记忆索引无鉴权面；若持续失败请检查索引库权限"
 
 
 class _ToolError(Exception):
@@ -92,30 +92,69 @@ def _trace_id(content: str, ts: int) -> str:
 # ---------------------------------------------------------------------------
 
 def _search(args: dict) -> str:
+    _t0 = time.time()               # 记忆操作审计用：本次检索耗时
     q = str(args.get("query", "")).strip()
     if not q:
         raise _ToolError("memory_search 需要 query 参数")
     top = _clamp(args.get("topK"), 1, 30, 8)
+    org = str(args.get("origin") or "").strip().lower()
+    if org not in ("", "native", "external"):
+        raise _ToolError("origin 必须是 native | external（留空=全部）")
     try:
-        res = memos_daemon.engine_request("POST", "/api/v1/memory/search",
-                                          body={"agent": _AGENT, "query": q},
-                                          timeout=30)
-        ov: dict = {}
-        try:
-            ov = memos_daemon.engine_request("GET", "/api/v1/overview", timeout=8)
-        except Exception:
-            pass
-    except memos_daemon.EngineAuthError:
+        body = {"agent": _AGENT, "query": q}
+        if org:
+            body["origin"] = org
+        # 标注调用方 → 决定用哪一档召回严格度（对应 `rag.retrieval.callers.mcp`）。
+        # Agent 的自动召回通常希望"少而准"，可以比面板查询配得更严。
+        from agentmemhub.rag.config import retrieval_caller
+        with retrieval_caller("mcp"):
+            res = engine_api.engine_request("POST", "/api/v1/memory/search",
+                                              body=body, timeout=30)
+            ov: dict = {}
+            try:
+                ov = engine_api.engine_request("GET", "/api/v1/overview",
+                                                 timeout=8)
+            except Exception:
+                pass
+    except engine_api.EngineAuthError:
         raise _ToolError(_auth_hint())
     except Exception as e:
         raise _ToolError(f"引擎检索失败：{e}")
 
     hits = res.get("hits") or []
-    lines = [f"记忆检索「{q}」：{len(hits)} 条命中"
-             f"（引擎在线，episodes={ov.get('episodes')}, traces={ov.get('traces')}）", ""]
-    for h in hits[:top]:
-        lines.append(f"- score={h.get('score')} tier={h.get('tier')} "
-                     f"ref={h.get('refKind')}/{h.get('refId')}")
+    # 记忆操作事实流：**读也要留痕**（"什么时候读了什么"与写入同样重要——
+    # 排查"某条记忆为什么没被想起"时，要能区分"没写过"和"写了但没召回"）
+    try:
+        from collections import Counter
+        from agentmemhub import logs as _logs
+        _logs.audit_memory({
+            "event": "read", "ts": round(time.time(), 3), "path": "mcp",
+            "actor": _AGENT, "query": q,
+            "top": top, "hits": len(hits), "origin_filter": org or "all",
+            "kinds": dict(Counter((h.get("kind") or "message") for h in hits)),
+            "elapsed_ms": int((time.time() - _t0) * 1000),
+        })
+    except Exception:                       # noqa: BLE001 —— 审计旁路
+        pass
+    scope = {"native": "（仅自有记忆沉淀）", "external": "（仅外部投喂）"}.get(org, "")
+    shown = hits[:top]
+    head = (f"记忆检索「{q}」{scope}：{len(shown)} 条命中"
+            f"（引擎在线，episodes={ov.get('episodes')}, traces={ov.get('traces')}）")
+    if len(hits) > len(shown):
+        # 引擎实际返回更多（curate 只做相关度截断、不硬砍条数）——必须说清
+        # "共多少 / 给了多少"，否则 Agent 会以为库里只有这几条（实测踩过：
+        # 头部写"19 条命中"却只列 8 条）。
+        head += (f"\n（引擎共返回 {len(hits)} 条，按相关度取前 {len(shown)} 条；"
+                 f"需要更多可调大 topK）")
+    lines = [head, ""]
+    tier_label = {"page": "知识页", "memory": "记忆", "message": "对话"}
+    for h in shown:
+        kind = h.get("kind") or "message"
+        origin = h.get("origin") or "native"
+        src_tag = "自有" if origin == "native" else "投喂"
+        path = f" → {h.get('wikiPath')}" if h.get("wikiPath") else ""
+        lines.append(f"- [{tier_label.get(kind, kind)}·{src_tag}] "
+                     f"score={h.get('score')} {h.get('title') or ''}{path}")
         lines.append(f"  {h.get('snippet') or ''}")
     ctx = (res.get("injectedContext") or "").strip()
     if ctx:
@@ -126,9 +165,9 @@ def _search(args: dict) -> str:
 def _recent(args: dict) -> str:
     limit = _clamp(args.get("limit"), 1, 30, 8)
     try:
-        res = memos_daemon.engine_request(
+        res = engine_api.engine_request(
             "GET", f"/api/v1/traces?limit={limit}&offset=0&groupByTurn=1", timeout=15)
-    except memos_daemon.EngineAuthError:
+    except engine_api.EngineAuthError:
         raise _ToolError(_auth_hint())
     except Exception as e:
         raise _ToolError(f"引擎读取失败：{e}")
@@ -154,7 +193,7 @@ def _recent(args: dict) -> str:
 
 
 def _stats(args: dict) -> str:
-    st = memos_daemon.daemon_status()
+    st = engine_api.daemon_status()
     if not st["online"]:
         raise _ToolError(_engine_hint())
     lines = [f"记忆引擎：在线（{st['base_url']}）"]
@@ -190,40 +229,17 @@ def _save(args: dict) -> str:
             if isinstance(raw_tags, (list, tuple)) else [])
     ts = int(time.time() * 1000)
     tid = _trace_id(content, ts)
-    bundle = {
-        "version": 1,
-        "traces": [{
-            "id": tid, "episodeId": "mcp", "sessionId": "mcp",
-            "ts": ts, "turnId": ts,
-            "userText": content, "agentText": "",
-            "summary": content[:200],
-            "value": value, "alpha": 0.3,
-            "priority": value,
-            "tags": tags,
-            "toolCalls": [], "agentThinking": None,
-        }],
-        "policies": [], "worldModels": [], "skills": [],
-    }
-    # 写后验证：import 偶发瞬时失败（SQLITE_BUSY 被引擎静默吞，返回 imported=0）
-    # 时重试一次；仍失败则落日志并明确报错，不再伪装“已写入”。
-    imported = skipped = 0
-    resp: dict = {}
-    for attempt in (1, 2):
-        try:
-            from agentmemhub.memos import push_bundle
-            resp = push_bundle(bundle, memos_daemon.base_url())
-        except memos_daemon.EngineAuthError:
-            raise _ToolError(_auth_hint())
-        except Exception as e:
-            if attempt == 2:
-                raise _ToolError(f"记忆写入失败：{e}")
-            time.sleep(0.6)
-            continue
-        imported = int(resp.get("imported", 0) or 0)
-        skipped = int(resp.get("skipped", 0) or 0)
-        if imported > 0:
-            break
-        time.sleep(0.6)
+    # 直写索引库（进程内直调，无 bundle / HTTP 导入语义）。
+    # 幂等靠 tid 落 legacy_id；多模型向量、tags、origin、初始分由 bridge 一次写完，
+    # 因此不需要再补一次 embeddings/rebuild（旧路径靠它补向量）。
+    from agentmemhub import rag_bridge
+    try:
+        resp = rag_bridge.save_memory_trace(
+            content, tid=tid, ts=ts, value=value, priority=value, tags=tags)
+    except Exception as e:                      # 索引库写失败要明确报出
+        raise _ToolError(f"记忆写入失败：{e}")
+    imported = int(resp.get("imported", 0) or 0)
+    skipped = int(resp.get("skipped", 0) or 0)
     if imported == 0:
         try:
             from agentmemhub import logs
@@ -232,15 +248,102 @@ def _save(args: dict) -> str:
         except Exception:
             pass
         raise _ToolError(f"记忆写入未生效（imported=0, skipped={skipped}），请稍后重试")
-    # 单条入库后补一次增量向量（repair：只补缺失），失败不阻塞
+    # 同步一条蒸馏表记录：MCP 直写的记忆此前不进 distilled_memories —— 记忆
+    # 报表看不见、wiki 编译输入（status IN new/similar）完全不可见。落表后
+    # 报表与 wiki 才能覆盖 Agent 主动写入的记忆（投影由下次蒸馏统一补齐）。
+    # 全程旁路：失败只记日志，不影响 memory_save 的返回。
     try:
-        memos_daemon.engine_request(
-            "POST", "/api/v1/embeddings/rebuild",
-            body={"mode": "repair"}, timeout=300)
+        from agentmemhub import distill as _distill
+        from agentmemhub.rag.config import load_settings
+        from agentmemhub.rag.ingest import open_index
+        conf_map = {"high": "high", "normal": "medium", "low": "low"}
+        # 可选 type：Agent 写记忆时通常知道类型（decision/lesson/...），默认 fact。
+        mem_type = str(args.get("type") or "fact").strip().lower() or "fact"
+        idx = open_index(load_settings().index_db)
+        try:
+            saved = _distill.save_direct_memory(
+                idx, content=content, type_=mem_type,
+                confidence=conf_map.get(importance, "medium"),
+                # tid 形如 'mcp_<hash>'；面板去重与回填的口径是 'mcp:<hash>'
+                #（substr 去掉 units.src_id 的 'mcp_' 前缀），这里必须对齐，
+                # 否则 slice_key 变 'mcp:mcp_<hash>'，去重匹配不上 → 面板重复
+                slice_key=f"mcp:{tid.removeprefix('mcp_')}",
+                model="memory_save(mcp)",
+                # 记忆操作事实流（logs/memory.log）的**协议层补充**：这些字段
+                # 只有 Agent 侧拿得到（importance/tags/trace_id 都是入参），
+                # 数据层记的是"落了哪条、内容是什么"。
+                audit_extra={"path": "mcp", "trace_id": tid,
+                             "importance": importance, "value": value,
+                             "tags": tags, "actor": _AGENT})
+            # 落表即补齐检索面：来源初始分 + 增量投影（含跨会话去重判定），
+            # 评分/加权/召回立即可用，不等下次蒸馏（阈值与蒸馏配置同源）。
+            # Agent 直写的初始分再按 importance 档位精调（0.8/0.6/0.4）——
+            # 投影默认只给来源语义分，importance 是 Agent 对重要性的明确判断
+            if saved in ("inserted", "revived"):
+                from agentmemhub.rag.memstore import AGENT_IMPORTANCE_VALUES
+                _distill.backfill_base_values(idx)
+                pending = _distill._pending_projection(idx)
+                if pending:
+                    dedup = ((load_settings().distill or {}).get("dedup")
+                             or {}) if hasattr(load_settings(), "distill") else {}
+                    _distill.project_memories(
+                        idx, load_settings(), pending,
+                        duplicate_threshold=float(
+                            dedup.get("cosine_duplicate") or 0.92),
+                        similar_threshold=float(
+                            dedup.get("cosine_similar") or 0.80))
+                idx.execute(
+                    "UPDATE unit_values SET value=? WHERE unit_id IN"
+                    " (SELECT u.id FROM units u JOIN distilled_memories dm"
+                    "  ON u.src_id = 'dst_' || dm.content_hash"
+                    "  WHERE dm.slice_key=?)",
+                    (AGENT_IMPORTANCE_VALUES[importance],
+                     f"mcp:{tid.removeprefix('mcp_')}"))
+                # 必须显式提交：`sqlite3` 的隐式事务在 `close()` 时**回滚**。
+                # 少了这一行，importance 档位（0.8/0.6/0.4）永远落不了库 ——
+                # 实测 225 条记忆的 value 全是 0.6，"重要"标记从未生效。
+                idx.commit()
+        finally:
+            idx.close()
+    except Exception as e:                      # noqa: BLE001
+        saved = f"error: {e}"
+        try:
+            from agentmemhub import logs
+            logs.record(f"memory_save 蒸馏表同步失败 id={tid}: {e}",
+                        level="error", actor="mcp", dest="cli")
+        except Exception:
+            pass
+    # wiki 增量更新触发检测：挂在 MCP 写入时（用户定下的模型——每次写入
+    # 过一遍检测，满足规则才触发，无后台定时任务）。异步 daemon 线程，
+    # 不阻塞 MCP 响应；update 单飞行锁 + manifest 基线天然防重复。
+    try:
+        import threading as _th
+        _th.Thread(target=_wiki_trigger_probe, daemon=True).start()
     except Exception:
         pass
     return (f"记忆已写入（id={tid}，imported={imported}）\n"
             f"内容：{content[:120]}" + ("…" if len(content) > 120 else ""))
+
+
+def _wiki_trigger_probe() -> None:
+    """wiki 触发器检测（daemon 线程入口）——全程旁路，绝不影响 MCP 响应。
+
+    ⚠️ 这条路径此前是 `except Exception: pass` **且丢弃返回值** —— 触发器在
+    MCP 这条链路上出问题时一个字都不留（成功/失败/被跳过全都看不见，实测因此
+    排查过一轮）。现在异常必须留痕：正常结果由 `on_memories_written` 内部的
+    `trigger_check` / `trigger_update_*` 事件覆盖，这里只兜住"连它都没兜住"的。
+    """
+    try:
+        from agentmemhub import wiki_triggers
+        wiki_triggers.on_memories_written()
+    except Exception as e:                  # noqa: BLE001 —— 兜底，但要留痕
+        try:
+            from agentmemhub import logs as _logs
+            _logs.audit_wiki({"event": "trigger_error", "hook": "write",
+                              "stage": "mcp_probe",
+                              "error": "%s: %s" % (type(e).__name__, str(e)[:200])})
+        except Exception:
+            pass
 
 
 def _score(args: dict) -> str:
@@ -252,12 +355,12 @@ def _score(args: dict) -> str:
     if polarity not in ("positive", "neutral", "negative"):
         raise _ToolError("polarity 必须是 positive | neutral | negative")
     try:
-        memos_daemon.engine_request(
+        engine_api.engine_request(
             "POST", "/api/v1/feedback",
             body={"channel": "explicit", "polarity": polarity,
                   "magnitude": 1.0, "traceId": tid},
             timeout=30)
-    except memos_daemon.EngineAuthError:
+    except engine_api.EngineAuthError:
         raise _ToolError(_auth_hint())
     except Exception as e:
         raise _ToolError(f"评分失败（trace 不存在或引擎异常）：{e}")
@@ -274,12 +377,205 @@ def _score(args: dict) -> str:
     return f"已评分（{tid} → {polarity}，引擎已重算 value/priority）"
 
 
+# ---------------------------------------------------------------------------
+# feed 工具（外部投喂转译层）—— **不依赖记忆引擎**
+#
+# 为什么单列一组：feed 是**纯本地文件处理**（读文件 / 抓网页 → 转译 → 落旁路根），
+# 与记忆索引毫无关系。而 `_tools_call` 对所有工具统一做"引擎在线"检查 ——
+# 若罩住 feed，"索引不可用时连投喂都做不了"，荒谬。所以这三个工具跳过那道检查。
+#
+# ⚠️ **过程日志必须收集，绝不能 print**：MCP 走 stdio JSON-RPC，stdout 就是
+# **协议流**；而 `feed/service.py` 的 `log` 默认值恰恰是 `print`（CLI 场景）。
+# 照抄 CLI 的写法会把 `[+] 原件入 raw：…` 混进协议里，客户端解析直接失败。
+# 这里一律收进返回文本 —— 既是隔离，也让模型看得到"跑到哪一步"。
+# ---------------------------------------------------------------------------
+
+#: 不依赖记忆引擎的工具（见上）
+_ENGINE_FREE_TOOLS = frozenset({"feed_add", "feed_list", "feed_status"})
+
+
+def _feed_svc():
+    from agentmemhub.feed import service as feed_service
+    return feed_service
+
+
+def _log_sink(lines: list) -> Callable[..., None]:
+    """把 feed 的过程日志收进列表（**绝不写 stdout**，见上面的警告）。"""
+    def _sink(msg, *_a, **_kw):
+        try:
+            lines.append(str(msg))
+        except Exception:                   # noqa: BLE001
+            pass
+    return _sink
+
+
+def _render_feed_add(res: dict, lines: list) -> str:
+    """投喂结果 → 可读文本（字段与 CLI / HTTP 的返回**同源**，不多不少）。"""
+    if res.get("skipped") == "duplicate":
+        out = ["已投喂过（内容未变，未重复入库）：%s"
+               % (res.get("title") or res.get("doc_id"))]
+    elif res.get("dry_run"):
+        out = ["dry-run：一个字都没写。会认领转换器：%s"
+               % (res.get("converter") or "（没有转换器能处理）")]
+    elif res.get("ok"):
+        out = ["投喂成功：%s" % (res.get("title") or res.get("doc_id"))]
+    else:
+        out = ["投喂失败：%s" % (res.get("error") or "未知原因")]
+    if res.get("ok") and not res.get("dry_run"):
+        out.append("  质量：%.2f" % float(res.get("quality") or 0.0))
+    for key, label in (("doc_id", "doc_id"), ("kind", "格式"),
+                       ("converter", "转换器"), ("raw_path", "原件"),
+                       ("kb_path", "交付物"), ("error_kind", "失败分类")):
+        v = res.get(key)
+        if v:
+            out.append("  %s：%s" % (label, v))
+    for w in (res.get("warnings") or []):
+        out.append("  ⚠️ %s" % w)
+    if lines:
+        out.append("")
+        out.append("过程：")
+        # 只留尾部若干行：工具结果该是结论，不是一整份日志
+        out.extend("  " + ln for ln in lines[-14:])
+    return "\n".join(out)
+
+
+def _feed_add(args: dict) -> str:
+    """投喂一条素材（路径 / URL / 二进制 / 正文 四种形态）。"""
+    svc = _feed_svc()
+    src = str(args.get("input") or args.get("source") or "").strip().lower()
+    value = args.get("value")
+    if not src:
+        # 容错：没写 input 就按值的形态猜 —— URL 最明确，存在的文件次之，
+        # 其余一律当正文（"我手上就是一段字"是最常见的用法）
+        s = str(value or "")
+        if "://" in s:
+            src = svc.INPUT_URL
+        elif s and Path(s).is_file():
+            src = svc.INPUT_PATH
+        else:
+            src = svc.INPUT_TEXT
+    if src not in svc.INPUTS:
+        raise _ToolError("input 必须是 %s 之一（收到 %r）"
+                         % (" / ".join(svc.INPUTS), src))
+    lines: list = []
+    res = svc.ingest_any(
+        source=src, value=value,
+        filename=str(args.get("filename") or ""),
+        encoding=str(args.get("encoding") or ""),
+        kind=str(args.get("kind") or ""),
+        force=bool(args.get("force")),
+        dry_run=bool(args.get("dry_run")),
+        log=_log_sink(lines))
+    return _render_feed_add(res, lines)
+
+
+def _feed_list(args: dict) -> str:
+    """列素材（可按状态 / 低质量筛）。"""
+    svc = _feed_svc()
+    status = str(args.get("status") or "").strip()
+    rows = svc.list_materials(status=status,
+                              low_quality=bool(args.get("low_quality")),
+                              limit=_clamp(args.get("limit"), 1, 200, 20))
+    if not rows:
+        return ("素材库里没有符合条件的记录。%s"
+                % ("（换个 status 试试，取值见 feed_status）" if status else ""))
+    out = ["共 %d 条（上限 200）" % len(rows), ""]
+    for r in rows:
+        mark = "⚠️ " if (r.get("warnings")
+                        or float(r.get("quality") or 1.0) < 0.5) else ""
+        out.append("- %s[%s] %s · %s · 质量 %.2f · %s"
+                   % (mark, r.get("status") or "?", r.get("title") or "（无标题）",
+                      r.get("kind") or "-", float(r.get("quality") or 0.0),
+                      r.get("doc_id") or ""))
+    return "\n".join(out)
+
+
+def _render_material(row: dict) -> str:
+    """单条素材详情（三段路径、转换器、质量、告警都在）。"""
+    out = ["素材 %s" % row.get("doc_id"),
+           "  标题：%s" % (row.get("title") or "（无）"),
+           "  格式：%s · 状态：%s"
+           % (row.get("kind") or "-", row.get("status") or "-"),
+           "  质量：%.2f" % float(row.get("quality") or 0.0),
+           "  来源：%s" % (row.get("source_ref") or "-"),
+           "  转换器：%s" % (row.get("converter") or "-")]
+    for key, label in (("raw_path", "原件"), ("mirror_path", "镜像"),
+                       ("kb_path", "交付物")):
+        if row.get(key):
+            out.append("  %s：%s" % (label, row[key]))
+    ts = row.get("doc_time")
+    if ts:
+        out.append("  文档时间：%s"
+                   % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(ts))))
+    for w in (row.get("warnings") or []):
+        out.append("  ⚠️ %s" % w)
+    if row.get("error"):
+        out.append("  失败：%s（%s）" % (row["error"], row.get("error_kind") or ""))
+    return "\n".join(out)
+
+
+def _feed_status(args: dict) -> str:
+    """素材库健康概览；给 `doc_id` 时看单条详情。"""
+    svc = _feed_svc()
+    doc_id = str(args.get("doc_id") or "").strip()
+    if doc_id:
+        row = svc.get_material(doc_id)
+        if not row:
+            raise _ToolError("没有这条素材：%s" % doc_id)
+        return _render_material(row)
+
+    from agentmemhub.feed.base import QUALITY_WARN
+
+    rows = svc.list_materials()
+    counts: dict = {}
+    for r in rows:
+        k = str(r.get("status") or "?")
+        counts[k] = counts.get(k, 0) + 1
+    low = [r for r in rows
+           if (r.get("warnings")
+               or float(r.get("quality") or 1.0) < QUALITY_WARN)]
+    out = ["投喂素材库：共 %d 条" % len(rows)]
+    if counts:
+        out.append("  状态：" + "、".join("%s %d" % (k, counts[k])
+                                         for k in sorted(counts)))
+    out.append("  需人工复核：%d 条（`feed_list` 带 low_quality=true 可看）" % len(low))
+    try:
+        from agentmemhub.feed import formats
+        st = formats.state()
+        allowed = st.get("allowed") or []
+        out.append("  格式白名单：来源 %s，允许 %d 种（%s）"
+                   % (st.get("source"), len(allowed),
+                      "、".join(allowed[:12]) + ("…" if len(allowed) > 12 else "")))
+    except Exception as e:                  # noqa: BLE001 —— 概览不该因一项失败而全废
+        out.append("  格式白名单：读取失败（%s）" % str(e)[:80])
+    try:
+        # ⚠️ `with_index=False`：带索引的体检要打开**真实**索引库（`session_rag.db`）。
+        # MCP 是长驻进程，这里只做"素材库自身"的健康检查；投影层是否残留请用
+        # CLI `feed lint`（它会显式去查索引库）。
+        lint = svc.lint(with_index=False)
+        out.append("  产物体检：P0=%d（%s）"
+                   % (lint.get("p0", 0),
+                      "数据一致" if not lint.get("p0") else "有数据不一致，需修"))
+        for i in (lint.get("issues") or [])[:5]:
+            out.append("    [%s] %s: %s"
+                       % (i.get("level"), i.get("kind"), i.get("detail")))
+    except Exception as e:                  # noqa: BLE001
+        out.append("  产物体检：跳过（%s）" % str(e)[:80])
+    return "\n".join(out)
+
+
 _TOOL_HANDLERS: dict[str, Callable[[dict], str]] = {
+    # ── 记忆工具（依赖引擎）────────────────────────────────────────────
     "memory_search": _search,
     "memory_recent": _recent,
     "memory_stats": _stats,
     "memory_save": _save,
     "memory_score": _score,
+    # ── feed 工具（**不依赖引擎**，见上面的说明）──────────────────────
+    # 新增而不改动既有五个：Skill 侧强依赖它们的 schema 与返回格式
+    "feed_add": _feed_add,
+    "feed_list": _feed_list,
+    "feed_status": _feed_status,
 }
 
 #: `note` 参数说明：Agent 补充的**意图**（为什么做这次操作）。
@@ -297,6 +593,15 @@ _TOOLS: list[dict] = [
             "properties": {
                 "query": {"type": "string", "description": "检索查询，自然语言描述想找的记忆主题"},
                 "topK": {"type": "integer", "description": "返回条数（默认 8，最大 30）"},
+                "origin": {
+                    "type": "string",
+                    "enum": ["native", "external"],
+                    "description": (
+                        "（可选）按数据来源筛选：native=自有记忆沉淀（会话蒸馏/Agent 直写/"
+                        "自生成知识页），external=外部投喂（PDF/网页等素材）。"
+                        "不传=两者都返回。返回结果每条的 origin 字段即其来源。"
+                    ),
+                },
                 "note": {"type": "string", "description": _NOTE_DESC},
             },
             "required": ["query"],
@@ -349,6 +654,15 @@ _TOOLS: list[dict] = [
                         "引擎不解释标签语义，纯透传。"
                     ),
                 },
+                "type": {
+                    "type": "string",
+                    "enum": ["decision", "fact", "preference", "lesson"],
+                    "description": (
+                        "（可选）记忆类型，不传=fact。decision=做出的决策/选型；"
+                        "fact=事实/结论/技术沉淀；preference=偏好/约定；"
+                        "lesson=踩坑/教训。落在蒸馏表供面板筛选与 wiki 编译。"
+                    ),
+                },
                 "note": {"type": "string", "description": _NOTE_DESC},
             },
             "required": ["content"],
@@ -365,6 +679,88 @@ _TOOLS: list[dict] = [
                 "note": {"type": "string", "description": _NOTE_DESC},
             },
             "required": ["trace_id", "polarity"],
+        },
+    },
+    # ── feed（外部投喂转译层）：新增独立工具，**不动上面五个的契约** ──────
+    {
+        "name": "feed_add",
+        "description": (
+            "把外部素材投喂进知识库（外部投喂转译层）：统一转译成 markdown，发布到"
+            "与自有 wiki **并列**的知识库页面层（origin=external），"
+            "**不进**记忆 / 蒸馏 / wiki 编译。四种输入形态：path=本地文件路径；"
+            "url=网页链接（含公众号）；data=**二进制数据**（调用方已 open/read 出来的"
+            "字节，须配 filename，encoding 传 base64）；text=直接给正文。"
+            "支持 md/txt · 网页 · PDF · DOCX · PPTX · XLSX · XMIND · CSV；"
+            "格式不在白名单时会返回当前允许清单。同内容重复投喂返回「已投喂过」，不重复入库。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "input": {
+                    "type": "string",
+                    "enum": ["path", "url", "data", "text"],
+                    "description": ("输入形态。不传则按 value 猜：含 :// 当 url、"
+                                    "是存在的文件当 path、其余当 text"),
+                },
+                "value": {
+                    "type": "string",
+                    "description": "内容本身：路径 / URL / base64 字节 / 正文",
+                },
+                "filename": {
+                    "type": "string",
+                    "description": ("data 形态**必填**（扩展名是判格式与认领转换器的依据）；"
+                                    "text 形态下兼作标题"),
+                },
+                "encoding": {
+                    "type": "string",
+                    "enum": ["base64", "utf-8"],
+                    "description": "data 形态的字节编码方式（默认 utf-8）",
+                },
+                "kind": {"type": "string",
+                         "description": "（可选）强制指定类型，一般不用传"},
+                "force": {"type": "boolean",
+                          "description": "（可选）同内容已投喂过也重跑"},
+                "dry_run": {"type": "boolean",
+                            "description": "（可选）只查重与认领转换器，一个字都不写"},
+                "note": {"type": "string", "description": _NOTE_DESC},
+            },
+            "required": ["value"],
+        },
+    },
+    {
+        "name": "feed_list",
+        "description": ("列出已投喂的素材（可按状态或低质量筛选）。"
+                        "用来回答「我投过什么、哪些需要复核」以及确认一次投喂是否落库。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "description": ("（可选）received / converted / published / "
+                                    "failed / retracted"),
+                },
+                "low_quality": {"type": "boolean",
+                                "description": "（可选）只看质量低或有告警的"},
+                "limit": {"type": "integer",
+                          "description": "返回条数（默认 20，最大 200）"},
+                "note": {"type": "string", "description": _NOTE_DESC},
+            },
+        },
+    },
+    {
+        "name": "feed_status",
+        "description": (
+            "投喂素材库的健康快照：各状态计数、需人工复核的条数、当前格式白名单、"
+            "产物体检（P0/P1）。给 doc_id 时改为看**单条**素材的详情"
+            "（三段路径 / 转换器 / 质量 / 告警 / 失败原因）。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "doc_id": {"type": "string",
+                           "description": "（可选）看这条素材的详情"},
+                "note": {"type": "string", "description": _NOTE_DESC},
+            },
         },
     },
 ]
@@ -528,8 +924,10 @@ class MCPHandler:
             raise LookupError(f"unknown tool: {name}")
 
         def _run(a: dict) -> str:
-            # 引擎未运行时所有工具统一返回明确指引（网关不代管引擎生命周期）
-            if memos_daemon.auth_state() is None:
+            # 引擎未运行时**记忆工具**统一返回明确指引（网关不代管引擎生命周期）。
+            # feed 工具**跳过这道检查**：它们是本地文件处理，与索引是否就绪无关 ——
+            # "索引没建好就不能投喂"没有任何道理（投喂产物落在旁路根，本来也不进索引）。
+            if name not in _ENGINE_FREE_TOOLS and engine_api.auth_state() is None:
                 raise _ToolError(_engine_hint())
             return fn(a)
 
@@ -633,8 +1031,29 @@ def run_http(host: str = "127.0.0.1", port: int = 9100) -> None:
     uvicorn.run(build_http_app(), host=host, port=port, log_level="info")
 
 
+def _harvest_probe() -> None:
+    """启动时顺手**收割一次异步任务**（daemon 线程，绝不阻塞 MCP 初始化）。
+
+    离线批次是异步的（等厂商 18 分钟 ~ 24 小时），完成后总要有人回读 + 落盘。项目
+    刻意**不做常驻轮询、没有 daemon**，所以把它挂在"进程启动"这种天然事件上 ——
+    用户每次开 DSH 都会顺带检查一次。队列空时它零成本立即返回（只读一次本地文件）。
+
+    异常一律吞掉：收割是旁路，绝不能影响 MCP 的启动与响应。
+    """
+    try:
+        from agentmemhub import wiki_triggers
+        wiki_triggers.harvest_now()
+    except Exception:                       # noqa: BLE001 —— 旁路
+        pass
+
+
 def main() -> None:
     """stdio 入口（python -m agentmemhub mcp_server / console script）。"""
+    # 用局部导入而不是模块级别名：`mcp_server` 里的 `_th` 只在别的函数内部导入过，
+    # 模块级并没有这个名字 —— 而 `tests/test_console.py` 有一条"包内不得有未定义
+    # 全局名"的静态检查会（正确地）拦下它。
+    import threading
+    threading.Thread(target=_harvest_probe, daemon=True).start()
     run_stdio()
 
 

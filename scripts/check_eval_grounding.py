@@ -1,4 +1,4 @@
-﻿"""评测集落地校验：每题至少一个期望关键词必须真实存在于索引语料（text/title LIKE）。
+"""评测集落地校验：每题至少一个期望关键词必须真实存在于索引语料（text/title LIKE）。
 
 防止出「语料里根本没有答案」的废题。用法：
   uv run python scripts/check_eval_grounding.py [--file eval/queries.yaml]

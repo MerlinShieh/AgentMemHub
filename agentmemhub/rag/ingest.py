@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS ingest_meta(
 );
 """
 
-# R3：MemOS trace id 兼容别名（legacy_id）与桥接元表（增量补列，幂等）
+# R3：trace id 兼容别名（legacy_id）与桥接元表（增量补列，幂等）
 _SCHEMA_BRIDGE = """
 CREATE TABLE IF NOT EXISTS conv_scores(
     source TEXT NOT NULL,
@@ -57,6 +57,18 @@ CREATE TABLE IF NOT EXISTS conv_scores(
     PRIMARY KEY (source, conversation_id)
 );
 """
+
+
+def origin_of(source: str | None) -> str:
+    """按 `source` 判定**数据来源维度**：`feed` → `external`，其余 → `native`。
+
+    为什么要有这一个函数（而不是两处各写一遍）：同一条投喂数据会在**两个层**落
+    units —— 采集层的原始段落（本模块）与蒸馏层的记忆（`distill._project_one`）。
+    两处口径必须一致，否则"原始段落标 native、蒸馏记忆标 external"，
+    投喂的原文会被当成自有沉淀（2026-10-10 实测缺口，M0 地基）。
+    抽成单点后，改口径只改这里；`distill` 与本模块共用它。
+    """
+    return "external" if (source or "") == "feed" else "native"
 
 
 def ensure_bridge_schema(conn: sqlite3.Connection) -> None:
@@ -77,6 +89,24 @@ def ensure_bridge_schema(conn: sqlite3.Connection) -> None:
     # 无法回答——任何按增量消费 units 的下游（如 wiki 投影）都只能全量重扫。
     if "updated_at" not in cols:
         conn.execute("ALTER TABLE units ADD COLUMN updated_at INTEGER")
+    # wiki_path：页面层投影（source='wiki'）专用——L2 页面在知识库目录里的
+    # 相对路径，供召回命中后"按需读全文"（两阶段召回的第二阶段）。
+    # 页面是聚合产物、篇幅长（中位 1639 字符），不该一股脑塞进召回上下文。
+    if "wiki_path" not in cols:
+        conn.execute("ALTER TABLE units ADD COLUMN wiki_path TEXT")
+    # origin：**数据来源维度**（native=自有记忆沉淀 / external=外部投喂）。
+    # 与 role 的"层级"维度正交：role 回答"这是页面/记忆/消息"，origin 回答
+    # "这是自己长出来的还是从外面喂进来的"。NULL 视为 native（历史数据默认）。
+    # 召回时带上它，Agent 与用户都能分辨知识出处。
+    if "origin" not in cols:
+        conn.execute("ALTER TABLE units ADD COLUMN origin TEXT")
+    # doc_id：**投喂页面回指原件**的锚（materials.doc_id，见 feed 转译层设计）。
+    # 页面层解析 frontmatter 的 `doc:` 得到，投影时写入。为什么必须持久化：
+    # 召回命中一个投喂页后要能反查"这是哪份外部素材"；此前只能靠 wiki_path
+    # 去读页面文件再抠 frontmatter —— 页面一重编或删除，溯源链就断。
+    # 非投喂页面保持 NULL（而非空串，便于 `WHERE doc_id IS NOT NULL` 查询）。
+    if "doc_id" not in cols:
+        conn.execute("ALTER TABLE units ADD COLUMN doc_id TEXT")
     # 自愈式回填（幂等，每次调用都兜一次）：覆盖两类 NULL —— 补列时的存量行，
     # 以及任何绕过写入路径产生的行（例如仍在跑**旧代码的常驻 MCP 进程**写入
     # 的记忆——实测真实发生过）。用发现时刻填充，不用 units.time（那是事件
@@ -167,6 +197,66 @@ def drop_vec_table(conn: sqlite3.Connection, spec: ModelSpec) -> None:
         (f"vecdim.{spec.vec_table}", f"vecbuilt.{spec.vec_table}"),
     )
     conn.commit()
+
+
+def write_models(settings: Settings) -> list[ModelSpec]:
+    """`write.order` 里需要写向量的模型（去重、保序）。
+
+    为什么要单列一个函数：**写入侧必须写全部配置模型，而不是只写 active**。
+    只写 active 的后果是「非 active 模型的向量永远缺这些新行」—— 而
+    `ingest --model` 的候选来自源库 `events` 而非 `units`，它连这些行都看不见，
+    补不上；唯一能补的 `reembed --model` 要整表重建（实测 22228 条约 19 分钟），
+    只能当离线修复手段。实测踩过：base 表曾因蒸馏投影只写 active 而缺 1912 条。
+    """
+    out: list[ModelSpec] = []
+    seen: set[str] = set()
+    for mid in settings.write_order:
+        if mid in seen:
+            continue
+        seen.add(mid)
+        out.append(settings.model(mid))
+    return out
+
+
+def encode_for_write(settings: Settings, texts: list[str], *,
+                     skip_active: bool = True,
+                     ) -> list[tuple[ModelSpec, np.ndarray]]:
+    """为 `write.order` 里除 active 之外的模型各编码一次整批。
+
+    返回 `[(spec, (N, dim) 数组)]`。默认跳过 active 模型：调用方通常已经用
+    active embedder 编过一遍（判重与主检索都要它），重复编码是纯浪费。
+    """
+    out: list[tuple[ModelSpec, np.ndarray]] = []
+    for spec in write_models(settings):
+        if skip_active and spec.id == settings.active_model:
+            continue
+        try:
+            emb = get_embedder(spec, settings=settings)
+            out.append((spec, emb.encode_passages(texts)))
+        except Exception:                   # noqa: BLE001 —— 见下方注释
+            # 单个模型不可用（onnx 缺失/损坏、内存不足、维度不符）**不该让整条记忆
+            # 写不进去**：只写 active 时不会失败，改成写全模型后这是新引入的脆性，
+            # 而"一个坏模型 ⇒ 所有记忆都存不了"比"少一路召回"糟得多。
+            # 但**绝不能静默**：这批记忆在该模型里就没有向量，只能靠这条日志发现。
+            logging.getLogger("asrag.ingest").warning(
+                "写入侧跳过模型 %s（不可用）：这批 %d 条在该模型里不会有向量",
+                spec.id, len(texts), exc_info=True)
+    return out
+
+
+def put_vecs(conn: sqlite3.Connection, rowid: int,
+             pairs: list[tuple[ModelSpec, np.ndarray]]) -> None:
+    """把一条 unit 的多模型向量写进各自的表（先删后插）。
+
+    vec0 是虚拟表，**不支持 `INSERT OR REPLACE` 的主键替换语义**（同一 rowid
+    重复插入直接抛 UNIQUE 冲突），所以原地更新必须先显式删旧向量 —— 这个坑在
+    蒸馏投影与 wiki 投影里各踩过一次，收到这里统一处理。
+    """
+    for spec, vec in pairs:
+        conn.execute(f"DELETE FROM {spec.vec_table} WHERE rowid=?", (rowid,))
+        conn.execute(
+            f"INSERT INTO {spec.vec_table}(rowid, embedding) VALUES(?,?)",
+            (rowid, np.ascontiguousarray(vec, dtype=np.float32).tobytes()))
 
 
 def _existing_keys(conn: sqlite3.Connection, vec_table: str | None = None) -> set[tuple]:
@@ -274,17 +364,28 @@ def run_ingest(
 
     idx = open_index(idx_path)
     try:
-        if rebuild:
-            log.info("rebuild requested: dropping units + %s", spec.vec_table)
-            drop_vec_table(idx, spec)
-            idx.execute("DELETE FROM units")
-            idx.execute("DELETE FROM ingest_meta WHERE key='watermark'")
-            idx.commit()
-        ensure_vec_table(idx, spec)
-
+        # ⚠️ 顺序很重要：**先**打开源库并校验 schema，**再**决定要不要清空索引。
+        # 反过来的写法（曾是这样）意味着源库路径写错或缺表时，`DELETE FROM units`
+        # 已经执行过才抛错 —— units（含 message/memory/wiki/distilled 全部投影）
+        # 与所有模型向量不可逆丢失；而 units 是 AUTOINCREMENT，重灌后 id 更大，
+        # unit_values（手动加权 / 反馈）按旧 id 全部变成永久孤儿。
         src = open_source_ro(src_path)
         try:
             validate_source_schema(src)
+
+            if rebuild:
+                log.info("rebuild requested: dropping units + %s", spec.vec_table)
+                drop_vec_table(idx, spec)
+                idx.execute("DELETE FROM units")
+                idx.execute("DELETE FROM ingest_meta WHERE key='watermark'")
+                idx.commit()
+            ensure_vec_table(idx, spec)
+            # 本函数要写**桥接列**（`origin`），所以必须自己保证列在 —— 不能指望
+            # 别的调用点（rag_bridge / wiki_index）已经迁移过这张库。
+            # 实测：全新索引库上只跑 ingest 会直接报
+            # `sqlite3.OperationalError: table units has no column named origin`。
+            ensure_bridge_schema(idx)
+
             known = _existing_keys(idx, spec.vec_table)
             cursor = None
             summary = {
@@ -322,10 +423,12 @@ def run_ingest(
                                 uid = idx.execute(
                                     "INSERT INTO units(source, conversation_id, seq,"
                                     " role, turn_key, src_id, time, title, text,"
-                                    " chars, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                                    " chars, origin, updated_at)"
+                                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                                     (r["source"], r["conversation_id"], r["seq"],
                                      r["role"], r["turn_key"], r["src_id"],
-                                     r["time"], r["title"], t, len(t), now),
+                                     r["time"], r["title"], t, len(t),
+                                     origin_of(r["source"]), now),
                                 ).lastrowid
                             idx.execute(
                                 f"INSERT OR REPLACE INTO {spec.vec_table}"
@@ -473,6 +576,22 @@ def run_stats(settings: Settings, log: logging.Logger | None = None) -> dict:
         idx.close()
 
 
+def _vec_tables(conn: sqlite3.Connection) -> list[str]:
+    """真正的 vec0 虚拟表名（**不含**影子表）。
+
+    ⚠️ 必须按 `sql LIKE '%USING vec0%'` 筛，不能按 `name LIKE 'vec_%'`：
+    vec0 的影子表（`vec_xxx_info` / `_chunks` / `_rowids` / `_vector_chunks00`）
+    同样 `type='table'` 且以 `vec_` 开头。对它们执行 `DELETE ... WHERE rowid = ?`
+    会删掉**整块向量**所在的聚类行，而且一声不响：内存库实测删 rowid 1/2 后
+    `SELECT COUNT(*) FROM vec_xxx` 仍是 3（看着像没删），但
+    `WHERE embedding MATCH ?` 返回 **0 条** —— ANN 索引整块报废，而所有统计
+    口径（COUNT / coverage）都还是满的。vec0 自己维护影子表，删虚拟表行会联动。
+    """
+    return [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master"
+        " WHERE type='table' AND sql LIKE '%USING vec0%'")]
+
+
 def delete_units_for_conversation(conn: sqlite3.Connection,
                                   source: str, conversation_id: str) -> int:
     """级联删除某会话的全部派生数据（重构运行模型：AgentMemHub 删会话必须同步清索引）。
@@ -485,8 +604,7 @@ def delete_units_for_conversation(conn: sqlite3.Connection,
         (source, conversation_id))]
     if not ids:
         return 0
-    vec_tables = [r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'vec_%'")]
+    vec_tables = _vec_tables(conn)
     with conn:
         conn.execute(
             "DELETE FROM units WHERE source=? AND conversation_id=?",
@@ -509,8 +627,7 @@ def delete_units_for_turn(conn: sqlite3.Connection, source: str,
         (source, conversation_id, turn_key))]
     if not ids:
         return 0
-    vec_tables = [r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'vec_%'")]
+    vec_tables = _vec_tables(conn)
     with conn:
         conn.execute(
             "DELETE FROM units WHERE source=? AND conversation_id=? AND turn_key=?",

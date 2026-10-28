@@ -1,18 +1,44 @@
 # AgentMemHub
 
-统一提取你电脑上所有 AI Agent Harness 的对话历史 → 归一为**全量事件流**（含工具链、思维链、Shell 执行、代码补丁）→ 本地 SQLite 存储可搜索 → **记忆蒸馏**（LLM 离线提炼为结构化记忆）→ **内置记忆引擎 `agentmemhub.rag`**（向量化 + 混合召回 + 价值评分，进程内直调、无独立服务）→ 面板双标签页浏览（统一会话 / 记忆报表）。
+统一提取你电脑上所有 AI Agent Harness 的对话历史 → 归一为**全量事件流**（含工具链、思维链、Shell 执行、代码补丁）→ 本地 SQLite 存储可搜索 → **记忆蒸馏**（LLM 离线提炼为结构化记忆）→ **内置记忆引擎 `agentmemhub.rag`**（向量化 + 混合召回 + 价值评分，进程内直调、无独立服务）→ 面板**四标签页**浏览（统一会话 / 记忆报表 / **wiki知识库**：L2 蒸馏产物 + 外部投喂页面 / **设置**：只读配置视图）。
 
 **让任何 Agent 的会话经验，变成可检索、可迁移、可复用的统一记忆资产。**
 
+## 界面一览
+
+> 下列截图用**虚构演示数据**生成（`scripts/make_demo_data.py` 造的「星轨笔记」示例库：
+> 6 个会话 / 21 条记忆 / 11 篇知识库页 / 2 份投喂素材），**不含任何真实会话与配置**。
+> 想自己看：跑该脚本后用 `AGENTMEMHUB_CONFIG=demo/config.yaml` 起一个独立端口。
+
+**① 会话** —— 默认视图：来源徽章、模型、事件数、任务完成度
+
+![会话视图](docs/images/panel-conversations.png)
+
+**② 记忆报表** —— 蒸馏终稿 + 溯源 + ⭐ 手动加权 + 👍👎 反馈
+
+![记忆报表](docs/images/panel-memories.png)
+
+**③ wiki 知识库** —— L2 蒸馏产物与外部投喂页面按域分组；正文里的 `[m3236]` 可点开溯源
+
+![知识库](docs/images/panel-wiki.png)
+
+**④ 设置** —— `agentmemhub.yaml` 的只读视图，保留每个键的原注释，标出被环境变量覆盖的项
+
+![设置](docs/images/panel-settings.png)
+
+> **v2.8（2026-10-24）**：MemOS 上游依赖**彻底移除** —— vendored `memOS/` 目录、
+> `agentmemhub.memos` 模块、`/api/v1/import` 端点、`memos` 子命令、`memory_backend`
+> 与 `memos.*` 配置键全部删除，**不再有回退开关**。
+>
+> **v2.7（2026-10-23）**：wiki 增量从「整会话重编」改为**页级增量** —— 会话分桶 +
+> L2 只重编受影响的页 + 投影只算变化页，12 条新记忆的编译耗时从 ~50 分钟降到 ~4 分钟。
+>
 > **v2.0（2026-09-10）**：记忆后端从上游 MemOS 引擎切换为**自研内置引擎 `agentmemhub.rag`**
 > ——进程内直调，**无独立服务、无端口、无守护进程**，启动面板或跑 `sync` 即完整可用。
-> MCP 五工具与面板契约零改动；如需回退 MemOS，在 `agentmemhub.yaml` 设 `backend.backend: memos`
-> 即可（vendored `memOS/` 保留未删）。召回机制与实测数据见 [docs/recall-fusion.md](docs/recall-fusion.md)。
+> MCP 五工具与面板契约零改动（2026-10 又新增了 3 个投喂工具，原有五工具的签名与返回
+> 一字未改）。召回机制与实测数据见 [docs/recall-fusion.md](docs/recall-fusion.md)。
 >
-> **v2.1（2026-09-11）**：新增**记忆蒸馏**（离线把会话提炼为结构化记忆，四入口：
-> Python / CLI / start.bat 控制台 / 面板，详见「记忆蒸馏」章节）；**双标签页面板**
-> （统一会话 / 记忆报表，含筛选·展开溯源·⭐加权·👍👎反馈·表头排序·双向跳转）；
-> 权重体系完整落地（来源初始分 → 反馈演化 → 手动加权不衰减）。
+> 更早的逐版变更见文末 [Roadmap](#roadmap)。
 
 ## 模型准备（首次使用必读）
 
@@ -48,6 +74,27 @@ uv run python scripts/fetch_model.py Xenova/bge-base-zh-v1.5
 [Xenova/bge-base-zh-v1.5](https://huggingface.co/Xenova/bge-base-zh-v1.5)（均为量化 ONNX）。
 网络受限时脚本自动回退代理；国内可加 `--base https://hf-mirror.com`。
 
+## LLM 模型选型（记忆蒸馏 / Wiki 编译用）
+
+上面是**嵌入模型**（负责检索）。蒸馏与 wiki 编译还要配一个**生成模型**（`llm` 段），
+选型直接决定质量与成本：
+
+| 模型 | 输入 / 输出（USD/百万 token） | 说明 |
+|---|---|---|
+| **`xiaomi/mimo-v2.6-flash`** ⭐ **推荐** | **0.14 / 0.28** | 2026-09-22 上游新上架，**价格与 V2.5 持平**，按"同价优先新模型"切换；**质量指标待重测**（上一版 V2.5 实测 12/12 稳定、思维链仅占输出 24~37%，可作预期参考）。配 `repair_model` 补 JSON 遵从性 |
+| `xiaomi/mimo-v2.5` | 0.14 / 0.28 | 同价**回退位**（已实测：真实成本≈deepseek 的一半）；新模型出问题时换回 |
+| **`meituan/LongCat-2.0:free`** ⭐ **次选** | **免费**（100 请求/天） | 适合**放后台大批量、多次重跑**——同一批目标跑多轮取更优结果，零成本提质量 |
+| `deepseek/deepseek-v4.1-flash` | 0.15 / 0.60（低谷） | **247 tok/s**（全表最快）；注意**峰谷计价**（国内工作时段翻倍） |
+| `z-ai/glm-5.3-flash` | 0.15 / 0.50 | 官网 Intelligence **41.9**（全表最高），付费档质量优先 |
+| `zai-org/GLM-5.2-Fast` | 3.00 / 10.25 | ⚠️ **"Fast"是高吞吐定位不是便宜**——比同厂 glm-5.3-flash 贵 20 倍，极易误选 |
+
+免费档还有 `inclusionai/ling-3.0-flash-sante:free`（100 请求/天）与
+`poolside/laguna-s-2.1-free`（**唯一无日限**）。**完整对标（含计费模式与三个坑）
+见 [docs/model-selection.md](docs/model-selection.md)**。
+
+配置位置：`agentmemhub.yaml` 的 `llm` 段；两级 wiki 编译**刻意不级联**
+（`wiki.llm` 与 `wiki.l2.llm` 各自相对顶层覆盖，见 [docs/llm-wiki.md](docs/llm-wiki.md)）。
+
 ## 支持的 Agent
 
 | Agent | 数据来源 | 格式 |
@@ -71,7 +118,7 @@ uv run python scripts/fetch_model.py Xenova/bge-base-zh-v1.5
    │                                                                                 │
    │  采集层                        存储层                 消费层                     │
    │  ┌──────────────┐           ┌────────────┐     ┌────────────────────┐          │
-   │  │ adapters/    │  ingest   │ SQLite 会话库│    │ CLI（7+ 子命令）      │          │
+   │  │ adapters/    │  ingest   │ SQLite 会话库│    │ CLI（22 个子命令）      │          │
    │  │ 8 个数据源     │ ────────▶│ (store.py) │     │ 控制台（start.bat）    │          │
    │  │ (sqlite/jsonl)│           │ events+fts │     │ Web 看板（/api/*）    │          │
    │  └──────────────┘           └─────┬──────┘     └────────┬───────────┘          │
@@ -84,7 +131,7 @@ uv run python scripts/fetch_model.py Xenova/bge-base-zh-v1.5
    │            │             ┌──────────────────────────────────┐                   │
    │            │             │ 内置记忆引擎 agentmemhub/rag      │                   │
    │            └────────────▶│ units + vec_<model> + trigram FTS │                   │
-   │          （检索/看板/导出）│ 三路召回 RRF 融合 + 价值评分       │                   │
+   │          （检索/看板/导出）│ 六路通道 RRF 融合 + 价值评分       │                   │
    │                          └──────────────────────────────────┘                   │
    │                                                                                 │
    │   配置层：agentmemhub.yaml（全路径可配置）＋ 环境变量覆盖                           │
@@ -95,20 +142,36 @@ uv run python scripts/fetch_model.py Xenova/bge-base-zh-v1.5
 
 ```
 AgentMemHub/
-├── agentmemhub/                  # 核心包
+├── agentmemhub/                  # 核心包（36 个顶层模块 + adapters/ web/ rag/ feed/）
 │   ├── cli.py / console.py       # 命令行入口 / 交互式控制台
-│   ├── config.py                 # 统一配置体系（YAML + 环境变量 + 默认）
+│   ├── config.py / config_doc.py # 统一配置（YAML + 环境变量）/ 保注释的行扫描读取
 │   ├── store.py + schema.sql     # SQLite 会话库（conversations/events/events_fts）
 │   ├── watermarks.py             # 增量同步水位/变更集（delta）状态
 │   ├── rag/                      # ★ 内置记忆引擎（v2.0）
 │   │                             #   config/embedder/ingest/search/memstore/runtime
 │   ├── rag_bridge.py             # ★ 引擎接缝：MCP/面板/cli 的统一调用入口
+│   ├── distill.py / scoring.py   # 记忆蒸馏 / LLM 三轴评分（策略层）
+│   ├── llm.py                    # LLM 接入（重试退避 / 总时长上限 / 沙箱熔断）
+│   ├── wiki.py / wiki_index.py   # ★ LLM Wiki 两级编译 + 页面投影进召回面
+│   ├── wiki_manifest.py          #   L1 输入清单（脏会话与增量判定的真源）
+│   ├── wiki_pending.py           #   待更新记忆：软/硬删除 + 忽略与恢复
+│   ├── wiki_triggers.py          #   离线触发器（时点/阈值/总闸，写 overrides 不改 yaml）
+│   ├── llm_batch.py              # ★ 离线批处理（Batch API，官方价五折）
+│   ├── batch_client.py           #   厂商 Batch 客户端（提交/轮询/取结果）
+│   ├── batch_ops.py              #   CLI 与 HTTP 共用的动作层
+│   ├── task_queue.py             #   通用惰性收割（开 DSH / 写记忆时顺手推进一次）
+│   ├── wiki_batch.py             #   wiki 两级的离线批处理适配
+│   ├── snapshot.py               # 快照与回滚（索引库 + wiki 产物目录）
 │   ├── health.py                 # 记忆库一致性巡检（面板健康卡片/CLI/测试共用判据）
-│   ├── mcp_server.py             # MCP 记忆网关（stdio / Streamable HTTP；含调用审计）
-│   ├── scoring.py                # LLM 三轴评分（策略层，与引擎的存值层分工）
+│   ├── failures.py               # ★ 长任务失败清单（分类/汇总/单独重跑，供 wiki 两级使用）
+│   ├── logs.py / notify.py       # 事实流日志 / 通知推送（通道可插拔）
+│   ├── mcp_server.py             # MCP 记忆网关（stdio / Streamable HTTP；含调用审计与 feed 投喂工具）
+│   ├── mdmini.py                 # 面板用的极简 Markdown 渲染（先转义再套结构）
+│   ├── export.py / sanitize.py   # 导出 / 内容脱敏
+│   ├── feed/                     # ★ 外部投喂转译层（格式注册表 + 三段物料）
 │   ├── adapters/                 # 8 个 Agent 数据源适配器（src_id/turn_key/注入识别）
-│   ├── web/                      # FastAPI 记忆面板 + 前端 + /api/memos 网关
-│   └── memos.py / memos_daemon.py # 回退路径（backend=memos 时启用，默认不参与）
+│   ├── web/                      # FastAPI 记忆面板 + 前端 + /api/* 网关
+│   └── engine_api.py           # 引擎运行时门面（/api/v1/* 端点派发到进程内 rag_bridge）
 ├── models/                       # 嵌入模型（自带 bge-small 开箱即用）
 ├── agentmemhub.yaml(.example)    # 统一配置（模型/分桶/召回/后端开关；本体 gitignore）
 ├── database/                     # 数据目录（gitignore）：采集库 + 索引库 + 水位 + 评分状态
@@ -116,14 +179,19 @@ AgentMemHub/
 │   ├── fetch_model.py            #   下载更大嵌入模型并登记到配置
 │   ├── check_eval_grounding.py   #   召回评测集落地校验
 │   ├── sensitive_scan.py         #   推送前敏感信息扫描
+│   ├── audit_frontend_api.py     #   路由 ↔ 前端调用对账（--used / --json）
+│   ├── check_config_keys.py      #   僵尸配置键检测（定义了但没人读的键）
 │   ├── web_verify.py             #   面板前后端接口联调自检（对运行中的服务）
 │   ├── health_check.py           #   记忆库一致性巡检（与面板「记忆库健康」同判据）
 │   ├── mcp_log.py                #   MCP 调用审计查询（logs/mcp.log 的读取端）
+│   ├── wiki_compile.py           #   LLM Wiki 第一级：逐会话把零散记忆编译成页面
+│   ├── wiki_aggregate.py         #   LLM Wiki 第二级：跨会话按主题聚合成实体页
+│   ├── wiki_linkfix.py           #   wiki 链接修复（按合并关系重定向失效链接）
+│   ├── sync_llm_from_dsh.py      #   从 DSH 配置同步 LLM 接入参数（密钥只写本地 yaml）
 │   └── e2e/                      #   浏览器级端到端测试
 ├── eval/                         # 召回评测示例集（queries.example.yaml；私有集不入库）
-├── tests/                        # pytest（488 项通过 / 1 项条件跳过）
-├── docs/                         # 设计文档（架构/迁移/召回融合/接口契约等）
-├── memOS/                        # 回退用的上游引擎（gitignore，默认不参与运行）
+├── tests/                        # pytest（1466 项通过 / 1 项条件跳过；88 个测试文件）
+├── docs/                         # 技术文档（架构全景/蒸馏/召回/wiki/模型选型/接口契约）
 ├── start.bat                     # 启动控制台（Windows）
 ├── ClearData.bat / ClearTest.bat # 清空数据 / 恢复干净测试环境
 └── AGENTS.md / ARCHITECTURE.md   # 协作约定 / 架构说明
@@ -137,7 +205,15 @@ AgentMemHub/
 
 1. **采集**：`ingest` 从各 Agent 的官方数据位置读取会话（路径可经 `agents.*` 配置覆盖），归一为全量事件流（含工具链/思维链/Shell/补丁，每事件带 `src_id`/`turn_key` 稳定锚与系统注入标记）写入本地 SQLite
 2. **消费**：CLI/控制台/Web 看板检索、浏览、导出、管理会话——全部读本地库，不上传任何数据
-3. **记忆**：`sync` 把事件流向量化写入内置索引（按长度分桶批处理、多模型并发、`src_id` 幂等）→ 对话时经三路召回（向量/全文/标识符）融合命中
+3. **记忆**：`sync` 把事件流向量化写入内置索引（按长度分桶批处理、多模型并发、`src_id` 幂等）→ 对话时经**六路通道**召回（向量 / 全文 / 标识符 / 多词短语 + 页面专属两路）融合命中
+
+**派生层（只读，不改写上面三层）**
+
+4. **编译**：`scripts/wiki_compile.py` 把蒸馏记忆**逐会话**编译成页面
+   → `scripts/wiki_aggregate.py` **跨会话**聚合成主题实体页
+   → `scripts/wiki_linkfix.py` 按合并关系修链接。
+   产物是独立 markdown，**随时可全量重建**；RAG 与用户数据可以影响 wiki，
+   **wiki 不会反向影响 RAG**。详见 [docs/llm-wiki.md](docs/llm-wiki.md)。
 
 ## 快速开始
 
@@ -227,7 +303,10 @@ python -m agentmemhub sync
 | 数据目录（所有本地状态） | 项目内 `database/` | 环境变量 `AGENTMEM_HUB_DATA_DIR` 或 yaml `data_dir` |
 | **采集库**（统一事件流） | `database/agentmemhub.db` | 环境变量 `AGENTMEMHUB_DB` |
 | **记忆索引库**（向量 + 全文 + 评分） | `database/session_rag.db` | 随数据目录 |
+| **投喂素材库**（原件快照 / 正文 / 发布页登记） | `database/materials.db` | 随数据目录 |
+| 通知发送记录 | `database/notify.db` | 随数据目录 |
 | 增量水位 / 评分记账 | `database/watermarks.json` · `scored_traces.json` | 随数据目录 |
+| **wiki 产物**（L1 / L2 页面 + 逐页 json） | `exports/wiki_work/out_l1_mimo` · `out_l2_mimo` · `out_feed` | yaml `wiki.out_l1` / `wiki.out_l2` |
 | 嵌入模型 | `models/` | 自带 bge-small；`scripts/fetch_model.py` 下载更多 |
 | 导出目录 | `exports/` | `--out` 参数 |
 
@@ -241,8 +320,6 @@ python -m agentmemhub sync
 - `conversations` — 会话元数据（source / id / title / cwd / model / 时间）
 - `events` — 全量事件流（role / content / tool / reasoning / patch / shell，含 `raw_json` 原始保底）
 - `events_fts` — FTS5 全文索引（英文检索）
-
-![记忆报表页 — 状态/类型/置信/来源筛选、表头排序、展开溯源与 ⭐ 加权](./docs/images/memory-report.png)
 
 **记忆索引库**（`database/session_rag.db`，由内置引擎管理）：
 
@@ -293,11 +370,20 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 | `folders [--source] [--limit]` | 按文件夹统计各 Agent 会话数 |
 | `sync [--source] [--full]` | **采集 + 向量化写入记忆索引**（增量；小模型先跑完即可检索，大模型后台并发补齐）|
 | `mcp [--http] [--bind H] [--port P]` | MCP 记忆网关：默认 stdio（Agent 拉起）；`--http` 常驻为 Streamable HTTP 供团队共享 |
-| `rebuild [--mode repair\|rebuild]` | 补齐缺失向量（repair）/ 全量重算 |
-| `memos [--source] [--out]` | 回退路径：生成 MemOS bundle（backend=memos 时用）|
+| `feed --action add\|list\|show\|retry\|retract\|forget\|lint\|formats\|scan\|batch` | **外部投喂转译层**：把 md / 网页 / PDF / Office / 思维导图 / 表格转译成知识库页面（与自有 wiki **并列**，`origin=external`，不进记忆与 wiki 编译）。`add` 支持"路径 / 二进制 / URL / 正文"**四形态**（CLI 侧是 `feed add <路径>` 或 `feed add --stdin`）；`scan` 只读预览、`batch` **默认不落盘**（`--apply` 才写）；`formats` 控制允许哪些后缀 —— 详见 [docs/modules/feed.md](docs/modules/feed.md) |
 | `clean [--source x] [--apply]` | 记忆清洗：删除系统注入事件（默认预览，`--apply` 才执行并重建 FTS/计数；sync 会自动只清变更会话）|
 | `score [--pending] [--limit N] [--dry-run] [--workers N] [--ids id1,id2] [--unscored-count] [--sync-episodes]` | ⚠️ **当前不生效**（入口已从控制台/面板隐藏；实测评为 neutral 居多且跑批全跳过，质量把关由蒸馏置信度 + 面板 👍/👎 承担）——命令保留备查。原功能：LLM 批量自动评分历史记忆（**增量优先**：pending_score 队列非空只评队列·定点读零全量枚举，队列空则先筛未评 id 再读正文；`--pending` 仅评队列，`--ids` 只评指定条（写后即评），`--unscored-count` 统计未评条数（只读 id），`--sync-episodes` 回填 episode.r_task；**三档 verdict 均记入跳过清单**——positive/negative 写 value、neutral 不写值但仍标记「已评」避免下次重评（dry-run 一律不记录）；网关**内容审核拒评（如智谱 1301）自动归 neutral 并记账**，不再每次卡该条报错；LLM 调用**强制直连**、不受系统代理影响，确需代理设 `AGENTMEMHUB_LLM_PROXY`）|
-| `rebuild [--mode repair\|rebuild]` | 补向量：触发引擎 embedding rebuild（导入记忆后修复语义检索）|
+| `rebuild [--mode repair\|rebuild]` | 补向量：给缺向量的记忆补嵌（repair）/ 全量重算（导入记忆后修复语义检索）|
+| `weight --ids id1,id2 [--value V]` | 记忆手动加权：锁定价值分（优先于自动聚合、不衰减）|
+| `wiki --action failures\|retry --out DIR [--stage l1\|l2] [--src DIR_L1] [--workers N]` | **LLM Wiki 运维**：查看失败清单（按原因分类）/ 定向补跑失败项（只跑失败的，不全量重来）|
+| `wiki --action pending\|ignored\|drop\|restore` | **待更新记忆的查看与删除**：`pending` 列明细；`drop --ids a,b --mode soft`（不进 wiki、仍可召回）/ `--mode hard --confirm`（真删）；`ignored` 列已忽略；`restore` 取消 |
+| `wiki --action triggers\|trigger\|align\|update` | 触发器状态 / 手动触发 / 对齐审计（只读）/ 增量更新；`triggers --set-batch on\|off` **热改离线触发器总闸**（写 overrides，不用重启） |
+| `wiki --action backfill-manual\|index-pages` | `backfill-manual`：历史 Agent 直写记忆回填蒸馏表（幂等）；`index-pages`：把 L2 知识页投影进召回面（页级召回）|
+| `wiki --action full-run [--offline]` | **全量重跑**：重新归域 + 全部域重编 + 覆盖写盘（域编号会重排）。什么时候用：增量归类"撑不住"时（`align` 提示"『待整理』域已有 N 页"）—— 该重新归纳的是**域结构本身**。通道由 `wiki.full.mode`（`realtime`/`offline`）决定，`--offline` 可临时覆盖；⚠️ 编译段约 300+ 条请求，动手前自动留快照 |
+| `wiki --action batch-status\|batch-run\|batch-cancel\|batch-resubmit` | **离线批处理（MiMo Batch API，官方价是实时的 50%）**：`batch-status` 查在飞任务（厂商状态 / 进度 / 已等多久 / 建议）；`batch-run` **推进一段**（无在飞→提交、结果到位→交下一段或落盘，状态机自判）；`batch-cancel` 取消作废；`batch-resubmit` 平台侧 `validation_failed` 后用**原输入文件**重提。**收割是自动的**（开 DSH / 写记忆 / 跑任意 CLI 命令都会顺手推进一次），**发起**由离线触发器 `wiki.batch.enabled` 或手动 `batch-run` 决定，详见 [docs/modules/batch-offline.md](docs/modules/batch-offline.md) §3.4/§3.5 |
+| `memory-log [--event write\|read] [--path mcp\|http\|distill\|cli] [--grep 词] [--json]` | **记忆操作事实流**：什么时候写了/读了什么记忆（含内容全文与来源路径）|
+| `snapshot [--snapshot-action create\|list\|restore]` | 快照与回滚（索引库整库 + wiki 产物目录）|
+| `llm-config [--json]` | **配置自检**：列出各 LLM 使用点（蒸馏/评分/Wiki 一级/二级）**最终生效**的配置，并标出每项是**继承**还是**覆盖** |
 | `stats` / `adapters` | 统计 / adapter 状态 |
 
 > 更完整的代码与 SQL 示例（按 Agent 查询、按文件夹跨 Agent 统计、会话角色分布、直连数据库等）见 **[docs/EXAMPLES.md](./docs/EXAMPLES.md)**。
@@ -401,7 +487,7 @@ Claude Code 等支持 MCP 的 Agent harness 上——模型在会话进行中即
 
 | 工具 | 说明 |
 |---|---|
-| `memory_search(query, topK?, note?)` | 语义检索历史记忆（三路混合召回），返回命中条目 + 注入上下文 |
+| `memory_search(query, topK?, origin?, note?)` | 语义检索历史记忆（六路通道融合），返回命中条目（带**层级与来源**标注）+ 注入上下文 |
 | `memory_recent(limit)` | 最近写入的记忆时间线，快速了解近期积累 |
 | `memory_stats()` | 索引就绪状态 / 记忆总量 / 嵌入模型与 LLM 评分可用性 |
 | `memory_save(content, importance?, tags?, note?)` | 写一条记忆。`importance` 为可选档位（`high`/`normal`/`low` → 初始价值 0.8/0.6/0.4，**不传即 normal**），由 Agent 用当前推理直接判断，**无需外挂评分模型**；`tags` 为可选标签数组（面板筛选/溯源用，引擎纯透传）。即时入库并补向量，写后验证 imported，失败明确报错不伪装 |
@@ -501,8 +587,8 @@ Skill 与 MCP 强绑定、无降级路径——MCP 不可用时 Skill 会明确�
 
 设计要点：
 
-- **引擎由用户常驻控制**（看板 / `memos-daemon`）；网关只转发请求，引擎离线时所有工具
-  返回明确错误与启动指引（isError），不做启停决策
+- **引擎由调用方进程加载**（v2.0 起进程内直调，无独立服务、无端口）；网关只把请求
+  派发到本进程内的 `rag_bridge`，**不存在「引擎离线」这种状态**
 - **协议层与传输层分离**：stdio 零新依赖；Streamable HTTP 复用 web 依赖
   （fastapi/uvicorn），`POST /mcp` 单端点（GET 405、DELETE 结束会话），
   兼容 MCP 2024-11-05 / 2025-06-18
@@ -521,8 +607,10 @@ Skill 与 MCP 强绑定、无降级路径——MCP 不可用时 Skill 会明确�
 
 **索引库**（`database/session_rag.db`）：
 
-- **units / unit_vectors / units_fts**：原子记忆与向量（含蒸馏投影：
-  `role='distilled'`、`src_id='dst_<内容hash>'`）
+- **units**：原子记忆文本（模型无关）。`src_id` 前缀区分来源：`dst_<hash>` = 蒸馏投影、
+  `mcp_<hash>` = Agent 直写、`wiki_<hash>` = 知识页投影
+- **vec_<model> / units_fts**：**每个模型一张向量表**（`sqlite-vec`，换模型不互相污染，
+  表名由模型 id 推出）+ trigram 全文索引
 - **unit_values / unit_feedback**：价值分（`manual_value` = 用户 ⭐ 锁定值）与反馈记录
 - **distilled_memories**：蒸馏终稿（type/topic/content/confidence/status + 完整溯源）
 - **distill_hashes**：蒸馏幂等锚（切片/合并级内容哈希 + 提示词版本）
@@ -538,8 +626,7 @@ Skill 与 MCP 强绑定、无降级路径——MCP 不可用时 Skill 会明确�
 AgentMemHub/
 ├── agentmemhub/
 │   ├── rag/                     ← 内置记忆引擎（向量化 / 混合召回 / 价值评分）
-│   ├── rag_bridge.py            ← 引擎接缝：以原 MemOS 端点语义实现进程内调用
-│   └── memos*.py                ← 回退路径（backend=memos 时启用）
+│   └── rag_bridge.py            ← 引擎接缝：以原 MemOS 端点语义实现进程内调用
 ├── database/                    ← 采集库 agentmemhub.db + 索引库 session_rag.db
 ├── models/                      ← 嵌入模型（自带 bge-small；更大模型按需下载）
 └── agentmemhub.yaml             ← 统一配置（模型/分桶/召回/后端开关）
@@ -563,9 +650,10 @@ uv run python -m agentmemhub serve       # 启动记忆面板 http://127.0.0.1:8
   高精度模型在后台子进程并发补齐，完成后自动生效。
 - **性能优化**：批量嵌入按**文本长度分桶**，避免短文本被长文本 padding 拖累
   （实测 bge-base 从 5.26 → 26 条/秒，全量 51 分钟 → 11.6 分钟）。
-- **回退 MemOS**：改 `agentmemhub.yaml` 的 `backend.backend: memos`（或设环境变量
-  `AGENTMEMHUB_BACKEND=memos`）即可切回 vendored 引擎，此时才需要其独立服务与
-  `memos-daemon` 管理命令。
+- **没有回退开关了**：MemOS 上游已于 2026-10-24 彻底移除（vendored 目录、模块、
+  导入端点、`memos` 子命令、`memory_backend` 配置键全删）。`agentmemhub/engine_api.py`
+  名字保留，但它现在只是**进程内引擎的运行时门面**（把 MemOS 时代的 `/api/v1/*`
+  端点语义派发到 `rag_bridge`），没有守护进程可启停。
 
 ## 记忆蒸馏（把会话提炼为结构化记忆）
 
@@ -613,6 +701,77 @@ llm:
     User-Agent: "AgentMemHub/1.0"
 ```
 
+## LLM Wiki（把碎片记忆编译成可读知识库）
+
+RAG 之外的第二条路径。RAG 在查询时从原始碎片检索，**每次重新推导、无累积**，
+优化的是「能不能捞到」；LLM Wiki 把已经沉淀的结论**编译**成结构化、互相链接的
+markdown 页面，人和 Agent 都能直接读，优化的是「有没有结构」。
+
+两层是**单向**关系：原始记忆可以影响 wiki，**wiki 不会反向影响 RAG**。
+
+```
+N 条蒸馏记忆
+      │
+      ├─ 第一级  scripts/wiki_compile.py    逐会话编译   → 每会话若干页（json + md）
+      │                                      压缩比约 1.7:1
+      └─ 第二级  scripts/wiki_aggregate.py  跨会话聚合   → 主题实体页
+```
+
+两级都**只读运行**：打开索引库副本、产出独立 markdown、不写任何数据表。
+
+### 第一级：会话内编译
+
+```bash
+uv run python scripts/wiki_compile.py --list                    # 列出候选会话
+uv run python scripts/wiki_compile.py --all --out DIR \
+    --index-db database/session_rag.db --workers 8              # 全量
+uv run python scripts/wiki_compile.py --source X --conversation-id Y --out DIR
+```
+
+先让 LLM 把会话内的记忆**按主题分组**（没有现成的分组键可用：`topic` 几乎唯一、
+`slice_key` 是会话级的），再逐组编译成页面。长会话强制走两段式——推理模型的
+**思维链计入 `max_tokens`**，一次喂 45 条记忆会在 32K 上限处被截断。
+
+支撑断点续跑：已有产出的会话自动跳过，失败不中断整批。
+
+### 第二级：跨会话聚合
+
+```bash
+# 只归域（便宜，先看域表质量）
+uv run python scripts/wiki_aggregate.py --src 一级产出目录 --out DIR \
+    --db database/session_rag.db --stage domains
+# 单域试跑
+uv run python scripts/wiki_aggregate.py --src ... --out DIR --db ... --domain DSH
+```
+
+三阶段：**归域**（几百个标题 → 主题域）→ **域内细分**（决定哪几页合并成一页）→
+**重新编译**（把同一主题散在多个会话里的页面重写成一篇，不是拼接）。
+
+第一级的页面按**会话**切，所以同一主题会散成好几页（`AgentMemHub` 一个实体就散在
+十几个会话、几十个标题里）；第二级按**主题**合回来，这才是真正的收敛点。
+
+> 第二级会把正文里的会话内序号引用提升成**全局记忆编号** `[m123]`——
+> 聚合后编号不冲突，且直接可追溯回 `distilled_memories`。
+
+详见 [docs/llm-wiki.md](docs/llm-wiki.md)。
+
+### 配置：两级刻意不级联
+
+```yaml
+wiki:
+  llm:                    # 第一级（继承顶层 llm，只覆盖差异）
+    thinking: "disabled"  # DeepSeek 官方支持彻底关推理
+  l2:
+    llm:                  # 第二级：**同样继承顶层 llm**，刻意跳过 wiki.llm
+      reasoning_effort: "low"
+      timeout: 900        # 默认 60s 对"输入几万字符"的调用必然读超时
+      max_total_seconds: 600   # 单次调用"总时长"硬上限 —— socket 超时管不住
+                               # "一直有数据在来但整体极慢"（实测有人 975 秒才返回）
+```
+
+级联继承会让第一级换 provider 时连带改掉第二级——实测踩过：第一级切到
+DeepSeek 官方关推理后，第二级因此丢掉了 Command Code 的凭据。
+
 ## 统一配置
 
 所有路径/端口默认采用官方默认；需要覆盖时创建 `agentmemhub.yaml`（模板见 `agentmemhub.yaml.example`）。优先级：环境变量 > 配置文件 > 内置默认。
@@ -620,9 +779,6 @@ llm:
 ```yaml
 data_dir: database                    # 本地状态根目录（采集库/索引/水位/评分）
 db_path: ""                           # 采集库 SQLite（留空 = <data_dir>/agentmemhub.db）
-
-backend:
-  backend: rag                        # rag（内置引擎，默认）| memos（回退）
 
 rag:
   active: bge-small-zh-v1.5           # 检索用模型（随仓库分发，开箱即用）
@@ -640,10 +796,17 @@ rag:
     # 多模型召回融合（真正生效，2026-09-11 起）：逐模型向量路 + RRF；
     # 同门模型重叠度高，扩展前先评测
     models: [bge-small-zh-v1.5]
-    candidate_k: 30                   # 每路候选数
-    threshold_floor: 0.2              # 相对阈值（×top）
-    max_per_conversation: 2           # 同会话限席（原子记忆不受限）
-    search_max_hits: 20               # 面板检索返回上限
+    # 召回严格度档位 1~5（1 最严格 … 5 最宽松，默认 3「均衡」）。
+    # **一条刻度统一给出**：候选宽度 / 相对阈值 / 终审阈值 / 页面席位 /
+    # 字面兜底席 / 证据门槛线 —— 不要再分别去配 candidate_k / threshold_floor
+    # 那些单项（它们已由档位决定，见 docs/data-architecture.md §4.3/§13）。
+    recall_level: 3
+    # 按调用方细分档位（与 logs.files 同一模式：不配则回落上面的全局值）：
+    #   mcp=Agent 自动召回（求"少而准"）/ panel=面板查询（求"不遗漏"）
+    #   cli=命令行 / eval=召回评测
+    # callers:
+    #   mcp: 3
+    #   panel: 4
   models:                             # 模型注册表（新增模型在此登记）
     bge-small-zh-v1.5:
       path: models/bge-small-zh-v1.5
@@ -655,10 +818,6 @@ rag:
 agents:
   zcode: ""                           # 各 harness 会话位置；留空=官方默认自动发现
   hermes: ""
-memos:                                # 仅 backend=memos 时参与
-  base_url: "http://127.0.0.1:18800"
-  repo_dir: ""
-
 web:
   port: 8086
 
@@ -671,6 +830,9 @@ llm:                                  # 蒸馏与评分共用（OpenAI 兼容端
 distillation:                         # 记忆蒸馏全部可调（不硬编码）
   enabled: true
   prompt_ver: null                    # 留空=跟随代码内版本（改提示词自动重蒸）
+  direct_bucket: daily                # Agent 直写记忆（mcp/direct）按天分桶。
+                                      # 不分桶时所有直写记忆共用一个虚拟会话，任一条新增
+                                      # 都要整会话重编（详见 Roadmap v2.7）；none = 退回旧行为
   slice: {max_turns: 16, max_chars: 24000, topic_boundary: true}
   merge: {enabled: true, max_chars: 8000, max_rounds: 6}
   dedup: {cosine_duplicate: 0.92, cosine_similar: 0.80}
@@ -680,6 +842,77 @@ distillation:                         # 记忆蒸馏全部可调（不硬编码�
 ```
 
 相对路径相对项目根解析，`~` 展开为用户目录。
+
+### 配置的「继承」有四种形态（改配置前必读）
+
+同一个键可能**被上层决定**，也可能**覆盖**上层 —— 机制不止一种，不弄清容易写出
+"配了不生效"或"覆盖范围超出预期"的配置。完整说明（含检查清单）见
+[docs/data-architecture.md §13](docs/data-architecture.md)。
+
+| 机制 | 例子 | 覆盖项写在哪 |
+|---|---|---|
+| **内置默认 < 配置文件** | `DEFAULT_WIKI` → `wiki` 段 | —（不配即用默认） |
+| **集中式细分覆盖** | `logs.rotate` < `logs.files.<日志名>` | 集中在同名键下 |
+| | `rag.retrieval.recall_level` < `rag.retrieval.callers.<调用方>` | 同上 |
+| **就地覆盖** | `llm` < `wiki.llm` / `distillation.llm` / `wiki.l2.llm` | 分散在各使用段 |
+| **三层**（仅页面策略） | 内置默认 < **档位** < `rag.retrieval.page.*` | — |
+
+**"某个调用方到底在用哪份 LLM 配置"看不出来时**：
+
+```bash
+uv run python -m agentmemhub llm-config          # 生效配置 + 继承/覆盖标注
+uv run python -m agentmemhub llm-config --json   # 机器读
+```
+
+**加/改配置键之后**跑一次 `uv run python scripts/check_config_keys.py` —— 查"定义了
+却没有任何读取点"的**僵尸键**（本项目踩过三次：`wiki.single_shot_max`、
+`wiki.workers`、`wiki.l2.*`，共同特征是**配置值恰好等于代码里硬编码的默认值**，
+所以既不报错、也不让测试变红）。
+
+> ⚠️ 该脚本是**启发式**：按"键名在代码里出现过"判定，**不保证真的从 yaml 读**。
+> 例：`rag.retrieval.candidate_k` 在代码里出现过（档位展开的 profile 有同名字段），
+> 但 yaml 里配它**不生效** —— 那类要人工复核（见 §13 检查清单）。
+
+## 技术文档
+
+按"想知道什么"索引（架构细节一律以第一份为准）：
+
+| 文档 | 内容 |
+|---|---|
+| **[docs/data-architecture.md](docs/data-architecture.md)** | **架构全景（权威）**：三层数据模型、表矩阵、ID 锚体系、六路召回与准入、价值体系、快照回滚、运维速查、演进时间线 |
+| [docs/branch-milestones.md](docs/branch-milestones.md) | **分支里程碑时间线**：四个大里程碑做了什么 + 即将做的事（Roadmap） |
+| [docs/memory-deletion.md](docs/memory-deletion.md) | **记忆软删除与 wiki 引用状态（设计基准）**：数据模型、接口、召回行为、环境安全（**待实施**） |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | 代码结构与模块职责（速览） |
+| [docs/recall-fusion.md](docs/recall-fusion.md) | 多路召回融合的机制、算法与评测数据 |
+| [docs/memory-distillation.md](docs/memory-distillation.md) | 记忆蒸馏：切片 / 合并 / 去重 / 投影全流程 |
+| [docs/llm-wiki.md](docs/llm-wiki.md) | LLM Wiki 两级编译、增量更新、触发器、失败兜底与格式修复 |
+| [docs/batch-offline-plan.md](docs/batch-offline-plan.md) | **离线批处理（Batch API）接入计划**：决策记录 D1–D6、三段式流水线状态机、里程碑追踪与风险清单（**M0–M3 已落地并实测两轮端到端，M4 开关与 M5 触发器已接核心部分；剩 M6 收尾**） |
+| [docs/model-selection.md](docs/model-selection.md) | LLM 模型选型与定价（含免费档与跑批注意事项） |
+| [docs/API.md](docs/API.md) | 对外契约：HTTP / MCP / CLI（含错误语义与长任务约定） |
+| [docs/EXAMPLES.md](docs/EXAMPLES.md) | SQL / CLI / Python 查询示例 |
+| [docs/branch-divergence.md](docs/branch-divergence.md) | **历史归档**：`feat/llm-wiki` 相对 `main` 的差异记录（该分支已于 2026-10-23 删除，内容全部并入 `feat/kb-ui`，删除前打了 tag `llm-wiki-done` = `d5dd4f4`） |
+
+服务运行时另有交互式接口文档 `/api/docs`（Swagger UI）。
+
+## 模块地图（改代码用）
+
+上面的技术文档按"想知道什么"索引；这里是按**职责域**的代码地图，
+每份固定六小节（职责边界 / 对外入口 / 数据流与不变量 / 配置项 / 调试与排障 / 测试在哪）。
+**不逐文件写 README**（几十份必然与实现漂移），按域合并。
+
+| 职责域 | 代码 | 模块文档 | 状态 |
+|---|---|---|---|
+| LLM Wiki 编译链 | `wiki.py`、`wiki_index.py`、`wiki_manifest.py`、`wiki_pending.py`、`wiki_triggers.py`、`scripts/wiki_*.py`、`obsidian.py` | [docs/modules/wiki.md](docs/modules/wiki.md) | 已写 |
+| 配置体系 | `config.py`、`config_doc.py`、`scripts/check_config_keys.py`、`scripts/sync_llm_*.py` | [docs/modules/config.md](docs/modules/config.md) | 已写 |
+| 日志与可观测性 | `logs.py`、`failures.py`、`snapshot.py`、`notify.py` | [docs/logging.md](docs/logging.md)（**事件字典 + 排查剧本**） | 已写 |
+| 离线批处理（Batch API） | `llm_batch.py`、`batch_client.py`、`wiki_batch.py`、`task_queue.py`（通用惰性收割）、`batch_ops.py`（CLI/HTTP 共用动作层） | [docs/modules/batch-offline.md](docs/modules/batch-offline.md) | 已落地（M0–M3 + M4/M5 核心；剩 M6 收尾，见 [计划](docs/batch-offline-plan.md)） |
+| 通知与推送 | `notify.py`（**通道可插拔**）、`logs.py`（`audit_notify`） | [docs/modules/notify.md](docs/modules/notify.md) | 已写（2026-10-04） |
+| 外部投喂转译层 | `agentmemhub/feed/**`（转换器注册表 + 三段物料）、`cli.py`（`feed` 子命令）、`mcp_server.py`（`feed_add`/`feed_list`/`feed_status`） | [docs/modules/feed.md](docs/modules/feed.md) | **常用文档已适配**：md/txt · 网页（含本地另存）· 公众号 · **PDF** · **DOCX** · **PPTX** · **XLSX** · **XMIND** · **CSV/TSV**；MCP 三个投喂工具与通知已接（M5 ✅）；**面板投喂视图已落地**（清单/四形态投喂/扫描批量/重转/撤下/删除/体检/格式白名单，2026-10-22）；剩 T4 图片 OCR（见 [计划](docs/feed-adapter-plan.md)） |
+| 记忆引擎（内置 rag） | `agentmemhub/rag/**` | [docs/modules/memory-engine.md](docs/modules/memory-engine.md) | 已写（2026-10-23） |
+| 面板后端网关 | `agentmemhub/web/**`、`mdmini.py` | [docs/modules/panel.md](docs/modules/panel.md) | 已写（2026-10-23） |
+| 采集与适配 | `agentmemhub/adapters/**`、`store.py`、`models.py`、`watermarks.py` | [docs/modules/ingest-adapters.md](docs/modules/ingest-adapters.md) | 已写（2026-10-23） |
+| 蒸馏与 LLM 接入 | `distill.py`、`scoring.py`、`llm.py`、`export.py` | [docs/modules/distill-llm.md](docs/modules/distill-llm.md) | 已写（2026-10-23） |
+| 三层对外入口 | `mcp_server.py`、`cli.py`、`console.py`、`health.py` | [docs/modules/interfaces.md](docs/modules/interfaces.md) | 已写（2026-10-23） |
 
 ## 需求
 
@@ -703,7 +936,7 @@ uv run python -m agentmemhub serve
 uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentmemhub.db
 ```
 
-功能：**双标签页**——「统一会话」与「记忆报表」分开呈现，互不混排。
+功能：**四标签页**——「统一会话」「记忆报表」「wiki知识库」「设置」分开呈现，互不混排。
 
 **统一会话页**：Agent/工作空间多选筛选 · 服务端分页列表 · 全文搜索（FTS5+LIKE）· 统计卡与图表 ·
 会话详情抽屉（用户消息/思维链/工具调用/代码补丁 全渲染，按记忆轮次分组）· 标题编辑与会话删除（真实写库）。
@@ -731,6 +964,9 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 - 来源列区分 **`MCP`**（Agent 主动写入的原子记忆，无原始会话、会话列不可点）与采集来源；
   每行标注「召回单元」与「有无原始会话」，避免误点失效链接
 - **语义检索**框（向量+全文混合评分召回，结果可点开原始会话）
+- **记忆时间线**（2026-10-23）：表头的「时间线」按钮弹出明细层，**按天分组倒序**展示原始轨迹
+  （用户输入 / Agent 输出摘要 + 分值 + 轮次锚），滚到底自动加载下一页；
+  适合回答"最近到底记了什么"（报表是**蒸馏后**的终稿，时间线是**原始**输入，两者口径不同）
 - 「记忆操作」工具栏：**提取会话入库 → 清洗数据 → 蒸馏记忆 → 写入记忆**，
   （自动评分按钮已隐藏——蒸馏置信度 + 👍/👎 已覆盖质量把关）
   全部为后台任务；**全局进度条**（两页可见，按百分比分级配色、结果实时回显、同一时刻只允许一个任务）
@@ -738,9 +974,57 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 > 记忆排除（会话级/轮次级「不写入记忆」）的**后端能力保留**（`memory_exclusions` 表、
 > `/api/*/memory-exclusion`、CLI/MCP 均可用），面板 UI 自 P3 起下线——会话列表只做查看/删除/改标题。
 
-![AgentMemHub 主看板 — 筛选栏、统计卡、趋势/占比图与会话列表](./docs/images/dashboard.png)
+**wiki知识库页**（2026-10-18 新增）：展示**页面产物** —— L2 蒸馏知识库 + 外部投喂交付物。
+它与「统一会话」**零耦合**（页面不是会话），后期会话页降级或隐藏都不影响它。
 
-![会话详情抽屉 — 按时间顺序展示事件流，支持多选角色筛选（用户输入/Agent Output/System）](./docs/images/detail.png)
+- **左栏 = 域列表**（22 个域 + 每域页数；来源用 `origin` 区分蒸馏 / 投喂）
+- **右栏 = 页面列表**（标题 · 域 · 类型 · 来源 · 编译时间），点标题即在右栏内打开**渲染后的正文**
+- 顶部：来源切换（全部 / 蒸馏 L2 / 外部投喂）· 标题搜索 · 分页
+- 数据**以磁盘为准**（不查投影表）：投影（`index-pages`）是运维动作、会滞后 ——
+  两者行数**从不保证相等**（曾实测磁盘 424 页 / 投影 399 行）；面板要看的是
+  **知识库本身**，"能否被召回"是另一件事
+- 正文渲染走 `agentmemhub/mdmini.py`（**先转义再套结构**：内容里的 `<script>` 只会显示成文本，
+  链接只放行 http/https）
+- **溯源可点**（2026-10-23）：正文里的 `[m3236]` 就是 `distilled_memories.id`，渲染成可点徽章；
+  点开是速览浮层（正文 / 类型 / 置信 / 来源会话 / 轮次锚 / 去重链），可一键跳到**记忆报表**或
+  **原始会话**。采集库已无该会话时**不给回跳按钮**（给了就是死链）
+
+**运维（同一页的二级视图，2026-10-18）**：`浏览 / 运维 / 投喂` 三态切换，运维页六块 ——
+
+- **健康概览**：两级一致性（`l1_ahead` 时直接提示更新）、覆盖率、死链、待更新/失败计数、
+  触发器状态；**卡住的更新锁**会单独告警（`in_progress` 长期不变 ⇒ 上轮异常退出，
+  并给出处置路径）
+- **待更新记忆**：明细（id / 类型 / 来源 / 置信 / 摘要）+ 勾选后**软删除**
+  （不进 wiki、仍可被召回）或**硬删除**（真删，二次确认）+ 「已忽略」视图与恢复
+- **编译失败**：清单（stage / target / kind / attempts / error）+ **定向补跑**（只跑失败的）
+- **触发器规则**：启用 / 时点 / 脏记忆阈值 / 每日首次 —— **写运行时覆盖，不改 yaml**
+- **离线批处理**：在飞状态 + 推进一段 / 取消 / 重提 + 检测流水
+- **快照与回滚**（2026-10-23）：现有快照列表（时间 / 原因 / 大小）· 立即快照 ·
+  分范围回滚（全部 / 只 wiki 产物 / 只数据库；回滚前自动存保护快照）。超过保留上限时自动删最旧
+
+⚠️ 运维页里的长任务（增量更新 / 补跑 / 批次推进）复用**全局进度条**（`/api/admin/job`），
+任务结束后自动刷新本页；**所有有副作用的动作都走二次确认**。
+
+**投喂视图（2026-10-22）**：素材**登记层**的写入与管理。它与「浏览」是**两层东西** ——
+浏览看"转换后的知识页"，投喂看"转换前的素材"，混在一起就分不清"页面有问题"还是"源有问题"。
+
+- 清单（状态 / 格式 / 质量 / 告警，可只看低质量）+ 详情（三段路径 / 转换器 / 失败原因）
+- **四形态投喂**：本地路径 / 网页链接 / 上传文件（可多选）/ 直接正文
+- **扫目录批量**：先 `scan` **只读预览**（可投喂 N / 被格式挡掉 M + 按后缀分布 + 被挡原因），
+  人确认后再跑
+- 素材级操作：重转 / 撤下（`retract`）/ 删除（可勾选 `purge` 连原件一起删）
+- 体检（P0/P1 分级）与**格式白名单热改**
+- ⚠️ **面板可以删素材，MCP 侧仍然不给删除** —— 那是给 Agent 的接口约束（只给写入与查看），
+  人工勾选 + 二次确认是另一回事，别拿 MCP 的约束去砍面板的能力
+
+**设置页（2026-10-23）**：`agentmemhub.yaml` 的**只读**视图 —— 按模块分组、带原注释、可搜索，
+并标出哪些键正被环境变量覆盖（`AGENTMEMHUB_CONFIG` 等）。
+
+- 数据源是 `agentmemhub/config_doc.py`（**行扫描**，不是 `yaml.safe_load`）：保留每个键自己的注释，
+  `value_raw` 保留 yaml 原文（`'8000'` 的引号、`[...]` 行内列表都不改写）
+- **只读是刻意的**：`PUT /api/config` 不存在，也没有任何代码路径会把配置写回 yaml，
+  所以中文注释**不可能被程序冲掉**。真要做"面板改配置"，正确做法是"按行号文本级定点替换"，
+  而不是把配置拆成 `config/` 多个文件（成本与收益对比见 [`docs/modules/config.md`](docs/modules/config.md) §8）
 
 设计要点：
 
@@ -765,10 +1049,10 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 - [x] 8 个 Agent Adapter（含 src_id/turn_key 稳定锚与系统注入识别）
 - [x] Trae 适配器（最小可用：会话清单 + 每轮快照 diff + 项目记忆；对话正文等官方开放接口）
 - [x] 全量检索 + JSONL/Markdown 导出
-- [x] ~~MemOS bundle 桥接~~（v2.0 起退役为回退路径）
+- [x] ~~MemOS bundle 桥接~~（v2.0 起退役；v2.8 起**代码与配置全部移除**）
 - [x] Web 仪表盘（FastAPI + 原生 JS，服务端分页、事件按需加载、真删改）
 - [x] 交互式控制台入口（start.bat / 无参数菜单）
-- [x] ~~记忆引擎一体化管理（MemOS 平移）~~（v2.0 起改为内置引擎）
+- [x] ~~记忆引擎一体化管理（MemOS 平移）~~（v2.0 起改为内置引擎；v2.8 移除上游）
 - [x] 统一配置体系（agentmemhub.yaml：全路径可配置）
 - [x] MCP 记忆网关（stdio / Streamable HTTP 双传输，供 ZCode/OpenCode 等 harness 检索/写入记忆）
 - [x] 记忆清洗（clean：删除系统注入事件，预览→执行并重建 FTS/计数）
@@ -779,9 +1063,9 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 - [x] 增量同步架构（会话级清单对比 → upsert → watermarks 变更集贯通 clean/push；评分增量优先·定点读零全量枚举；cap 超限回退全量；默认数据目录收进项目内 database/）
 ### v2.0（2026-09-10）记忆引擎自研内核
 
-- [x] 内置记忆引擎 `agentmemhub.rag`（向量化 / 三路混合召回 / 价值评分，进程内直调、无独立服务）
+- [x] 内置记忆引擎 `agentmemhub.rag`（向量化 / 六路通道融合召回 / 价值评分，进程内直调、无独立服务）
 - [x] 引擎接缝 `rag_bridge`：原 MemOS 端点语义的进程内实现，MCP 五工具与面板契约零改动
-- [x] 一行配置回退 MemOS（`backend.backend: memos`），vendored `memOS/` 保留
+- [x] ~~一行配置回退 MemOS~~（**v2.8 已移除**：不可能再回退，见模块文档）
 - [x] 存量零丢失迁移（MemOS 2286 traces / 3836 feedback → 新索引）
 - [x] 记忆写入控制：会话级 + 轮次级排除（后端能力保留；面板 UI 自 P3 起下线，改用双标签页报表）
 - [x] 面板改造为「AgentMemHub 记忆面板」：**双标签页（统一会话 / 记忆报表）**、记忆报表（筛选·展开溯源·⭐加权·反馈·语义检索）、会话↔记忆双向跳转、标题修改与删除防 ingest 覆盖
@@ -790,8 +1074,180 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 - [x] 统一配置 `agentmemhub.yaml`（模型注册/分桶/召回/写入策略/后端开关单文件）
 - [x] 记忆蒸馏（离线，四入口：Python/CLI/start.bat 控制台/面板）：S0 窗口化切片 → S1 段级蒸馏 → S2 同会话合并 → S3 跨会话去重 → S4 投影为可召回 unit；幂等增量、脱敏、失败可重跑
 - [x] 权重体系：来源初始分 → 反馈演化（状态式可撤销）→ 手动加权（⭐ 两态锁定不衰减，有界 boost）
-- [x] **MCP 调用审计**：每次记忆调用（save / search / recent / stats / score）由服务端在**唯一分发点**自动留痕到 `logs/mcp.log`（每次两条 `call`/`result` + `call_id`，含参数摘要、耗时、成败），**不依赖 Agent 记得写**；Agent 可用可选参数 `note` 补充意图（为什么）；查询走 `scripts/mcp_log.py`
+- [x] **MCP 调用审计**：每次调用（记忆：save / search / recent / stats / score；投喂：feed_add / feed_list / feed_status）由服务端在**唯一分发点**自动留痕到 `logs/mcp.log`（每次两条 `call`/`result` + `call_id`，含参数摘要、耗时、成败），**不依赖 Agent 记得写**；Agent 可用可选参数 `note` 补充意图（为什么）；查询走 `scripts/mcp_log.py`
 - [x] 带标签的版本锚点（`v0-pre-rag` 回滚点 / `v1-rag-backend-only` / v2.0）
+
+### v2.1（2026-09-18）LLM Wiki 两级编译 + 调用兜底
+
+**LLM Wiki（碎片 → 可读知识库）**：在 RAG 之外增加一条**派生**路径——把已沉淀的
+蒸馏记忆编译成结构化、互相链接、人和 Agent 都能直接读的 markdown 页面。
+RAG 优化「能不能捞到」，wiki 优化「有没有结构」；**wiki 不会反向改写记忆**。
+
+- [x] 第一级 `scripts/wiki_compile.py`：逐会话把零散记忆归纳成页面（先分组再编译，两段式）
+- [x] 第二级 `scripts/wiki_aggregate.py`：跨会话按主题聚合成实体页（归域 → 域内细分 → 重新编译）
+- [x] `scripts/wiki_linkfix.py`：按「被合并页 → 合并后页」重定向，死链 **92.6% → 0%**
+- [x] 溯源提升：正文引用从**会话内序号** `[n]` 提升为**全局记忆号** `[m<id>]`，可直接追回 `distilled_memories`
+- [x] 实测：223 会话 / 1562 条记忆 → 第一级 **660 页** → 第二级 **20 域 / 233 页**（压缩比 2.8:1）
+
+**调用兜底（长任务可运维性）**：
+
+- [x] 长任务日志 `logs/wiki.log`：每次 LLM 调用（阶段/目标/重试/耗时/**token 增量**）、
+      每会话与每页成败、运行汇总——跑几十分钟的任务必须能从日志回答
+      "跑到哪了、哪些失败了、花了多少、上次断在哪"
+- [x] 失败清单 `agentmemhub/failures.py`：JSONL 落盘、**跨次累积**、按原因分类；
+      `quota`/`auth`/`model` 三类**醒目提示"重试与继续跑都无意义"**
+- [x] **补跑服务接口**（`agentmemhub/wiki.py`）——补跑不能只靠人敲脚本：
+      CLI `python -m agentmemhub wiki --action failures|retry`、
+      HTTP `GET /api/wiki/failures` + `POST /api/wiki/retry`（后台任务）、
+      以及 Python `wiki.retry_failed() / retry_all()`；**CLI 与面板共用同一份实现**
+- [x] **格式修复模型**（`llm.repair_model`）：主模型返回了内容但 JSON 解析失败时，
+      把**原始输出**交给 JSON 遵从性更好的模型转格式——**救回被截断的内容**，
+      而不是丢弃或退化成拼接
+- [x] 记忆内容硬截断：`CONTENT_MAX=120` 从"提示词软约束"改为**代码级兜底**
+      （实测没有任何模型稳定遵守，超标率 38–53%）
+
+**成本优化**：
+
+- [x] LLM 接入切换为 `xiaomi/mimo-v2.5`（实测思维链仅 24–37%，
+      算上推理 token 的真实成本约为 deepseek 的一半）
+- [x] **2026-09-22 随上游上架切换到 `xiaomi/mimo-v2.6-flash`**（价格与 V2.5 持平，
+      同价优先新模型；ID 经实测探测确认，`mimo-v2.6` / `mimo-v2.5-flash` 均不支持）
+- [x] `thinking` / `reasoning_effort` 开关 + 用量与成本统计（`usage_snapshot` / `estimate_cost`）
+- [x] 两级 wiki **各自相对顶层 `llm` 覆盖**，互不牵连
+      （级联会让第一级换 provider 时连带改掉第二级，已实测踩过）
+
+### v2.2（2026-09-20）Wiki 页面进召回面 + 召回调优
+
+**页面层进召回面**：L2 知识页整页投影为 `wiki_<crc32>` 单元，走**页面专属两条
+通道**（子集向量 + 子集全文），与消息层/记忆层**同池融合**——知识库与记忆本质是
+同一种数据，一次检索同时拿到"聚合答案"（page）与"具体结论"（memory）。
+
+- [x] 页面层投影（`agentmemhub/wiki_index.py`：全量对齐、幂等收敛）
+- [x] 召回结果带**层级与来源**标注（`kind` = page/memory/message × `origin` = native/external）
+- [x] **页面准入策略**：高分优先 + 低分字面兜底 + 席位。三轮实测迭代——
+      "分数不能当门槛" → "证据也不能当门槛" → "证据等级绝对优先仍不行"，
+      每次都靠真实查询证伪（详见 `docs/data-architecture.md` §4.2）
+- [x] **召回严格度档位** `rag.retrieval.recall_level`（1 最严格 … 5 最宽松，**默认 3**）：
+      把候选宽度 / 相对阈值 / 终审阈值 / 页面席位收成**一条单调刻度**，带单调性测试守卫
+- [x] **短语精确匹配通道**：`command code`、`api key` 这类**多词英文专名**——
+      此前 12 个含 "Command Code" 的单元有 11 个连候选池都进不去（§4.4）
+- [x] 两处链路级修复：页面**豁免**通用相对阈值；页面保位用**替换**而非追加
+      （否则会被下游"取前 N 条"截断切掉，§4.0）
+- [x] **快照保留份数配置化**（`snapshot.keep`，默认 5，非法值回退默认）+ 补一份全量统一版本快照
+- [x] 文档：新增 **`docs/data-architecture.md`（架构全景·权威）**、
+      `docs/model-selection.md`（模型选型与定价）；六路通道表述同步进 README / ARCHITECTURE / API
+
+### v2.3（2026-09-21）可观测性：三个事实流
+
+**按视角拆日志**——"这条记忆到底写进去没有""这次 wiki 为什么跑 / 为什么没跑"
+此前只能靠翻库和反推代码：
+
+- [x] `logs/mcp.log` **协议层**：谁调了什么工具、参数、耗时、成败（服务端唯一分发点自动写）
+- [x] `logs/memory.log` **数据层**：哪条记忆被写/读、**内容全文**、来自 `mcp`/`http`/`distill`/`cli` 哪条路径
+- [x] `logs/wiki.log` **流水线层**：编译跑到哪、花了多少、断在哪；新增**触发判定留痕**
+      （`trigger_check` 记下 `should_run` / `reasons` / `dirty`）
+- [x] **日志滚动与归档**由 `logs` 配置段统一控制：全局默认 + 单文件覆盖（空则回落）；
+      滚动规则**二选一**（`max_mb > 0` 按大小**优先**，否则按**自然日**首次写入）；
+      归档进 `logs/archive/<日志名>/`，`keep_days` 默认 30
+- [x] 写入点一律"建目录 + 追加打开"：**手工删掉日志文件甚至整个 `logs/` 也能自动重建续记**
+- [x] 同日暴露并修复 wiki **静默落后于记忆却一直显示健康**（三处叠加缺陷 + 一个观测盲区 +
+      一个配置漏配，详见 v2.4 与 `docs/llm-wiki.md`）
+
+### v2.4（2026-09-22）编译可靠性 + 待更新记忆可运维
+
+**把"能跑"钉死成"跑得住、失败也不骗人"**：
+
+- [x] **组级并发**（`wiki.page_workers`，默认 3）+ **结果按组序重排**（完成顺序不确定，
+      直接 append 会让页序漂移、产物不可复现）；实测 **32 组约 48 分钟 → 约 12 分钟**
+- [x] **分组分批**（`wiki.plan_batch_max`，默认 40）：分组是"输出规模随输入线性增长"的调用
+- [x] **429 进程级共享闸门**：撞限就推后"下次允许发请求的时间"，**所有线程一起等**
+      （避免多 worker 各自退避造成的"退避共振"）+ 尊重 `Retry-After`（上限 300s）
+- [x] **`HTTPException` 纳入瞬态重试**：`IncompleteRead`/`RemoteDisconnected` 继承自它
+      而非 `OSError`，旧捕获会漏掉 → "切网丢一组、一次都不重试"
+- [x] **组级失败剔除新基线**：单组失败不影响整会话（对），但会话仍算成功 →
+      那几组记忆照样进新基线、被永久掩盖（实测 23 组失败 3 组、**20 条记忆**差点静默丢弃）
+- [x] **跨进程单飞行锁**（`O_CREAT|O_EXCL` 原子创建 + PID/时间戳 + 陈旧抢占）：
+      `threading.Lock` 只管进程内、`msvcrt.locking` 跨进程无效、不依赖 `psutil`
+- [x] **计时双口径**：墙钟 `seconds` + 累计调用耗时 `call_seconds`
+      （机器休眠会把墙钟撑大，实测一次 L2 显示 9.2 小时而实际约 1 小时）
+- [x] **待更新记忆的查看与删除**：`wiki --action pending|ignored|drop|restore`
+      （HTTP 同步四路由）。**软删除** = 打 `wiki_ignore_at`，记忆仍可召回、只是不进 wiki、
+      可恢复、**不触发重编**；**硬删除** = 真删（蒸馏行 + 投影 + 向量）需 `confirm`，
+      删完**重建 manifest**。**边界**：只处理**尚未进 wiki** 的记忆（删除不产生死链），
+      已进 wiki 的删除属 `docs/memory-deletion.md` 范畴，`drop()` 会拒绝
+- [x] 主模型切换 `xiaomi/mimo-v2.6-flash`（同价优先新模型，V2.5 留作回退位）
+
+### v2.5（2026-10-15 ~ 10-22）外部文档投喂
+
+**知识来源从"对话"扩到"文档"**：
+
+- [x] **素材登记层**（`materials.db`）+ 三段物料（原件快照 / 转换后正文 / 发布页），
+      与自有 wiki **并列**而非从属：不参与蒸馏、不参与 L1/L2 编译，产物落旁路根 `out_feed/`
+- [x] **格式覆盖**：md/txt · 网页（含本地另存）· 公众号 · PDF · DOCX · PPTX · **XLSX** ·
+      **XMIND** · **CSV/TSV**（表格转 markdown 有行列/单元格上限，超限截断并标注）
+- [x] **11 个 HTTP 接口 + 3 个 MCP 工具**（`feed_add` / `feed_list` / `feed_status`）——
+      MCP **只给写入与查看、不给删除**（无人值守约束）；面板人工勾选 + 二次确认，可以删
+- [x] **幂等**（内容哈希判重，重复投喂答"已投喂过"）+ 后缀白名单热改
+- [x] **面板投喂视图**：清单 / 四形态投喂（路径·链接·上传·正文）/ 扫描批量（先只读预览）/
+      重转·撤下·删除 / 体检（P0/P1）/ 白名单
+
+### v2.6（2026-10-18 ~ 10-23）面板 UI 统一重做
+
+**把"后端做完了但没入口"补齐**（62 个路由只调了 18 个 → 64 个路由调了 53 个）：
+
+- [x] **四标签页**：「统一会话」/「记忆报表」/「wiki知识库」/「设置」，各管一层、互不混排
+- [x] **知识库三子视图**：**浏览**（磁盘为准、不查投影）/ **运维**（健康·待更新·失败补跑·
+      触发器热改·离线批次·快照回滚六块）/ **投喂**
+- [x] **记忆溯源可点**：正文里的 `[m3236]` 即 `distilled_memories.id`，点开浮层看
+      类型/置信/来源会话/去重链（`GET /api/memories/{mid}`），可一跳报表、一跳原始会话
+      （采集库已无该会话时**不给回跳按钮**，避免死链）
+- [x] **记忆时间线**：按天分组的原始输入轨迹，与报表的"蒸馏终稿"口径分开
+- [x] **设置页（只读）**：`config_doc.py` 行扫描保留每个键的原注释 + 与
+      `agentmemhub.yaml.example` 做键集体检（缺失/多余/取值不同）；**刻意不提供写接口**
+- [x] **守护**：`scripts/audit_frontend_api.py`（路由↔前端对账）、
+      `tests/test_web_layout.py`（四个视图容器必须挂在 `#app` 之内——
+      **div 数量平衡 ≠ 嵌套正确**，设置页整片空白就是这么来的）
+
+### v2.7（2026-10-23）wiki 增量：从「整会话重编」到「页级重编」
+
+**让"12 条新记忆"不再等于"重编 270 页"** —— 这一轮修的是**放大倍数**，不是功能：
+
+- [x] **直写记忆按日分桶**：`mcp/direct` 原本是**唯一的巨型虚拟会话** —— Agent 经 MCP
+      直写的记忆全部落在同一个 `conversation_id` 上（当时 210 条记忆 / 84 个 L1 页），
+      任何一条新增都会把整会话判脏。改为按天分桶（`distillation.direct_bucket: daily`），
+      脏单位自然降到"新增那一段"；`none` 可退回旧行为
+- [x] **L2 页级重编**：每页 json 的 `from_files` 记录了它由哪些 L1 页合成，增量时只重算
+      **受影响页**、其余页原样保留（合并写盘、空闲序号、崩塌判据都按范围算）。
+      实测 12 条新记忆的 L2 重编范围从 270 页降到 **4 页**
+- [x] **页面投影只重算变化页**：`project_pages()` 原先把整库（当时 626 页）重新 encode
+      并全量 UPDATE —— 每轮固定 188 秒；改为「新页 / 内容或元数据变 / 向量缺失」三判据后
+      **188 秒 → 0.4 秒**（元数据必须一起比：`doc_id` 变而正文没变时也要更新，否则溯源链断）
+- [x] **LLM 调用加总时长上限**：`wiki.l2.llm.max_total_seconds`（默认 600）。socket 超时
+      管不住"一直有数据在来、但整体极慢"的调用（实测有一条 975 秒才返回、且 `ok=True`、
+      `attempt=1`）；改用**工作线程 + `join(上限)`** 硬收口（Windows 上 `socket.shutdown()`
+      中断不了阻塞中的 `recv`，实测无效）。同时消除 `call_json(tries=3)` ×
+      `complete_json(max_retries=2)` 的**重试叠乘**（最坏 9 次）
+- [x] **陈旧「更新进行中」判为异常退出**：`update_started_at` 只是面板展示标记、**不是锁**；
+      真正的互斥是 `logs/wiki_update.lock` 文件锁（`O_CREAT|O_EXCL`，3 小时自动过期）
+      —— 早先把它当成锁告警过一次，是**假告警**
+- [x] **日志与进度口径**：`pages` 报「本轮编译页数」而非「域总页数」（否则会以为编了 200 页
+      实际只编了 2 页）；面板进度条接上 `[N/M]` 百分比，并把细分/域规划/LLM 调用事件一并转出
+
+### v2.8（2026-10-24）彻底移除 MemOS 上游依赖
+
+**让"上游"这个词从项目里消失** —— 不是换个依赖，是把四层不同的东西一层层剥掉：
+
+- [x] **物理实体**：`memOS/` vendored 目录（**931.6 MB / 10856 文件**，一直靠
+      `.gitignore` 挡在库外）
+- [x] **代码链路**：`agentmemhub/memos.py` 整个删除；`rag_bridge.import_bundle`
+      换成单条写入口 `save_memory_trace()`；MCP `memory_save` 不再走 HTTP 推送，
+      改为进程内直写 —— 顺带消掉「写在另一个库、再靠侧车对齐」那条路径
+- [x] **配置面**：`memory.backend` / `memos.*` 全部删除，**没有回退开关**；
+      `/api/engine/*` 保留但语义改为"内置引擎运行时状态"（`memos_daemon` → `engine_api`）
+- [x] **语义锚不动**：`source='memory'` + `conversation_id='mcp'` 这一对历史锚**保留**
+      —— 它在索引库里标记"Agent 直写"的行，与 MemOS 无关；改名要迁移历史数据，不值
+
+判据：`git grep -i memos` 只剩 `engine_api.py` 头部的来历说明与台账文档里的历史叙述。
 
 - [ ] 更多 Agent（Claude Code / Cursor / Gemini CLI / CodeBuddy）
 - [ ] 记忆折叠压缩（超长会话压缩、相邻轮折叠）

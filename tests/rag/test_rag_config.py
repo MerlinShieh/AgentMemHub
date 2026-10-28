@@ -178,3 +178,123 @@ def test_no_env_falls_back_to_project_database(monkeypatch, tmp_path):
     s = load_settings()
     assert s.source_db == PROJECT_ROOT / "database" / "agentmemhub.db"
     assert s.index_db == PROJECT_ROOT / "database" / "session_rag.db"
+
+
+# ── 召回严格度档位（rag.retrieval.recall_level，1 最严格 … 5 最宽松）──────
+
+def _settings_at(tmp_path, retrieval_yaml: str = ""):
+    """在临时根下构造可加载的配置：`rag:` 段内可插入 retrieval 子段。"""
+    _mk_model(tmp_path, "m", 384)
+    body = ("rag:\n  active: m\n" + (retrieval_yaml or "")
+            + "  models:\n    m:\n      path: models/m\n      dim: 384\n")
+    (tmp_path / "agentmemhub.yaml").write_text(body, encoding="utf-8")
+    return load_settings(tmp_path)
+
+
+def test_召回档位_默认均衡(tmp_path):
+    """默认 3（均衡）：实测 1~2 档过于极端（三个查询各只返回 1 条）。"""
+    from agentmemhub.rag.config import DEFAULT_RECALL_LEVEL, RECALL_LEVELS
+    s = _settings_at(tmp_path)
+    assert DEFAULT_RECALL_LEVEL == 3
+    assert s.recall_level == 3
+    assert s.recall_profile["name"] == RECALL_LEVELS[3]["name"] == "均衡"
+
+
+@pytest.mark.parametrize("bad", ['0', '6', '-1', 'abc', '""', 'null'])
+def test_召回档位_非法值回退默认(tmp_path, bad):
+    """档位决定"给不给结果"，写错时回退默认档而不是静默放宽。"""
+    from agentmemhub.rag.config import DEFAULT_RECALL_LEVEL
+    s = _settings_at(tmp_path, f"  retrieval:\n    recall_level: {bad}\n")
+    assert s.recall_level == DEFAULT_RECALL_LEVEL
+
+
+def test_召回档位_按调用方细分_缺省回落全局(tmp_path):
+    """与日志的滚动策略**同一模式**：全局 `recall_level` < `callers.<name>`。
+
+    动机（2026-09-22）：**用户主动检索**希望"尽量不遗漏"（档位高），而
+    **Agent 的自动召回**希望"少而准"（档位低）—— 两者不该共用一条刻度。
+    """
+    from agentmemhub.rag.config import (current_retrieval_caller,
+                                        retrieval_caller)
+    s = _settings_at(tmp_path, "  retrieval:\n    recall_level: 4\n"
+                               "    callers:\n      mcp: 2\n")
+    assert s.global_recall_level == 4
+    assert s.recall_level_for("mcp") == 2
+    assert s.recall_level_for("panel") == 4         # 未配 → 回落全局
+    assert s.recall_level_for("") == 4              # 未标记 → 全局
+
+    assert current_retrieval_caller() == ""
+    with retrieval_caller("mcp"):
+        assert s.recall_level == 2                  # 属性自动跟随 contextvar
+        assert s.recall_profile["level"] == 2
+        assert s.recall_profile["name"] == "严格"
+    assert s.recall_level == 4, "退出上下文后必须恢复"
+
+
+def test_召回档位_细分非法值回落到全局而非默认档(tmp_path):
+    """写错的覆盖项不该比全局更严 —— 否则"想调松"的意图会反向生效。"""
+    s = _settings_at(tmp_path, "  retrieval:\n    recall_level: 5\n"
+                               "    callers:\n      mcp: abc\n      cli: '9'\n")
+    assert s.recall_level_for("mcp") == 5
+    assert s.recall_level_for("cli") == 5
+
+
+def test_页面策略跟随调用方档位(tmp_path):
+    """页面席位/兜底席都来自档位 —— 按调用方分档时它必须一起变。"""
+    from agentmemhub.rag.config import retrieval_caller
+    s = _settings_at(tmp_path, "  retrieval:\n    recall_level: 1\n"
+                               "    callers:\n      panel: 5\n")
+    assert s.page_policy["max_in_results"] == 1      # 档 1
+    assert s.recall_profile["nonpage_literal_seats"] == 1
+    with retrieval_caller("panel"):
+        assert s.page_policy["max_in_results"] == 5  # 档 5
+        assert s.recall_profile["nonpage_literal_seats"] == 4
+
+
+def test_召回档位_展开参数并驱动页面策略(tmp_path):
+    s = _settings_at(tmp_path, "  retrieval:\n    recall_level: 5\n")
+    prof = s.recall_profile
+    assert prof["level"] == 5 and prof["name"] == "最宽松"
+    assert prof["candidate_k"] == 60 and prof["curate_floor"] == 0.7
+    pol = s.page_policy                      # 档位同时驱动页面层
+    assert pol["max_in_results"] == 5 and pol["min_evidence"] == "any"
+
+
+def test_页面策略_显式配置覆盖档位(tmp_path):
+    """想单独调某一项时，yaml 显式项覆盖档位、不必换档。"""
+    s = _settings_at(tmp_path, "  retrieval:\n    recall_level: 5\n"
+                               "    page:\n      max_in_results: 2\n")
+    pol = s.page_policy
+    assert pol["max_in_results"] == 2        # 显式覆盖
+    assert pol["literal_seats"] == 3         # 未覆盖项仍随档位
+
+
+def test_召回档位_逐档放宽是单调的():
+    """1→5 必须**单调**放宽：候选更多、阈值更低、页面席位更多、证据要求更松。
+
+    这条防止将来改档位表时把刻度改乱（例如把 2 档的席位写得比 3 档还多）——
+    档位的唯一价值就是"一个方向上的刻度"，非单调就失去意义。
+    """
+    from agentmemhub.rag.config import RECALL_LEVELS
+    ks, floors, curates, seats, literals, weaken, np_literals = \
+        [], [], [], [], [], [], []
+    for lv in range(1, 6):
+        p = RECALL_LEVELS[lv]
+        ks.append(p["candidate_k"])
+        floors.append(p["threshold_floor"])
+        curates.append(p["curate_floor"])
+        seats.append(p["page"]["max_in_results"])
+        literals.append(p["page"]["literal_seats"])
+        weaken.append(p["page"]["literal_required_below"])
+        np_literals.append(p["nonpage_literal_seats"])
+        assert "min_evidence" not in p["page"], \
+            "档位不得设证据硬门槛——它会连高分页面一起挡掉"
+    assert ks == sorted(ks), "候选宽度应逐档变大"
+    assert floors == sorted(floors, reverse=True), "相对阈值应逐档变松"
+    assert curates == sorted(curates, reverse=True), "终审阈值应逐档变松"
+    assert seats == sorted(seats), "页面席位应逐档变多"
+    assert literals == sorted(literals), "字面兜底席位应逐档变多"
+    assert np_literals == sorted(np_literals), "非页面字面兜底席应逐档变多"
+    assert weaken == sorted(weaken, reverse=True), "字面证据门槛线应逐档降低"
+    assert RECALL_LEVELS[1]["page"]["max_in_results"] == 1
+    assert RECALL_LEVELS[5]["page"]["max_in_results"] == 5
