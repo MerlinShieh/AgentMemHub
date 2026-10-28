@@ -13,7 +13,8 @@
 >
 > **v2.0（2026-09-10）**：记忆后端从上游 MemOS 引擎切换为**自研内置引擎 `agentmemhub.rag`**
 > ——进程内直调，**无独立服务、无端口、无守护进程**，启动面板或跑 `sync` 即完整可用。
-> MCP 五工具与面板契约零改动。召回机制与实测数据见 [docs/recall-fusion.md](docs/recall-fusion.md)。
+> MCP 五工具与面板契约零改动（2026-10 又新增了 3 个投喂工具，原有五工具的签名与返回
+> 一字未改）。召回机制与实测数据见 [docs/recall-fusion.md](docs/recall-fusion.md)。
 >
 > 更早的逐版变更见文末 [Roadmap](#roadmap)。
 
@@ -1213,6 +1214,22 @@ RAG 优化「能不能捞到」，wiki 优化「有没有结构」；**wiki 不�
       —— 早先把它当成锁告警过一次，是**假告警**
 - [x] **日志与进度口径**：`pages` 报「本轮编译页数」而非「域总页数」（否则会以为编了 200 页
       实际只编了 2 页）；面板进度条接上 `[N/M]` 百分比，并把细分/域规划/LLM 调用事件一并转出
+
+### v2.8（2026-10-24）彻底移除 MemOS 上游依赖
+
+**让"上游"这个词从项目里消失** —— 不是换个依赖，是把四层不同的东西一层层剥掉：
+
+- [x] **物理实体**：`memOS/` vendored 目录（**931.6 MB / 10856 文件**，一直靠
+      `.gitignore` 挡在库外）
+- [x] **代码链路**：`agentmemhub/memos.py` 整个删除；`rag_bridge.import_bundle`
+      换成单条写入口 `save_memory_trace()`；MCP `memory_save` 不再走 HTTP 推送，
+      改为进程内直写 —— 顺带消掉「写在另一个库、再靠侧车对齐」那条路径
+- [x] **配置面**：`memory.backend` / `memos.*` 全部删除，**没有回退开关**；
+      `/api/engine/*` 保留但语义改为"内置引擎运行时状态"（`memos_daemon` → `engine_api`）
+- [x] **语义锚不动**：`source='memory'` + `conversation_id='mcp'` 这一对历史锚**保留**
+      —— 它在索引库里标记"Agent 直写"的行，与 MemOS 无关；改名要迁移历史数据，不值
+
+判据：`git grep -i memos` 只剩 `engine_api.py` 头部的来历说明与台账文档里的历史叙述。
 
 - [ ] 更多 Agent（Claude Code / Cursor / Gemini CLI / CodeBuddy）
 - [ ] 记忆折叠压缩（超长会话压缩、相邻轮折叠）

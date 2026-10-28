@@ -32,7 +32,7 @@ AgentMemHub 从所有 Agent Harness（ZCode / OpenCode / Hermes / WorkBuddy / Qw
                                     │ distilled_memories / hashes   │
                                     └──────────────┬───────────────┘
                                                    ▼
-              rag_bridge.py（唯一接缝）→ MCP 五工具 / 面板网关 / CLI / scoring.py
+              rag_bridge.py（唯一接缝）→ MCP 工具（记忆 5 / 投喂 3）/ 面板网关 / CLI / scoring.py
 ```
 
 ## 目录结构
