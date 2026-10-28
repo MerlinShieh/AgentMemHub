@@ -4,6 +4,28 @@
 
 **让任何 Agent 的会话经验，变成可检索、可迁移、可复用的统一记忆资产。**
 
+## 界面一览
+
+> 下列截图用**虚构演示数据**生成（`scripts/make_demo_data.py` 造的「星轨笔记」示例库：
+> 6 个会话 / 21 条记忆 / 11 篇知识库页 / 2 份投喂素材），**不含任何真实会话与配置**。
+> 想自己看：跑该脚本后用 `AGENTMEMHUB_CONFIG=demo/config.yaml` 起一个独立端口。
+
+**① 会话** —— 默认视图：来源徽章、模型、事件数、任务完成度
+
+![会话视图](docs/images/panel-conversations.png)
+
+**② 记忆报表** —— 蒸馏终稿 + 溯源 + ⭐ 手动加权 + 👍👎 反馈
+
+![记忆报表](docs/images/panel-memories.png)
+
+**③ wiki 知识库** —— L2 蒸馏产物与外部投喂页面按域分组；正文里的 `[m3236]` 可点开溯源
+
+![知识库](docs/images/panel-wiki.png)
+
+**④ 设置** —— `agentmemhub.yaml` 的只读视图，保留每个键的原注释，标出被环境变量覆盖的项
+
+![设置](docs/images/panel-settings.png)
+
 > **v2.8（2026-10-24）**：MemOS 上游依赖**彻底移除** —— vendored `memOS/` 目录、
 > `agentmemhub.memos` 模块、`/api/v1/import` 端点、`memos` 子命令、`memory_backend`
 > 与 `memos.*` 配置键全部删除，**不再有回退开关**。
@@ -1003,20 +1025,6 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 - **只读是刻意的**：`PUT /api/config` 不存在，也没有任何代码路径会把配置写回 yaml，
   所以中文注释**不可能被程序冲掉**。真要做"面板改配置"，正确做法是"按行号文本级定点替换"，
   而不是把配置拆成 `config/` 多个文件（成本与收益对比见 [`docs/modules/config.md`](docs/modules/config.md) §8）
-
-### 界面
-
-> 下面是**虚构演示数据**的截图（`scripts/make_demo_data.py` 生成的「星轨笔记」示例库：
-> 6 个会话 / 21 条记忆 / 11 篇知识库页 / 2 份投喂素材），**不含任何真实会话与配置**。
-> 想重新生成：跑该脚本后用 `AGENTMEMHUB_CONFIG=demo/config.yaml` 起一个独立端口即可。
-
-| 会话（默认视图） | 记忆报表 |
-|---|---|
-| ![会话](docs/images/panel-conversations.png) | ![记忆报表](docs/images/panel-memories.png) |
-
-| 知识库 · 浏览 | 设置 · 只读配置 |
-|---|---|
-| ![知识库](docs/images/panel-wiki.png) | ![设置](docs/images/panel-settings.png) |
 
 设计要点：
 
