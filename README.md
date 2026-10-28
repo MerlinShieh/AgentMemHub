@@ -4,18 +4,18 @@
 
 **让任何 Agent 的会话经验，变成可检索、可迁移、可复用的统一记忆资产。**
 
-> **v2.0（2026-09-10）**：记忆后端从上游 MemOS 引擎切换为**自研内置引擎 `agentmemhub.rag`**
-> ——进程内直调，**无独立服务、无端口、无守护进程**，启动面板或跑 `sync` 即完整可用。
-> MCP 五工具与面板契约零改动。召回机制与实测数据见 [docs/recall-fusion.md](docs/recall-fusion.md)。
->
 > **v2.8（2026-10-24）**：MemOS 上游依赖**彻底移除** —— vendored `memOS/` 目录、
 > `agentmemhub.memos` 模块、`/api/v1/import` 端点、`memos` 子命令、`memory_backend`
 > 与 `memos.*` 配置键全部删除，**不再有回退开关**。
 >
-> **v2.1（2026-09-11）**：新增**记忆蒸馏**（离线把会话提炼为结构化记忆，四入口：
-> Python / CLI / start.bat 控制台 / 面板，详见「记忆蒸馏」章节）；**双标签页面板**
-> （统一会话 / 记忆报表，含筛选·展开溯源·⭐加权·👍👎反馈·表头排序·双向跳转）；
-> 权重体系完整落地（来源初始分 → 反馈演化 → 手动加权不衰减）。
+> **v2.7（2026-10-23）**：wiki 增量从「整会话重编」改为**页级增量** —— 会话分桶 +
+> L2 只重编受影响的页 + 投影只算变化页，12 条新记忆的编译耗时从 ~50 分钟降到 ~4 分钟。
+>
+> **v2.0（2026-09-10）**：记忆后端从上游 MemOS 引擎切换为**自研内置引擎 `agentmemhub.rag`**
+> ——进程内直调，**无独立服务、无端口、无守护进程**，启动面板或跑 `sync` 即完整可用。
+> MCP 五工具与面板契约零改动。召回机制与实测数据见 [docs/recall-fusion.md](docs/recall-fusion.md)。
+>
+> 更早的逐版变更见文末 [Roadmap](#roadmap)。
 
 ## 模型准备（首次使用必读）
 
@@ -297,8 +297,6 @@ python -m agentmemhub sync
 - `conversations` — 会话元数据（source / id / title / cwd / model / 时间）
 - `events` — 全量事件流（role / content / tool / reasoning / patch / shell，含 `raw_json` 原始保底）
 - `events_fts` — FTS5 全文索引（英文检索）
-
-![记忆报表页 — 状态/类型/置信/来源筛选、表头排序、展开溯源与 ⭐ 加权](./docs/images/memory-report.png)
 
 **记忆索引库**（`database/session_rag.db`，由内置引擎管理）：
 
@@ -1005,9 +1003,9 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
   所以中文注释**不可能被程序冲掉**。真要做"面板改配置"，正确做法是"按行号文本级定点替换"，
   而不是把配置拆成 `config/` 多个文件（成本与收益对比见 [`docs/modules/config.md`](docs/modules/config.md) §8）
 
-![AgentMemHub 主看板 — 筛选栏、统计卡、趋势/占比图与会话列表](./docs/images/dashboard.png)
-
-![会话详情抽屉 — 按时间顺序展示事件流，支持多选角色筛选（用户输入/Agent Output/System）](./docs/images/detail.png)
+> 面板截图暂缺。原先的 `dashboard.png` / `detail.png` / `memory-report.png` 拍于
+> 2026-09，是**双标签页**时代的界面，与现在的四标签页 + 知识库三子视图差得太远，
+> 留着只会误导，已一并移除。想看实际界面：`uv run python -m agentmemhub serve`。
 
 设计要点：
 
