@@ -477,6 +477,16 @@ def _csv_ids(v: str) -> set[str]:
     return {x.strip() for x in v.split(",") if x.strip()}
 
 
+def _score_rc(r: dict) -> int:
+    """评分结果 → 退出码。
+
+    为什么不能只打印不返回：`score` 常被 cron / 脚本调用，**成败只能靠退出码**。
+    原先哪怕 100% 评估失败（比如 key 失效全是 401）也返回 0，于是自动化侧永远
+    认为"评分正常"，等到发现库里 `r_human` 一直是空的时候已经过了很久。
+    """
+    return 1 if int(r.get("errors") or 0) > 0 else 0
+
+
 def cmd_score(args) -> None:
     """LLM 批量自动评分历史记忆（三轴评估 → feedback 写入）。"""
     if args.pending:
@@ -507,7 +517,8 @@ def cmd_score(args) -> None:
         except Exception as e:
             _stdout(f"评分失败（队列保留，重跑 score --pending 即可重试）：{e}")
             _cli_log(f"score --pending 失败 → {e}", level="error")
-        return
+            return 1
+        return _score_rc(r)
     if args.unscored_count:
         from agentmemhub.scoring import count_unscored
         try:
@@ -517,7 +528,8 @@ def cmd_score(args) -> None:
         except Exception as e:
             _stdout(f"统计失败：{e}")
             _cli_log(f"score --unscored-count 失败 → {e}", level="error")
-        return
+            return 1
+        return 0
     if args.sync_episodes:
         from agentmemhub.scoring import sync_episode_r_task
         try:
@@ -527,7 +539,8 @@ def cmd_score(args) -> None:
         except Exception as e:
             _stdout(f"同步失败：{e}")
             _cli_log(f"score --sync-episodes 失败 → {e}", level="error")
-        return
+            return 1
+        return 0
     from agentmemhub.scoring import run_score_all, run_score_incremental
 
     def _emit(s: str) -> None:
@@ -550,9 +563,15 @@ def cmd_score(args) -> None:
                 + (f" missing={r['missing']}" if r.get("missing") else "")
                 + ("（dry-run，未写入）" if r["dryRun"] else ""))
         _cli_log(f"score({mode}) → {r}")
+        if int(r.get("errors") or 0) > 0:
+            _stdout("提示：失败原因见上方逐条输出。若全是 401 / Unauthorized，"
+                    "是 LLM 凭据或端点失效（agentmemhub.yaml 的 llm 段），"
+                    "与评分逻辑无关 —— 蒸馏用的是同一条链路，会一起失败。")
     except Exception as e:
         _stdout(f"评分失败：{e}")
         _cli_log(f"score 失败 → {e}", level="error")
+        return 1
+    return _score_rc(r)
 
 
 def cmd_distill(args) -> None:
