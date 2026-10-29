@@ -670,9 +670,28 @@ def all_traces() -> list[dict]:
     return out
 
 
-def turn_refs() -> list[str]:
-    """全量轮次锚 id 列表（scoring list_trace_ids 的 rag 等价物）。"""
-    return [t["id"] for t in all_traces()]
+def turn_refs(*, scorable_only: bool = True) -> list[str]:
+    """全量轮次锚 id 列表（scoring list_trace_ids 的 rag 等价物）。
+
+    `scorable_only=True`（默认）只返回**真能评的**：评分把 user/agent 正文
+    截断后送 LLM，正文为空的条目进 `evaluate_trace` 第一句就
+    `return "neutral"` —— 不烧 LLM 钱，但会被写进已评清单（`scored_traces.json`），
+    并且让 `score --unscored-count` 的数字虚高。
+
+    2026-10-29 实测：3867 条里 **1197 条**是这种空壳 —— wiki 页面 636、
+    `dst_` 蒸馏投影 236（正文在 `distilled_memories`，`units.text` 为空）、
+    纯工具轮次 325。剔除后 `--unscored-count` 从 3837 降到约 2670。
+
+    判据只用「有没有正文」，不按 `source` 硬列：将来接新数据源不必回来改这里。
+    显式点名评某条（`score --ids` / `--pending`）不受此限 —— 那是调用方的意图。
+    """
+    out: list[str] = []
+    for t in all_traces():
+        if scorable_only and not ((t.get("userText") or "").strip()
+                                  or (t.get("agentText") or "").strip()):
+            continue
+        out.append(t["id"])
+    return out
 
 
 def sync_episode_r_task(trace_ids=None) -> dict:
