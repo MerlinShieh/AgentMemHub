@@ -161,6 +161,25 @@
 
 ## 已修（按时间倒序，便于以后不再重复排查）
 
+**2026-10-29 评分链路（`score` 一直「不生效」的真实原因）**
+- `fix(cli)` `cmd_score` 三个分支原来**只打印不返回**，`main()` 拿到 `None` 就当成功 ——
+  于是哪怕 100% 评估失败（key 失效时全是 401）退出码也是 0，cron / 脚本永远认为评分正常。
+  新增 `_score_rc()`：只看 `errors`（`evaluated=0` 而 `skipped` 很大属正常过滤，不算失败）；
+  异常路径一律 `return 1`；有失败时多打一行直接指向 `agentmemhub.yaml` 的 `llm` 段。
+- `fix(rag)` `turn_refs()` 不再把**没有正文的条目**算进评分枚举。它们进
+  `evaluate_trace` 第一句就 `return "neutral"`：不烧 LLM 钱，但会被写进
+  `scored_traces.json` 的已评清单，还让 `--unscored-count` 虚高。
+  实测 3867 条里 **1197 条**是这种空壳（wiki 页面 636 / `dst_` 蒸馏投影 236 /
+  纯工具轮次 325）；判据只用「有没有正文」，不按 `source` 硬列。
+  剔除后 `--unscored-count` 从 3837 → **2642**。
+  `score --ids` / `--pending` 显式点名的不受限（`scorable_only=False`）。
+- **不是代码缺陷但必须记下的现场**：本次「评分全失败」的直接原因是 **LLM 凭据 401**
+  （`api.commandcode.ai` + `xiaomi/mimo-v2.6-flash` 那把 key 被拒），
+  而蒸馏走同一条链路 —— 所以它是"评分坏了"也是"蒸馏坏了"。
+  `~/.dsh/settings.yaml` 已不存在（只剩 `settings.yaml.imported`），
+  `scripts/sync_llm_from_dsh.py` 因此失效。实测可用的替代：Deepseek 官方
+  `deepseek-v4-flash`、智谱 `glm-5.3-flash`。
+
 **2026-10-26 第四轮（第一章 8 条）**
 - `fix(console)` `[7] 停止看板` 不再误杀：兜底路径按端口拿到 PID 后**先问"你是谁"**
   （`_process_cmdline` + `_looks_like_dashboard`，要求命令行同时含 `agentmemhub` 与 `serve`），

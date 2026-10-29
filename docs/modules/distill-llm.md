@@ -38,6 +38,28 @@
 | `POST /api/admin/distill` | 面板长任务 |
 | Python | `distill.run(...)`、`distill.save_direct_memory(...)`（MCP 直写走这里） |
 
+### 2.1 评分的枚举口径（容易误解，写清楚）
+
+`score` 评的**不是「一条记忆」，而是「一轮对话」**：`rag_bridge.all_traces()` 把
+`units` 按 `_group_key` 聚合成轮次（`source='memory'` 一个单元一轮，其余按
+`turn_key` 分组），一条 trace 对应一轮 user/assistant 问答。
+
+送 LLM 的东西是截断后的正文（用户侧 800 字、助手侧 1200 字）+ 一个要求输出
+`{"verdict": ..., "reason": ...}` 的 system prompt；**只做三分类，不打分**。
+极性经 `POST /api/v1/feedback`（`channel=explicit`、`magnitude=1.0`）落库后，
+`rag/memstore.put_feedback` 按 `value = clamp(Σ(magnitude×sign) / Σ(magnitude), -1, 1)`
+重算 —— 所以一条 positive 落库就是 `1.0`、negative 是 `-1.0`。
+
+两个容易踩的边界（2026-10-29 实测校准）：
+
+- **没有正文的条目不算可评**。`turn_refs()` 默认剔除它们（3867 条里有 1197 条：
+  wiki 页面 636 / `dst_` 蒸馏投影 236 / 纯工具轮次 325）。它们进 `evaluate_trace`
+  会直接判 neutral，不烧 LLM 钱但会污染已评清单与 `--unscored-count`。
+- **蒸馏出来的结构化记忆（`dst_`）评不到**：正文在 `distilled_memories.content`，
+  `units.text` 是空的，它只有 `BASE_VALUE_DISTILLED = 0.3` 的起点分，靠真实召回
+  与 👍/👎 演化。而 MCP 直写的原子记忆（`source='memory'`，241 条）正文就在
+  `units.text` 里，能正常走三轴投票。
+
 ## 3. 数据流与不变量
 
 ### 3.1 一条记忆的一生
