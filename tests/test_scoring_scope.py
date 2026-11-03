@@ -36,3 +36,18 @@ def test_count_unscored与评分枚举同口径(monkeypatch):
     monkeypatch.setattr(rag_bridge, "all_traces", lambda: list(_FAKE))
     monkeypatch.setattr(scoring, "_load_scored", lambda: {"line:a"})
     assert scoring.count_unscored() == 1        # 只剩 mcp_y 未评
+
+
+def test_turn_refs去重(monkeypatch):
+    """多个轮次组可能共享同一个 trace id（锚点的 legacy_id/src_id 相同）。
+
+    下游 `traces_by_ids` 是按 turn_key 去重的 —— 同一个 id 只会评一次。
+    这里不去重的话 `--unscored-count` 会虚高（实测 2642 vs 真实 2340）。
+    """
+    fake = [
+        {"id": "line:a", "userText": "问", "agentText": "答"},
+        {"id": "line:a", "userText": "问", "agentText": "答"},
+        {"id": "line:b", "userText": "问2", "agentText": "答2"},
+    ]
+    monkeypatch.setattr(rag_bridge, "all_traces", lambda: list(fake))
+    assert rag_bridge.turn_refs() == ["line:a", "line:b"]

@@ -684,13 +684,23 @@ def turn_refs(*, scorable_only: bool = True) -> list[str]:
 
     判据只用「有没有正文」，不按 `source` 硬列：将来接新数据源不必回来改这里。
     显式点名评某条（`score --ids` / `--pending`）不受此限 —— 那是调用方的意图。
+
+    **去重**：多个轮次组可能共享同一个 `legacy_id`（`_rows_to_traces` 拿锚点的
+    legacy_id/src_id 当 trace id，不同会话里同源写入会撞），实测 2670 条里有
+    302 条重复。不去重会让 `--unscored-count` 虚高、`score --all` 的进度分母也虚高
+    （下游 `traces_by_ids` 是按 turn_key 去重的，同一 id 只会评一次）。
     """
     out: list[str] = []
+    seen: set[str] = set()
     for t in all_traces():
         if scorable_only and not ((t.get("userText") or "").strip()
                                   or (t.get("agentText") or "").strip()):
             continue
-        out.append(t["id"])
+        tid = t["id"]
+        if tid in seen:
+            continue
+        seen.add(tid)
+        out.append(tid)
     return out
 
 
