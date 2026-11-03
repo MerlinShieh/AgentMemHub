@@ -40,25 +40,36 @@
 
 ### 2.1 评分的枚举口径（容易误解，写清楚）
 
-`score` 评的**不是「一条记忆」，而是「一轮对话」**：`rag_bridge.all_traces()` 把
-`units` 按 `_group_key` 聚合成轮次（`source='memory'` 一个单元一轮，其余按
-`turn_key` 分组），一条 trace 对应一轮 user/assistant 问答。
+`score` 评的是**「一个可独立判断的单元」**，有两种：对话轮和单条记忆。
 
-送 LLM 的东西是截断后的正文（用户侧 800 字、助手侧 1200 字）+ 一个要求输出
+`rag_bridge.all_traces()` 把 `units` 按 `_group_key` 聚合：`role='distilled'`
+（蒸馏产物）和 `source='memory'`（Agent 直写）**各自一条一轮**，其余按
+`turn_key` 聚成一轮 user/assistant 问答。
+
+送 LLM 的东西是截断后的正文（800/1200 字）+ 一个要求输出
 `{"verdict": ..., "reason": ...}` 的 system prompt；**只做三分类，不打分**。
 极性经 `POST /api/v1/feedback`（`channel=explicit`、`magnitude=1.0`）落库后，
 `rag/memstore.put_feedback` 按 `value = clamp(Σ(magnitude×sign) / Σ(magnitude), -1, 1)`
 重算 —— 所以一条 positive 落库就是 `1.0`、negative 是 `-1.0`。
 
-两个容易踩的边界（2026-10-29 实测校准）：
+四个容易踩的边界（2026-10-29 / 11-03 实测校准）：
 
-- **没有正文的条目不算可评**。`turn_refs()` 默认剔除它们（3867 条里有 1197 条：
-  wiki 页面 636 / `dst_` 蒸馏投影 236 / 纯工具轮次 325）。它们进 `evaluate_trace`
-  会直接判 neutral，不烧 LLM 钱但会污染已评清单与 `--unscored-count`。
-- **蒸馏出来的结构化记忆（`dst_`）评不到**：正文在 `distilled_memories.content`，
-  `units.text` 是空的，它只有 `BASE_VALUE_DISTILLED = 0.3` 的起点分，靠真实召回
-  与 👍/👎 演化。而 MCP 直写的原子记忆（`source='memory'`，241 条）正文就在
-  `units.text` 里，能正常走三轴投票。
+- **蒸馏记忆的正文在 `units.text` 里，不在 `distilled_memories` 里**。
+  `_project_one` 写入的是 `f"{topic}：{content}"`，实测 1916 行**全部有正文**。
+  早期文档里「`dst_` 正文为空所以评不到」的说法是错的 —— 真正的原因是下面两条。
+- **`role='distilled'` 必须单独成轮**。若不特判，它的 `turn_key` 会让它并进原
+  对话轮：一次评分覆盖同轮的多条记忆（实测一轮最多 3 条蒸馏行），而且评的是
+  对话质量而不是这条记忆的价值。
+- **组内没有 user/assistant 时，正文要兜到 `agentText`**。`_rows_to_traces` 只认
+  这两种 role，蒸馏行两者都不是，不兜底就会两个字段都空 → 被 `turn_refs` 当
+  空壳剔除。559 条 `turn_key` 为空的蒸馏记忆正是这样「评不到」的。
+- **没有正文的条目不算可评**。`turn_refs()` 默认剔除它们（wiki 页面 636 /
+  纯工具轮次 325 等）。它们进 `evaluate_trace` 会直接判 neutral，不烧 LLM 钱
+  但会污染已评清单与 `--unscored-count`。
+
+`trace["kind"]` 区分两种形态：`memory`（记忆结论，prompt 用「记忆内容：…」）
+与 `dialogue`（对话，prompt 用「用户：… 助手：…」）—— 把一条结论硬塞进对话
+模板会误导三轴判断（"任务有没有完成"对一条记忆没有意义）。
 
 ## 3. 数据流与不变量
 

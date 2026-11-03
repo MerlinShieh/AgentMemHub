@@ -161,6 +161,24 @@
 
 ## 已修（按时间倒序，便于以后不再重复排查）
 
+**2026-11-03 蒸馏记忆纳入评分（一条被写错的判断）**
+- 之前的结论是「`dst_` 评不到，因为正文在 `distilled_memories`、`units.text` 是空的」
+  —— **判断错了**。实测 `src_id LIKE 'dst_%'` 共 1916 行，`text` 为空 **0 行**
+  （`_project_one` 写入的是 `f"{topic}：{content}"`）。真正原因是两处盲区：
+  1. `_group_key` 只特判 `source=='memory'`，蒸馏行的 `turn_key` 让它**并进原对话轮**
+     ⇒ 一次评分覆盖同轮的多条记忆（实测一轮最多 3 条蒸馏行），而且评的是对话质量
+     而不是这条记忆的价值；
+  2. `_rows_to_traces` 只从 `role in (user, assistant)` 取正文，蒸馏行两者都不是
+     ⇒ 两个字段都空 ⇒ 被 `turn_refs` 当空壳剔除（559 条 `turn_key` 为空的正是这样）。
+- 修法：`role=='distilled'` 与 `source=='memory'` 一样**独立成轮**；组内没有
+  user/assistant 时把正文兜到 `agentText`；trace 新增 `kind`（`memory` / `dialogue`），
+  `evaluate_trace` 按 `kind` 选 prompt 形态 —— 把一条结论硬塞进「用户/助手」模板会
+  让模型按对话完成度判，三轴里两轴失效。
+- 顺带对齐 `traces_by_ids` 的口径：它原来按 `turn_key` 展开，`score --ids <某条记忆>`
+  会顺带评掉同轮全部对话与同伴记忆（实测点 1 条评了 8 条）；现在只评 1 条。
+- 效果：`--unscored-count` 2340 → **4889**；记忆类 trace **2157** 条
+  （`dst_` 蒸馏 1916 + Agent 直写 241），此前它们只有 0.3 / 0.4~0.8 的起点分。
+
 **2026-10-29 评分链路（`score` 一直「不生效」的真实原因）**
 - `fix(cli)` `cmd_score` 三个分支原来**只打印不返回**，`main()` 拿到 `None` 就当成功 ——
   于是哪怕 100% 评估失败（key 失效时全是 401）退出码也是 0，cron / 脚本永远认为评分正常。
