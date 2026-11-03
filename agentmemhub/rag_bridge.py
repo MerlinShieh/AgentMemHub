@@ -116,8 +116,12 @@ def resolve_unit_id(conn: sqlite3.Connection, ref: str) -> Optional[int]:
 
 
 def _group_key(r: sqlite3.Row) -> str:
-    if r["source"] == "memory":
-        return f"unit:{r['id']}"          # 原子记忆一单元一轮
+    # 蒸馏记忆（role='distilled'）与 Agent 原子记忆**各自成轮**：
+    # 它们的正文是"一条结论"，不是一段对话。
+    # 若按 turn_key 并进原对话轮，一次评分会覆盖同轮的多条记忆（实测一轮最多
+    # 3 条蒸馏行），而且评的是对话质量而不是这条记忆本身的价值。
+    if r["role"] == "distilled" or r["source"] == "memory":
+        return f"unit:{r['id']}"          # 一条记忆一轮
     if r["turn_key"]:
         return f"t:{r['source']}/{r['conversation_id']}/{r['turn_key']}"
     return f"unit:{r['id']}"
@@ -134,6 +138,15 @@ def _rows_to_traces(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
         users = [r for r in g if r["role"] == "user"]
         agents = [r for r in g if r["role"] == "assistant"]
         anchor = users[0] if users else g[0]
+        user_text = "\n".join(r["text"] for r in users)
+        agent_text = "\n".join(r["text"] for r in agents)
+        if not user_text and not agent_text:
+            # 组内既没有 user 也没有 assistant（蒸馏记忆这类「一条结论一轮」）：
+            # 正文本身就是被评估对象，放进 agentText 让评分拿得到。
+            # 缺了这一步，`role='distilled'` 的行会因两个字段都空而被
+            # `turn_refs` 当空壳剔除 —— 蒸馏记忆就永远评不到。
+            agent_text = "\n".join(
+                r["text"] for r in g if (r["text"] or "").strip())
         vals = [r["value"] for r in g if r["value"] is not None]
         manuals = [r["manual_value"] for r in g if r["manual_value"] is not None]
         out.append({
@@ -141,8 +154,12 @@ def _rows_to_traces(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
             "ts": int(anchor["time"] or 0) * 1000,
             "episodeId": anchor["conversation_id"],
             "sessionId": anchor["conversation_id"],
-            "userText": "\n".join(r["text"] for r in users),
-            "agentText": "\n".join(r["text"] for r in agents),
+            "userText": user_text,
+            "agentText": agent_text,
+            # 评分输入形态：对话轮按「用户/助手」拼，记忆按「记忆内容」给 ——
+            # 把一条蒸馏结论硬塞进「用户：… 助手：…」的模板会误导三轴判断。
+            "kind": ("memory" if (anchor["role"] == "distilled"
+                                  or anchor["source"] == "memory") else "dialogue"),
             "summary": (anchor["title"] or "")[:200],
             # 手动加权优先于自动聚合值（与 ValueStore.values 的读取口径一致）
             "value": manuals[0] if manuals else (vals[0] if vals else 0.0),
@@ -739,9 +756,13 @@ def traces_by_ids(ids: set[str]) -> list[dict]:
             if uid is None:
                 continue
             row = conn.execute(
-                "SELECT source, conversation_id, turn_key FROM units WHERE id=?",
+                "SELECT source, conversation_id, turn_key, role FROM units WHERE id=?",
                 (uid,)).fetchone()
-            if row["turn_key"] and row["source"] != "memory":
+            # 与 `_group_key` 保持同一口径：蒸馏记忆是「一条记忆一轮」，
+            # 不能按 turn_key 展开回原对话（否则 `score --ids <某条记忆>`
+            # 会顺带评掉同轮的全部对话与其同伴记忆 —— 实测点 1 条评了 8 条）。
+            if (row["turn_key"] and row["source"] != "memory"
+                    and row["role"] != "distilled"):
                 key = f"t:{row['source']}/{row['conversation_id']}/{row['turn_key']}"
                 if key in seen:
                     continue

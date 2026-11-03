@@ -184,11 +184,18 @@ def evaluate_trace(trace: dict, llm_cfg: dict, timeout: float = 45) -> str:
     agent_text = _scrub_text((trace.get("agentText") or "").strip())[:1200]
     if not user_text and not agent_text:
         return "neutral"
+    # 记忆类（蒸馏结论 / Agent 原子记忆）的正文是「一条结论」，不是对话。
+    # 套「用户：… 助手：…」模板会让模型按"对话有没有完成任务"去判，
+    # 评错对象 —— 单条记忆该问的是"这条结论值不值得留下"。
+    if trace.get("kind") == "memory":
+        payload = f"记忆内容：\n{agent_text or user_text}"
+    else:
+        payload = f"任务内容：\n用户：{user_text}\n助手：{agent_text}"
     body = {
         "model": llm_cfg["model"],
         "messages": [
             {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": f"任务内容：\n用户：{user_text}\n助手：{agent_text}"},
+            {"role": "user", "content": payload},
         ],
         "temperature": 0.1,
         "max_tokens": 80,
