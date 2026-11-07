@@ -604,14 +604,16 @@ def cmd_stale(args) -> int:
         _stdout(f"没有「创建满 {days} 天且最近 {days} 天零召回命中」的记忆。")
         return 0
     _stdout(f"「创建满 {days} 天且最近 {days} 天零召回命中」的记忆共 {len(rows)} 条"
-            "（最老优先；仅报告，不删除。命中统计自 2026-11-06 起积累，此前老记忆"
-            "均视为未命中，属预期）：\n")
+            "（按 价值×新鲜度 升序，最该复核的在前；仅报告，不删除。"
+            "命中统计自 2026-11-06 起积累，此前老记忆均视为未命中，属预期）：\n")
     for r in rows:
         t = _dt.datetime.fromtimestamp(int(r["time"])).strftime("%Y-%m-%d")
         val = r["value"]
         val_s = "?" if val is None else f"{float(val):.2f}"
+        fresh = r.get("freshness")
+        fresh_s = "" if fresh is None else f"  fresh={float(fresh):.2f}"
         text = (r["text"] or "").replace("\n", " ")
-        _stdout(f"  [{r['id']}] {r['src_id']}  {t}  value={val_s}"
+        _stdout(f"  [{r['id']}] {r['src_id']}  {t}  value={val_s}{fresh_s}"
                 f"  hits={r['hit_count']}  {text[:80]}")
     return 0
 

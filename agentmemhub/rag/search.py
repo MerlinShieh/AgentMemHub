@@ -679,6 +679,25 @@ def _fetch_units(conn: sqlite3.Connection, ids: list[int]) -> dict[int, sqlite3.
     return {r["id"]: r for r in rows}
 
 
+def _recall_anchors(index_db, unit_ids: list[int]) -> dict[int, int]:
+    """取「最后命中时刻」映射（衰减续命锚点）；读失败一律返回空。
+
+    命中统计是旁路观测（见 `recall_stats` 模块头）：检索主路径绝不能因为它
+    的读写问题而失败或变慢——所以这里吞掉所有异常，让锚点回落创建时间。
+    """
+    try:
+        from .recall_stats import last_hit_times
+        return last_hit_times(index_db, unit_ids)
+    except Exception:                      # noqa: BLE001 —— 旁路必须无害
+        return {}
+
+
+def _decay_anchor(created_ts, last_hit_ts):
+    """衰减锚点 = max(创建时间, 最后命中时间)；两个都缺失返回 None（不衰减）。"""
+    anchor = max(int(created_ts or 0), int(last_hit_ts or 0))
+    return anchor or None
+
+
 def expand_turn(conn: sqlite3.Connection, source: str, conversation_id: str,
                 turn_key: str | None) -> list[tuple[str, str]]:
     if not turn_key:
@@ -812,8 +831,13 @@ def hybrid_search(
         if value_provider is not None and rel:
             from .ext import apply_value_boost
 
-            meta = {uid: (m["time"],) for uid, m in
-                    _fetch_units(conn, list(rel)).items()}
+            units_meta = _fetch_units(conn, list(rel))
+            # 衰减锚点 = max(创建时间, 最后命中)（生命周期设计 M1）：
+            # 「被用过」的记忆续命，老而不用的才真正走向衰减。命中库读失败
+            # 只会让锚点回落创建时间（`_recall_anchors` 内部吞掉并返回空）。
+            anchors = _recall_anchors(settings.index_db, list(units_meta))
+            meta = {uid: (_decay_anchor(m["time"], anchors.get(uid)),)
+                    for uid, m in units_meta.items()}
             values = value_provider.values(list(rel))
             rel, dropped_low = apply_value_boost(
                 rel, meta, values, include_low_value=include_low_value,

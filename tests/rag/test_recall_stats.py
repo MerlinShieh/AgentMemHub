@@ -9,7 +9,7 @@ import sqlite3
 import time
 
 from agentmemhub.rag.recall_stats import (
-    hits_db_path, record_hits, stale_memories)
+    hits_db_path, last_hit_times, record_hits, stale_memories)
 from agentmemhub.rag.ingest import ensure_vec_table, open_index
 
 
@@ -100,6 +100,78 @@ def test_stale_report_with_unit_values(tmp_path):
     assert rows and rows[0]["value"] == 0.3 and rows[0]["priority"] == 0.3
 
 
+def test_last_hit_times_readonly_and_missing(tmp_path):
+    """锚点查询：库缺失返回空（冷启动回落创建时间）、只读不写。"""
+    p, conn = _mk_index(tmp_path)
+    conn.close()
+    assert last_hit_times(p, [1, 2]) == {}          # 命中库尚不存在
+    record_hits(p, [1, 99], ts=NOW)
+    got = last_hit_times(p, [1, 2])
+    assert got == {1: NOW}                         # 只有记录过的命中才会出现
+    assert last_hit_times(p, []) == {}
+
+
+def test_stale_report_freshness_column(tmp_path):
+    """报表带 freshness 与 stale_score，并按 value×freshness 升序。
+
+    注意报表筛的是「最近 N 天零命中」，所以真正体现续命锚点的场景是
+    **很久以前命中过一次**（落在窗口外、但比创建时间新）。
+    """
+    p, conn = _mk_index(tmp_path)
+    with conn:
+        _insert_unit(conn, 1, role="distilled", src_id="dst_never",
+                     text="老且从不被用", t=NOW - 400 * 86400)
+        _insert_unit(conn, 2, role="distilled", src_id="dst_oldhit",
+                     text="老但在窗口外命中过", t=NOW - 400 * 86400)
+    conn.close()
+    # 2 号在 200 天前命中过：已超出 90 天零命中窗口（仍在清单里），锚点更新
+    record_hits(p, [2], ts=NOW - 200 * 86400)
+    rows = stale_memories(p, days=90, limit=50)
+    by_id = {r["id"]: r for r in rows}
+    assert set(by_id) == {1, 2}
+    assert by_id[2]["freshness"] > by_id[1]["freshness"], \
+        "窗口外命中过的比从未命中的新鲜（锚点前移）"
+    assert rows[0]["id"] == 1, "更低 stale_score 的排最前"
+    assert {"freshness", "stale_score"} <= set(rows[0])
+
+
+def test_search_anchor_revives_hit_memory(project_settings, embedder, tmp_path):
+    """端到端（M1）：老记忆若最近被命中过，衰减锚点被刷新 → boost 更高。
+
+    注意用**独立子目录**：`hits_db_path` 只替换文件名，同目录下的多个索引库
+    会共用同一个 recall_hits.db（生产中索引库固定是 session_rag.db，不冲突）。
+    """
+    import dataclasses
+
+    from agentmemhub.rag.search import _decay_anchor, _recall_anchors
+
+    active = project_settings.active_spec
+    sub = tmp_path / "anchor_case"
+    sub.mkdir()
+    st = dataclasses.replace(project_settings, index_db=sub / "idx_anchor.db")
+    text = "续命锚点探针：老记忆被召回后衰减锚点应刷新"
+    conn = open_index(st.index_db)
+    try:
+        ensure_vec_table(conn, active)
+        with conn:
+            cur = conn.execute(
+                "INSERT INTO units(source, conversation_id, seq, role, turn_key,"
+                " src_id, time, title, text, chars)"
+                " VALUES('memory','conv',1,'user','tk','mcp_anchor',"
+                f"{OLD},'探针',?,?)", (text, len(text)))
+        uid = cur.lastrowid
+    finally:
+        conn.close()
+
+    # 未命中：锚点回落创建时间
+    assert _recall_anchors(st.index_db, [uid]) == {}
+    assert _decay_anchor(OLD, None) == OLD
+    # 命中后：锚点前移到最近命中时刻（续命）
+    record_hits(st.index_db, [uid], ts=NOW - 60)
+    anchors = _recall_anchors(st.index_db, [uid])
+    assert _decay_anchor(OLD, anchors.get(uid)) == NOW - 60
+
+
 def test_search_records_hits(project_settings, embedder, tmp_path):
     """埋点：hybrid_search 的最终命中自动落进独立命中库；检索不受统计影响。"""
     import dataclasses
@@ -107,8 +179,9 @@ def test_search_records_hits(project_settings, embedder, tmp_path):
     from agentmemhub.rag.search import hybrid_search
 
     active = project_settings.active_spec
-    st = dataclasses.replace(project_settings,
-                            index_db=tmp_path / "idx_hook.db")
+    sub = tmp_path / "hook_case"
+    sub.mkdir()
+    st = dataclasses.replace(project_settings, index_db=sub / "idx_hook.db")
     text = "命中统计探针：这条记忆被检索后必须在独立命中库出现"
     conn = open_index(st.index_db)
     try:

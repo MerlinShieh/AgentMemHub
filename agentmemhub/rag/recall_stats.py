@@ -58,7 +58,9 @@ def record_hits(index_db: Path, unit_ids: list[int],
     **绝不抛错**：统计是旁路观测，任何失败只返回 0——检索结果不能被它影响
     （这也是埋点处不必再包 try 的契约；外层再包一层也无妨）。
     """
-    ids = [int(i) for i in unit_ids if i is not None]
+    # 去重：同一次检索里同一 unit 可能出现多次（多通道命中/轮次展开），
+    # 那仍然只是"用了一次"——不去重会让 hit_count 虚高。
+    ids = list(dict.fromkeys(int(i) for i in unit_ids if i is not None))
     if not ids:
         return 0
     now = int(ts if ts is not None else time.time())
@@ -81,11 +83,50 @@ def record_hits(index_db: Path, unit_ids: list[int],
         return 0
 
 
+def last_hit_times(index_db: Path, unit_ids) -> dict[int, int]:
+    """批量取「最后命中时刻」——召回侧衰减的**续命锚点**（M1）。
+
+    锚点 = max(创建时间, 最后命中)：一条老记忆若上个月还被召回，它不算过期。
+    命中库/表不存在时返回空 dict（冷启动：全部回落创建时间，优雅降级）。
+    只读连接（`mode=ro`）——本函数在检索读路径上被调用，不应产生任何写。
+    """
+    ids = [int(i) for i in unit_ids if i is not None]
+    if not ids:
+        return {}
+    db = hits_db_path(index_db)
+    if not db.exists():
+        return {}
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5.0)
+        try:
+            marks = ",".join("?" * len(ids))
+            rows = conn.execute(
+                f"SELECT unit_id, last_hit_at FROM unit_recall_stats"
+                f" WHERE unit_id IN ({marks})", ids).fetchall()
+            return {int(uid): int(ts) for uid, ts in rows if ts}
+        finally:
+            conn.close()
+    except Exception:
+        return {}      # 统计是旁路：读不到就当没有，绝不干扰检索
+
+
+def _freshness(anchor_ts: int | None, now: int) -> float:
+    """新鲜度因子（0~1）：与召回侧衰减同参数（保鲜期 + 半衰期）。"""
+    from agentmemhub.rag.ext import (FRESH_OFFSET_DAYS, HALF_LIFE_DAYS,
+                                     decayed_value)
+    if not anchor_ts:
+        return 1.0                     # 时间未知 → 保守给满值（不因未知而惩罚）
+    return decayed_value(1.0, now - int(anchor_ts),
+                         HALF_LIFE_DAYS, FRESH_OFFSET_DAYS)
+
+
 def stale_memories(index_db: Path, *, days: int = 90,
                     limit: int = 200) -> list[dict[str, Any]]:
     """低价值记忆报表：创建已满 `days` 天且最近 `days` 天零召回命中的记忆。
 
-    排序：最老优先（清理候选通常从"最老且从未被用"开始）。
+    排序（M1 起）：`value × freshness` **升序**——低价值且已不新鲜的排最前。
+    freshness 的锚点同样是 max(创建时间, 最后命中)，与召回侧衰减同源，
+    避免"报表说它过时、排序却还在给它加成"的口径分裂。
     只读、不删除——清理动作由人工经既有入口（软删除/硬删除）执行。
     """
     cutoff = int(time.time()) - int(days) * 86400
@@ -134,6 +175,21 @@ def stale_memories(index_db: Path, *, days: int = 90,
                 ORDER BY u.time ASC
                 LIMIT ?""",
             args + [max(1, int(limit))]).fetchall()
-        return [dict(r) for r in rows]
+        out: list[dict[str, Any]] = []
+        now = int(time.time())
+        for r in rows:
+            d = dict(r)
+            # 无价值记录时按来源初始分兜底（蒸馏 0.3 / 直写 0.6）——用 0 会让
+            # 这类条目凭空排到最前，把真正该清理的高价值老记忆挤到后面。
+            val = d.get("value")
+            if val is None:
+                val = (0.3 if d.get("role") == "distilled" else 0.6)
+            anchor = max(int(d.get("time") or 0), int(d.get("last_hit_at") or 0))
+            d["freshness"] = round(_freshness(anchor, now), 4)
+            d["stale_score"] = round(float(val) * d["freshness"], 4)
+            out.append(d)
+        # 排序：低价值且不新鲜的最前（报表语义 = 优先复核清理）
+        out.sort(key=lambda d: d["stale_score"])
+        return out
     finally:
         conn.close()

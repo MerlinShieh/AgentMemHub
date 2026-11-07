@@ -110,16 +110,42 @@ class DictValueProvider:
         return {i: self.table[i] for i in unit_ids if i in self.table}
 
 
-HALF_LIFE_DAYS = 30.0
+#: **半衰期**（天）——记忆生命周期设计 M1（2026-11-07）从 30 改为 180。
+#:
+#: 为什么改：30 天那套是给社交热榜设计的尺度。本项目的记忆是**技术知识**
+#: （配置、踩坑解法、架构决策），半年后通常仍然有效——按 30 天半衰期，
+#: 一年前沉淀的结论只剩 0.02%，等于被时间判死，而它可能恰恰是"经典"。
+#: 180 天的尺度：1 年剩 12.5%、3 年剩 1.6%，老知识沉底但不归零
+#: （真正的"退场"判据仍然是 value<=0 或分层淘汰，不是时间）。
+HALF_LIFE_DAYS = 180.0
+
+#: **保鲜期**（天）：写入/命中后的这段时间内**完全不衰减**。
+#:
+#: 为什么需要：没有保鲜期时，刚沉淀的一批记忆之间就被时间拉开了差距
+#: （今天写的比上周写的天然占优，而这与内容质量无关）。90 天 = 一个季度，
+#: 与"技术结论多久会被改写"的经验尺度相当。
+FRESH_OFFSET_DAYS = 90.0
+
 BOOST_CAP = 0.3  # 上游同源结论：价值只做有界 tie-breaker
 
 
 def decayed_value(value: float, age_seconds: float,
-                  half_life_days: float = HALF_LIFE_DAYS) -> float:
-    """V·0.5^(Δt/半衰期)。age 未知（<=0）按不衰减处理（保守给全值）。"""
+                  half_life_days: float = HALF_LIFE_DAYS,
+                  offset_days: float = 0.0) -> float:
+    """V·0.5^((Δt−offset)/半衰期)。
+
+    两段式：`Δt ≤ offset` 一律返回原值（**保鲜期**，不衰减）；
+    超出部分才按指数衰减。`age` 未知（<=0）同样按不衰减处理（保守给全值）。
+
+    `offset_days` 默认 0 = 纯指数衰减（保持既有调用方与原测试的语义）；
+    生产链路由 `apply_value_boost` 显式传 `FRESH_OFFSET_DAYS`。
+    """
     if age_seconds <= 0:
         return value
-    days = age_seconds / 86400.0
+    age = age_seconds - offset_days * 86400.0
+    if age <= 0:
+        return value
+    days = age / 86400.0
     return value * (0.5 ** (days / half_life_days))
 
 
@@ -131,12 +157,20 @@ def apply_value_boost(
     now: float | None = None,
     weight_cap: float = BOOST_CAP,
     half_life_days: float = HALF_LIFE_DAYS,
+    offset_days: float = FRESH_OFFSET_DAYS,
     include_low_value: bool = False,
     no_decay: set[int] | None = None,
 ) -> tuple[dict[int, float], list[int]]:
     """对 {unit_id: relevance} 施加价值偏置。
 
-    units_meta: {id: (time_epoch, None占位) } —— 引擎自带的事件时间戳用于衰减。
+    units_meta: {id: (锚点时间戳, None占位)} —— `id → (anchor_ts,)`。
+
+        **锚点 = max(创建时间, 最后命中时间)**（记忆生命周期设计 M1）。
+        为什么不是纯创建时间：LRU 语义——一条很久以前沉淀、但上个月还被
+        召回过的记忆，它不过期而是"经典"。`last_hit_at` 来自
+        `recall_hits.db`（`recall_stats.last_hit_times`），缺失时自动回落
+        创建时间（冷启动优雅降级）。由 `search.hybrid_search` 负责拼装。
+
     no_decay：用户手动加权的 unit 集合——锁定的价值**不随时间衰减**
     （用户意志优先于新陈代谢）。返回 (新 relevance, 被硬过滤掉的 id)。
     value<=0 默认剔除（对应 MemOS priority>0 闸门；include_low_value=True
@@ -157,7 +191,7 @@ def apply_value_boost(
         ts = units_meta.get(uid, (None,))[0]
         age = (now - ts) if ts else 0.0
         eff = max(v, 0.0) if uid in nd else max(
-            decayed_value(max(v, 0.0), age, half_life_days), 0.0)
+            decayed_value(max(v, 0.0), age, half_life_days, offset_days), 0.0)
         boost = weight_cap * eff
         out[uid] = rel + min(boost, weight_cap)
     return out, dropped

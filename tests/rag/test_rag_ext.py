@@ -92,10 +92,31 @@ def test_llm_judge_garbage_output_fail_closed():
 # ── ValueProvider / 价值偏置 ───────────────────────────────────────────
 
 def test_decayed_value_half_life():
-    now = time.time()
+    """半衰期 180 天（生命周期设计 M1，2026-11-07 从 30 天改为 180 天）。
+
+    技术知识的合理尺度：1 年剩 12.5%、3 年剩 1.6%——老知识沉底但不归零，
+    真正的退场判据是 value<=0 或分层淘汰，不是时间。
+    """
     assert decayed_value(1.0, 0) == 1.0
-    assert decayed_value(1.0, 30 * 86400) == pytest.approx(0.5, rel=1e-6)
-    assert decayed_value(1.0, 90 * 86400) == pytest.approx(0.125, rel=1e-6)
+    assert decayed_value(1.0, 180 * 86400) == pytest.approx(0.5, rel=1e-6)
+    assert decayed_value(1.0, 360 * 86400) == pytest.approx(0.25, rel=1e-6)
+    # 旧参数（30 天）下的取值必须**不再**成立——防止常量被改回去
+    assert decayed_value(1.0, 30 * 86400) > 0.85
+
+
+def test_decayed_value_fresh_period():
+    """保鲜期：offset 内一律不衰减，超出部分才按指数算。
+
+    没有保鲜期时，刚沉淀的一批记忆之间就被时间拉开差距（与内容质量无关）。
+    """
+    from agentmemhub.rag.ext import FRESH_OFFSET_DAYS
+    assert FRESH_OFFSET_DAYS == 90.0
+    # 保鲜期内：原样返回
+    assert decayed_value(1.0, 1 * 86400, offset_days=90) == 1.0
+    assert decayed_value(1.0, 90 * 86400, offset_days=90) == 1.0
+    # 第 91 天起才开始衰减（衰减量只按超出部分算）
+    assert decayed_value(1.0, 180 * 86400,
+                         offset_days=90) == pytest.approx(0.5 ** 0.5, rel=1e-6)
 
 
 def test_apply_value_boost_cap_and_filter():
@@ -113,11 +134,23 @@ def test_apply_value_boost_cap_and_filter():
 
 
 def test_apply_value_decay_uses_unit_time():
+    """锚点时间参与衰减：超出保鲜期的部分按半衰期折算。"""
     now = 1_800_000_000.0
-    old_ts = now - 30 * 86400  # 恰好一个半衰期
+    # 270 天前：90 天保鲜期 + 180 天一个整半衰期 → 恰好 0.5
+    old_ts = now - 270 * 86400
     rel = {1: 0.8}
     out, _ = apply_value_boost(rel, {1: (old_ts,)}, {1: 1.0}, now=now)
     assert out[1] == pytest.approx(0.8 + 0.3 * 0.5, rel=1e-6)
+
+
+def test_apply_value_boost_no_decay_wins_over_age():
+    """⭐ 锁定的（no_decay）不受时间影响——用户意志优先于新陈代谢。"""
+    now = 1_800_000_000.0
+    very_old = now - 2000 * 86400
+    out, _ = apply_value_boost({1: 0.8}, {1: (very_old,)}, {1: 1.0},
+                               now=now, no_decay={1})
+    assert out[1] == pytest.approx(0.8 + BOOST_CAP, rel=1e-6), \
+        "锁定值即便极老也必须拿满 boost"
 
 
 # ── 与 hybrid_search 的集成 ────────────────────────────────────────────
