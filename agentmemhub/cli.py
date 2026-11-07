@@ -649,9 +649,16 @@ def cmd_conflicts(args) -> int:
                 return 1
             _stdout(("已处置：" if r.get("changed") else "未变更：")
                     + f"冲突 #{r['id']} → {r['status']}"
-                    + ("（旧方已归档，可经面板 ⭐ 清除加权恢复）"
+                    + ("（旧方已归档：召回层 ⭐锁0 退场"
+                       + ("，wiki 编译层已标记不进页面"
+                          if r.get("distilled_tagged")
+                          else "；但未找到蒸馏表对应行，wiki 侧未标记")
+                       + "；清除加权可恢复）"
                        if r.get("old_archived") else "")
                     + (f"\n{r['note']}" if r.get("note") else ""))
+            if r.get("old_archived"):
+                _stdout("提示：受影响页面会在下次 wiki 增量更新时重编摘掉旧结论"
+                        "（align 会把它判成 removed 并触发）。")
             _cli_log(f"conflicts resolve {args.resolve} → {r}")
             return 0
 

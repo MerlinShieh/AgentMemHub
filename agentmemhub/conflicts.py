@@ -511,16 +511,54 @@ def list_conflicts(conn: sqlite3.Connection, *, status: str = "open",
     return out
 
 
+def _archive_unit(conn: sqlite3.Connection, unit_id: int, *, ts: int) -> dict:
+    """把一条记忆**完整退场**：召回层 + wiki 编译层同时排除。
+
+    两层各用各的闸（2026-11-07 修）：
+    - `unit_values.manual_value = 0` → `apply_value_boost` 的 `v<=0` 硬剔除
+      （召回不再返回它，清除加权即恢复）；
+    - `distilled_memories.wiki_ignore_at = ts` → 编译输入排除
+      （下次受影响页面重编时不再包含它）。
+
+    **为什么必须双写**：只写 manual_value 时，召回层看不见它了，但
+    `wiki_compile.load_memories()` 的输入只看 `status`，它照样被写进页面
+    ——"归档了但 wiki 还在教旧结论"。而 align 基线（`build_inputs`）早就
+    按 `wiki_ignore_at` 过滤，双写后 align 会把它判成 removed →
+    下次增量更新自动重编受影响页面，无需手动 full-run。
+
+    返回 `{"distilled_tagged": bool}`：`distilled_memories` 里是否找到对应行
+    （`dst_<h>` 与 `mcp_<h>` 双投影都指向同一个 content_hash）。
+    """
+    from agentmemhub.rag.memstore import set_manual_value
+
+    set_manual_value(conn, unit_id, 0.0)
+    tagged = False
+    row = conn.execute("SELECT src_id FROM units WHERE id=?",
+                       (unit_id,)).fetchone()
+    src = (row[0] if row else "") or ""
+    head, _, h = src.partition("_")
+    if head in ("dst", "mcp") and h:
+        cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(distilled_memories)")}
+        if "wiki_ignore_at" in cols:
+            cur = conn.execute(
+                "UPDATE distilled_memories SET wiki_ignore_at=?"
+                " WHERE content_hash=? AND wiki_ignore_at IS NULL", (ts, h))
+            tagged = bool(cur.rowcount)
+    return {"distilled_tagged": tagged}
+
+
 def resolve(conn: sqlite3.Connection, conflict_id: int, action: str, *,
             reason: str = "", by: str = "cli") -> dict:
     """处置一条冲突。
 
-    - `superseded`：**归档旧方**（`manual_value=0` → 撤出召回面、可逆）。
+    - `superseded`：**归档旧方**——召回层（`manual_value=0`）与 wiki 编译层
+      （`wiki_ignore_at`）**双写**，两层同时退场、均可逆。
       旧方若已有其他手动加权，拒绝自动覆盖并要求人工处理（用户意志优先）。
     - `kept_both`：两者都保留（标记已确认，不再报告）。
     - `dismissed`：误报（记原因，同对不再重复报告）。
     """
-    from agentmemhub.rag.memstore import ensure_memstore_schema, set_manual_value
+    from agentmemhub.rag.memstore import ensure_memstore_schema
 
     ensure_conflicts_schema(conn)
     ensure_memstore_schema(conn)      # 空库首次处置时 unit_values 可能还不存在
@@ -536,6 +574,8 @@ def resolve(conn: sqlite3.Connection, conflict_id: int, action: str, *,
     if action not in ("superseded", "kept_both", "dismissed"):
         raise ValueError(f"非法 action: {action!r}")
 
+    now = int(time.time())
+    tagged = False
     if action == "superseded":
         old_manual = conn.execute(
             "SELECT manual_value FROM unit_values WHERE unit_id=?",
@@ -544,8 +584,7 @@ def resolve(conn: sqlite3.Connection, conflict_id: int, action: str, *,
             return {"id": conflict_id, "status": "open", "changed": False,
                     "note": f"旧方 #{unit_old} 已手动加权为 {old_manual[0]}，"
                             "归档会覆盖用户意志；请先清除加权或改选 kept_both"}
-        set_manual_value(conn, unit_old, 0.0)
-    now = int(time.time())
+        tagged = _archive_unit(conn, unit_old, ts=now)["distilled_tagged"]
     conn.execute(
         "UPDATE memory_conflicts SET status=?, resolved_at=?, resolved_by=?,"
         " rule_hit=rule_hit||? WHERE id=?",
@@ -554,7 +593,8 @@ def resolve(conn: sqlite3.Connection, conflict_id: int, action: str, *,
     conn.commit()
     return {"id": conflict_id, "status": action, "changed": True,
             "unit_new": unit_new, "unit_old": unit_old,
-            "old_archived": action == "superseded"}
+            "old_archived": action == "superseded",
+            "distilled_tagged": tagged}
 
 
 def stats(conn: sqlite3.Connection) -> dict:

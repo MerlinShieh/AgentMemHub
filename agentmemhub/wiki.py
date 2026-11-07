@@ -411,15 +411,21 @@ def align(out_dir: Path | str = "", stage: str = "", db: str = "",
 # ---------------------------------------------------------------------------
 
 def _delete_empty_session_outputs(l1_dir: Path, sessions: set, db: str) -> list[str]:
-    """输入已清空的会话，其 L1 产物文件要删掉（重编流程不会再碰到它们）。"""
+    """输入已清空的会话，其 L1 产物文件要删掉（重编流程不会再碰到它们）。
+
+    "清空"的判据必须与**编译输入**一致（都排除 `wiki_ignore_at`）：否则一条
+    记忆被软删/归档后，这里仍数到它 → 会话被判成非空 → 旧页面留着不删。
+    """
     conn = sqlite3.connect("file:%s?mode=ro" % Path(db).as_posix(), uri=True)
     removed: list[str] = []
     try:
         import wiki_compile
+        ignore = wiki_compile._wiki_ignore_clause(conn)
         for s, c in sessions:
             n = conn.execute(
                 "SELECT COUNT(*) FROM distilled_memories"
-                " WHERE source=? AND conversation_id=? AND status IN ('new','similar')",
+                " WHERE source=? AND conversation_id=? AND status IN ('new','similar')"
+                + ignore,
                 (s, c)).fetchone()[0]
             if n == 0:
                 stem = wiki_compile._out_stem(s, c)

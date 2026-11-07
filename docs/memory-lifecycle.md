@@ -436,3 +436,37 @@ CLI：`agentmemhub conflicts --from-wiki [--l2-dir DIR]`。
 （"内部数据矛盾"、"与核心规则自相矛盾"），不是标注——所以解析**只认引用块行首**
 的 `⚠️ 矛盾：`。全文匹配会把这些全算进来（实测 179 个含"矛盾"的页面里，
 真正的结构化标注只有 187 条中的一部分）。
+
+### 11.5 归档必须两层退场（2026-11-07 修，端到端已验证）
+
+**问题**：最初 `superseded` 只写 `unit_values.manual_value = 0`（召回层退场）。
+但 wiki 的编译输入看的是另一处：
+
+```
+wiki_manifest.build_inputs()   ← align 基线，早就按 wiki_ignore_at 过滤
+wiki_compile.load_memories()   ← 真正取正文编译，居然没读 wiki_ignore_at
+```
+
+两者口径不一致，后果是：**归档了记忆，召回层看不见它了，但页面里仍然写着旧结论；
+而且就算全量重跑也不会消失**（它 `status` 还是 `new`/`similar`，照样被读进编译输入）。
+
+**修法（三层，缺一不可）**：
+
+| 层 | 改动 |
+|---|---|
+| ① 编译输入 | `wiki_compile.load_memories()` / `list_sessions()` 加 `AND wiki_ignore_at IS NULL`（与 align 基线对齐；顺带修好了**软删一直没真正生效**的既有缺陷）|
+| ② 归档动作 | `superseded` 双写：`manual_value=0`（召回退场）+ `wiki_ignore_at=now`（编译退场）。`mcp_<h>` 与 `dst_<h>` 双投影都能对上同一个 `content_hash` |
+| ③ 空会话判据 | `_delete_empty_session_outputs()` 的"清空"判据同样排除软删，否则会话被判成非空、旧页面留着不删 |
+
+**端到端实测（真实库，试点一条后立即恢复）**：
+
+```
+归档前：unit#31092 manual_value=None  distilled#4397 wiki_ignore_at=None
+superseded 后：manual_value=0.0      wiki_ignore_at=1794020844
+align 立刻感知：失去输入 1（真删除 0 / 状态迁移 1），脏会话 8 个
+                mcp/direct  +0 ~0 -1
+```
+
+这条顺带回答了"归档后旧数据要靠全量重跑才能修正吗"——**不用**：
+align 会把它判成 `removed`（状态迁移），下次**增量更新**只重编受影响的
+8 个脏会话及其所在域，不是整个 wiki。

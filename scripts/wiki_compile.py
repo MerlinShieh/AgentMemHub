@@ -209,6 +209,21 @@ def _wlog(**kw) -> None:
         pass
 
 
+def _wiki_ignore_clause(conn: sqlite3.Connection) -> str:
+    """编译输入要排除「不进 wiki」的记忆（`wiki_ignore_at` 非空）。
+
+    为什么必须有这道条件（2026-11-07 修）：`wiki_manifest.build_inputs()` 早就
+    用它算 align 基线，但**编译侧一直没读** —— 于是软删的记忆被 align 判成
+    "不在基线"（不报待更新），真编译时却仍被读进来写进页面，软删在"进不进
+    页面"这件事上等于没生效。同一口径必须两处一致。
+
+    列的存在性每次现查（与 `wiki_manifest.build_inputs` 同做法）：迁移由写入侧
+    保证，本函数可能先于迁移运行，列不存在说明从没人标记过 → 不过滤即正确语义。
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(distilled_memories)")}
+    return " AND wiki_ignore_at IS NULL" if "wiki_ignore_at" in cols else ""
+
+
 def list_sessions(conn: sqlite3.Connection, *, min_n: int = 0,
                   limit: int = 20) -> list[tuple]:
     """列候选会话（按有效蒸馏记忆数降序）。
@@ -219,7 +234,7 @@ def list_sessions(conn: sqlite3.Connection, *, min_n: int = 0,
         "SELECT m.source, m.conversation_id, COUNT(*) n, MAX(u.title)"
         " FROM distilled_memories m"
         " LEFT JOIN units u ON u.src_id = 'dst_' || m.content_hash"
-        " WHERE m.status IN ('new','similar')"
+        " WHERE m.status IN ('new','similar')" + _wiki_ignore_clause(conn) +
         " GROUP BY m.source, m.conversation_id HAVING n >= ?"
         " ORDER BY n DESC LIMIT ?", (min_n, limit)).fetchall()
 
@@ -230,11 +245,13 @@ def load_memories(conn: sqlite3.Connection, source: str,
 
     刻意读 `distilled_memories`（真相源）而非 `units`（召回投影）—— 前者带
     type / confidence / created_at，后者只是检索用的文本层。
+    排除 `wiki_ignore_at` 非空的（软删 / 归档）：它们不该进页面。
     """
     rows = conn.execute(
         "SELECT id, type, confidence, content, created_at, topic"
         " FROM distilled_memories"
         " WHERE source=? AND conversation_id=? AND status IN ('new','similar')"
+        + _wiki_ignore_clause(conn) +
         " ORDER BY created_at, id", (source, conversation_id)).fetchall()
     return [{"id": r[0], "type": r[1], "confidence": r[2], "content": r[3],
              "created_at": r[4], "topic": r[5]} for r in rows]
