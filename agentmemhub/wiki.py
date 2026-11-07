@@ -786,6 +786,38 @@ def _offline_advance(*, l1: Path, l2: Path, db: str, runner, client,
                                   for w in waiting)]}
 
 
+def _resolve_dirty(a1: dict, a2: dict, *, full: bool) -> tuple[set, set, str]:
+    """从两级 align 结果算出本轮要动的会话 / 受影响的 L1 文件。
+
+    返回 `(dirty_sessions, l2_stale_touched, early_msg)`；`early_msg` 非空即
+    可早退（没有可定位的变化）。
+
+    **为什么需要 `l2_stale_touched`**（2026-11-07 实测场景）：触发器跑完了 L1
+    （18 会话 147 页），但那一轮的 L2 只重编了 16/18 个域；此后人工跑 `update`
+    会因 L1 无脏会话而**直接早退**，落后的 L2 永远推不动。此时 L2 的 align
+    仍会报脏（removed/added），从它反推受影响的 L1 文件名即可定位脏域。
+    """
+    import wiki_compile
+
+    dirty: set = set()
+    for sess in ((a1.get("stages") or {}).get("l1", {})
+                 .get("dirty_sessions") or {}):
+        s, _, c = str(sess).partition("/")
+        if s and c:
+            dirty.add((s, c))
+
+    stale: set = set()
+    if not dirty and not full:
+        for key in ((a2.get("stages") or {}).get("l2", {})
+                    .get("dirty_sessions") or {}):
+            s, _, c = str(key).partition("/")
+            if s and c:
+                stale.add(wiki_compile._out_stem(s, c) + ".md")
+        if not stale:
+            return dirty, stale, "没有可定位的脏会话"
+    return dirty, stale, ""
+
+
 def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
            workers: int = 0, on_progress: Callable[[str], None] | None = None,
            should_stop: Callable[[], bool] | None = None,
@@ -867,19 +899,13 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
     except Exception as e:                      # noqa: BLE001 —— 旁路，快照失败不阻塞
         snap = {"id": None, "error": str(e)[:200]}
 
-    dirty_sessions = set()
-    for sess in (a1["stages"]["l1"].get("dirty_sessions") or {}):
-        s, _, c = sess.partition("/")
-        if s and c:
-            dirty_sessions.add((s, c))
-    if not dirty_sessions and not full:
-        # ⚠️ `full=True` 时必须放过这一道：全量**不依赖脏会话** —— 它要重来的是
-        # "域结构"（这正是"『待整理』域撑不住"时该做的事）。若在这里早退，全量
-        # 就永远跑不起来（实测：2026-10-04 写测试时正是被这道挡住）。
-        return {"updated": False, "message": "没有可定位的脏会话"}
-
     import wiki_aggregate
     import wiki_compile
+
+    # 本轮要动的东西：L1 脏会话 + （L1 已同步时）L2 落后反推出的受影响 L1 文件
+    dirty_sessions, l2_stale_touched, early = _resolve_dirty(a1, a2, full=full)
+    if early:
+        return {"updated": False, "message": early}
 
     # ---- 2. 重编脏会话的 L1 ----
     if _why := _stopped():
@@ -926,6 +952,7 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
 
     # 本次动过的 L1 文件 = 重编会话的产物 + 新文件 + 已删除会话的旧文件名
     touched = {"%s.md" % wiki_compile._out_stem(s, c) for s, c in dirty_sessions}
+    touched |= l2_stale_touched
     touched |= new_files
     touched |= {f.rsplit(".", 1)[0] + ".md" for f in removed_files}
     dirty_domains = sorted(n for n, fs in domain_map.items() if set(fs) & touched)
@@ -998,6 +1025,15 @@ def update(*, l1_dir: Path | str, l2_dir: Path | str, db: str = "",
                 "hints": ["没有可提交的脏域（L2 基线落后，但 L1 没有新变化可定位到域）"
                           "—— 请用 `agentmemhub wiki --action batch-resubmit` 重提"
                           "已终局的任务；确需全量重编请显式跑实时 update"]}
+    # **实时模式下的同类保险**：`preset` 为空时聚合层会回退到"全量归域 +
+    # 全库重编"（实测 449 页，极贵）。走到这里说明基线确实落后却没定位到域
+    # （典型：L2 页缺 `from_files` 反向映射），此时**宁可早退并明说**，
+    # 也不要悄悄烧一小时把知识库整库重编一遍。
+    if not preset and not full:
+        return {"updated": False,
+                "message": "L2 基线落后，但定位不到可重编的域（L2 页可能缺 "
+                           "from_files 反向映射）—— 请显式跑 "
+                           "`wiki --action full-run` 全量重建，或先排查产物完整性"}
     args = SimpleNamespace(
         src=str(l1), out=str(l2), db=db, stage="all", workers=workers or 0,
         limit=0, domain="", dmin=20, dmax=60, batch=120, min_pages=2,
