@@ -526,17 +526,31 @@ def _archive_unit(conn: sqlite3.Connection, unit_id: int, *, ts: int) -> dict:
     按 `wiki_ignore_at` 过滤，双写后 align 会把它判成 removed →
     下次增量更新自动重编受影响页面，无需手动 full-run。
 
-    返回 `{"distilled_tagged": bool}`：`distilled_memories` 里是否找到对应行
-    （`dst_<h>` 与 `mcp_<h>` 双投影都指向同一个 content_hash）。
+    ⚠️ **还要连同双投影一起归档**（2026-11-07 实测踩到）：同一内容在 units
+    里可能有两行——`dst_<h>`（蒸馏投影）与 `mcp_<h>`（Agent 直写落账），
+    共享同一个 content_hash。只锁其中一行时，**另一行仍会被正常召回**
+    （实测：归档 dst_ 后查"关键架构缺口修复"，mcp_ 那条照样排在结果第一）。
+
+    返回 `{"distilled_tagged": bool, "archived_units": [id...]}`。
     """
     from agentmemhub.rag.memstore import set_manual_value
 
-    set_manual_value(conn, unit_id, 0.0)
-    tagged = False
     row = conn.execute("SELECT src_id FROM units WHERE id=?",
                        (unit_id,)).fetchone()
     src = (row[0] if row else "") or ""
     head, _, h = src.partition("_")
+    targets = [unit_id]
+    if head in ("dst", "mcp") and h:
+        # 双投影：另一侧那一行也必须一起退场，否则等于没归档
+        for prefix in ("dst", "mcp"):
+            r = conn.execute("SELECT id FROM units WHERE src_id=?",
+                             (f"{prefix}_{h}",)).fetchone()
+            if r and r[0] not in targets:
+                targets.append(r[0])
+    for uid in targets:
+        set_manual_value(conn, uid, 0.0)
+
+    tagged = False
     if head in ("dst", "mcp") and h:
         cols = {r[1] for r in conn.execute(
             "PRAGMA table_info(distilled_memories)")}
@@ -545,7 +559,7 @@ def _archive_unit(conn: sqlite3.Connection, unit_id: int, *, ts: int) -> dict:
                 "UPDATE distilled_memories SET wiki_ignore_at=?"
                 " WHERE content_hash=? AND wiki_ignore_at IS NULL", (ts, h))
             tagged = bool(cur.rowcount)
-    return {"distilled_tagged": tagged}
+    return {"distilled_tagged": tagged, "archived_units": targets}
 
 
 def resolve(conn: sqlite3.Connection, conflict_id: int, action: str, *,
@@ -576,6 +590,7 @@ def resolve(conn: sqlite3.Connection, conflict_id: int, action: str, *,
 
     now = int(time.time())
     tagged = False
+    archived_units: list[int] = []
     if action == "superseded":
         old_manual = conn.execute(
             "SELECT manual_value FROM unit_values WHERE unit_id=?",
@@ -584,7 +599,9 @@ def resolve(conn: sqlite3.Connection, conflict_id: int, action: str, *,
             return {"id": conflict_id, "status": "open", "changed": False,
                     "note": f"旧方 #{unit_old} 已手动加权为 {old_manual[0]}，"
                             "归档会覆盖用户意志；请先清除加权或改选 kept_both"}
-        tagged = _archive_unit(conn, unit_old, ts=now)["distilled_tagged"]
+        arch = _archive_unit(conn, unit_old, ts=now)
+        tagged = arch["distilled_tagged"]
+        archived_units = arch["archived_units"]
     conn.execute(
         "UPDATE memory_conflicts SET status=?, resolved_at=?, resolved_by=?,"
         " rule_hit=rule_hit||? WHERE id=?",
@@ -594,7 +611,8 @@ def resolve(conn: sqlite3.Connection, conflict_id: int, action: str, *,
     return {"id": conflict_id, "status": action, "changed": True,
             "unit_new": unit_new, "unit_old": unit_old,
             "old_archived": action == "superseded",
-            "distilled_tagged": tagged}
+            "distilled_tagged": tagged,
+            "archived_units": archived_units}
 
 
 def stats(conn: sqlite3.Connection) -> dict:

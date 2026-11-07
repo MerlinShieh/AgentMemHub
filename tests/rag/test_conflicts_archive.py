@@ -173,6 +173,33 @@ def test_superseded_from_mcp_projection_tags_same_hash(tmp_path, project_setting
         conn.close()
 
 
+def test_superseded_archives_both_projections(tmp_path, project_settings):
+    """回归（2026-11-07 实测踩到）：同一内容有 `dst_` 与 `mcp_` 两行 unit，
+    只锁其中一行时**另一行仍会被正常召回**（实测归档 dst_ 后，mcp_ 那条
+    照样排在检索结果第一）。必须两边一起归档。
+    """
+    from agentmemhub import conflicts as cf
+
+    _, conn = _mk(tmp_path, project_settings)
+    try:
+        _mem(conn, 801, content="同一内容双投影")
+        _mem(conn, 802, content="新内容")
+        dst_uid = _unit(conn, src_id="dst_h801", text="同一内容双投影", seq=7)
+        mcp_uid = _unit(conn, src_id="mcp_h801", text="同一内容双投影", seq=8)
+        new_uid = _unit(conn, src_id="dst_h802", text="新内容", seq=9)
+        cid = _conflict(conn, new_uid=new_uid, old_uid=dst_uid)
+        out = cf.resolve(conn, cid, "superseded")
+        assert set(out["archived_units"]) == {dst_uid, mcp_uid}, \
+            "两条投影都必须归档"
+        for uid in (dst_uid, mcp_uid):
+            mv = conn.execute(
+                "SELECT manual_value FROM unit_values WHERE unit_id=?",
+                (uid,)).fetchone()
+            assert mv and mv[0] == 0.0, f"unit#{uid} 未归档就会继续被召回"
+    finally:
+        conn.close()
+
+
 def test_kept_both_does_not_archive(tmp_path, project_settings):
     """kept_both / dismissed 不应动任何记忆。"""
     from agentmemhub import conflicts as cf
