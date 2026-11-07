@@ -618,6 +618,94 @@ def cmd_stale(args) -> int:
     return 0
 
 
+def cmd_conflicts(args) -> int:
+    """记忆冲突：规则层检测「旧结论被新结论取代」（只标记不执行）。
+
+    处置动作（superseded/kept_both/dismissed）由人工指定；
+    `superseded` 归档旧方 = `manual_value` 锁 0（撤出召回面、可清加权恢复）。
+    """
+    from agentmemhub import conflicts as cf
+    from agentmemhub.rag.config import load_settings
+    from agentmemhub.rag.ingest import open_index
+
+    settings = load_settings()
+    try:
+        conn = open_index(settings.index_db)
+    except Exception as e:
+        _stdout(f"打不开索引库：{e}")
+        _cli_log(f"conflicts 打开索引库失败 → {e}", level="error")
+        return 1
+    try:
+        if args.resolve is not None:
+            if not args.action:
+                _stdout("需要 --action superseded|kept_both|dismissed")
+                return 1
+            try:
+                r = cf.resolve(conn, args.resolve, args.action,
+                               reason=args.reason)
+            except (KeyError, ValueError) as e:
+                _stdout(f"处置失败：{e}")
+                _cli_log(f"conflicts --resolve 失败 → {e}", level="error")
+                return 1
+            _stdout(("已处置：" if r.get("changed") else "未变更：")
+                    + f"冲突 #{r['id']} → {r['status']}"
+                    + ("（旧方已归档，可经面板 ⭐ 清除加权恢复）"
+                       if r.get("old_archived") else "")
+                    + (f"\n{r['note']}" if r.get("note") else ""))
+            _cli_log(f"conflicts resolve {args.resolve} → {r}")
+            return 0
+
+        if args.scan:
+            if args.reset:
+                n = cf.reset(conn)
+                _stdout(f"已清空冲突表（{n} 条），重新扫描…")
+            _stdout("存量扫描中（每条记忆一次近邻查询，纯 SQL 不加载模型）…")
+
+            def _prog(i: int, total: int) -> None:
+                _stdout(f"  [{i}/{total}]")
+            try:
+                st = cf.scan(conn, vec_table=settings.active_spec.vec_table,
+                             progress=_prog)
+            except Exception as e:
+                _stdout(f"扫描失败：{e}")
+                _cli_log(f"conflicts --scan 失败 → {e}", level="error")
+                return 1
+            _stdout(f"扫描完成：检查 {st['scanned']} 条，新增疑似冲突 "
+                    f"{st['pairs']} 对（conflict {st.get('conflict', 0)} / "
+                    f"evolution {st.get('evolution', 0)}）"
+                    + (f"，清掉双投影误报 {st['purged_dual']} 对"
+                       if st.get("purged_dual") else "")
+                    + (f"，失败 {st['errors']} 条" if st.get("errors") else ""))
+            _cli_log(f"conflicts scan → {st}")
+            return 1 if st.get("errors") else 0
+
+        # 默认：列出
+        rows = cf.list_conflicts(conn, status=args.status, limit=args.limit)
+        agg = cf.stats(conn)
+        _cli_log(f"conflicts list status={args.status} → {len(rows)} 条")
+        if args.json:
+            _stdout(json.dumps({"stats": agg, "items": rows},
+                               ensure_ascii=False, indent=1))
+            return 0
+        if not rows:
+            _stdout(f"没有状态为 {args.status or '任意'} 的冲突。"
+                    f"（累计 {agg['total']} 条：{agg['by_status']}）")
+            return 0
+        _stdout(f"冲突 {len(rows)} 条（累计 {agg['total']}：{agg['by_status']}）\n")
+        for r in rows:
+            kind = "语义冲突" if r["kind"] == "conflict" else "版本演进"
+            _stdout(f"  #{r['id']} [{kind}] sim={r['similarity']:.3f}  {r['rule_hit']}")
+            _stdout(f"      新 #{r['unit_new']} {r['new_src']}: "
+                    f"{(r['new_text'] or '').replace(chr(10), ' ')[:90]}")
+            _stdout(f"      旧 #{r['unit_old']} {r['old_src']}: "
+                    f"{(r['old_text'] or '').replace(chr(10), ' ')[:90]}")
+        _stdout("\n处置：conflicts --resolve <id> --action "
+                "superseded|kept_both|dismissed [--reason 说明]")
+        return 0
+    finally:
+        conn.close()
+
+
 def cmd_distill(args) -> None:
     """记忆蒸馏：原始会话 → 结构化记忆（LLM 提炼，幂等 + fail-open）。
 
@@ -1279,6 +1367,25 @@ def build_parser() -> argparse.ArgumentParser:
     pst.add_argument("--limit", type=int, default=200, help="最多列出条数（默认 200）")
     pst.add_argument("--json", action="store_true", help="以 JSON 输出（机器读/面板对接）")
 
+    pcf = sub.add_parser(
+        "conflicts",
+        help="记忆冲突：找出被新结论取代的旧记忆（规则层，只标记不执行）")
+    pcf.add_argument("--scan", action="store_true",
+                     help="存量扫描：对全部记忆类 unit 做近邻比对（分钟级，纯 SQL 不加载模型）")
+    pcf.add_argument("--reset", action="store_true",
+                     help="扫描前清空冲突表（规则调整后重扫用；已处置记录也会清掉）")
+    pcf.add_argument("--list", action="store_true", help="列出冲突（默认动作）")
+    pcf.add_argument("--resolve", type=int, default=None,
+                     help="处置指定冲突 id")
+    pcf.add_argument("--action", default="",
+                     choices=("", "superseded", "kept_both", "dismissed"),
+                     help="处置动作：superseded=归档旧方（可逆）/ kept_both=都保留 / dismissed=误报")
+    pcf.add_argument("--reason", default="", help="处置原因（写入审计）")
+    pcf.add_argument("--status", default="open",
+                     help="按状态筛选（open / superseded / kept_both / dismissed；空=全部）")
+    pcf.add_argument("--limit", type=int, default=50, help="最多列出条数（默认 50）")
+    pcf.add_argument("--json", action="store_true", help="以 JSON 输出")
+
     _register_snapshot_parser(sub)
     _register_memory_log_parser(sub)
     _register_llm_config_parser(sub)
@@ -1657,6 +1764,7 @@ def main() -> int:
         "sync": cmd_sync, "clean": cmd_clean, "score": cmd_score, "rebuild": cmd_rebuild,
         "distill": cmd_distill, "weight": cmd_weight,
         "stale": cmd_stale,
+        "conflicts": cmd_conflicts,
         "wiki": cmd_wiki,
         "feed": cmd_feed,
         "snapshot": cmd_snapshot,

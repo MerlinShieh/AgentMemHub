@@ -340,6 +340,8 @@ python -m agentmemhub llm-config [--json]                       # 各 LLM 使用
                                                                 # （标出每项是继承还是覆盖）
 python -m agentmemhub stale [--days 90] [--limit 200] [--json]  # 低价值记忆报表：N 天零召回命中的
                                                                 # 记忆清单（清理候选，**只报告不删除**）
+python -m agentmemhub conflicts [--scan] [--list] [--reset] [--json]  # 记忆冲突：找出被新结论取代的旧记忆
+python -m agentmemhub conflicts --resolve 12 --action superseded [--reason 说明]  # 处置
 ```
 
 > **`stale` 的口径**：记忆 = `role='distilled'`（蒸馏投影）或 `source='memory'`
@@ -348,6 +350,12 @@ python -m agentmemhub stale [--days 90] [--limit 200] [--json]  # 低价值记�
 > ⚠️ 命中统计（`recall_hits.db`，与索引库同目录的**独立库**）自 2026-11-07
 > 才开始积累 —— 此前没有任何命中数据，老记忆一律视为"从未命中"，
 > 上线首日报表≈全部老记忆，属预期；跑一段时间后才有区分度。
+>
+> **`conflicts` 的口径**：规则层只认两类**可靠**信号——「同一主体的版本换代」
+> （`Mobile_App_AutoTest v1.1.0` vs `v1.4.0`）与「唯一端口冲突」；
+> 变更词、数字差异、`owner/name` 形态的模型名都只作证据不作判据
+> （真实库四轮实测：裸规则会产生千级误报）。**接受漏报换队列可信**，
+> 需要高召回时再上 LLM 兜底（见 [memory-lifecycle.md](memory-lifecycle.md) §11.3）。
 
 ---
 
