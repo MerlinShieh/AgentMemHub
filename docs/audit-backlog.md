@@ -161,6 +161,50 @@
 
 ## 已修（按时间倒序，便于以后不再重复排查）
 
+**2026-11-07 生命周期闭环最后一块：零召回命中报表 + 两条审计待修**
+
+- **新增 `agentmemhub/rag/recall_stats.py`**：记忆生命周期此前缺"清理依据"——
+  软删除有了、wiki 增量有了，但**没有任何数据能回答"哪些记忆从没被用过"**。
+  两件事：
+  1. **记事实**：`record_hits()` 在 `hybrid_search` 出口把**最终命中**
+     （准入+多样性+精判之后，不是候选池）记入**独立命中库** `recall_hits.db`
+     （与索引库同目录、分库）。分库理由：检索是读路径，不该在索引库上制造
+     写锁竞争；且命中是"观测事实"，快照回滚索引时不该被一起回滚。
+     埋点契约：**绝不抛错**（失败只写 warning，检索结果不受影响）。
+  2. **出报表**：`stale_memories()` + CLI `agentmemhub stale --days 90`：
+     「创建已满 N 天且最近 N 天零命中」的记忆清单，最老优先，带 `value`/`priority`
+     （unit_values 存在才 JOIN，空库不报错）、`hit_count`、正文前 160 字。
+     **只报告不删除**——清理走既有入口（待更新记忆软/硬删除、面板勾选）。
+  口径：记忆 = `role='distilled'` 或 `source='memory'`（与评分枚举一致）；
+  消息层不参与。双投影（`mcp_`/`dst_`）不去重，留待后续按 src_hash 归并。
+  ⚠️ **冷启动**：命中统计自本模块落地才积累，此前老记忆一律视为"从未命中"，
+  上线首日报表≈全部老记忆，属预期；跑一段时间后才有区分度。
+  守卫：`tests/rag/test_recall_stats.py`（upsert 口径 / 报表过滤语义 / 埋点真落库 /
+  统计失败不炸检索）。
+- `fix(rag)` 非 active 模型缺失不再 500、`write_order` 缺 active 自动补齐 ——
+  见下方两条原「待修」的已修记录。
+
+**2026-11-06 评分链路两条硬伤（配合方向调整：默认标准分 + 按需评分）**
+- **方向背景**：用户 11-06 表态——不跑全库 4889 条批量 LLM 评分；统一会话蒸馏出的记忆
+  默认拿标准分（`BASE_VALUE_DISTILLED = 0.3` 已是此语义），补救手段改为
+  **手动加权**（面板 ⭐ / `manual_value`）与**按需挑一部分送在线 LLM 评分**
+  （`score --ids` 已能精确点单，`traces_by_ids` 修后点 1 条只评 1 条）。
+  三档/magnitude/priority 语义类问题（原 §4.5 的 3、4、5 条）**优先级下降**，等业务口径再定。
+- `fix(scoring)` **`evaluate_trace` 改走 `llm.py` 统一纪律**（原 §4.5-1）：此前用
+  `urllib` 裸连——无重试、无退避、无 `max_total_seconds`，实测撞过
+  `read operation timed out` 白评一轮。现在与蒸馏同源同配置：瞬态错误
+  （429/5xx/网络抖动）按 `llm.max_retries` 指数退避、429 走进程级全局限流闸门、
+  非流式假超时由 `llm.max_total_seconds` 兜底；`llm` 段的
+  timeout/max_retries/backoff_base 等键**对评分开始生效**（此前不生效）。
+  scoring 侧重复的 `_llm_opener`/`_scrub_text`/`_is_content_filter`/
+  `ContentFilterRejected` 副本删除，统一由 llm.py 提供（守护测试同步迁移）。
+- `fix(scoring)` **已评清单落盘从 O(n²) 降为 O(n)**（原 §4.5-6）：批量评分循环里
+  每条成功写入都调 `mark_scored` 全量重写 `scored_traces.json`（第 i 条写 i 行）。
+  改为循环内 `_mark_scored_inmem` 内存记账（防批内双评），批末
+  `mark_scored_many(written + neutral)` **一次写盘**。权衡：批中途崩溃时
+  已写 feedback 未落盘的条目下次重评一次（同向 feedback 幂等无害）。
+  单条手动场景（👍/👎）仍走 `mark_scored` 立即落盘。
+
 **2026-11-03 蒸馏记忆纳入评分（一条被写错的判断）**
 - 之前的结论是「`dst_` 评不到，因为正文在 `distilled_memories`、`units.text` 是空的」
   —— **判断错了**。实测 `src_id LIKE 'dst_%'` 共 1916 行，`text` 为空 **0 行**
@@ -267,9 +311,20 @@
   会整会话重插（同键正文被改写），此后任何 sync/ingest 都跳过它；若该模型向量曾缺失，
   会用**新文本**写向量而 `units.text` 仍是旧文本 → 向量与正文语义错位。
   现实修法只能是 `--rebuild`（代价见上一条），需要设计「known 命中后比对 content hash」。
-- **待修**：`rag.retrieval.models` 里非 active 模型文件缺失时 `search.py:744-751` 无 try，
-  整个检索 500（`config.py` 只校验 active 模型的文件存在）。
+- ~~**待修**：`rag.retrieval.models` 里非 active 模型文件缺失时 `search.py:744-751` 无 try，
+  整个检索 500（`config.py` 只校验 active 模型的文件存在）。~~
+  **已修（2026-11-07）**：多模型向量路逐模型 `try`，非 active 模型加载/编码失败
+  **只跳过该路并写 warning 日志**（日志里点名模型 id 与排查方向），不拖垮整个检索；
+  active 模型仍原样上抛（它的文件在配置加载时校验过，运行期失败是真故障，
+  静默跳过等于"无结果假成功"）。守卫：`tests/rag/test_rag_search.py
+  ::test_retrieval_skips_unavailable_nonactive_model`（坏模型 + 好 active，
+  断言 active 照常命中且有 warning）。
 - **待修**：`seq = MAX(seq)+1` 在两个 MCP 客户端同时写时撞 `UNIQUE(source,conversation_id,seq)`，
   `legacy_id` 唯一索引的"先查后插"同样非原子；应改 `BEGIN IMMEDIATE` + 冲突重试。
-- **待修**：`rag.write.order` 漏掉 active 模型时，新记忆/页面的 active 向量永不写入，
-  而召回主通道正是 active 表 —— 配置检查脚本应加「active ∈ write_order」校验。
+- ~~**待修**：`rag.write.order` 漏掉 active 模型时，新记忆/页面的 active 向量永不写入，
+  而召回主通道正是 active 表 —— 配置检查脚本应加「active ∈ write_order」校验。~~
+  **已修（2026-11-07）**：在 `rag/config.py::Settings.write_order` **语义级修复** ——
+  `order` 非空但缺 active 时自动**补到末尾**（不破坏 fast_first 的既有顺序；
+  缺省仍走"空则仅 active"）。选语义修复而非只加检查脚本，理由：配置检查是启发式、
+  会漏（本项目已有先例），而这个坑的后果是"写入成功却永远召不回"，必须在取值处兜死。
+  守卫：`tests/rag/test_rag_config.py::test_write_order_appends_active_when_missing`。
