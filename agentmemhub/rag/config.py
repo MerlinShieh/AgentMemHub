@@ -254,10 +254,21 @@ class Settings:
 
     @property
     def write_order(self) -> list[str]:
-        """向量化写入顺序（先跑的先可用）；空则仅 active。"""
+        """向量化写入顺序（先跑的先可用）；空则仅 active。
+
+        **active 永远在列**（2026-10-27 审计确认过的坑）：order 配了非空列表
+        却漏掉 active 时，此前不触发"空则仅 active"的兜底 → 新记忆/新页面的
+        active 向量永不写入，而召回主通道（"vec"）读的正是 active 表——表现
+        为"写入成功却永远召不回"，且不报错。修法：缺则补到**末尾**（fast_first
+        语义下先跑的小模型先可用，active 兜底不破坏既有顺序）。
+        """
         order = [m for m in (self.write.get("order") or [])
                  if m in self.models]
-        return order or [self.active_model]
+        if not order:
+            return [self.active_model]
+        if self.active_model not in order:
+            order.append(self.active_model)
+        return order
 
     @property
     def retrieval_models(self) -> list[str]:

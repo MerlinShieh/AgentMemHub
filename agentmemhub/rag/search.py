@@ -743,12 +743,26 @@ def hybrid_search(
             # 其余模型用 "vec:<model_id>" —— 各路独立参与 RRF，一致命中信号更强。
             for mid in settings.retrieval_models:
                 s = settings.model(mid)
-                ensure_vec_table(conn, s)
-                em = embedder if mid == spec.id else get_embedder(s, settings=settings)
-                qv = em.encode_query(query)
                 name = "vec" if mid == spec.id else f"vec:{mid}"
-                channels[name] = vector_search(conn, s.vec_table, qv,
-                                               candidate_k, exclude_ids=excl)
+                # 非 active 模型加载/编码失败只**跳过该路**（写日志），不拖垮整个
+                # 检索（2026-10-27 审计确认的坑：config 只校验 active 的模型文件
+                # 存在，`retrieval.models` 里配了文件缺失的非 active 模型时，
+                # get_embedder 在这里抛 FileNotFoundError → 整个检索 500，
+                # 而主通道本来好好的）。active 模型仍原样上抛——它的文件在配置
+                # 加载时校验过，运行期失败是真故障，静默跳过等于无结果假成功。
+                try:
+                    ensure_vec_table(conn, s)
+                    em = (embedder if mid == spec.id
+                          else get_embedder(s, settings=settings))
+                    qv = em.encode_query(query)
+                    channels[name] = vector_search(conn, s.vec_table, qv,
+                                                   candidate_k, exclude_ids=excl)
+                except Exception as e:
+                    if mid == spec.id:
+                        raise
+                    log.warning(
+                        "召回跳过模型 %s（加载/编码失败：%s）——请检查 "
+                        "rag.retrieval.models 与该模型目录", mid, e)
         if mode in ("hybrid", "fts"):
             channels["fts"] = fts_search(conn, query, candidate_k, exclude_ids=excl)
         if mode == "hybrid" and idents:

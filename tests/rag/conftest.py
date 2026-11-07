@@ -21,6 +21,18 @@ def project_settings():
     return load_settings()
 
 
+@pytest.fixture()
+def embedder(project_settings, tmp_log_dir):
+    """真实 active 嵌入模型的小批量实例（检索/写入测试共用）。"""
+    import logging
+
+    from agentmemhub.rag.embedder import OnnxEmbedder
+
+    log = logging.getLogger("asrag.test.embedder")
+    log.addHandler(logging.NullHandler())
+    return OnnxEmbedder(project_settings.active_spec, batch_size=4, log=log)
+
+
 # ── fixture 源库：复刻 agentmemhub.db 关键结构 + 边界数据 ──────────────────
 
 _SOURCE_DDL = """

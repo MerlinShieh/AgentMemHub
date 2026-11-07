@@ -138,6 +138,20 @@ def test_write_order_ignores_unregistered(tmp_path):
     assert s.write_order == ["a"]
 
 
+def test_write_order_appends_active_when_missing(tmp_path):
+    """回归（2026-10-27 审计）：order 非空但漏掉 active 时，active 必须补进
+    写入清单（补到末尾）——否则新记忆/页面的 active 向量永不写入，而召回
+    主通道（"vec"）读的正是 active 表，表现为"写入成功却永远召不回"。"""
+    _mk_model(tmp_path, "a", 384)
+    _mk_model(tmp_path, "b", 384)
+    (tmp_path / "agentmemhub.yaml").write_text(
+        "rag:\n  active: b\n  write:\n    order: [a]\n  models:\n"
+        "    a:\n      path: models/a\n      dim: 384\n"
+        "    b:\n      path: models/b\n      dim: 384\n", encoding="utf-8")
+    s = load_settings(tmp_path)
+    assert s.write_order == ["a", "b"]     # 漏配的 active 补到末尾
+
+
 def test_model_files_missing_raises(tmp_path):
     (tmp_path / "models.json").write_text(
         json.dumps({

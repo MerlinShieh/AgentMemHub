@@ -37,11 +37,6 @@ def rag_db(project_settings, embedder, fixture_source_db, tmp_path):
     return dataclasses.replace(project_settings, index_db=idx)
 
 
-@pytest.fixture()
-def embedder(project_settings):
-    return OnnxEmbedder(project_settings.active_spec, batch_size=4, log=_qlog)
-
-
 # ── FTS 基建 ────────────────────────────────────────────────────────────
 
 def test_ensure_fts_backfill_idempotent(rag_db):
@@ -364,3 +359,61 @@ def test_multi_model_vector_recall(project_settings, embedder, tmp_path):
                          embedder=embedder, log=_qlog)
     assert any("探针" in (h.text or "") for h in hits), \
         "第二模型表里的向量必须能通过 retrieval.models 被召回"
+
+
+def test_retrieval_skips_unavailable_nonactive_model(project_settings, embedder,
+                                                     tmp_path):
+    """回归（2026-10-27 审计）：`retrieval.models` 配了文件缺失的非 active
+    模型时，只跳过该路并写警告日志，检索不 500——主通道本来好好的。
+    （config 只校验 active 的模型文件存在，非 active 缺失是真实可配出的状态。）
+    """
+    import dataclasses
+    import logging
+
+    from agentmemhub.rag.ingest import ensure_vec_table, open_index
+    from agentmemhub.rag.search import hybrid_search
+
+    active = project_settings.active_spec
+    broken = dataclasses.replace(active, id="broken-m",
+                                 path=tmp_path / "no_such_model_dir")
+    st = dataclasses.replace(
+        project_settings,
+        index_db=tmp_path / "idx_skip.db",
+        models={**project_settings.models, broken.id: broken},
+        retrieval={**project_settings.retrieval,
+                   "models": [broken.id, active.id]},
+    )
+    text = "跳过坏模型探针：这条记忆只有 active 向量，检索不应被坏模型拖垮"
+    conn = open_index(st.index_db)
+    try:
+        ensure_vec_table(conn, active)
+        with conn:
+            cur = conn.execute(
+                "INSERT INTO units(source, conversation_id, seq, role, turn_key,"
+                " src_id, time, title, text, chars)"
+                " VALUES('probe','conv',1,'user','tk','probe-skip-1',1786000000,"
+                "'探针',?,?)", (text, len(text)))
+            v = embedder.encode_passages([text])[0]
+            conn.execute(
+                f"INSERT INTO {active.vec_table}(rowid, embedding) VALUES(?,?)",
+                (cur.lastrowid, bytes(v)))
+    finally:
+        conn.close()
+
+    warnings: list[str] = []
+    lg = logging.Logger("t-skip")
+    lg.addHandler(_ListHandler(warnings))
+    hits = hybrid_search(st, "跳过坏模型探针", mode="vector", k=5,
+                         embedder=embedder, log=lg)
+    assert any("探针" in (h.text or "") for h in hits), \
+        "active 主通道必须照常命中"
+    assert any(broken.id in w for w in warnings), "跳过要留下日志证据"
+
+
+class _ListHandler(logging.Handler):
+    def __init__(self, sink: list):
+        super().__init__()
+        self.sink = sink
+
+    def emit(self, record):
+        self.sink.append(record.getMessage())
