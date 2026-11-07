@@ -909,6 +909,14 @@ def hybrid_search(
             hits = judge.filter(query, hits)
             log.info("judge applied in=%d out=%d", before, len(hits))
 
+        # 旁路：记录最终命中（生命周期报表的数据源）。独立命中库 + 契约上
+        # "绝不抛错"，失败最多丢一次统计，检索结果不受影响。
+        try:
+            from agentmemhub.rag.recall_stats import record_hits
+            record_hits(settings.index_db, [h.unit_id for h in hits])
+        except Exception as e:                 # noqa: BLE001 —— 防御性兜底
+            log.warning("召回命中统计失败（不影响检索结果）: %s", e)
+
         log.info(
             "search q=%r mode=%s k=%d idents=%s phrases=%s vec_n=%d fts_n=%d"
             " ident_n=%d phrase_n=%d dropped_low=%d bypassed=%d page_dropped=%d"

@@ -574,6 +574,48 @@ def cmd_score(args) -> None:
     return _score_rc(r)
 
 
+def cmd_stale(args) -> int:
+    """低价值记忆报表：N 天零召回命中的记忆清单（生命周期清理候选）。
+
+    只报告、不删除——清理动作走既有入口（待更新记忆软/硬删除、面板勾选）。
+    口径见 `agentmemhub/rag/recall_stats.py` 模块头（"记忆"= 蒸馏投影 +
+    Agent 直写；"命中"= 检索最终返回；命中统计自该模块落地开始积累）。
+    """
+    import datetime as _dt
+    from agentmemhub.rag.config import load_settings
+    from agentmemhub.rag.recall_stats import stale_memories
+
+    days = max(1, int(args.days))
+    try:
+        rows = stale_memories(load_settings().index_db,
+                              days=days, limit=args.limit)
+    except Exception as e:
+        _stdout(f"报表失败：{e}")
+        _cli_log(f"stale 失败 → {e}", level="error")
+        return 1
+    _cli_log(f"stale --days {days} → {len(rows)} 条")
+    if args.json:
+        import json as _json
+        for r in rows:
+            r["age_days"] = max(0, (int(time.time()) - int(r["time"])) // 86400)
+        _stdout(_json.dumps(rows, ensure_ascii=False, indent=1))
+        return 0
+    if not rows:
+        _stdout(f"没有「创建满 {days} 天且最近 {days} 天零召回命中」的记忆。")
+        return 0
+    _stdout(f"「创建满 {days} 天且最近 {days} 天零召回命中」的记忆共 {len(rows)} 条"
+            "（最老优先；仅报告，不删除。命中统计自 2026-11-06 起积累，此前老记忆"
+            "均视为未命中，属预期）：\n")
+    for r in rows:
+        t = _dt.datetime.fromtimestamp(int(r["time"])).strftime("%Y-%m-%d")
+        val = r["value"]
+        val_s = "?" if val is None else f"{float(val):.2f}"
+        text = (r["text"] or "").replace("\n", " ")
+        _stdout(f"  [{r['id']}] {r['src_id']}  {t}  value={val_s}"
+                f"  hits={r['hit_count']}  {text[:80]}")
+    return 0
+
+
 def cmd_distill(args) -> None:
     """记忆蒸馏：原始会话 → 结构化记忆（LLM 提炼，幂等 + fail-open）。
 
@@ -1228,6 +1270,13 @@ def build_parser() -> argparse.ArgumentParser:
     pd.add_argument("--dry-run", action="store_true",
                     help="只蒸馏不落库（预览产物与成本，可反复执行）")
 
+    pst = sub.add_parser("stale",
+                         help="低价值记忆报表：N 天零召回命中的记忆清单（清理候选，只报告不删除）")
+    pst.add_argument("--days", type=int, default=90,
+                     help="观察窗口天数（默认 90：创建满 N 天且最近 N 天零命中）")
+    pst.add_argument("--limit", type=int, default=200, help="最多列出条数（默认 200）")
+    pst.add_argument("--json", action="store_true", help="以 JSON 输出（机器读/面板对接）")
+
     _register_snapshot_parser(sub)
     _register_memory_log_parser(sub)
     _register_llm_config_parser(sub)
@@ -1605,6 +1654,7 @@ def main() -> int:
         "serve": cmd_serve, "mcp": cmd_mcp,
         "sync": cmd_sync, "clean": cmd_clean, "score": cmd_score, "rebuild": cmd_rebuild,
         "distill": cmd_distill, "weight": cmd_weight,
+        "stale": cmd_stale,
         "wiki": cmd_wiki,
         "feed": cmd_feed,
         "snapshot": cmd_snapshot,

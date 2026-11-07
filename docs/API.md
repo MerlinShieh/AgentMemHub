@@ -338,7 +338,16 @@ python -m agentmemhub memory-log                                # 记忆操作�
   [--event write|read] [--path mcp|http|distill|cli] [--grep 关键词] [--limit N] [--json]
 python -m agentmemhub llm-config [--json]                       # 各 LLM 使用点**最终生效**的配置
                                                                 # （标出每项是继承还是覆盖）
+python -m agentmemhub stale [--days 90] [--limit 200] [--json]  # 低价值记忆报表：N 天零召回命中的
+                                                                # 记忆清单（清理候选，**只报告不删除**）
 ```
+
+> **`stale` 的口径**：记忆 = `role='distilled'`（蒸馏投影）或 `source='memory'`
+> （Agent 直写），与评分枚举一致；消息层不参与。"命中"= 检索**最终返回**
+> （准入 + 多样性 + 精判之后），不是候选池。
+> ⚠️ 命中统计（`recall_hits.db`，与索引库同目录的**独立库**）自 2026-11-07
+> 才开始积累 —— 此前没有任何命中数据，老记忆一律视为"从未命中"，
+> 上线首日报表≈全部老记忆，属预期；跑一段时间后才有区分度。
 
 ---
 
