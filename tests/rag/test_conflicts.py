@@ -94,13 +94,37 @@ def test_classify_conflict_by_slot():
     assert "port" in v[1]
 
 
-def test_classify_number_diff_is_evidence_not_trigger():
-    """数字差异只作证据不触发（实测 76 对全是不同里程碑的数量对照）。"""
-    assert cf.classify("半衰期改为 180 天", "半衰期 30 天") is None
-    # 但证据仍在 detail 里，方便人工比对
-    v = cf.classify("端口改为 9100，半衰期 180 天", "服务端口 8086")
+def test_classify_param_change_by_shared_noun():
+    """参数名词 + 变更词 + 数值不同 → conflict（知识库最有价值的一类）。
+
+    "半衰期 30 天" vs "半衰期改为 180 天"：两条都在说同一个**参数**，
+    且新方明确是变更句——这才是"同一属性的两个候选值"。
+    """
+    v = cf.classify("半衰期改为 180 天", "半衰期 30 天")
     assert v is not None and v[0] == "conflict"
-    assert any(k.startswith("num:") for k in v[2]["slots_new"])
+    assert "半衰期" in v[1] and "180" in v[1]
+    assert v[2]["param_nouns"] == ["半衰期"]
+
+
+def test_classify_number_diff_without_param_noun_is_ignored():
+    """没有共享参数名词的数量差异不判（「M1 完成 106 条」vs「M3 完成 5 条」）。"""
+    assert cf.classify("M3 完成，全部 5 条记忆", "M1 完成，全部 106 条记忆") is None
+
+
+def test_classify_number_diff_without_marker_is_ignored():
+    """有参数名词但没有变更词 → 不判（可能是两处不同描述而非改写）。"""
+    assert cf.classify("超时设为 900 秒", "超时 60 秒") is None
+
+
+def test_classify_same_series_model_upgrade():
+    """同一系列模型换代 → evolution；跨系列不判。"""
+    v = cf.classify("默认模型已换成 xiaomi/mimo-v2.6-flash",
+                    "默认模型使用 xiaomi/mimo-v2.5")
+    assert v is not None and v[0] == "evolution"
+    assert "同系列" in v[1]
+    # 跨系列：各自不同主题，不算换代
+    assert cf.classify("NVIDIA NIM 接入 z-ai/glm-5.2",
+                       "阿里套餐支持 qwen3.7/3.6") is None
 
 
 def test_classify_evolution_by_version():

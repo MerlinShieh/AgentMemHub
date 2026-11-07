@@ -61,9 +61,40 @@ _VERSIONED_EN_RE = re.compile(
     re.M)
 _VERSIONED_ZH_RE = re.compile(r"([\u4e00-\u9fff]{2,8})\s*v(\d+\.\d+(?:\.\d+)*)")
 
+#: **参数名词**：出现这些词说明文本在陈述"某个配置项的值"。
+#:
+#: 为什么需要它：光看"同单位数字不同"会把「M1 完成 106 条」vs「M3 完成 5 条」
+#: 判成冲突。加了这个词表后，只有当**两条记忆都在说同一个参数**（都提到
+#: "半衰期"/"端口"/"超时"…）才比较数值——这才是"同一属性的两个候选值"。
+#:
+#: ⚠️ 词表**只收"可量化且唯一"的配置参数**。真实库实测（2026-11-07）：
+#: `预算`/`衰减`/`并发`/`批次`/`缓存`/`配额`/`频率` 这类词在技术笔记里
+#: 几乎总指"某个统计口径"而不是"某个配置项"，把它们收进来会让
+#: 「预算 8 次」vs「36/5 个片段」这种不同维度的数字被判成参数冲突。
+#: 维护原则：**宁缺毋滥**——加词前先问"两条记忆都为这个词给过唯一数值吗"。
+_PARAM_NOUNS: tuple[str, ...] = (
+    "半衰期", "保鲜期", "端口", "维度", "超时", "阈值", "上限", "下限",
+    "保留份数", "间隔", "权重上限", "重试次数",
+)
+
+
+def param_nouns(text: str) -> set[str]:
+    """文本中出现的参数名词（用于判断两条记忆是否在说同一配置项）。"""
+    return {n for n in _PARAM_NOUNS if n in (text or "")}
+
+
+def _model_stem(value: str) -> str:
+    """模型名的"词干"：剥掉版本片段，用于判断是否同一系列。
+
+    `xiaomi/mimo-v2.5` 与 `xiaomi/mimo-v2.6-flash` → 都是 `xiaomi/mimo`
+    （同一系列的两个版本 = 换代）；`z-ai/glm-5.2` 与 `qwen3.7/3.6` → 不同。
+    """
+    return re.sub(r"[-_.v]?\d+(?:\.\d+)*.*$", "", value).strip("/-._")
+
+
 #: 中文主体黑名单：这些是**动词/泛名词**不是项目名。实测「AGENTS.md 记录 v1.3.2」
-#: 会把"记录"抽成主体——虽然不同主体之间不会互相比较（不会造成误报），但会污染
-#: detail 证据、也会让"记录 v1.1"和"记录 v2.0"这种巧合互相比较。
+#: 会把"记录"抽成主体——不同主体之间不会互相比较（不会造成误报），但会污染
+#: detail 证据，也会让"记录 v1.1" 与 "记录 v2.0" 这种巧合互相比较。
 _VER_ZH_STOP = frozenset({
     "记录", "说明", "更新", "完成", "版本", "支持", "使用", "发布", "项目",
     "文档", "结构", "功能", "实现", "设计", "现在", "当前", "升级", "兼容",
@@ -102,6 +133,11 @@ _HARD_SLOTS = ("port",)
 #: 代价：一条记忆提到两个端口时漏报——**宁可漏报不误报**，误报会让整个
 #: 功能失去可信度（用户点开三条都是噪音就再也不用了）。
 _UNIQUE_MAX = 1
+
+#: 数字槽位的唯一值上限放宽到 2：真实记忆常写成"180 天半衰期 + 90 天保鲜期"
+#: （一句话两个同类数字），按 1 会漏掉这类最重要的参数变更。配合"必须共享
+#: 参数名词 + 新方含变更词"两个前置条件，误报风险可控。
+_NUM_UNIQUE_MAX = 2
 
 #: 默认只扫「记忆类」unit（与评分枚举、stale 报表同口径）。
 _MEMORY_WHERE = "(u.role='distilled' OR u.source='memory')"
@@ -217,15 +253,23 @@ def classify(new_text: str, old_text: str, *,
         if not (va & vb):
             return "conflict", f"l2:{key} {sorted(va)} ≠ {sorted(vb)}", detail
 
-    # ── 数字差异：**降级为证据，不触发**。────────────────────────────
-    #
-    # 最初设计成"同单位唯一值不同 + 含变更词 → conflict"，真实库实测：76 对
-    # 里绝大多数是「M1 完成，全部 106 条」vs「M3 完成，全部 1xx 条」这种
-    # **不同里程碑的数量对照**——数字在技术文本里几乎总是场景相关的实测值，
-    # 不是"同一配置项的两个候选值"。要可靠判定必须知道"这个数字属于哪个
-    # 配置项"，那已经是语义理解（L3/L4 的活）。
-    # 取舍：**接受漏报**（"半衰期 30 天→180 天"这类不报），换取队列可信。
-    # 数字差异仍写进 detail，供人工比对时参考。
+    # ── 数字参数变更：**必须共享参数名词**才算（"半衰期 30 天" vs "半衰期
+    #    改为 180 天"）。这是知识库最有价值的一类冲突（配置/参数被改），
+    #    但只在"两条都在说同一个参数"时才判——否则「M1 完成 106 条」vs
+    #    「M3 完成 5 条」也会被算成冲突（实测 76 对全误报就是这么来的）。
+    shared_nouns = param_nouns(old_text) & param_nouns(new_text)
+    if shared_nouns and marks:
+        for key in sorted(set(a) & set(b)):
+            if not key.startswith("num:"):
+                continue
+            va, vb = a[key], b[key]
+            if len(va) > _NUM_UNIQUE_MAX or len(vb) > _NUM_UNIQUE_MAX:
+                continue
+            if not (va & vb):
+                detail["param_nouns"] = sorted(shared_nouns)
+                return ("conflict",
+                        f"l2:{'/'.join(sorted(shared_nouns))} "
+                        f"{sorted(va)} ≠ {sorted(vb)}", detail)
 
     # ── 演进：同一主体的版本换代 ────────────────────────────────────
     # `ver:<主体>` 的键已绑定主体名，直接比较即可（裸版本号不参与）。
@@ -235,8 +279,19 @@ def classify(new_text: str, old_text: str, *,
         va, vb = a[key], b[key]
         if not (va & vb):
             return "evolution", f"l2:{key} {sorted(va)} ≠ {sorted(vb)}", detail
-    # `model` 差异**不触发**（真实库实测：6 对里全是"推荐哪个模型" vs
-    # "某通道用哪个模型"——都在聊模型但不是换代）。仅作 detail 证据。
+    # `model` 差异只在**同一系列**内算换代（`mimo-v2.5` → `mimo-v2.6`）。
+    # 跨系列（`glm-5.2` vs `qwen3.7/3.6`）不判——实测那类多是"推荐哪个模型"
+    # 与"某通道用哪个模型"并存，不是换代。
+    ma, mb = a.get("model"), b.get("model")
+    if ma and mb and not (ma & mb):
+        stems_a = {_model_stem(v) for v in ma}
+        stems_b = {_model_stem(v) for v in mb}
+        same = {x for x in stems_a if x and x in stems_b}
+        if same:
+            detail["model_old"] = sorted(ma)
+            detail["model_new"] = sorted(mb)
+            return ("evolution",
+                    f"l2:model 同系列换代 {sorted(ma)} → {sorted(mb)}", detail)
     return None
 
 
