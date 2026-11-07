@@ -655,6 +655,28 @@ def cmd_conflicts(args) -> int:
             _cli_log(f"conflicts resolve {args.resolve} → {r}")
             return 0
 
+        if args.from_wiki:
+            from agentmemhub import config as hub_config
+            from agentmemhub import conflicts as cfw
+            l2 = (args.l2_dir or (hub_config.config().wiki or {}).get("out_l2")
+                  or "").strip()
+            if not l2:
+                _stdout("未配置 wiki.out_l2，请用 --l2-dir 指定 L2 产物目录")
+                return 1
+            _stdout(f"从 L2 页面解析矛盾/取代标注：{l2}")
+            try:
+                st = cfw.ingest_wiki_annotations(conn, l2)
+            except Exception as e:
+                _stdout(f"解析失败：{e}")
+                _cli_log(f"conflicts --from-wiki 失败 → {e}", level="error")
+                return 1
+            _stdout(f"标注 {st['annotations']} 条 → 澄清类 {st['clarified']} 条跳过、"
+                    f"可落表 {st['mapped']} 条、编号过多待复核 {st['ambiguous']} 条、"
+                    f"无法解析 {st['unresolved']} 条；"
+                    f"新增冲突 {st['inserted']} 条（已存在 {st['skipped']} 条）")
+            _cli_log(f"conflicts from-wiki → {st}")
+            return 0
+
         if args.scan:
             if args.reset:
                 n = cf.reset(conn)
@@ -1372,6 +1394,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="记忆冲突：找出被新结论取代的旧记忆（规则层，只标记不执行）")
     pcf.add_argument("--scan", action="store_true",
                      help="存量扫描：对全部记忆类 unit 做近邻比对（分钟级，纯 SQL 不加载模型）")
+    pcf.add_argument("--from-wiki", action="store_true",
+                     help="从 L2 页面正文解析已有的「⚠️ 矛盾 / 取代关系」标注并落表"
+                          "（语义级判断的沉淀，零提示词改动）")
+    pcf.add_argument("--l2-dir", default="",
+                     help="L2 产物目录（默认取配置 wiki.out_l2）")
     pcf.add_argument("--reset", action="store_true",
                      help="扫描前清空冲突表（规则调整后重扫用；已处置记录也会清掉）")
     pcf.add_argument("--list", action="store_true", help="列出冲突（默认动作）")

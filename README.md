@@ -385,7 +385,7 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 | `snapshot [--snapshot-action create\|list\|restore]` | 快照与回滚（索引库整库 + wiki 产物目录）|
 | `llm-config [--json]` | **配置自检**：列出各 LLM 使用点（蒸馏/评分/Wiki 一级/二级）**最终生效**的配置，并标出每项是**继承**还是**覆盖** |
 | `stale [--days 90] [--limit 200] [--json]` | **低价值记忆报表**（记忆生命周期闭环的最后一块）：列出「创建已满 N 天且最近 N 天**零召回命中**」的蒸馏/直写记忆，按 `价值×新鲜度` 升序（最该复核的在前），带 `value`/`freshness`/`hit_count`/正文摘要。**只报告、不删除** —— 清理走 `wiki --action drop` 或面板勾选。命中数据记在独立库 `recall_hits.db`（2026-11-07 起积累，此前老记忆一律视为未命中，属预期）|
-| `conflicts [--scan] [--list] [--resolve ID --action A] [--reset] [--json]` | **记忆冲突**：找出被新结论取代的旧记忆。`--scan` 存量扫描（纯 SQL 近邻，不加载模型，分钟级）；`--resolve` 处置 —— `superseded`（归档旧方 = ⭐ 锁 0，撤出召回面且可逆）/ `kept_both` / `dismissed`。可靠信号只有「同主体版本换代」与「唯一端口冲突」两类，其余降级为证据——**宁可漏报不误报**（详见 [docs/memory-lifecycle.md](docs/memory-lifecycle.md) §11.3）|
+| `conflicts [--from-wiki] [--scan] [--list] [--resolve ID --action A] [--reset] [--json]` | **记忆冲突**：找出被新结论取代的旧记忆。**首选 `--from-wiki`**：解析 L2 页面里 LLM 已写好的 `⚠️ 矛盾/取代关系` 标注并落表（零提示词改动，实测 1361 页 → 57 条独立冲突对，抽样 8~9 成准确）；`--scan` 是规则层兜底（只认同系列模型换代/唯一端口冲突，覆盖未进 wiki 的记忆）；`--resolve` 处置 —— `superseded`（归档旧方 = ⭐ 锁 0，可逆）/ `kept_both` / `dismissed`。详见 [docs/memory-lifecycle.md](docs/memory-lifecycle.md) §11.4 |
 | `stats` / `adapters` | 统计 / adapter 状态 |
 
 > 更完整的代码与 SQL 示例（按 Agent 查询、按文件夹跨 Agent 统计、会话角色分布、直连数据库等）见 **[docs/EXAMPLES.md](./docs/EXAMPLES.md)**。

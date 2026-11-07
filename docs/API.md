@@ -340,7 +340,8 @@ python -m agentmemhub llm-config [--json]                       # 各 LLM 使用
                                                                 # （标出每项是继承还是覆盖）
 python -m agentmemhub stale [--days 90] [--limit 200] [--json]  # 低价值记忆报表：N 天零召回命中的
                                                                 # 记忆清单（清理候选，**只报告不删除**）
-python -m agentmemhub conflicts [--scan] [--list] [--reset] [--json]  # 记忆冲突：找出被新结论取代的旧记忆
+python -m agentmemhub conflicts [--from-wiki] [--scan] [--list] [--reset] [--json]  # 记忆冲突
+python -m agentmemhub conflicts --from-wiki            # 首选：解析 L2 页面的 ⚠️ 标注（语义级）
 python -m agentmemhub conflicts --resolve 12 --action superseded [--reason 说明]  # 处置
 ```
 
@@ -351,11 +352,15 @@ python -m agentmemhub conflicts --resolve 12 --action superseded [--reason 说�
 > 才开始积累 —— 此前没有任何命中数据，老记忆一律视为"从未命中"，
 > 上线首日报表≈全部老记忆，属预期；跑一段时间后才有区分度。
 >
-> **`conflicts` 的口径**：规则层只认两类**可靠**信号——「同一主体的版本换代」
-> （`Mobile_App_AutoTest v1.1.0` vs `v1.4.0`）与「唯一端口冲突」；
-> 变更词、数字差异、`owner/name` 形态的模型名都只作证据不作判据
-> （真实库四轮实测：裸规则会产生千级误报）。**接受漏报换队列可信**，
-> 需要高召回时再上 LLM 兜底（见 [memory-lifecycle.md](memory-lifecycle.md) §11.3）。
+> **`conflicts` 的口径**：**两条识别路径，语义优先**——
+> ① `--from-wiki`（首选）：解析 L2 跨会话聚合时 LLM 已写好的
+> `> ⚠️ 矛盾：` / `> ⚠️ 取代关系：` 引用块，把判断沉淀成结构化数据
+> （零提示词改动；实测 1361 页 → 187 条标注 → 102 条可落表 → 57 条独立冲突对，
+> 抽样 8~9 成是真取代）；
+> ② `--scan`（兜底）：规则层，只可靠识别「同系列模型换代」与「唯一端口冲突」，
+> 覆盖从未进 wiki 的记忆（真实库实测只有 4 对）。
+> `index.md`/摘要里的"矛盾"是叙述用词不是标注，解析只认引用块行首。
+> 详见 [memory-lifecycle.md](memory-lifecycle.md) §11.3–§11.4。
 
 ---
 

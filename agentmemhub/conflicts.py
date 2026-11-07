@@ -1,16 +1,22 @@
-"""记忆冲突检测（规则层）——发现「旧结论已被新结论取代」。
+"""记忆冲突检测——发现「旧结论已被新结论取代」。
 
-背景与设计（见 `docs/memory-lifecycle.md` §4）：LLM（Mem0 的
-ADD/UPDATE/DELETE/NOOP 四操作）是**开放域**的通用解，但个人/团队知识库里
-的"矛盾"绝大多数是**同一事实的版本演进**（v2.5→v2.6、端口 8086→9100），
-而且人表达"更新"时几乎总会留下语言标记（"改为/废弃/不再"）。所以这里用
-**零成本、可解释的规则层**，LLM 只留作兜底（L4，未实现）。
+**两条识别路径**（按可靠性排序）：
 
-四层漏斗中的实现范围：
-- L0 候选生成：向量近邻（**直接用库里已有的向量**做 KNN，不需要加载嵌入模型）
-- L1 变更词规则：新记忆含"改为/废弃/不再"等标记 → 疑似取代
-- L2 结构化槽位对比：同槽位不同值（端口/路径/模型名/数字+单位/版本号）
-- L3/L4：未实现（本地 NLI 缓做、LLM 只兜底高价值项）
+1. **`wiki` 路径（首选，语义级）**：L2 跨会话聚合时，LLM 本来就在做矛盾识别与
+   时效择优（`scripts/wiki_aggregate.py` 的 `_PAGE_RULES` 第 4/5 条），并把结论
+   写成正文里的 `> ⚠️ 矛盾：…` / `> ⚠️ 取代关系：…` 引用块。本模块**解析这些
+   已有产物**（零提示词改动、零产出风险），把判断沉淀成结构化数据。
+   见 `parse_wiki_annotations()` / `ingest_wiki_annotations()`。
+2. **规则层（兜底，覆盖从未进 wiki 的记忆）**：向量近邻 + 结构化槽位对比。
+
+为什么优先走 wiki 路径：语义判断本来就由 LLM 做了，另建一套规则既重复又弱
+（真实库实测：规则层只能可靠识别"同系列模型换代/唯一端口冲突"）。
+
+⚠️ **两类"矛盾"必须分清**（实测教训）：
+- `index.md` 与页面摘要里出现的"矛盾"是**叙述用词**（"内部数据矛盾"、
+  "与核心规则自相矛盾"），不是标注 → 解析只认**引用块行首**的 `⚠️ 矛盾：`；
+- LLM 也会写"二者并非矛盾，而是条件不同"——这类是**澄清而非冲突**，
+  按 `_CLARIFY_MARKERS` 排除。
 
 **只标记、不执行**：所有处置动作（归档/保留/忽略）由人工经 CLI 或面板确认，
 归档复用 `memstore.set_manual_value(uid, 0.0)`（撤出召回面、可逆、零新表）。
@@ -21,6 +27,7 @@ import json
 import re
 import sqlite3
 import time
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 #: 变更标记词：命中即说明这条记忆在描述"某事的改变"（新方通常是取代方）。
@@ -557,3 +564,152 @@ def stats(conn: sqlite3.Connection) -> dict:
         "SELECT status, COUNT(*) FROM memory_conflicts GROUP BY status").fetchall()
     by_status = {r[0]: int(r[1]) for r in rows}
     return {"total": sum(by_status.values()), "by_status": by_status}
+
+
+# ══════════════════════════════════════════════════════════════════════
+# wiki 路径：解析 L2 页面里已有的矛盾/取代标注（语义级判断的沉淀）
+# ══════════════════════════════════════════════════════════════════════
+
+#: 只认**引用块行首**的标注。真实产物实测的两种形态：
+#:   `> ⚠️ 矛盾：发布记录称 tag v2.0.0 与 main 一致于 6b657c6 [m4350][m4351]，而…`
+#:   `> ⚠️ 取代关系：早期跨库合并用 Python 双连接 [m4363]；…改为 SQL 内 ATTACH [m4370]。`
+#:
+#: 为什么必须锚定行首的 `>`：`index.md` 与页面摘要里"矛盾"是**叙述用词**
+#: （"内部数据矛盾"、"与核心规则自相矛盾"），全文匹配会把它们全算成标注
+#: （实测 179 个含"矛盾"的页面里，真正的标注远少于此）。
+#:
+#: ⚠️ 空白必须用 `[ \t]*` 而不是 `\s*`：`\s` 包含换行，会让 `\s*[：:]` 跨过
+#: 行尾、把**下一行**的引用块内容当成这条标注的正文（实测踩到——标注正文
+#: 里混进了 `> - 事实：…` 这种续行，导致编号归属全错）。
+_WIKI_ANNOT_RE = re.compile(
+    r"^[ \t]*>[ \t]*⚠️[ \t]*(矛盾|取代关系)[ \t]*[：:][ \t]*(.+?)[ \t]*$", re.M)
+
+#: 记忆引用编号（正文里的 `[m123]`）。
+_MREF_RE = re.compile(r"\[m(\d+)\]")
+
+#: 澄清性表述：LLM 常写"二者并非矛盾，而是条件不同"/"两者实为一致，后者更具体"
+#: ——那是**解释**不是冲突，直接跳过（实测这类占标注的一小部分但很显眼）。
+_CLARIFY_MARKERS: tuple[str, ...] = (
+    "并非矛盾", "不是矛盾", "并非对立", "并不矛盾", "并非冲突",
+    "不是冲突", "并不冲突", "并不对立", "二者并非", "两者并非",
+    "并非取代", "不是取代",
+    "实为一致", "本质一致", "实为同一", "是同一事件", "同一事件",
+    "两者一致", "二者一致", "是一致的", "相一致的",
+)
+
+
+def parse_wiki_annotations(l2_dir: Path | str) -> list[dict]:
+    """解析 L2 页面正文里的矛盾/取代标注（**纯文本解析，不碰库**）。
+
+    跳过 `index.md`（目录索引，不是知识页）。返回：
+    `[{page, kind, kind_raw, text, refs: [int...], clarified: bool}]`
+
+    `kind`：`conflict`（矛盾）/ `evolution`（取代关系）。
+    `clarified=True` 表示这条是"并非矛盾，而是…"的澄清，调用方应跳过。
+    """
+    root = Path(l2_dir)
+    out: list[dict] = []
+    if not root.exists():
+        return out
+    for md in sorted(root.rglob("*.md")):
+        if md.name == "index.md":
+            continue
+        try:
+            text = md.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        for m in _WIKI_ANNOT_RE.finditer(text):
+            raw_kind, body = m.group(1), m.group(2).strip()
+            if not body:
+                continue
+            refs = [int(x) for x in _MREF_RE.findall(body)]
+            clarified = any(k in body for k in _CLARIFY_MARKERS)
+            out.append({
+                "page": str(md.relative_to(root)).replace("\\", "/"),
+                "kind": "evolution" if "取代" in raw_kind else "conflict",
+                "kind_raw": raw_kind,
+                "text": body[:500],
+                "refs": refs,
+                "clarified": clarified,
+            })
+    return out
+
+
+def _mem_units(conn: sqlite3.Connection, mem_ids: list[int]) -> dict[int, dict]:
+    """`m<id>` → {unit_id, time} 映射（经 distilled_memories.content_hash）。"""
+    if not mem_ids:
+        return {}
+    marks = ",".join("?" * len(mem_ids))
+    try:
+        rows = conn.execute(
+            f"SELECT m.id, m.content_hash, m.created_at, u.id, u.time"
+            f"  FROM distilled_memories m"
+            f"  LEFT JOIN units u ON u.src_id = 'dst_' || m.content_hash"
+            f" WHERE m.id IN ({marks})", mem_ids).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    out: dict[int, dict] = {}
+    for mid, _h, created, uid, utime in rows:
+        out[int(mid)] = {"unit_id": int(uid) if uid else None,
+                         "time": int(utime or created or 0)}
+    return out
+
+
+def ingest_wiki_annotations(conn: sqlite3.Connection,
+                            l2_dir: Path | str) -> dict:
+    """把 L2 标注落进 `memory_conflicts`（**语义级判断的沉淀**）。
+
+    方向判定：一条标注涉及多个 `[mN]` 时，按记忆的**时间戳**排序——早的作
+    `unit_old`、晚的作 `unit_new`（L2 正文只表达"这两条冲突/后者取代前者"，
+    不保证顺序，用时间判定比猜措辞可靠）。
+
+    返回统计：`{pages_scanned, annotations, clarified, mapped, unresolved,
+    inserted, skipped}`——`unresolved` 是"标注里找不到可用记忆对"的条数，
+    用来量化**解析率**。
+    """
+    ensure_conflicts_schema(conn)
+    anns = parse_wiki_annotations(l2_dir)
+    stats_out = {"annotations": len(anns), "clarified": 0, "mapped": 0,
+                 "unresolved": 0, "ambiguous": 0, "inserted": 0,
+                 "skipped": 0, "fetched_unmapped": 0}
+    for a in anns:
+        if a["clarified"]:
+            stats_out["clarified"] += 1
+            continue
+        uniq = sorted(set(a["refs"]))
+        if len(uniq) < 2:
+            # 只引了 0/1 条**不同**编号：无法确定"谁取代谁"
+            # （`[m4501][m4501]` 这种同一条重复两次也算一条，实测出现过）
+            stats_out["unresolved"] += 1
+            continue
+        if len(uniq) > 2:
+            # 3 条以上编号：LLM 常按"甲方证据 [a][b] vs 乙方证据 [c]"来写，
+            # 只取最早/最晚是**武断的**——实测会把同侧的两条证据判成对立
+            # （"模型选择倾向" vs "默认模型配置" 这种不冲突的对被凑成一对）。
+            # 这类留给人工/LLM 复核，不自动落表。
+            stats_out["ambiguous"] += 1
+            continue
+        mapping = _mem_units(conn, uniq)
+        usable = [(mid, info) for mid, info in mapping.items()
+                  if info["unit_id"] is not None]
+        if len(usable) < 2:
+            stats_out["fetched_unmapped"] += 1
+            stats_out["unresolved"] += 1
+            continue
+        stats_out["mapped"] += 1
+        usable.sort(key=lambda x: (x[1]["time"], x[0]))
+        old_mid, old_info = usable[0]
+        new_mid, new_info = usable[-1]
+        detail = {"page": a["page"], "kind_raw": a["kind_raw"],
+                  "text": a["text"], "refs": a["refs"],
+                  "mem_old": old_mid, "mem_new": new_mid}
+        rec = _insert_conflict(
+            conn, unit_new=new_info["unit_id"], unit_old=old_info["unit_id"],
+            kind=a["kind"], rule_hit=f"wiki:{a['page']}",
+            similarity=0.0, detail=detail)
+        if rec["created"]:
+            stats_out["inserted"] += 1
+        else:
+            stats_out["skipped"] += 1
+    conn.commit()
+    return stats_out
