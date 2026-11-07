@@ -132,6 +132,30 @@ def test_scrub_text_strips_zero_width():
     assert scrub_text("行1\n行2\t制表") == "行1\n行2\t制表"   # 换行/制表保留
 
 
+def test_build_opener_direct_by_default(monkeypatch):
+    """默认强制直连：opener 中不注册任何 ProxyHandler（评分/蒸馏共用此纪律）。
+
+    机制说明：build_opener 传入 ProxyHandler 实例会跳过默认「读系统代理」的
+    ProxyHandler；空代理表的实例没有任何 xxx_open 方法，根本不会被注册
+    （实测 handlers 无 ProxyHandler）→ 请求不经过任何代理 = 直连。
+    """
+    import urllib.request
+
+    from agentmemhub import llm as _llm
+    monkeypatch.delenv("AGENTMEMHUB_LLM_PROXY", raising=False)
+
+    def _proxy_handlers(op):
+        return [h for h in op.handlers
+                if isinstance(h, urllib.request.ProxyHandler)]
+
+    assert _proxy_handlers(_llm.build_opener()) == []
+    # 显式指定才走代理（私有部署逃生口）
+    monkeypatch.setenv("AGENTMEMHUB_LLM_PROXY", "http://127.0.0.1:8080")
+    phs = _proxy_handlers(_llm.build_opener())
+    assert len(phs) == 1 and phs[0].proxies == {
+        "http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"}
+
+
 def test_is_content_filter_judgement():
     assert is_content_filter(400, '{"error": {"code": "1301"}}')
     assert is_content_filter(400, "包含contentFilter")

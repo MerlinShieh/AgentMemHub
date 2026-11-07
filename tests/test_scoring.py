@@ -82,50 +82,66 @@ def _http_error(code, body: str, url="https://x", reason="Bad Request"):
     return urllib.error.HTTPError(url, code, reason, _Msg(), io.BytesIO(body.encode()))
 
 
-def test_scrub_text_strips_invisible_control():
-    from agentmemhub import scoring
-    s = scoring._scrub_text("零宽​甲\n正常\t制表\rother\x00")
-    assert "​" not in s
-    assert "\n" in s and "\t" in s         # 换行/制表保留
-    assert "其他" in s or "other" in s
-
-
-def test_is_content_filter_detects_bigmodel_1301():
-    from agentmemhub import scoring
-    assert scoring._is_content_filter(400, '{"error":{"code":"1301","message":"敏感内容"}}')
-    assert scoring._is_content_filter(400, '{"contentFilter":[{"level":0}]}')
-    assert not scoring._is_content_filter(400, '{"error":{"code":"1102","message":"余额不足"}}')
-    assert not scoring._is_content_filter(401, '{"error":"unauthorized"}')
-    assert not scoring._is_content_filter(500, "boom")
-
-
 def test_evaluate_trace_content_filter_raises_typed():
+    """审核拒评（1301）→ llm.ContentFilterRejected（scoring 侧同名导出），不重试。"""
     from agentmemhub import scoring
     body = '{"error":{"code":"1301","message":"系统检测到输入或生成内容可能包含不安全或敏感内容"}}'
-    with mock.patch("agentmemhub.scoring._llm_opener",
-                    side_effect=lambda: _FakeOpener(
-                        lambda req, timeout: (_ for _ in ()).throw(_http_error(400, body)))), \
-         mock.patch("agentmemhub.scoring.read_engine_llm",
-                    return_value={"endpoint": "https://x", "api_key": "k", "model": "m"}):
+    opener = _FakeOpener(
+        lambda req, timeout: (_ for _ in ()).throw(_http_error(400, body)))
+    _FakeOpener.calls = []
+    with mock.patch("agentmemhub.llm.build_opener", return_value=opener):
         import pytest as _pt
         with _pt.raises(scoring.ContentFilterRejected):
             scoring.evaluate_trace({"userText": "x", "agentText": "y"},
                                    {"endpoint": "https://x", "api_key": "k", "model": "m"})
+    assert len(_FakeOpener.calls) == 1     # 确定性错误不重试
 
 
 def test_evaluate_trace_other_400_surfaces_body():
+    """非审核类 400（如欠费 1102）→ LLMError，响应体原因要在异常里。"""
     from agentmemhub import scoring
+    from agentmemhub.llm import LLMError
     body = '{"error":{"code":"1102","message":"欠费"}}'
-    with mock.patch("agentmemhub.scoring._llm_opener",
-                    side_effect=lambda: _FakeOpener(
-                        lambda req, timeout: (_ for _ in ()).throw(_http_error(400, body)))), \
-         mock.patch("agentmemhub.scoring.read_engine_llm",
-                    return_value={"endpoint": "https://x", "api_key": "k", "model": "m"}):
+    opener = _FakeOpener(
+        lambda req, timeout: (_ for _ in ()).throw(_http_error(400, body)))
+    with mock.patch("agentmemhub.llm.build_opener", return_value=opener):
         import pytest as _pt
-        with _pt.raises(RuntimeError) as ei:
+        with _pt.raises(LLMError) as ei:
             scoring.evaluate_trace({"userText": "x", "agentText": "y"},
                                    {"endpoint": "https://x", "api_key": "k", "model": "m"})
     assert "1102" in str(ei.value) or "欠费" in str(ei.value)
+
+
+def test_evaluate_trace_retries_transient_via_llm_discipline():
+    """回归（audit-backlog §4.5-1）：evaluate_trace 改走 llm.py 统一纪律——
+    瞬态错误（网络抖动）按 llm.max_retries 退避重试，不再一错即弃白评一轮。"""
+    from agentmemhub import scoring
+    results: list = [urllib.error.URLError("connection reset"),
+                    {"choices": [{"message": {"content":
+                        '{"verdict":"positive","reason":"ok"}'}}]}]
+
+    class _Resp:
+        def __init__(self, payload: dict):
+            self._b = json.dumps(payload).encode("utf-8")
+        def read(self):
+            return self._b
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def respond(req, timeout):
+        r = results.pop(0) if results else None
+        if isinstance(r, Exception):
+            raise r
+        return _Resp(r)
+    opener = _FakeOpener(respond)
+    llm = {"endpoint": "https://x", "api_key": "k", "model": "m",
+           "max_retries": 1, "backoff_base": 0.0, "timeout": 5}
+    _FakeOpener.calls = []
+    with mock.patch("agentmemhub.llm.build_opener", return_value=opener):
+        v = scoring.evaluate_trace({"userText": "a", "agentText": "b"}, llm)
+    assert v == "positive" and len(_FakeOpener.calls) == 2   # 1 次失败 + 1 次重试成功
 
 
 def test_content_filter_neutral_marked_not_error(tmp_path, monkeypatch):
@@ -226,7 +242,7 @@ def test_evaluate_trace_calls_llm_endpoint():
         assert "k-123" in req.headers["Authorization"]
         return R()
     _FakeOpener.calls = []
-    with mock.patch("agentmemhub.scoring._llm_opener",
+    with mock.patch("agentmemhub.llm.build_opener",
                     return_value=_FakeOpener(fake_urlopen)):
         assert evaluate_trace(trace, llm) == "positive"
     # 请求端点 = 引擎配置的 LLM endpoint
@@ -234,7 +250,7 @@ def test_evaluate_trace_calls_llm_endpoint():
 
 
 def test_evaluate_trace_empty_returns_neutral():
-    with mock.patch("agentmemhub.scoring._llm_opener",
+    with mock.patch("agentmemhub.llm.build_opener",
                     side_effect=AssertionError("不应调用")):
         assert evaluate_trace({"id": "t", "userText": "", "agentText": ""},
                               {"endpoint": "x", "api_key": "k", "model": "m"}) == "neutral"
@@ -332,6 +348,30 @@ def test_run_score_all_only_ids_targeted_no_full_scan():
         r = run_score_all(only_ids={"t1", "ghost"})
     by_ids.assert_called_once_with({"t1", "ghost"})
     assert r["evaluated"] == 1 and r["missing"] == 1     # ghost 库中无 → 计入 missing
+
+
+def test_run_score_all_flushes_scored_once(tmp_path, monkeypatch):
+    """回归（audit-backlog §4.5-6）：已评清单一次落盘（mark_scored_many 合并
+    written+neutral），循环内不再逐条 mark_scored 全量重写 JSON（原 O(n²)）。"""
+    scoring = _empty_cache(tmp_path, monkeypatch)
+    llm = {"endpoint": "https://x", "api_key": "k", "model": "m"}
+    verdicts = iter(["positive", "neutral", "negative"])
+    traces = [{"id": f"t{i}", "userText": "a", "agentText": "b"} for i in range(3)]
+    with mock.patch("agentmemhub.scoring.read_engine_llm", return_value=llm), \
+         mock.patch("agentmemhub.scoring.evaluate_trace",
+                    side_effect=lambda t, c: next(verdicts)), \
+         mock.patch("agentmemhub.scoring.sync_episode_r_task", return_value=0), \
+         mock.patch("agentmemhub.scoring.mark_scored") as ms, \
+         mock.patch("agentmemhub.scoring.mark_scored_many",
+                    wraps=scoring.mark_scored_many) as msm, \
+         mock.patch("agentmemhub.engine_api.engine_request",
+                    return_value={"id": "fb"}):
+        r = run_score_all(traces=traces)
+    assert r["positive"] == 1 and r["neutral"] == 1 and r["negative"] == 1
+    ms.assert_not_called()                    # 循环内不再逐条落盘
+    assert msm.call_count == 1                # 只在批末写一次
+    assert set(msm.call_args[0][0]) == {"t0", "t1", "t2"}   # written+neutral 合并
+    assert scoring._load_scored() == {"t0", "t1", "t2"}     # wraps 真实执行 → 缓存生效
 
 
 
@@ -506,30 +546,8 @@ def test_admin_score_job_runs():
         assert done["progress"]["total"] == 500
 
 # ---------------------------------------------------------------------------
-# LLM 强制直连（不受系统代理/环境变量影响）
+# LLM 强制直连：见 tests/test_llm.py（build_opener 的直连/代理行为在 llm 侧守护）
 # ---------------------------------------------------------------------------
-
-def test_llm_opener_direct_by_default(monkeypatch):
-    """默认强制直连：opener 中不注册任何 ProxyHandler。
-
-    机制说明：build_opener 传入 ProxyHandler 实例会跳过默认「读系统代理」的
-    ProxyHandler；空代理表的实例没有任何 xxx_open 方法，根本不会被注册
-    （实测 handlers 无 ProxyHandler）→ 请求不经过任何代理 = 直连。
-    """
-    import urllib.request
-    from agentmemhub import scoring
-    monkeypatch.delenv("AGENTMEMHUB_LLM_PROXY", raising=False)
-
-    def _proxy_handlers(op):
-        return [h for h in op.handlers
-                if isinstance(h, urllib.request.ProxyHandler)]
-
-    assert _proxy_handlers(scoring._llm_opener()) == []
-    # 显式指定才走代理（私有部署逃生口）
-    monkeypatch.setenv("AGENTMEMHUB_LLM_PROXY", "http://127.0.0.1:8080")
-    phs = _proxy_handlers(scoring._llm_opener())
-    assert len(phs) == 1 and phs[0].proxies == {
-        "http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"}
 
 
 def test_read_engine_llm_prefers_hub_yaml(monkeypatch):

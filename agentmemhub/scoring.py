@@ -19,14 +19,14 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from agentmemhub import engine_api
+from agentmemhub.llm import (  # 统一 LLM 纪律：重试 / 退避 / max_total_seconds /
+    ContentFilterRejected,     # 全局限流闸门 / 审核拒评不重试（与蒸馏同源）
+    LLMClient, LLMConfig, LLMError)
 
 _SYSTEM_PROMPT = (
     "你是记忆质量评估器。判断一条 Agent 任务记忆是否值得长期保留。\n"
@@ -102,6 +102,22 @@ def mark_scored_many(trace_ids: list[str]) -> None:
             pass
 
 
+def _mark_scored_inmem(trace_id: str) -> None:
+    """只更新内存缓存的已评记账（**不写盘**）——批量评分循环里逐条用它，
+    跑完由 `mark_scored_many` 一次性落盘。此前每条成功写入都调 `mark_scored`
+    全量重写 JSON 文件（第 i 条写 i 行），4800 条评分的文件写入量是 O(n²)。
+
+    权衡：进程在批中途崩溃时，已写 feedback 但未落盘的条目下次会重评一次
+    （重评只是再投一次同向 feedback，幂等无害），换来批量路径写盘 O(n)。
+    单条手动场景（👍/👎）仍直接用 `mark_scored` 立即落盘。
+    """
+    global _scored_cache
+    with _cache_lock:
+        s = _load_scored()
+        s.add(trace_id)
+        _scored_cache = s
+
+
 def clear_scored() -> None:
     """清空已评清单（测试/重评用）。"""
     global _scored_cache
@@ -133,55 +149,23 @@ def read_engine_llm() -> dict[str, Any]:
             "headers": dict(llm.get("headers") or {})}
 
 
-def _llm_opener() -> urllib.request.OpenerDirector:
-    """LLM 评估专用 opener：**强制直连**。
-
-    Python urllib 默认会自动采用 Windows 系统代理（注册表）与 *_proxy 环境变量
-    ——Clash 等工具开关/切节点会让 LLM 请求时通时断（TLS 握手被掐 =
-    UNEXPECTED_EOF）。这里显式置空代理表，直连不受本机代理状态影响；
-    确需走代理的私有部署用环境变量 AGENTMEMHUB_LLM_PROXY 显式指定。
-    """
-    proxy = os.environ.get("AGENTMEMHUB_LLM_PROXY", "").strip()
-    return urllib.request.build_opener(
-        urllib.request.ProxyHandler(
-            {"http": proxy, "https": proxy} if proxy else {}))
-
-
-class ContentFilterRejected(Exception):
-    """LLM 网关因输入内容审核（bigmodel code 1301 等）确定性拒评——非网络/鉴权错误，
-    重试永远 400，应按「无法评估」处理（视作 neutral、记入跳过清单、不写 value）。"""
-
-
-def _scrub_text(s: str) -> str:
-    """剥离零宽/控制字符（0x200b 等不可见码点最易触发审核/解析异常），
-    保留 \n\t；用于评估前净化正文。"""
-    if not s:
-        return s
-    import unicodedata
-    keep = []
-    for ch in s:
-        cat = unicodedata.category(ch)
-        if ch in ("\n", "\t") or cat not in ("Cc", "Cf", "Cs", "Co", "Cn"):
-            keep.append(ch)
-    return "".join(keep)
-
-
-def _is_content_filter(code: int, body: str) -> bool:
-    """判定是否内容审核类 400（智谱 1301 / contentFilter / 敏感字样）。"""
-    if code != 400 or not body:
-        return False
-    return ("1301" in body) or ("contentFilter" in body) or ("敏感内容" in body) \
-        or ("不安全" in body)
-
-
-def evaluate_trace(trace: dict, llm_cfg: dict, timeout: float = 45) -> str:
+def evaluate_trace(trace: dict, llm_cfg: dict,
+                   timeout: Optional[float] = None) -> str:
     """LLM 三轴评估一条 trace，返回 verdict（positive|neutral|negative）。
 
-    正文净化后再送；网关内容审核确定性拒评抛 ContentFilterRejected，其它
-    HTTP/网络错误抛出并带上响应体原因（便于日志定位，不再只有一句 Bad Request）。
+    2026-11-06 起**改走 `llm.py` 的统一纪律**（此前用 urllib 裸连，实测撞过
+    `read operation timed out` 白评一轮）：瞬态错误（429/5xx/网络抖动）按
+    `llm.max_retries` 指数退避重试、429 走进程级全局限流闸门、
+    `llm.max_total_seconds` 兜住非流式调用"一个字节都不发"的假超时——
+    这些与蒸馏链路同源同配置。网关内容审核确定性拒评（智谱 1301 等）抛
+    `ContentFilterRejected`，不重试。其余 LLM 错误抛 `LLMError`（含响应体
+    原因，便于日志定位）。`llm_cfg` 除 endpoint/api_key/model/headers 外
+    还接受 timeout / max_retries / backoff_base / max_total_seconds 等
+    `llm` 段键（此前这些键对评分不生效）。
+    模型输出解析失败（ValueError）维持旧行为：视作 neutral，不报错。
     """
-    user_text = _scrub_text((trace.get("userText") or "").strip())[:800]
-    agent_text = _scrub_text((trace.get("agentText") or "").strip())[:1200]
+    user_text = (trace.get("userText") or "").strip()[:800]
+    agent_text = (trace.get("agentText") or "").strip()[:1200]
     if not user_text and not agent_text:
         return "neutral"
     # 记忆类（蒸馏结论 / Agent 原子记忆）的正文是「一条结论」，不是对话。
@@ -191,42 +175,22 @@ def evaluate_trace(trace: dict, llm_cfg: dict, timeout: float = 45) -> str:
         payload = f"记忆内容：\n{agent_text or user_text}"
     else:
         payload = f"任务内容：\n用户：{user_text}\n助手：{agent_text}"
-    body = {
-        "model": llm_cfg["model"],
-        "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": payload},
-        ],
-        "temperature": 0.1,
-        "max_tokens": 80,
-    }
-    req = urllib.request.Request(
-        llm_cfg["endpoint"],
-        data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json",
-                 "Authorization": f"Bearer {llm_cfg['api_key']}",
-                 # provider 特定请求头（与蒸馏同源配置；多数 provider 为空）
-                 **dict(llm_cfg.get("headers") or {})},
-        method="POST")
+    # 净化由 complete_json 内部统一做（scrub_text），这里不再重复
+    cfg = LLMConfig.from_dict(
+        llm_cfg, timeout=timeout, temperature=0.1, max_tokens=80)
     try:
-        with _llm_opener().open(req, timeout=timeout) as r:
-            data = json.loads(r.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        detail = ""
-        try:
-            detail = e.read().decode("utf-8", "replace")[:200]
-        except Exception:
-            pass
-        if _is_content_filter(e.code, detail):
-            raise ContentFilterRejected(detail or "内容审核拒绝") from None
-        raise RuntimeError(f"HTTP {e.code} {e.reason}"
-                           + (f": {detail}" if detail else "")) from None
-    content = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
-    verdict = _parse_verdict(content)
-    return verdict
+        data = LLMClient(cfg).complete_json(
+            _SYSTEM_PROMPT, payload, max_tokens=80, temperature=0.1)
+    except ValueError:
+        # 模型返回了内容但解不出 JSON：与旧 _parse_verdict 兜底一致 → neutral
+        return "neutral"
+    verdict = str(data.get("verdict") or "").strip().lower()
+    return verdict if verdict in ("positive", "neutral", "negative") else "neutral"
 
 
 def _parse_verdict(content: str) -> str:
+    """旧版宽松解析（保留供历史调用方 / 测试；evaluate_trace 已改走
+    complete_json + extract_json 的容错链，此函数不再是主路径）。"""
     import re
     low = content.strip().lower()
     m = re.search(r'"verdict"\s*:\s*"(\w+)"', low)
@@ -397,7 +361,7 @@ def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
                             body={"channel": "explicit", "polarity": verdict,
                                   "magnitude": 1.0, "traceId": tid},
                             base=root, timeout=30)
-                        mark_scored(tid)          # 写入成功 → 进入已评清单（重跑跳过）
+                        _mark_scored_inmem(tid)  # 内存记账防批内双评；落盘统一在批末
                         written_ids.append(tid)
                         out(f"{label} → {verdict} ✓ 已写入")
                     except Exception as e:
@@ -413,8 +377,12 @@ def run_score_all(*, emit: Optional[Callable[[str], None]] = None,
     if all_traces:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
             list(ex.map(work, all_traces))
+    # 已评清单统一一次落盘（written + neutral 合并）：批内靠内存记账防双评，
+    # 文件写入从 O(n²)（每条全量重写）降为 O(n)（一次）
+    flush_ids = written_ids + neutral_ids
+    if flush_ids:
+        mark_scored_many(flush_ids)
     if neutral_ids:
-        mark_scored_many(neutral_ids)             # 一次写盘：neutral 不再每次重评
         out(f"已记入 {len(neutral_ids)} 条 neutral 到跳过清单（下次不再重复评估）")
     if written_ids:
         try:

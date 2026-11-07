@@ -1,7 +1,7 @@
 """通用 LLM 客户端（OpenAI 兼容 /chat/completions），供记忆蒸馏等文本生成任务使用。
 
-与 `scoring.py` 的 LLM 调用**同源纪律**（该模块为评分专用，未直接复用其私有
-函数，以免蒸馏与评分链路互相牵制）：
+评分链路（`scoring.evaluate_trace`）自 2026-11-06 起也复用本客户端（此前用
+urllib 裸连，无重试/退避/总时长上限，实测撞过 read timeout 白评一轮）：
 - **强制直连**：Python urllib 默认会采用 Windows 系统代理（注册表）与 *_proxy
   环境变量——Clash 等工具开关/切节点会让请求时通时断（TLS 握手被掐）。确需
   走代理用环境变量 `AGENTMEMHUB_LLM_PROXY` 显式指定；
