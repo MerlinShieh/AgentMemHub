@@ -10,23 +10,43 @@
 
 ## 一、结论：当前推荐
 
-1. **主力：`xiaomi/mimo-v2.6-flash`** ⭐ —— 2026-09-22 上游新上架，**价格与 V2.5
-   持平**（$0.14/$0.28），按"同价优先新模型"切换。ID 经**实测探测**确认：
+> **2026-11-08 更新（换主力的原因见 §1.1）**：主力从 `mimo-v2.6-flash` 换成
+> `deepseek/deepseek-v4.1-flash`——**不是价格选择，是"单请求耗时 vs 网关超时"的选择**。
+
+1. **主力：`deepseek/deepseek-v4.1-flash`** ⭐ —— **247 tok/s**（全表最快），
+   wiki 大批量编译实测**单次 8~52 秒**，稳定不撞网关超时。代价是输出单价高
+   （高峰 ¥8/M，空闲半价）：一轮 9 域 334 页实测约 **¥18.9**（264 次调用、
+   输入 2.35M / 输出 2.36M tokens）。注意**峰谷计价**（北京时间工作日
+   9:00-12:00 / 14:00-18:00 为高峰）。
+2. **短任务主力（蒸馏等按条调用）：`xiaomi/mimo-v2.6-flash`** ⭐ —— 价格最低
+   （$0.14/$0.28），输出详实（思维链占 24~37%），**单条短请求没问题**；
+   但**不适合 wiki 大批量编译**（见 §1.1）。ID 经**实测探测**确认：
    `mimo-v2.6-flash` 可用，而 `mimo-v2.6`、`mimo-v2.5-flash` 都返回
    "not supported on this endpoint"（探测时注意：必须走项目自己的 client ——
    裸 urllib 会被 Cloudflare 拦成 403 `error code: 1010`，**连在用的旧模型也 403**，
-   容易误判成"模型不存在"）。
-   **质量指标待重测**：下面 V2.5 的实测结论（12/12 稳定、思维链 24~37%、JSON
-   遵从性弱于 deepseek）是**同族上一版**的数据，可作预期参考，但**不能当成本版
-   结论**。回退位：`llm.model` 换回 `xiaomi/mimo-v2.5`（同价，已实测）。
-2. **批量 / 质量增强：`meituan/LongCat-2.0:free`** ⭐ —— **免费**（100 请求/天/账号，
+   容易误判成"模型不存在"）。回退位：`llm.model` 换回 `xiaomi/mimo-v2.5`（同价，已实测）。
+3. **批量 / 质量增强：`meituan/LongCat-2.0:free`** ⭐ —— **免费**（100 请求/天/账号，
    UTC 午夜重置）。适合**放后台大批量、多次重跑**：同一批目标跑多轮取更优结果，
    是"零成本提质量"的手段（配合 `wiki --action retry` 定向补跑）。
-3. 免费档备选：`inclusionai/ling-3.0-flash-sante:free`（同为 100 请求/天）、
+4. 免费档备选：`inclusionai/ling-3.0-flash-sante:free`（同为 100 请求/天）、
    `poolside/laguna-s-2.1-free`（**唯一无日限**，适合真正的大批量）。
-4. 付费档质量优先：`z-ai/glm-5.3-flash`（官网 Intelligence **41.9**，全表最高，
-   比最便宜付费档贵约 25%）；高吞吐：`deepseek/deepseek-v4.1-flash`（**247 tok/s**，
-   全表最快，但注意峰谷计价）。
+5. 付费档质量优先：`z-ai/glm-5.3-flash`（官网 Intelligence **41.9**，全表最高，
+   比最便宜付费档贵约 25%）。
+
+### 1.1 为什么 wiki 编译不能用慢模型（2026-11-08 实测）
+
+`api.commandcode.ai` 前置 **Cloudflare**：源站 **100 秒**未响应即返回 **524**
+（"Upstream model provider is temporarily unavailable"）。而 wiki 的「域内细分」
+与「页面编译」是**大请求**（单次 prompt 3~22K tokens、输出含大量思维链）：
+
+| 模型 | 同类请求单次耗时 | 结果 |
+|---|---|---|
+| `xiaomi/mimo-v2.6-flash` | **50 ~ 126 秒** | 大面积 524 → 细分降级为"该批成员各自成页" → 9 域页面数 **526**（聚合度被破坏）|
+| `deepseek/deepseek-v4.1-flash` | **8 ~ 52 秒** | **0 次 524** → 正常聚合 → 同 9 域 **334 页** |
+
+**判据**：长任务（wiki 编译）要盯的是**单请求耗时是否逼近网关超时线**，
+不是单价——慢模型省下的钱，会被降级产物（页面碎片化）和反复重跑吃掉。
+蒸馏是"按条短请求"，mimo 仍然划算，可两者分工使用。
 
 > 免费档需账户有 **$1 credits**（Command Code 的准入要求）。
 
@@ -79,7 +99,7 @@
 # agentmemhub.yaml
 llm:
   endpoint: "https://api.commandcode.ai/provider/v1"
-  model: "xiaomi/mimo-v2.6-flash"    # 主力推荐（同价优先新模型）
+  model: "deepseek/deepseek-v4.1-flash"   # 主力：wiki 大批量编译不撞 524（见 §1.1）
   repair_model: "deepseek/deepseek-v4.1-flash"   # JSON 解析失败时的修复模型
   timeout: 900
   # thinking / reasoning_effort 视 provider 支持情况填
