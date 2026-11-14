@@ -1,0 +1,176 @@
+# 项目分桶（Project Buckets）
+
+> 2026-11-14 落地。**MCP 直写记忆的 `conversation_id` 从「按自然日」改为「按项目」。**
+> 这篇记录"为什么这么分、怎么编码、怎么迁移、踩过什么坑"，
+> 架构全景见 [`data-architecture.md` §7.3](data-architecture.md)。
+
+---
+
+## 1. 为什么不再按日分桶
+
+2026-10-19 引入按日分桶（`direct-YYYY-MM-DD`），目的是**切小 wiki L1 的脏单位**
+——L1 按会话整编，单个 `direct` 会话攒到 210 条时，任何一条新增都要重编 84 页。
+
+它解决了"重编放大"，但留下两个结构性问题：
+
+| 问题 | 实测数据 |
+|---|---|
+| **桶数按天线性增长** | 一年 365 个桶 = 365 个 L1 页，每页只装几条 |
+| **同项目记忆被拆散** | 254 条 MCP 记忆里 **159 条（63%）被判 `similar`**，主题高度集中在同一个项目，却因分散在 N 个日桶，L1 编译时彼此看不见，无法合并 |
+
+根因：`conversation_id` 对 MCP 记忆是个**人造维度**——它既不是真实会话
+（那是 `source_session_id` 的事），也不是项目。当初按日只是技术妥协。
+
+DSH 工作区的真实结构是**项目**（实测只有 2~3 个），不是日期。
+
+---
+
+## 2. 编码规则：直接用 DSH 的 `projectKey()`
+
+不自己发明编码。规则抄自 `dsh-session-persistence-jsonl/lib/index.js:880-899`，
+**逐字对齐**，好处是 `~/.dsh/sessions/` 的目录名可以直接当项目标识用（零解析、零维护）。
+
+```
+/  \  :        → 合并成一个 -
+字母数字 . _ -  → 保留
+其它字符        → ~ + 4 位大写十六进制码点
+去开头所有 -    → 空则 "root" → 截断 251 → 前后补 --
+```
+
+| 工作目录 | 项目编码 | 长度 |
+|---|---|---|
+| `D:\data\vibeCoding\Agent_Memory\AgentMemHub` | `--D-data-vibeCoding-Agent_Memory-AgentMemHub--` | 46 |
+| `D:\data\vibeCoding\virtual-projects\dsh` | `--D-data-vibeCoding-virtual-projects-dsh--` | 42 |
+| `/home/user/projects/foo` | `--home-user-projects-foo--` | 30 |
+| `/` | `--root--` | 8 |
+| `D:\数据\项目` | `--D-~6570~636E-~9879~76EE--` | 27 |
+
+> **Unix 不需要额外分隔符**：根目录的 `/` 被 `lstrip("-")` 吃掉了。
+> 曾经设想过 `--|-home-...--` 的写法，但那会破坏"直接对着 DSH 目录名反推"的能力。
+
+### ⚠️ 文件名 60 字符截断
+
+`wiki_compile._out_stem()` 会把 cid 清洗后截到 60 字符：
+
+```python
+re.sub(r"[^\w\-]+", "_", cid)[:60]
+```
+
+本机已有一个 **56 字符**的工作区（`--C-Users-Mulin-AppData-Local-Temp-...--`），
+更深的路径会超限 → **两个不同项目截断后同名、互相覆盖**。
+
+处理方案（尚未实施，见 §6）：超限时保留前若干字符 + 回退到最近的 `-` +
+`-` + `md5(cid)[:8]`，总长 ≤ 60。**DB 里的 cid 保持完整**，只截文件名。
+
+---
+
+## 3. 写入时的三级取值
+
+`memory_save(source_project=...)`：
+
+| 优先级 | 来源 | 说明 |
+|---|---|---|
+| 1 | **调用方显式传入** | Agent 知道自己在改哪个项目，传**工作目录路径**最准（服务端自动编码） |
+| 2 | **会话工作区推断** | 扫 `~/.dsh/sessions/` 取最近活跃会话，返回其工作区目录名 |
+| 3 | **回退按日分桶** | 拿不到项目时用 `direct-YYYY-MM-DD`，**写入绝不失败** |
+
+三种入参形态都接受：
+
+```
+D:\data\vibeCoding\Agent_Memory\AgentMemHub   →  --D-data-vibeCoding-Agent_Memory-AgentMemHub--
+--D-data-vibeCoding--                          →  原样
+dsh-dev                                        →  原样（人工声明的逻辑项目）
+```
+
+**为什么默认只到工作区、不猜子目录**：猜子项目要解压会话日志做路径统计
+（本机实测一次 50~200ms，且新会话无活动时猜不出），得不偿失。
+子项目的精确信息由 Agent 传——它比任何启发式都清楚自己刚才在改哪个目录。
+
+### 虚拟项目
+
+没有独立代码仓库、但需要作为项目归集记忆的，放在
+`D:\data\vibeCoding\virtual-projects\<name>\`，编码天然稳定：
+
+```
+virtual-projects/dsh                 → --D-data-vibeCoding-virtual-projects-dsh--
+virtual-projects/second-brain-skill  → --D-data-vibeCoding-virtual-projects-second-brain-skill--
+virtual-projects/unclassified        → --D-data-vibeCoding-virtual-projects-unclassified--
+```
+
+**不要借用别人的安装目录当项目根**（如 `D:\AI_Agent\DSH`）——那是被研究的对象，
+不是项目归属。语义错了比没分还糟。
+
+---
+
+## 4. 历史数据怎么迁移的
+
+改造前的 252 条 MCP 记忆**既无 session 也无 cwd**，项目归属在数据层面不存在，
+**无法用规则迁移**。所以用 LLM 两阶段分组：
+
+```bash
+# ① 分组（只读生产库，产物落 exports/，可人工复核）
+uv run python scripts/project_grouping_probe.py
+#    阶段1：id + 内容前 120 字 → 归纳项目清单（命名统一）
+#    阶段2：分批（40 条/批）归类 → id → 项目 + 理由
+#    产物：exports/project_grouping_report/report.html（可搜索/筛选）
+
+# ② 迁移（先建快照，可回滚）
+uv run python scripts/project_bucket_migrate.py --plan    # 预览
+uv run python scripts/project_bucket_migrate.py --apply --yes
+```
+
+实测结果（252 条）：AgentMemHub 215 / DSH开发 27 / 未分类项目 8 / second-brain-skill 4，
+置信度 high 占 96%，成本约 ¥0.2。
+
+### ⚠️ 迁移必须改两张表
+
+```sql
+-- 蒸馏表（wiki 编译的输入）
+UPDATE distilled_memories SET conversation_id=? WHERE id=?;
+-- 召回面投影（否则「面板改名了、检索还在旧桶」）
+UPDATE units SET conversation_id=? WHERE source='memory' AND legacy_id=?;
+```
+
+两表的关联键**差一个字符**，这是最容易踩的坑：
+
+```
+units.legacy_id              = 'mcp_3405ee949e14a506'   ← 下划线
+distilled_memories.slice_key = 'mcp:3405ee949e14a506'   ← 冒号
+正确关联：legacy_id = 'mcp_' || substr(slice_key, 5)
+```
+
+漏掉 `'mcp_'` 前缀会匹配 **0 行**，且**不报错**——表现为面板改了、召回没改。
+
+---
+
+## 5. ⚠️ `full-run` 不会重编 L1
+
+这是迁移时最反直觉的一点，**必须记住**：
+
+- `wiki.update(full=True)` 的 `full` **只影响 L2**（跳过早退、重新归域、全部域重编）；
+- L1 编哪些会话由 `_resolve_dirty()` 决定，它**只看 align 的脏会话**；
+- 而 align 按**记忆 id** 比对，迁移只改 cid 不改 mid → **不显示任何脏会话**。
+
+后果：跑完 `full-run` 后，旧的 `mcp__direct*.md` 12 个页面**原样躺在那里**，
+新项目桶只编了恰好被 align 认出的 2 个。
+
+正确顺序：
+
+```
+1. 编译缺失的项目桶（wiki_compile.compile_one）
+2. 确认 4 个项目页都在
+3. 删除旧的 mcp__direct*.md
+4. build_manifest("l1", db) 重建基线
+5. 再跑 full-run（此时 L2 基于正确的 L1 文件集重新归域）
+```
+
+---
+
+## 6. 尚未做的
+
+| 项 | 说明 |
+|---|---|
+| **L1 文件名超长截断** | 见 §2。当前本机最长 57 字符，尚未触发；深目录会撞 |
+| **项目名映射** | `distillation.project.names`（编码 → 面板显示名）。已加配置键与消费点（`session_origin.project_display_name`），本地 yaml 可按需填 |
+| **投喂纳入项目** | 投喂（`origin=external`）目前**不进 wiki 编译**，是并列的独立层。要按项目组织是另一条链路，单独评估 |
+| **多路径 → 同一项目** | 合并项目（如"DSH开发"跨安装目录与插件仓库）需要配置级多对一映射；当前用虚拟项目目录绕过了这个问题 |

@@ -238,6 +238,14 @@ def _save(args: dict) -> str:
     if not source_session:
         source_session = session_origin.infer_active_session()
         session_origin_kind = "inferred" if source_session else "none"
+    # 项目桶（= wiki L1 的编译单位）：显式传入 > 会话工作区推断 > 留空（回退按日）。
+    # 与上面的来源会话是**两件事**：会话是溯源标签，项目是分组维度。
+    source_project = session_origin.normalize_project(
+        args.get("source_project"))
+    project_origin_kind = "param" if source_project else ""
+    if not source_project:
+        source_project = session_origin.infer_active_project()
+        project_origin_kind = "inferred" if source_project else "none"
     ts = int(time.time() * 1000)
     tid = _trace_id(content, ts)
     # 直写索引库（进程内直调，无 bundle / HTTP 导入语义）。
@@ -283,6 +291,8 @@ def _save(args: dict) -> str:
                 # 真实来源会话（`dsh:<会话 ID>`）；空串合法 —— 拿不到就留空，
                 # 绝不猜一个错的（标错比标空更坏：溯源会指向无关会话）。
                 source_session_id=source_session,
+                # 项目桶：决定 cid。同项目记忆进同一桶，L1 才能合并同类项。
+                source_project=source_project,
                 # 记忆操作事实流（logs/memory.log）的**协议层补充**：这些字段
                 # 只有 Agent 侧拿得到（importance/tags/trace_id 都是入参），
                 # 数据层记的是"落了哪条、内容是什么"。
@@ -291,7 +301,8 @@ def _save(args: dict) -> str:
                              "tags": tags, "actor": _AGENT,
                              # param | inferred | none —— memory.log 靠它统计
                              # 填充率与推断占比（不需要另开日志）
-                             "source_session_origin": session_origin_kind})
+                             "source_session_origin": session_origin_kind,
+                             "source_project_origin": project_origin_kind})
             # 落表即补齐检索面：来源初始分 + 增量投影（含跨会话去重判定），
             # 评分/加权/召回立即可用，不等下次蒸馏（阈值与蒸馏配置同源）。
             # Agent 直写的初始分再按 importance 档位精调（0.8/0.6/0.4）——
@@ -692,6 +703,19 @@ _TOOLS: list[dict] = [
                         "只在本次会话里**已经拿到过**这个值时才传。"
                         "不传时服务端会尝试自动推断，推断不出就留空——"
                         "留空完全正常，不影响写入与检索。"
+                    ),
+                },
+                "source_project": {
+                    "type": "string",
+                    "description": (
+                        "（可选）项目标识，决定这条记忆归入哪个项目桶（= wiki "
+                        "L1 的编译单位）。可给工作目录路径（如 `D:\\data\\vibeCoding"
+                        "\\Agent_Memory\\AgentMemHub`，服务端按 DSH 规则编码成 "
+                        "`--D-data-vibeCoding-Agent_Memory-AgentMemHub--`）、"
+                        "直接给编码、或给逻辑名（如 `dsh-dev`）。"
+                        "**不传时服务端推断为当前会话的工作区**；推断不出则回退"
+                        "按自然日分桶。同一项目的记忆进同一个桶，wiki 才能在 L1 "
+                        "层合并同类项——这是「按项目而非按天分桶」的目的。"
                     ),
                 },
                 "note": {"type": "string", "description": _NOTE_DESC},

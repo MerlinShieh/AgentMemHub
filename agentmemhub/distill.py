@@ -828,6 +828,7 @@ def save_direct_memory(idx: sqlite3.Connection, *, content: str,
                        slice_key: str = "", created_at: int | None = None,
                        bucket: str | None = None,
                        source_session_id: str = "",
+                       source_project: str = "",
                        audit_extra: dict | None = None) -> str:
     """Agent 直写记忆落蒸馏表（`memory_save` 的 wiki/报表可见性缺口修复）。
 
@@ -867,9 +868,16 @@ def save_direct_memory(idx: sqlite3.Connection, *, content: str,
     ensure_distill_schema(idx)
     h = fingerprint(content)
     ts = int(created_at or time.time())
-    # 会话归属：显式指定优先；否则按 `bucket` 策略分桶（默认按自然日）
-    cid = conversation_id or _direct_bucket(ts, bucket if bucket is not None
-                                            else _direct_bucket_policy())
+    # 会话归属（= wiki L1 的编译单位），优先级：
+    #   ① 显式 conversation_id（调用方明确指定，最高）
+    #   ② source_project（项目编码，如 `--D-data-vibeCoding-Agent_Memory-AgentMemHub--`）
+    #   ③ 回退 `_direct_bucket()` 按日分桶
+    # 为什么项目优先于按日：同项目的记忆必须在**同一个 L1 页**里，否则相似内容
+    # 在编译时彼此看不见（实测 254 条 MCP 记忆里 159 条被判 similar 却无法合并）。
+    # 按日分桶只在拿不到项目时作为兜底，避免写入失败。
+    cid = (conversation_id or source_project
+           or _direct_bucket(ts, bucket if bucket is not None
+                             else _direct_bucket_policy()))
     with idx:
         # **跨分桶查重**（理由见 docstring）：只在同会话内查的话，隔天重写同一条
         # 结论会插第二行 —— 分桶把"同一内容"分散到不同 cid，必须前移到全局口径。

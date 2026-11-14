@@ -1810,6 +1810,52 @@ def test_审计日志_无来源时不写空字段(conn):
     assert "source_session_id" not in entries[-1]
 
 
+# ── 项目桶（source_project）：决定 conversation_id，替代按日分桶 ──────
+
+def test_source_project_决定会话桶(conn):
+    """给了项目编码 → conversation_id 直接用它（wiki L1 的编译单位）。
+
+    这是「按项目分桶」的落点：同项目的记忆必须在同一个 L1 页里，否则相似内容
+    在编译时彼此看不见（实测 254 条 MCP 记忆里 159 条被判 similar 却无法合并）。
+    """
+    from agentmemhub.distill import save_direct_memory
+    KEY = "--D-data-vibeCoding-Agent_Memory-AgentMemHub--"
+    save_direct_memory(conn, content="项目桶测试的结论", source_project=KEY)
+    assert conn.execute(
+        "SELECT conversation_id FROM distilled_memories").fetchone()[0] == KEY
+
+
+def test_conversation_id_优先于项目(conn):
+    """显式 conversation_id 优先级最高（调用方明确指定时不该被项目覆盖）。"""
+    from agentmemhub.distill import save_direct_memory
+    save_direct_memory(conn, content="显式会话优先的结论",
+                       conversation_id="explicit-session",
+                       source_project="--D-some-project--")
+    assert conn.execute(
+        "SELECT conversation_id FROM distilled_memories").fetchone()[0] \
+        == "explicit-session"
+
+
+def test_没有项目时回退按日分桶(conn):
+    """拿不到项目（非 DSH 环境/推断失败）→ 回退按日分桶，写入不能失败。"""
+    from agentmemhub.distill import save_direct_memory
+    save_direct_memory(conn, content="没有项目信息的结论")
+    cid = conn.execute(
+        "SELECT conversation_id FROM distilled_memories").fetchone()[0]
+    assert cid.startswith("direct")
+
+
+def test_项目桶不影响幂等去重(conn):
+    """换桶不改变「同内容只入一条」的语义（查重是跨桶的）。"""
+    from agentmemhub.distill import save_direct_memory
+    assert save_direct_memory(conn, content="跨桶幂等的结论",
+                              source_project="--D-a--") == "inserted"
+    assert save_direct_memory(conn, content="跨桶幂等的结论",
+                              source_project="--D-b--") == "duplicate"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM distilled_memories").fetchone()[0] == 1
+
+
 def test_source_session_id_旧库迁移补列():
     """已存在的旧库（建表时还没有这列）在 ensure 后应被补上，且旧数据不受影响。"""
     import sqlite3 as _sqlite

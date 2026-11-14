@@ -109,7 +109,7 @@ MCP memory_save(content="…", importance="high", type="lesson",
   │    └─ 蒸馏表 distilled_memories（save_direct_memory）：
   │          slice_key = 'mcp:<tid 去 mcp_ 前缀>'   ← wiki/面板关联锚
   │          content_hash = fingerprint(content)    ← 内容指纹 sha256[:16]（规范化后）
-  │          conversation_id = 'direct-<日期>'      ← 虚拟分桶（只服务 wiki L1 切分）
+  │          conversation_id = '<项目编码>'          ← 按项目分桶（wiki L1 切分单位）
   │          source_session_id = 'dsh:<会话 ID>'    ← 真实来源会话（只做溯源）
   │          status = 'new'，type/importance 随参数
   │
@@ -123,7 +123,7 @@ MCP memory_save(content="…", importance="high", type="lesson",
 | ID / 锚 | 生成者 | 存储位置 | 用途 | ⚠️ 易错点 |
 |---|---|---|---|---|
 | `session_uid` | 源库 ingest | conversations.session_uid | 全局会话唯一 id，面板双向跳转 | 与 (source, conversation_id) 1:1 |
-| `conversation_id` | 各 harness | 源库 + 蒸馏表 + units | 会话标识 | 直写记忆是**虚拟分桶** `direct-YYYY-MM-DD`（source='mcp'），**不代表真实会话**——真实会话见下一行 |
+| `conversation_id` | 各 harness | 源库 + 蒸馏表 + units | 会话标识 | 直写记忆是**按项目分桶**的项目编码（`--D-data-vibeCoding-Agent_Memory-AgentMemHub--`，source='mcp'），**不代表真实会话**——真实会话见 `source_session_id` 一行。2026-11-14 之前是 `direct-YYYY-MM-DD` 按日分桶，历史数据已迁移 |
 | `source_session_id` | 调用方传入 / MCP 服务端推断 | distilled_memories.source_session_id | **真实来源会话**（`dsh:<会话 ID>`）溯源；面板/CLI 可查"这条记忆从哪个会话写出来的" | **只做标签**：不参与分组、不参与召回排序。**别拿它顶掉 `conversation_id`**——那会让直写记忆重新挤回少数大会话，wiki L1 整批重编（实测近 30 倍放大）。历史记忆（改造前写入）该列为 NULL，**无法回填**（当初没记，数据不存在） |
 | `tid`（trace id） | `_trace_id(content, ts)` | 返回值；引擎 **legacy_id**；蒸馏表 slice_key 前缀 | memory_score 定位；面板去重关联 | **引擎的 units.src_id 不是 tid**，是内容锚 |
 | `units.src_id`（手写层） | `content_anchor(text)` | units.src_id（`'mcp_<sha256(原始内容)[:16]>'`） | 引擎幂等（同内容不重投影）；**召回侧的双投影去重也用它** | **不能假定它与 `content_hash` 相同**——它用**原始**内容算哈希，而 `content_hash`（`fingerprint`）用**规范化后**内容（去空行 + 每行 strip）。两者只在"入库未改动内容"时一致（实测 114 条直写单元里 **11 条因 `sanitize.redact` 改动内容而分叉**）|
@@ -585,6 +585,31 @@ L2 重编 1 个域 → 全程 12 分钟。
 顺带修掉一个静默缺陷：manifest 的 `domains[].l1_files` 与磁盘页面的 `from_files` 会漂移
 （实测 `mcp__direct.md`：manifest 记 3 个域，磁盘 11 个域引用），旧逻辑会让那 8 个域的
 页面永远进不了增量范围。现在脏域以**磁盘来源**为准补全。
+
+**2026-11-14：分桶维度从「按日」改为「按项目」。**
+
+按日分桶解决了"重编放大"，但引入两个新问题：桶数按天**线性增长**（一年 365 个 L1 页），
+且同一项目的记忆散落在 N 个日桶里、**L1 编译时彼此看不见**——实测 254 条 MCP 记忆里
+**159 条被判 `similar`**（同一项目的不同批次结论），却因分在不同桶无法在 L1 层合并。
+
+改为按**工作目录编码**分桶（直接采用 DSH `projectKey()` 规则，见
+`dsh-session-persistence-jsonl`）：
+
+```
+D:\data\vibeCoding\Agent_Memory\AgentMemHub  →  --D-data-vibeCoding-Agent_Memory-AgentMemHub--
+/home/user/projects/foo                      →  --home-user-projects-foo--
+```
+
+桶数从"随时间增长"变成"随项目增长"（本机 4 个），同项目记忆进同一个 L1 页。
+
+历史数据的迁移**无法用规则完成**（迁移前的记忆既无 session 也无 cwd，项目归属在数据层面
+不存在），所以用 LLM 两阶段分组：`scripts/project_grouping_probe.py` 产出可人工复核的报告，
+`scripts/project_bucket_migrate.py` 按报告改 `distilled_memories.conversation_id` 与
+`units.conversation_id`（**两张表都要改**，否则面板改名了、检索还在旧桶）。
+
+⚠️ **`full-run` 不会重编 L1**：`_resolve_dirty()` 只看 align 的脏会话，而 align 按**记忆 id**
+比对——迁移只改 cid 不改 mid，所以旧页不会被清理、新桶也大多不会被编。迁移后必须显式
+删除旧 L1 页并 `build_manifest("l1", db)` 重建基线（2026-11-14 实测踩到）。
 
 ### 7.4 静默失败：manifest 必须只记「实际编译成了什么」
 

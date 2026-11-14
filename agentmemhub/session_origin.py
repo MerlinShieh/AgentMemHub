@@ -66,6 +66,85 @@ def dsh_sessions_root() -> Path:
     return Path(os.path.expanduser("~")) / DSH_SESSIONS_REL
 
 
+def project_key(cwd: str) -> str:
+    """把工作目录转成 DSH 的项目目录编码（与 `dsh-session-persistence-jsonl`
+    的 `projectKey()` **逐字对齐**，所以能直接和 `~/.dsh/sessions/` 的目录名对上）。
+
+    规则（抄自 DSH 实现）：
+    - `/` `\\` `:` → 合并成一个 `-`（连续分隔符不重复加）
+    - 字母数字 `.` `_` `-` → 原样保留
+    - 其它字符（含中文、空格、`~`）→ `~` + 4 位大写十六进制码点
+    - 去掉开头所有 `-`，空则 `root`，截断 251，前后补 `--`
+
+    实测：`D:\\data\\vibeCoding` → `--D-data-vibeCoding--`；
+    `/home/user/proj` → `--home-user-proj--`；`/` → `--root--`；
+    `D:\\数据` → `--D-~6570~636E--`。
+    """
+    readable = ""
+    separator_run = False
+    for ch in str(cwd):
+        code = ord(ch)
+        if ch in "/\\:":
+            if not separator_run:
+                readable += "-"
+            separator_run = True
+        elif ch != "~" and (ch.isascii()
+                            and (ch.isalnum() or ch in "._-")):
+            readable += ch
+            separator_run = False
+        else:
+            readable += "~%04X" % code
+            separator_run = False
+    body = readable.lstrip("-") or "root"
+    return "--%s--" % body[:251]
+
+
+def normalize_project(raw: object) -> str:
+    """把入参规范成项目标识；空值返回空串。
+
+    - 已是编码（`--xxx--`）→ 原样；
+    - 看起来像路径（含 `/` `\\` `:`）→ 转成 DSH 项目编码；
+    - 其它（如 `dsh-dev` 这种逻辑名）→ 原样保留，供人工声明使用。
+    """
+    v = str(raw or "").strip()
+    if not v:
+        return ""
+    if v.startswith("--") and v.endswith("--") and len(v) > 4:
+        return v
+    if any(sep in v for sep in ("/", "\\", ":")):
+        return project_key(v)
+    return v
+
+
+def project_display_name(code: str) -> str:
+    """项目编码 → 面板上显示的名字。
+
+    优先查配置映射（`distillation.project.names`）—— 编码是一长串路径，
+    直接上屏没人看得懂；没有映射则退到编码的最后一段
+    （`--D-data-vibeCoding-Agent_Memory-AgentMemHub--` → `AgentMemHub`）。
+
+    配置读不到（未配置 / 异常）不该影响展示，一律回退到末段。
+    """
+    v = str(code or "").strip()
+    if not v:
+        return ""
+    try:
+        from agentmemhub import config as hub_config
+        names = (((hub_config.config().distillation or {}).get("project") or {})
+                 .get("names") or {})
+        if isinstance(names, dict) and v in names:
+            return str(names[v])
+    except Exception:                           # noqa: BLE001
+        pass
+    # 逻辑名（`dsh-dev` 这类人工声明的项目）本来就是可读的，不能被「取末段」
+    # 拆成 `dev` —— 只有 `--…--` 形态的**路径编码**才需要抽取末段。
+    if not (v.startswith("--") and v.endswith("--")):
+        return v
+    body = v.strip("-")
+    tail = body.rsplit("-", 1)[-1] if body else v
+    return tail or v
+
+
 def normalize_source_session(raw: object) -> str:
     """把入参规范化成 `<来源>:<会话 ID>`；空值/非法值返回空串。
 
@@ -97,26 +176,26 @@ def _session_mtime(sess_dir: Path) -> Optional[float]:
         return None
 
 
-def infer_active_session(*, root: Optional[Path] = None,
-                         now: Optional[float] = None,
-                         window_s: float = FRESH_WINDOW_S) -> str:
-    """推断当前活跃的 DSH 会话，返回 `dsh:<会话 ID>`；判不出返回空串。
+def _scan_active(*, root: Optional[Path] = None,
+                 now: Optional[float] = None,
+                 window_s: float = FRESH_WINDOW_S) -> tuple[str, str]:
+    """扫会话目录，返回 `(会话 ID, 工作区编码)`；判不出返回 `("", "")`。
 
-    参数全部可注入，便于测试（`root` 指临时目录、`now` 固定时钟）。
+    工作区编码就是 DSH 的 `projectKey()` 产物（如 `--D-data-vibeCoding--`），
+    直接取自目录名——**不需要自己实现编解码**，这是"用 DSH 原生规则"的全部好处。
 
     选取规则（**主会话优先于子代理**，其次比 mtime）：
     会话进行中主会话文件一定在写（它在驱动子代理），所以只要主会话在窗口内
     就必然选中它，不会被子代理的更新写入抢走。
 
-    任何异常都 fail-open 成空串：这是给写入路径打标签的旁路，**不能因为它
-    让记忆写不进去**。
+    任何异常都 fail-open：这是给写入路径打标签的旁路，不能因为它让记忆写不进去。
     """
     try:
         base = Path(root) if root is not None else dsh_sessions_root()
         if not base.is_dir():
-            return ""
+            return "", ""
         clock = time.time() if now is None else float(now)
-        best: Optional[tuple[tuple[int, float], str]] = None
+        best: Optional[tuple[tuple[int, float], str, str]] = None
         for workspace in base.iterdir():
             if not workspace.is_dir():
                 continue
@@ -133,9 +212,31 @@ def infer_active_session(*, root: Optional[Path] = None,
                 prefer = 1 if sess.name.startswith(DSH_MAIN_PREFIX) else 0
                 rank = (prefer, mtime)
                 if best is None or rank > best[0]:
-                    best = (rank, sess.name)
+                    best = (rank, sess.name, workspace.name)
         if best is None:
-            return ""
-        return f"{DSH_SOURCE}:{best[1]}"
+            return "", ""
+        return best[1], best[2]
     except Exception:                           # noqa: BLE001
-        return ""
+        return "", ""
+
+
+def infer_active_session(*, root: Optional[Path] = None,
+                         now: Optional[float] = None,
+                         window_s: float = FRESH_WINDOW_S) -> str:
+    """推断当前活跃的 DSH 会话，返回 `dsh:<会话 ID>`；判不出返回空串。"""
+    sid, _ws = _scan_active(root=root, now=now, window_s=window_s)
+    return f"{DSH_SOURCE}:{sid}" if sid else ""
+
+
+def infer_active_project(*, root: Optional[Path] = None,
+                         now: Optional[float] = None,
+                         window_s: float = FRESH_WINDOW_S) -> str:
+    """推断当前活跃会话的**工作区编码**（`--D-data-vibeCoding--`）。
+
+    这就是「默认以当前工作区为项目」的落点：零解码、零维护，目录名直接可用。
+    更细的项目（如 `--D-data-vibeCoding-Agent_Memory-AgentMemHub--`）由调用方
+    显式传入或配置映射——服务端不去猜"用户此刻在哪个子目录干活"，
+    那需要解压会话日志做路径统计，既贵又不可靠。
+    """
+    _sid, workspace = _scan_active(root=root, now=now, window_s=window_s)
+    return workspace

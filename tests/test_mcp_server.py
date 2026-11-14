@@ -500,7 +500,7 @@ def test_source_session_id_in_schema_but_optional():
     assert req == ["content"]
 
 
-def _save_with(args: dict, *, inferred: str = ""):
+def _save_with(args: dict, *, inferred: str = "", inferred_project: str = ""):
     """跑一次 memory_save，返回 (传给 save_direct_memory 的 kwargs)。
 
     推断函数一律 mock：不 mock 的话测试会去读**真实**的 `~/.dsh/sessions`，
@@ -515,7 +515,9 @@ def _save_with(args: dict, *, inferred: str = ""):
          mock.patch("agentmemhub.distill._pending_projection", return_value=[]), \
          mock.patch("agentmemhub.rag.ingest.open_index", return_value=idx), \
          mock.patch("agentmemhub.session_origin.infer_active_session",
-                    return_value=inferred):
+                    return_value=inferred), \
+         mock.patch("agentmemhub.session_origin.infer_active_project",
+                    return_value=inferred_project):
         h, _ = _handler()
         assert h is not None
         _call(h, _req("tools/call",
@@ -556,13 +558,68 @@ def test_source_session_id_empty_when_unresolvable():
 
 
 def test_source_session_id_does_not_touch_conversation_id():
-    """来源会话只做溯源，**不参与分组** —— conversation_id 仍须按日落桶。
+    """来源会话只做溯源，**不参与分组** —— conversation_id 由项目桶决定。
 
-    这是本次改造最容易被误改坏的地方：一旦让真实会话顶掉分桶，
+    这是本次改造最容易被误改坏的地方：一旦让 source_session_id 顶掉分桶，
     直写记忆会重新挤回少数几个大会话，wiki L1 又要整批重编（实测近 30 倍放大）。
     """
     kwargs = _save_with({"content": "验证分桶不受影响",
                          "source_session_id": "session-x"},
                         inferred="")
     assert "conversation_id" not in kwargs, \
-        "save_direct_memory 的 conversation_id 必须继续交给按日分桶逻辑"
+        "conversation_id 必须交给 save_direct_memory 按项目/按日决定"
+
+
+# ---------------------------------------------------------------------------
+# 项目桶（source_project）：决定 conversation_id 的分组维度
+# ---------------------------------------------------------------------------
+
+def test_source_project_in_schema_but_optional():
+    """新参数进 schema 且非必填 —— 旧调用方不带它也要能写。"""
+    projects = next(t for t in _all_tools()
+                    if t["name"] == "memory_save")["inputSchema"]
+    assert "source_project" in projects["properties"]
+    assert projects["required"] == ["content"]
+
+
+def _all_tools() -> list[dict]:
+    h, _ = _handler()
+    return _call(h, _req("tools/list"))["result"]["tools"]
+
+
+def test_source_project_accepts_path_and_encodes():
+    """传工作目录路径 → 按 DSH 规则编码（与 `~/.dsh/sessions/` 目录名一致）。"""
+    kwargs = _save_with({"content": "项目桶参数测试",
+                         "source_project":
+                             r"D:\data\vibeCoding\Agent_Memory\AgentMemHub"})
+    assert kwargs["source_project"] == \
+        "--D-data-vibeCoding-Agent_Memory-AgentMemHub--"
+    assert kwargs["audit_extra"]["source_project_origin"] == "param"
+
+
+def test_source_project_accepts_ready_code():
+    """已是编码 → 原样透传（不重复编码）。"""
+    kwargs = _save_with({"content": "项目桶编码测试",
+                         "source_project": "--D-data-vibeCoding--"})
+    assert kwargs["source_project"] == "--D-data-vibeCoding--"
+
+
+def test_source_project_accepts_logical_name():
+    """逻辑名（人工声明的项目，如 dsh-dev）→ 原样，不强转路径编码。"""
+    kwargs = _save_with({"content": "逻辑项目名测试", "source_project": "dsh-dev"})
+    assert kwargs["source_project"] == "dsh-dev"
+
+
+def test_source_project_inferred_as_workspace():
+    """没传 → 推断为当前会话的工作区编码（默认以工作区为项目）。"""
+    kwargs = _save_with({"content": "项目推断测试"},
+                        inferred_project="--D-data-vibeCoding--")
+    assert kwargs["source_project"] == "--D-data-vibeCoding--"
+    assert kwargs["audit_extra"]["source_project_origin"] == "inferred"
+
+
+def test_source_project_empty_falls_back_to_daily():
+    """既没传也推断不出 → 空串，交给 save_direct_memory 回退按日分桶。"""
+    kwargs = _save_with({"content": "项目无从判断的结论"})
+    assert kwargs["source_project"] == ""
+    assert kwargs["audit_extra"]["source_project_origin"] == "none"

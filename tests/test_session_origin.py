@@ -175,3 +175,120 @@ def test_dsh_root_points_at_user_home():
     assert root.name == "sessions"
     assert root.parent.name == ".dsh"
     assert str(root).startswith(os.path.expanduser("~"))
+
+
+# ---------------------------------------------------------------------------
+# 项目编码（DSH projectKey 对齐）
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("cwd,expected", [
+    # 与 DSH 实测目录名逐字一致
+    (r"D:\data\vibeCoding", "--D-data-vibeCoding--"),
+    (r"C:\Users\Mulin", "--C-Users-Mulin--"),
+    # Unix：根目录的 / 被 lstrip("-") 吃掉，不需要额外的分隔符
+    ("/home/user/proj", "--home-user-proj--"),
+    ("/home/data/vibeCoding", "--home-data-vibeCoding--"),
+    # 根
+    ("/", "--root--"),
+    # 中文等非 ASCII → ~XXXX 转义（DSH 的规则，含 hex 码点）
+    (r"D:\数据", "--D-~6570~636E--"),
+    # 连续分隔符合并成一个 -
+    (r"D:\\data\\\vibeCoding", "--D-data-vibeCoding--"),
+    # 下划线/点/短横线保留
+    (r"D:\a_b.c-d", "--D-a_b.c-d--"),
+])
+def test_project_key_matches_dsh(cwd, expected):
+    """编码必须与 DSH 的 `projectKey()` 逐字一致 —— 这样 `~/.dsh/sessions/`
+    的目录名可以直接当项目标识用，零解析、零维护。"""
+    assert so.project_key(cwd) == expected
+
+
+def test_project_key_truncates_at_251():
+    """DSH 会截到 251 字符（路径组件上限），保持行为一致。"""
+    long = "D:\\" + "a" * 400
+    k = so.project_key(long)
+    # 前后各 2 个 -，中间被截到 251
+    assert len(k) == 251 + 4
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("", ""),
+    (None, ""),
+    ("   ", ""),
+    # 已是编码 → 原样
+    ("--D-data-vibeCoding--", "--D-data-vibeCoding--"),
+    # 路径 → 编码
+    (r"D:\data\vibeCoding\Agent_Memory\AgentMemHub",
+     "--D-data-vibeCoding-Agent_Memory-AgentMemHub--"),
+    ("/home/user/proj", "--home-user-proj--"),
+    # 逻辑名（无路径分隔符）→ 原样，供人工声明使用
+    ("dsh-dev", "dsh-dev"),
+])
+def test_normalize_project(raw, expected):
+    assert so.normalize_project(raw) == expected
+
+
+def test_normalize_project_does_not_mistake_single_dash_pair():
+    """`--` 只是两个短横线，不是合法编码（长度不 > 4），不能被当成编码放过。"""
+    assert so.normalize_project("--") == "--"
+
+
+# ---------------------------------------------------------------------------
+# 项目推断
+# ---------------------------------------------------------------------------
+
+def test_infer_active_project_returns_workspace_name(tmp_path):
+    """项目 = 工作区目录名（DSH 的编码），默认就取它 —— 不猜子目录。"""
+    now = 1_800_000_000.0
+    _make_session(tmp_path, "--D-data-vibeCoding--", "session-main", mtime=now - 5)
+    assert so.infer_active_project(root=tmp_path, now=now) == "--D-data-vibeCoding--"
+
+
+def test_infer_active_project_empty_when_stale(tmp_path):
+    now = 1_800_000_000.0
+    _make_session(tmp_path, "--D-x--", "session-old",
+                  mtime=now - so.FRESH_WINDOW_S - 10)
+    assert so.infer_active_project(root=tmp_path, now=now) == ""
+
+
+def test_infer_session_and_project_agree(tmp_path):
+    """两个推断函数必须指向**同一个会话**（否则记忆的桶和溯源会打架）。"""
+    now = 1_800_000_000.0
+    _make_session(tmp_path, "--D-a--", "session-x", mtime=now - 100)
+    _make_session(tmp_path, "--D-b--", "session-y", mtime=now - 1)
+    assert so.infer_active_session(root=tmp_path, now=now) == "dsh:session-y"
+    assert so.infer_active_project(root=tmp_path, now=now) == "--D-b--"
+
+
+def test_infer_active_project_never_raises(tmp_path):
+    f = tmp_path / "not-a-dir"
+    f.write_text("x", encoding="utf-8")
+    assert so.infer_active_project(root=f) == ""
+
+
+# ---------------------------------------------------------------------------
+# 项目显示名
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("code,expected", [
+    ("--D-data-vibeCoding-Agent_Memory-AgentMemHub--", "AgentMemHub"),
+    ("--D-data-vibeCoding-virtual-projects-dsh--", "dsh"),
+    ("--home-user-proj--", "proj"),
+    ("", ""),
+    # 逻辑名本来就是可读的，末段逻辑对它是恒等
+    ("dsh-dev", "dsh-dev"),
+])
+def test_project_display_name_falls_back_to_tail(code, expected):
+    """没有配置映射时退到编码末段 —— 面板至少能看懂，而不是一长串路径。"""
+    assert so.project_display_name(code) == expected
+
+
+def test_project_display_name_uses_config_mapping(monkeypatch):
+    """有配置映射时以配置为准（编码是人造的，别名才是给人看的）。"""
+    from agentmemhub import config as hub_config
+
+    class _Cfg:
+        distillation = {"project": {"names": {"--D-x--": "自定义名"}}}
+
+    monkeypatch.setattr(hub_config, "config", lambda: _Cfg())
+    assert so.project_display_name("--D-x--") == "自定义名"

@@ -301,7 +301,18 @@ distillation:
   #   分桶后一轮增量只重编当天那个桶（几十条 → 3~5 页），编译逻辑不变；
   #   跨天的同主题记忆仍会在 L2 域聚合时并到同一页，**不损失合并机会**。
   #   取值：daily（默认）| none（回退单一 direct 会话，仅排障用）
+  #   ⚠️ 2026-11-14 起：MCP 直写记忆**优先按「项目」分桶**（memory_save 的
+  #   `source_project`，默认取当前会话的工作区），本键只在拿不到项目时兜底。
   direct_bucket: daily
+  # 项目分桶：MCP 直写记忆的 conversation_id = 项目编码（= wiki L1 的编译单位）。
+  #   编码由 DSH 的 projectKey() 规则从工作目录生成，形如
+  #   `--D-data-vibeCoding-Agent_Memory-AgentMemHub--`。同项目的记忆进同一个桶，
+  #   wiki 才能在 L1 层把同主题的多次结论合并（按日分桶做不到这点）。
+  project:
+    # 编码 → 面板显示名。编码是一长串路径，直接上屏没人看得懂；未配置的回退显示末段。
+    names: {}
+      # "--D-data-vibeCoding-my-app--": 我的应用
+      # "--D-data-vibeCoding-virtual-projects-dsh--": DSH开发
   # prompt_ver: 提示词版本。**留空 = 跟随代码里的提示词版本**（推荐）——
   #   提示词一改就自动触发重蒸，并作废旧版本产物，不会新旧混杂。
   #   显式给整数则覆盖之（强制重蒸手段，如排查问题时）。

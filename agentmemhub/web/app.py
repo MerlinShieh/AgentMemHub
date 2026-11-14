@@ -1101,7 +1101,7 @@ def create_app(db_path: Path | None = None):
         """
         import sqlite3 as _sq
 
-        from agentmemhub import rag_bridge
+        from agentmemhub import rag_bridge, session_origin
         from agentmemhub.distill import DISTILLED_SRC_PREFIX
         st = rag_bridge.settings()
         # 跨库：蒸馏记忆/手动记忆在索引库，会话（sessionUid/标题）在采集库。
@@ -1272,6 +1272,13 @@ def create_app(db_path: Path | None = None):
                 it["conversation_title"] = it.get("conversation_title") or title_
                 it["has_conversation"] = key in titles
                 it["fb_polarity"] = fb_map.get(it.get("unit_id"))
+                # 项目桶（2026-11-14 起 MCP 直写记忆的 conversation_id 是项目编码
+                # `--D-…--`）：给个可读名。否则面板只能显示一长串路径编码，
+                # 或者落到"（MCP 写入 · 无会话）"——用户看不出这条属于哪个项目。
+                cid_ = str(it.get("conversation_id") or "")
+                it["project_name"] = (
+                    session_origin.project_display_name(cid_)
+                    if cid_.startswith("--") else "")
         finally:
             idx.close()
             src.close()

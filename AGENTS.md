@@ -24,6 +24,9 @@
    不参与分组与召回排序；**不要为了填它专门多跑一次 shell**
    （DSH 单次 shell 调用固定约 3.3 秒，`memory_save` 本身中位才 5.9 秒）——
    本次会话里已经拿到过这个值时才传，不传由服务端自动推断兜底，留空也完全正常；
+   `source_project` 可选，**决定记忆归入哪个项目桶**（= wiki L1 的编译单位）。
+   知道自己在改哪个项目时传**工作目录路径**最准（服务端自动编码）；
+   不传则推断为当前会话的工作区。同一项目的记忆进同一个桶，wiki 才能合并同类项；
 3. **写入后不需要立即评分**——价值分起点由 `importance` 决定（默认 0.6），
    之后由真实使用演化（👍/👎 反馈）；仅当用户明确说「这条很重要」
    时才用 `memory_score` 打 positive。（2026-09-11 起：写后即评已废除——
@@ -235,6 +238,9 @@
   每个 event 的字段含义与用途（**加新事件必须登记在此**）
 - `docs/model-selection.md` — LLM 模型选型与定价（推荐 MiMo / 免费 LongCat）
 - `docs/API.md` — 对外接口契约（HTTP / MCP / CLI；含长任务约定与错误语义）
+- `docs/project-buckets.md` — **项目分桶**：MCP 记忆为何按「项目」而非「按日」归组、
+  DSH `projectKey()` 编码规则、历史迁移（LLM 分组 + 两张表）与三条踩坑（文件名截断 /
+  双表关联差一个字符 / `full-run` 不重编 L1）
 - `docs/recall-fusion.md` — 召回融合的机制与实测数据（**最新权威描述见 `docs/data-architecture.md` §4**）
 - `docs/branch-divergence.md` — 分支差异记录（`feat/llm-wiki` 相对 `main`）
 - `docs/EXAMPLES.md` — SQL / CLI / Python 查询示例

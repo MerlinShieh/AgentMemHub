@@ -289,7 +289,7 @@ GET  /api/admin/job  →  轮询进度
 | 工具 | 参数 | 说明 |
 |---|---|---|
 | `memory_search` | `query`（必填）、`topK`、`origin`、`note` | 语义检索历史记忆（六路通道融合，见 `data-architecture.md` §4） |
-| `memory_save` | `content`（必填）、`importance`、`tags`、`type`、`source_session_id`、`note` | 写入一条记忆 |
+| `memory_save` | `content`（必填）、`importance`、`tags`、`type`、`source_session_id`、`source_project`、`note` | 写入一条记忆 |
 | `memory_recent` | `limit`、`note` | 最近记忆时间线 |
 | `memory_stats` | `note` | 引擎在线状态与记忆总量 |
 | `memory_score` | `trace_id`、`polarity`、`note` | 给记忆打极性分（**仅用户明确说重要时才用**）|
@@ -315,6 +315,15 @@ GET  /api/admin/job  →  轮询进度
   `conversation_id` 并存 —— 后者只为切小 wiki L1 脏单位，不能拿真实会话顶掉它）。
   填充率与来源（`param` / `inferred` / `none`）记在 `logs/memory.log` 的
   `source_session_origin` 字段。
+- `source_project`（2026-11-14 新增，**可选**）：**项目标识，决定记忆归入哪个桶**
+  （= `distilled_memories.conversation_id` = wiki L1 的编译单位）。三种给法：
+  工作目录路径（服务端按 DSH `projectKey()` 编码）、现成编码（`--D-…--`）、
+  逻辑名（如 `dsh-dev`）。
+  **不传时**服务端推断为当前会话的**工作区**编码；推断不出则回退按自然日分桶。
+  同项目的记忆进同一个桶，wiki 才能在 L1 层把同主题的多次结论合并——
+  实测按日分桶时 254 条 MCP 记忆里 159 条被判 `similar` 却因分散在 N 个日桶无法合并。
+  编码到显示名的映射配在 `distillation.project.names`（面板「来源会话」列用它）。
+  来源（`param` / `inferred` / `none`）记在 `source_project_origin` 字段。
 
 **feed 三个工具的三条约定**：
 
