@@ -227,6 +227,17 @@ def _save(args: dict) -> str:
     raw_tags = args.get("tags")
     tags = ([str(t).strip() for t in raw_tags if str(t).strip()]
             if isinstance(raw_tags, (list, tuple)) else [])
+    # 来源会话（溯源标签，**不参与分组**）：调用方显式传优先 → 推断兜底 → 留空。
+    # 为什么三级：MCP server 是宿主级单例，DSH 的 tools/call 不带会话上下文，
+    # 所以"谁在调我"它自己不知道；让 Agent 每次额外调 shell 去查要 ~3.3 秒，
+    # 不值得。于是接受"拿得到就记、拿不到就空"，靠 Session 推断覆盖大多数场景。
+    from agentmemhub import session_origin
+    source_session = session_origin.normalize_source_session(
+        args.get("source_session_id"))
+    session_origin_kind = "param" if source_session else ""
+    if not source_session:
+        source_session = session_origin.infer_active_session()
+        session_origin_kind = "inferred" if source_session else "none"
     ts = int(time.time() * 1000)
     tid = _trace_id(content, ts)
     # 直写索引库（进程内直调，无 bundle / HTTP 导入语义）。
@@ -269,12 +280,18 @@ def _save(args: dict) -> str:
                 # 否则 slice_key 变 'mcp:mcp_<hash>'，去重匹配不上 → 面板重复
                 slice_key=f"mcp:{tid.removeprefix('mcp_')}",
                 model="memory_save(mcp)",
+                # 真实来源会话（`dsh:<会话 ID>`）；空串合法 —— 拿不到就留空，
+                # 绝不猜一个错的（标错比标空更坏：溯源会指向无关会话）。
+                source_session_id=source_session,
                 # 记忆操作事实流（logs/memory.log）的**协议层补充**：这些字段
                 # 只有 Agent 侧拿得到（importance/tags/trace_id 都是入参），
                 # 数据层记的是"落了哪条、内容是什么"。
                 audit_extra={"path": "mcp", "trace_id": tid,
                              "importance": importance, "value": value,
-                             "tags": tags, "actor": _AGENT})
+                             "tags": tags, "actor": _AGENT,
+                             # param | inferred | none —— memory.log 靠它统计
+                             # 填充率与推断占比（不需要另开日志）
+                             "source_session_origin": session_origin_kind})
             # 落表即补齐检索面：来源初始分 + 增量投影（含跨会话去重判定），
             # 评分/加权/召回立即可用，不等下次蒸馏（阈值与蒸馏配置同源）。
             # Agent 直写的初始分再按 importance 档位精调（0.8/0.6/0.4）——
@@ -661,6 +678,20 @@ _TOOLS: list[dict] = [
                         "（可选）记忆类型，不传=fact。decision=做出的决策/选型；"
                         "fact=事实/结论/技术沉淀；preference=偏好/约定；"
                         "lesson=踩坑/教训。落在蒸馏表供面板筛选与 wiki 编译。"
+                    ),
+                },
+                "source_session_id": {
+                    "type": "string",
+                    "description": (
+                        "（可选）来源会话 ID，仅用于溯源（记「这条记忆是从哪个"
+                        "会话写出来的」），不参与分组与召回排序。"
+                        "DSH 里就是环境变量 DSH_SESSION_ID 的值，形如 "
+                        "`session-<uuid>` 或带来源前缀的 `dsh:session-<uuid>`。"
+                        "**但不要为了填它专门多跑一次 shell 命令**"
+                        "（DSH 每次 shell 调用固定约 3.3 秒，不值得）；"
+                        "只在本次会话里**已经拿到过**这个值时才传。"
+                        "不传时服务端会尝试自动推断，推断不出就留空——"
+                        "留空完全正常，不影响写入与检索。"
                     ),
                 },
                 "note": {"type": "string", "description": _NOTE_DESC},

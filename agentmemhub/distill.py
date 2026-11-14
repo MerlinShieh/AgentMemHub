@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS distilled_memories(
     model            TEXT,
     merged_from_json TEXT,
     created_at       INTEGER NOT NULL,
+    source_session_id TEXT,
     UNIQUE(source, conversation_id, content_hash)
 );
 CREATE INDEX IF NOT EXISTS idx_dm_conv   ON distilled_memories(source, conversation_id);
@@ -109,6 +110,18 @@ def ensure_distill_schema(conn: sqlite3.Connection) -> None:
     if "wiki_ignore_at" not in cols:
         conn.execute(
             "ALTER TABLE distilled_memories ADD COLUMN wiki_ignore_at INTEGER")
+    # source_session_id：**真实来源会话**（`dsh:<会话 ID>` / `claude:<id>` …）。
+    #
+    # 与 `conversation_id` 的区别是这次改造的全部要点：
+    # `conversation_id` 是**虚拟分桶**（`direct-YYYY-MM-DD`），只为把 wiki L1
+    # 的脏单位切小（见 `_direct_bucket()` 的背景说明），**不代表真实会话**；
+    # 本列才回答"这条记忆是从哪个会话写出来的"。两者必须并存——
+    # 一旦拿本列去替换 conversation_id，所有直写记忆会重新挤回少数几个大桶，
+    # 立刻回到"一条新记忆触发 84 页重编"的老问题（实测近 30 倍放大）。
+    # 所以本列**只做溯源标签**，不参与分组、不参与召回排序。
+    if "source_session_id" not in cols:
+        conn.execute(
+            "ALTER TABLE distilled_memories ADD COLUMN source_session_id TEXT")
     conn.commit()
 
 
@@ -646,6 +659,7 @@ def _audit_memory_write(*, memory_id: int | None, content: str, content_hash: st
                         source: str, conversation_id: str, type_: str,
                         confidence: str, result: str, slice_key: str = "",
                         topic: str | None = None, path: str = "",
+                        source_session_id: str = "",
                         extra: dict | None = None) -> None:
     """把一次记忆**落表**记进 `logs/memory.log`（审计旁路，失败绝不影响落库）。
 
@@ -666,6 +680,10 @@ def _audit_memory_write(*, memory_id: int | None, content: str, content_hash: st
         }
         if path:
             entry["path"] = path
+        # 来源会话单独成一列（不塞进 extra）：memory.log 是**唯一**能统计
+        # "填充率 / 是调用方传的还是推断的"的地方，字段名必须稳定。
+        if source_session_id:
+            entry["source_session_id"] = source_session_id
         if extra:
             entry.update(extra)
         logs.audit_memory(entry)
@@ -809,6 +827,7 @@ def save_direct_memory(idx: sqlite3.Connection, *, content: str,
                        source: str = "mcp", conversation_id: str = "",
                        slice_key: str = "", created_at: int | None = None,
                        bucket: str | None = None,
+                       source_session_id: str = "",
                        audit_extra: dict | None = None) -> str:
     """Agent 直写记忆落蒸馏表（`memory_save` 的 wiki/报表可见性缺口修复）。
 
@@ -825,6 +844,11 @@ def save_direct_memory(idx: sqlite3.Connection, *, content: str,
     分桶让同一内容在不同日期落到不同 `conversation_id`，若仍按
     (source, conversation_id, content_hash) 查，同一条结论隔天再写就会**重复入库**
     （库里两行、wiki 两处引用）。唯一索引仍是三列（历史口径不动），查重前移即可。
+
+    `source_session_id`（`dsh:<会话 ID>` 这类）是**真实来源会话**，与上面按日
+    分桶的 `conversation_id` 是两回事：前者只为溯源，后者只为切小 wiki 脏单位。
+    空值合法（拿不到就留空，不猜）。内容已存在（duplicate）时**不覆盖**旧来源
+    —— 首次写入的那一刻才是"它从哪来"的权威答案。
 
     返回 "inserted" | "revived" | "duplicate"；投影不在此处做（units 向量由
     下一次蒸馏的 S4 阶段统一补齐，`_pending_projection` 会捞到 status='new'）。
@@ -855,34 +879,43 @@ def save_direct_memory(idx: sqlite3.Connection, *, content: str,
             (source, h)).fetchone()
         if exist:
             if exist[1] in ("merged", "duplicate"):
+                # 复活时补来源会话：COALESCE 让「本次没拿到（空串）」保留旧值，
+                # 不会被一次缺参的写入抹掉已有的溯源信息。
                 idx.execute(
                     "UPDATE distilled_memories SET status='new', type=?,"
-                    " confidence=?, created_at=? WHERE id=?",
-                    (type_, confidence, ts, exist[0]))
+                    " confidence=?, created_at=?,"
+                    " source_session_id=COALESCE(?, source_session_id)"
+                    " WHERE id=?",
+                    (type_, confidence, ts, source_session_id or None, exist[0]))
                 _audit_memory_write(
                     memory_id=exist[0], content=content, content_hash=h,
                     source=source, conversation_id=cid,
                     type_=type_, confidence=confidence, result="revived",
-                    slice_key=slice_key, topic=topic, extra=audit_extra)
+                    slice_key=slice_key, topic=topic, extra=audit_extra,
+                    source_session_id=source_session_id)
                 return "revived"
             _audit_memory_write(
                 memory_id=exist[0], content=content, content_hash=h,
                 source=source, conversation_id=cid,
                 type_=type_, confidence=confidence, result="duplicate",
-                slice_key=slice_key, topic=topic, extra=audit_extra)
+                slice_key=slice_key, topic=topic, extra=audit_extra,
+                source_session_id=source_session_id)
             return "duplicate"
         cur = idx.execute(
             "INSERT INTO distilled_memories"
             "(source, conversation_id, slice_key, turn_key, type, topic,"
             " content, confidence, status, content_hash, prompt_ver, model,"
-            " created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " created_at, source_session_id)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (source, cid, slice_key, None, type_, topic, content,
-             confidence, "new", h, PROMPT_VER, model, ts))
+             confidence, "new", h, PROMPT_VER, model, ts,
+             source_session_id or None))
         _audit_memory_write(
             memory_id=cur.lastrowid, content=content, content_hash=h,
             source=source, conversation_id=cid, type_=type_,
             confidence=confidence, result="inserted", slice_key=slice_key,
-            topic=topic, extra=audit_extra)
+            topic=topic, extra=audit_extra,
+            source_session_id=source_session_id)
         return "inserted"
 
 

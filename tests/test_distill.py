@@ -1713,3 +1713,129 @@ def test_backfill_无实质内容跳过并计数(conn):
         " VALUES ('mcp_ddd', 'memory', 'mcp', '嗯', 1)")   # 无实质
     r = backfill_agent_memories(conn)
     assert r["skipped_substance"] == 1 and r["inserted"] == 0
+
+
+# ── 来源会话（source_session_id）：溯源标签，不参与分组 ─────────────────
+
+def test_source_session_id_列存在且可空(conn):
+    """来源会话是**独立列**，且允许 NULL（拿不到就留空，不猜）。"""
+    cols = {r[1]: r for r in conn.execute(
+        "PRAGMA table_info(distilled_memories)")}
+    assert "source_session_id" in cols
+    assert cols["source_session_id"][3] == 0        # notnull == 0
+
+
+def test_source_session_id_落库(conn):
+    from agentmemhub.distill import save_direct_memory
+    save_direct_memory(conn, content="来自某个会话的结论",
+                       source_session_id="dsh:session-abc")
+    row = conn.execute(
+        "SELECT conversation_id, source_session_id FROM distilled_memories"
+    ).fetchone()
+    # 关键：**conversation_id 仍是按日分桶**，没被真实会话顶掉 ——
+    # 一旦顶掉，直写记忆会重新挤回少数大桶，wiki L1 又要整批重编。
+    assert row[0].startswith("direct")
+    assert row[1] == "dsh:session-abc"
+
+
+def test_source_session_id_不传为NULL(conn):
+    """不传（或传空串）→ NULL，不是空字符串脏值。"""
+    from agentmemhub.distill import save_direct_memory
+    save_direct_memory(conn, content="没有来源会话的结论")
+    save_direct_memory(conn, content="另一个没有来源的结论",
+                       source_session_id="")
+    vals = [r[0] for r in conn.execute(
+        "SELECT source_session_id FROM distilled_memories")]
+    assert vals == [None, None]
+
+
+def test_source_session_id_duplicate不覆盖首次来源(conn):
+    """重复写入不覆盖来源 —— 首次落库那一刻才是"它从哪来"的权威答案。"""
+    from agentmemhub.distill import save_direct_memory
+    assert save_direct_memory(conn, content="同一条结论",
+                              source_session_id="dsh:session-first") == "inserted"
+    assert save_direct_memory(conn, content="同一条结论",
+                              source_session_id="dsh:session-second") == "duplicate"
+    assert conn.execute(
+        "SELECT source_session_id FROM distilled_memories").fetchone()[0] \
+        == "dsh:session-first"
+
+
+def test_source_session_id_复活时补值且不抹旧值(conn):
+    """revived 用 COALESCE：本次有值就补上，没值保留旧的。"""
+    from agentmemhub.distill import save_direct_memory
+    save_direct_memory(conn, content="会被归档的结论")
+    conn.execute("UPDATE distilled_memories SET status='merged'")
+    # 本次带了来源 → 补上
+    assert save_direct_memory(conn, content="会被归档的结论",
+                              source_session_id="dsh:session-later") == "revived"
+    assert conn.execute(
+        "SELECT source_session_id FROM distilled_memories").fetchone()[0] \
+        == "dsh:session-later"
+
+    conn.execute("UPDATE distilled_memories SET status='merged'")
+    # 本次没带来源 → 不能把已有值抹掉
+    assert save_direct_memory(conn, content="会被归档的结论") == "revived"
+    assert conn.execute(
+        "SELECT source_session_id FROM distilled_memories").fetchone()[0] \
+        == "dsh:session-later"
+
+
+def test_source_session_id_与来源记入审计日志(conn):
+    """`logs/memory.log` 是统计填充率与来源占比的**唯一**入口，字段名必须稳定。
+
+    填充率是这次改造的验收指标：如果 Skill 的"顺手才取"约定实际没生效，
+    只有靠这个字段才能发现（否则又是一次"以为做到了、其实没做"）。
+    """
+    from agentmemhub.distill import save_direct_memory
+    from agentmemhub.logs import read_memory_audit
+    save_direct_memory(
+        conn, content="审计字段验证：来源会话要进 memory.log",
+        source_session_id="dsh:session-audit",
+        audit_extra={"source_session_origin": "param"})
+    entries = read_memory_audit()
+    assert entries, "没写进 memory.log"
+    last = entries[-1]
+    assert last["source_session_id"] == "dsh:session-audit"
+    assert last["source_session_origin"] == "param"
+
+
+def test_审计日志_无来源时不写空字段(conn):
+    """来源留空时**不写该字段** —— 免得统计时把"没记"和"记了空"混为一谈。"""
+    from agentmemhub.distill import save_direct_memory
+    from agentmemhub.logs import read_memory_audit
+    save_direct_memory(conn, content="没有来源会话的审计字段验证")
+    entries = read_memory_audit()
+    assert entries
+    assert "source_session_id" not in entries[-1]
+
+
+def test_source_session_id_旧库迁移补列():
+    """已存在的旧库（建表时还没有这列）在 ensure 后应被补上，且旧数据不受影响。"""
+    import sqlite3 as _sqlite
+    old = _sqlite.connect(":memory:")
+    # 造一个"改造前"的表：没有 source_session_id
+    old.executescript("""
+        CREATE TABLE distilled_memories(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL, conversation_id TEXT NOT NULL,
+            slice_key TEXT, turn_key TEXT, type TEXT NOT NULL, topic TEXT,
+            content TEXT NOT NULL, confidence TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'new', dedup_of INTEGER,
+            content_hash TEXT NOT NULL, prompt_ver INTEGER NOT NULL,
+            model TEXT, merged_from_json TEXT, created_at INTEGER NOT NULL,
+            UNIQUE(source, conversation_id, content_hash)
+        );
+        INSERT INTO distilled_memories
+            (source, conversation_id, type, content, confidence,
+             content_hash, prompt_ver, created_at)
+        VALUES ('mcp','direct','fact','老数据','medium','h_old',1,1);
+    """)
+    ensure_distill_schema(old)
+    cols = {r[1] for r in old.execute(
+        "PRAGMA table_info(distilled_memories)")}
+    assert "source_session_id" in cols
+    row = old.execute(
+        "SELECT content, source_session_id FROM distilled_memories").fetchone()
+    assert row == ("老数据", None)          # 旧行保留，新列为 NULL
+    old.close()

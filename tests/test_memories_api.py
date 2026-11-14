@@ -302,3 +302,66 @@ def test_memory_detail_归并给出主记忆(memories_env):
     assert d["status"] == "merged"
     assert d["merged_into"] == 1
 
+
+# ── 写入会话（source_session_id）：面板「写入会话」列的数据面 ──────────────
+#
+# 与「来源会话」（conversation_title）不是一回事：那个是蒸馏所属会话，
+# MCP 直写的 conversation_id 是 `direct-YYYY-MM-DD` **虚拟分桶**、本就没有标题；
+# 本组测的这个才是「这条记忆从哪个真实会话写出来的」。
+
+def _set_session(path, content_hash, value):
+    c = sqlite3.connect(str(path))
+    c.execute("UPDATE distilled_memories SET source_session_id=?"
+              " WHERE content_hash=?", (value, content_hash))
+    c.commit()
+    c.close()
+
+
+def test_memories_expose_source_session_id(memories_env):
+    """报表要带出真实来源会话；未记录的历史记忆与手动路均为 None（不是空串）。"""
+    client, paths = memories_env
+    _set_session(paths["idx"], "h0", "dsh:session-abc")
+
+    d = client.get("/api/memories", params={"status": "all"}).json()
+    by_content = {i["content"]: i for i in d["items"]}
+    assert by_content["会话一的蒸馏结论"]["source_session_id"] == "dsh:session-abc"
+    # 历史记忆（改造前写入，数据不存在）→ None；前端据此显示破折号
+    assert by_content["会话一的事实记录"]["source_session_id"] is None
+    # 手动路（units 投影）没有该列 → 恒为 None
+    manual = [i for i in d["items"] if i["origin"] == "manual"][0]
+    assert manual["source_session_id"] is None
+
+
+def test_memories_sort_by_conversation_uses_session_when_no_unified(memories_env):
+    """「来源会话」一列承载两种来源：没有统一会话时，用写入会话参与排序。
+
+    面板只有一列（不再是「来源会话」+「写入会话」两列），所以排序键也只有一个：
+    `conversation`。它必须能在 MCP 直写记忆（无统一会话）上退到
+    `source_session_id`，否则那批记忆在这列上永远排不出有意义的结果。
+    """
+    client, paths = memories_env
+    # h2 的 conversation_id='c2' 在采集库里不存在 → 没有统一会话标题
+    _set_session(paths["idx"], "h2", "dsh:session-zzz")
+
+    asc = client.get("/api/memories", params={"status": "all",
+                                              "sort": "conversation",
+                                              "order": "asc"}).json()
+    desc = client.get("/api/memories", params={"status": "all",
+                                               "sort": "conversation",
+                                               "order": "desc"}).json()
+    assert asc["items"][0]["content"] == "会话二的踩坑教训"
+    assert desc["items"][-1]["content"] == "会话二的踩坑教训"
+
+
+def test_memory_detail_exposes_source_session_id(memories_env):
+    """单条详情（wiki 引用浮层）同样要带写入会话，与报表口径一致。"""
+    client, paths = memories_env
+    c = sqlite3.connect(str(paths["idx"]))
+    mid = c.execute("SELECT id FROM distilled_memories"
+                    " WHERE content_hash='h0'").fetchone()[0]
+    c.close()
+    _set_session(paths["idx"], "h0", "dsh:session-detail")
+
+    d = client.get(f"/api/memories/{mid}").json()
+    assert d["source_session_id"] == "dsh:session-detail"
+

@@ -1139,7 +1139,7 @@ def create_app(db_path: Path | None = None):
             distill_sel = (
                 "SELECT 'distilled' AS origin, m.id, m.source, m.conversation_id,"
                 " m.type, m.topic, m.content, m.confidence, m.status, m.model,"
-                " m.created_at, m.turn_key, m.dedup_of,"
+                " m.created_at, m.turn_key, m.dedup_of, m.source_session_id,"
                 " u.id AS unit_id, v.value AS value,"
                 " v.manual_value AS manual_value," + title_col
                 + " FROM distilled_memories m"
@@ -1150,6 +1150,9 @@ def create_app(db_path: Path | None = None):
                 " 'manual' AS type, NULL AS topic, u.text AS content,"
                 " NULL AS confidence, 'new' AS status, NULL AS model,"
                 " u.time AS created_at, NULL AS turn_key, NULL AS dedup_of,"
+                # units 表没有真实会话列（它是召回投影，只认虚拟分桶的
+                # conversation_id）→ 手动路恒为 NULL，与蒸馏路列数对齐
+                " NULL AS source_session_id,"
                 " u.id AS unit_id, v.value AS value,"
                 " v.manual_value AS manual_value," + title_col
                 + " FROM units u LEFT JOIN unit_values v ON v.unit_id = u.id"
@@ -1218,7 +1221,12 @@ def create_app(db_path: Path | None = None):
                               " WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END",
                 "status": "CASE t.status WHEN 'new' THEN 0 WHEN 'similar' THEN 1"
                           " WHEN 'merged' THEN 2 WHEN 'duplicate' THEN 3 ELSE 4 END",
-                "conversation": "COALESCE(t.conversation_title, t.conversation_id)",
+                # 「来源会话」是**一列两语义**：蒸馏记忆按统一会话标题排，
+                # MCP 直写记忆没有统一会话（conversation_id 是 direct-YYYY-MM-DD
+                # 虚拟分桶）→ 退到写入会话（source_session_id），再退到分桶名。
+                # 这样一列一个排序键，不必再单开 `session` 排序（面板也只有一列）。
+                "conversation": "COALESCE(t.conversation_title,"
+                                " t.source_session_id, t.conversation_id)",
             }
             key = sort if sort in _SORT_EXPR else "time"
             if key == "conversation" and not attached:
@@ -1332,6 +1340,7 @@ def create_app(db_path: Path | None = None):
                 "SELECT m.id, m.source, m.conversation_id, m.slice_key, m.turn_key,"
                 " m.type, m.topic, m.content, m.confidence, m.status, m.dedup_of,"
                 " m.content_hash, m.model, m.created_at, m.wiki_ignore_at,"
+                " m.source_session_id,"
                 " u.id AS unit_id, v.value AS value, v.manual_value AS manual_value"
                 " FROM distilled_memories m"
                 f" LEFT JOIN units u ON u.src_id = ('{DISTILLED_SRC_PREFIX}' || m.content_hash)"

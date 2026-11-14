@@ -74,8 +74,10 @@
 ### 3.1 MCP 一次写入走哪条路
 
 ```
-memory_save(content)
+memory_save(content, source_session_id?)
+  → 来源会话：调用方传入 > 服务端推断（~/.dsh/sessions 下最近活跃会话）> 留空
   → distill.save_direct_memory()   # source=mcp, conversation_id=direct-YYYY-MM-DD
+                                   #   source_session_id=dsh:<会话ID> ← 独立列，只做溯源
   → content_hash 查重（同 hash 不重复写）
   → units 投影 + 向量（rag 后端写入即嵌入）
   → 标记该会话为脏 → 下次 wiki 增量才重编 L1/L2
@@ -84,6 +86,11 @@ memory_save(content)
 **分桶是关键**：`mcp` 直写记忆按**天**分会话（`direct-2026-10-22`），
 不再全部堆在 `direct` 一个会话里。否则 200 多条记忆共用一个会话，
 L1 重编就是整会话重做（详见 [distill-llm.md](distill-llm.md) §5）。
+
+⚠️ **两个会话标识不能混**：`conversation_id` 是**虚拟分桶**（只服务 wiki L1 的
+脏单位切分），`source_session_id` 才是**真实来源会话**（只做溯源）。
+**绝不能用真实会话顶掉分桶** —— 那会让直写记忆重新挤回少数几个大桶，
+回到"一条新记忆触发整批重编"的老问题（实测近 30 倍放大）。
 
 ### 3.2 四条硬不变量
 

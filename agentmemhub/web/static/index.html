@@ -537,7 +537,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
                 <th class="cursor-pointer select-none whitespace-nowrap px-3 py-2 hover:text-foreground" data-msort="confidence" title="点击按置信度排序（高→低）">置信</th>
                 <th class="cursor-pointer select-none whitespace-nowrap px-3 py-2 hover:text-foreground" data-msort="status" title="点击按状态排序（新型→重复）">状态</th>
                 <th class="cursor-pointer select-none whitespace-nowrap px-3 py-2 hover:text-foreground" data-msort="source" title="点击按来源排序">来源</th>
-                <th class="cursor-pointer select-none px-3 py-2 hover:text-foreground" data-msort="conversation" title="点击按来源会话标题排序">来源会话</th>
+                <th class="cursor-pointer select-none px-3 py-2 hover:text-foreground" data-msort="conversation" title="这条记忆来自哪个会话：MCP 直写显示写入会话（dsh:…，不可跳转），蒸馏记忆显示统一会话标题（可点击跳转）">来源会话</th>
                 <th class="cursor-pointer select-none whitespace-nowrap px-3 py-2 hover:text-foreground" data-msort="time" title="点击按时间排序">时间</th>
                 <th class="cursor-pointer select-none whitespace-nowrap px-3 py-2 text-right hover:text-foreground" data-msort="value" title="点击按分值排序">分数</th>
                 <th class="whitespace-nowrap px-3 py-2 text-right">操作</th>
@@ -3567,14 +3567,22 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         ? `<span class="text-[10px] font-semibold ${it.confidence==='high'?'text-emerald-500':(it.confidence==='medium'?'text-amber-500':'text-muted-foreground')}">${{high:'高',medium:'中',low:'低'}[it.confidence]||esc(it.confidence)}</span>`
         : '<span class="text-[10px] text-muted-foreground/50">—</span>';
       const statusChip = `<span class="rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold ${it.status==='new'?'text-primary':(it.status==='similar'?'text-muted-foreground':'text-muted-foreground/70')}">${MEM_STATUS_LABEL[it.status]||esc(it.status)}</span>`;
-      // 来源会话：仅在采集库确有该会话时可点（MCP 原子记忆的占位会话 'mcp'
-      // 无真实会话，点击会 404——必须不可点）
+      // 来源会话（**一列承载两种来源，二者互斥**）：
+      //   · 写入会话（source_session_id）→ MCP 直写记忆的主信息，形如 dsh:<会话 ID>
+      //   · 统一会话（conversation_title）→ 蒸馏记忆，可点击跳转
+      // 为什么合并：两者在全库 **0 条重叠**（蒸馏走前者、MCP 直写走后者），
+      // 拆成两列等于每行固定有一列是空的。且后续以 MCP 写入为主、蒸馏只是一次性
+      // 接入，所以 source_session_id 优先展示。
+      // 只有统一会话可点：DSH 会话不在统一会话库里，点了会 404。
+      const sid = String(it.source_session_id || '');
       const convCell = (it.conversation_id && it.has_conversation)
         ? `<a href="#" data-goconv="1" data-source="${esc(it.source)}" data-convid="${esc(it.conversation_id)}" data-turn="${esc(it.turn_key||'')}"
               class="text-primary hover:underline" title="${esc(it.conversation_title||it.conversation_id)}${it.turn_key?'（点击打开会话并定位该轮）':''}">${esc((it.conversation_title||it.conversation_id).slice(0,24))}${it.turn_key?' <span class="text-[9px] text-muted-foreground">↗</span>':''}</a>`
-        : (it.source==='memory'
-            ? '<span class="text-[10px] text-muted-foreground" title="Agent 通过 MCP 主动写入的原子记忆，无原始会话">（MCP 写入 · 无会话）</span>'
-            : '<span class="text-[10px] text-muted-foreground">（无对应会话）</span>');
+        : (sid
+            ? `<span class="mono text-[10px] text-foreground" title="Agent 写入会话（不在统一会话库，无法跳转）：${esc(sid)}">${esc(sid.length>26 ? sid.slice(0,25)+'…' : sid)}</span>`
+            : (it.source==='memory'
+                ? '<span class="text-[10px] text-muted-foreground" title="Agent 通过 MCP 主动写入，且未记录来源会话（改造前写入的历史记忆无法回填）">（MCP 写入 · 无会话）</span>'
+                : '<span class="text-[10px] text-muted-foreground">（无对应会话）</span>'));
       const srcCell = it.source==='memory'
         ? '<span class="chip" style="background:#8B5CF61f;color:#8B5CF6" title="Agent 通过 MCP 主动写入">MCP</span>'
         : srcTag(it.source);
@@ -3588,7 +3596,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
         <td class="px-3 py-2.5 whitespace-nowrap">${confChip}</td>
         <td class="px-3 py-2.5 whitespace-nowrap">${statusChip}</td>
         <td class="px-3 py-2.5 whitespace-nowrap">${srcCell}</td>
-        <td class="px-3 py-2.5 max-w-[210px]"><div class="truncate">${convCell}</div></td>
+        <td class="px-3 py-2.5 max-w-[240px]"><div class="truncate">${convCell}</div></td>
         <td class="px-3 py-2.5 whitespace-nowrap text-muted-foreground" title="${fmtTime(it.created_at)}">${relTime(it.created_at)}</td>
         <td class="px-3 py-2.5 whitespace-nowrap text-right">${vChip}</td>
         <td class="px-3 py-2.5 whitespace-nowrap text-right">${starBtn}${scoreBtns}</td>`;
@@ -3610,6 +3618,7 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
               ${it.unit_id!=null?`<span>召回单元 <b class="text-foreground">unit:${it.unit_id}</b></span>`:'<span class="text-warning">未投影（不在召回面）</span>'}
               ${it.dedup_of?`<span>判重指向 <b class="text-foreground">#${it.dedup_of}</b></span>`:''}
               ${it.session_uid!=null?`<span>会话UID <b class="text-foreground">#${it.session_uid}</b></span>`:''}
+              ${it.source_session_id?`<span>写入会话 <b class="text-foreground mono">${esc(it.source_session_id)}</b></span>`:''}
             </div>
             ${it.turn_key?`<div class="mt-1.5 text-[10.5px] text-muted-foreground">轮次锚 <span class="mono">${esc(it.turn_key)}</span></div>`:''}
             <div class="mt-2.5 flex flex-wrap gap-2">

@@ -499,7 +499,7 @@ Claude Code 等支持 MCP 的 Agent harness 上——模型在会话进行中即
 | `memory_search(query, topK?, origin?, note?)` | 语义检索历史记忆（六路通道融合），返回命中条目（带**层级与来源**标注）+ 注入上下文 |
 | `memory_recent(limit)` | 最近写入的记忆时间线，快速了解近期积累 |
 | `memory_stats()` | 索引就绪状态 / 记忆总量 / 嵌入模型与 LLM 评分可用性 |
-| `memory_save(content, importance?, tags?, note?)` | 写一条记忆。`importance` 为可选档位（`high`/`normal`/`low` → 初始价值 0.8/0.6/0.4，**不传即 normal**），由 Agent 用当前推理直接判断，**无需外挂评分模型**；`tags` 为可选标签数组（面板筛选/溯源用，引擎纯透传）。即时入库并补向量，写后验证 imported，失败明确报错不伪装 |
+| `memory_save(content, importance?, tags?, type?, source_session_id?, note?)` | 写一条记忆。`importance` 为可选档位（`high`/`normal`/`low` → 初始价值 0.8/0.6/0.4，**不传即 normal**），由 Agent 用当前推理直接判断，**无需外挂评分模型**；`tags` 为可选标签数组（面板筛选/溯源用，引擎纯透传）；`type` 为可选记忆类型（`decision`/`fact`/`preference`/`lesson`，**不传即 fact**）；`source_session_id` 为可选**来源会话**（`dsh:<会话ID>`，也接受裸 ID 自动补 `dsh:` 前缀，其它 harness 用 `<harness>:<id>`），**只做溯源、不参与分组与召回**——不传时服务端自动推断（扫 `~/.dsh/sessions/*/` 取最近活跃会话），推断不出就留空，**留空完全正常**；⚠️ **不要为了让 Agent 填它专门多跑一次 shell**（DSH 单次 shell 约 3.3 秒，而 `memory_save` 本身中位才 5.9 秒）。即时入库并补向量，写后验证 imported，失败明确报错不伪装 |
 | `memory_score(trace_id, polarity, note?)` | 按需对任意一条记忆打分（反馈 → 引擎即时重算 value/priority；**写后即评流程已废除**，仅用户明确要求加权时使用）|
 
 > 表中 `note?` 是这三个工具共有的**可选**参数：写一句话**操作意图**（例：`note="排查用户说的召回异常"`）。

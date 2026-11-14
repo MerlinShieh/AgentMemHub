@@ -192,7 +192,7 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 
 | event | 所属流 | 关键字段 | 含义 | 排查用途 |
 |---|---|---|---|---|
-| `write` | memory.log | `memory_id`、`content_hash`、`source`、`conversation_id`、`type`、`confidence`、`topic`、`result`（`inserted` / `revived` / `duplicate`）、`slice_key`、`content`（**全文**）、`chars`、`path`；Agent 直写经 `audit_extra` 追加 `trace_id` / `importance` / `value` / `tags` / `actor` | 一条记忆**落表**（`distilled_memories`）的事实；`result` 区分新增、归档条目复活、同内容重复写入尝试 | 回答"当时到底写进去了什么"；`duplicate` 解释"为什么新增数为 0"；`slice_key`（直写为 `mcp:<hash>`）可溯源到 MCP 的 `trace_id` |
+| `write` | memory.log | `memory_id`、`content_hash`、`source`、`conversation_id`、`type`、`confidence`、`topic`、`result`（`inserted` / `revived` / `duplicate`）、`slice_key`、`content`（**全文**）、`chars`、`path`；**有来源会话时**追加 `source_session_id`（`dsh:<会话ID>`，空值不写该字段）；Agent 直写经 `audit_extra` 追加 `trace_id` / `importance` / `value` / `tags` / `actor` / `source_session_origin` | 一条记忆**落表**（`distilled_memories`）的事实；`result` 区分新增、归档条目复活、同内容重复写入尝试；`source_session_origin` 是取值的三级来源（`param` 调用方传入 / `inferred` 服务端推断 / `none` 都没有） | 回答"当时到底写进去了什么"；`duplicate` 解释"为什么新增数为 0"；`slice_key`（直写为 `mcp:<hash>`）可溯源到 MCP 的 `trace_id`；**`source_session_origin` 是来源会话填充率与推断占比的唯一统计口径**（`rg '"source_session_origin": "inferred"'`） |
 | `read` | memory.log | `path`（`mcp` / `http`）、`actor`（Agent 名 / `panel`）、`query`、`top`、`hits`、`origin_filter` / `kinds{}`、`elapsed_ms` | 一次记忆**检索**；读也留痕 | 区分"没写过"与"写了但没召回"——对比 `write` 的 `content` 与 `read` 的 `query` / `hits` |
 
 `path` 由 `logs.memory_path()`（contextvar）标记，未标记时为 `unknown`。内容记**全文**是有意的：
@@ -306,7 +306,7 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 
 | 步骤 | 命令 | 关注字段 |
 |---|---|---|
-| 全量时间线 | `python -m agentmemhub memory-log --limit 50` | 每行已渲染成 `[写·<path>] id=… source/type 内容摘要 ← result (N 字)` 或 `[读·<path>] q='…' 命中 N 条 {层级分布}` |
+| 全量时间线 | `python -m agentmemhub memory-log --limit 50` | 每行已渲染成 `[写·<path>] id=… source/type 内容摘要 ← result (N 字) [会话 …]` 或 `[读·<path>] q='…' 命中 N 条 {层级分布}`；行尾 `[会话 …]` 是**真实来源会话**（`dsh:<id>`，括号内标 `param` / `inferred`；历史记忆无此前缀）|
 | 只看写入 / 读取 | 加 `--event write` / `--event read` | — |
 | 只看某条路径 | 加 `--path mcp\|http\|distill\|cli\|unknown` | `path` 是协议层用 contextvar 标记的来源 |
 | 关键词 | 加 `--grep <关键词>`，或 `--json` 后自己筛 | `content`、`query`、`trace_id`、`slice_key` |
@@ -351,7 +351,7 @@ wiki 流的错误事件表是 `_WIKI_ERROR_EVENTS = ("page_fail", "run_aborted",
 
 | 命令 | 参数 | 输出形态 |
 |---|---|---|
-| `python -m agentmemhub memory-log` | `--limit N`（默认 50，`0` = 全部）、`--event write\|read`、`--path mcp\|http\|distill\|cli\|unknown`、`--grep <关键词>`、`--json` | 逐行 `MM-DD HH:MM:SS [写·<path>] id=… …` / `[读·<path>] q='…' 命中 N 条 {…}`；末行 `共 N 条（<memory.log 路径>）`；无匹配时打印"无匹配的记忆操作记录（…）" |
+| `python -m agentmemhub memory-log` | `--limit N`（默认 50，`0` = 全部）、`--event write\|read`、`--path mcp\|http\|distill\|cli\|unknown`、`--grep <关键词>`、`--json` | 逐行 `MM-DD HH:MM:SS [写·<path>] id=… …` / `[读·<path>] q='…' 命中 N 条 {…}`；写入行有来源会话时末尾追加 `[会话 dsh:…（param\|inferred）]`（`--json` 输出完整未截断值）；末行 `共 N 条（<memory.log 路径>）`；无匹配时打印"无匹配的记忆操作记录（…）" |
 | `python scripts/mcp_log.py` | `--limit N`（默认 20）、`--tool <名>`、`--failed`、`--grep <关键词>`、`--call <call_id 前缀>`、`--json`、`--path <文件或目录>` | 每条 5~6 行：`[MM-DD HH:MM:SS] <tool> <OK\|失败\|无响应> <耗时ms \| 错误>` + `意图:` + `参数:` + `标识:` + `结果:` + `call_id:`；空结果时给出"MCP server 仍是旧进程"之类的提示 |
 | `python -m agentmemhub wiki --action failures` | `--out <产出目录>`（必需）、`--stage l1\|l2\|留空` | 失败清单路径、未解决条数、按原因分类（`quota` / `auth` / `model` 标"需人工处理"）、按阶段计数、致命类提示 |
 | `python -m agentmemhub wiki --action align` | `--out <目录>`，或 `--l1 <L1> --l2 <L2>`（两级一起给才能看同步性）、`--db <索引库>` | 各级 manifest 的 `generated_at` / `n_inputs`、新增/变更/失去输入、脏会话清单、引用有效性与正向覆盖率、两级同步判词 |

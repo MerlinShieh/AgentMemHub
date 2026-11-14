@@ -481,3 +481,88 @@ def test_audit_digest_extracts_ids():
     assert _audit_digest("记忆已写入（id=mcp_abc123，value=0.6）")["trace_id"] == "mcp_abc123"
     assert _audit_digest("记忆检索「x」：3 条命中")["hits"] == 3
     assert _audit_digest("与标识无关的文本") == {}
+
+
+# ---------------------------------------------------------------------------
+# 来源会话（source_session_id）：溯源标签，三级取用
+# ---------------------------------------------------------------------------
+
+def test_source_session_id_in_schema_but_optional():
+    """新参数必须进 schema 且**非必填**——旧调用方不带它也要能写。"""
+    h, _ = _handler()
+    r = _call(h, _req("tools/list"))
+    props = next(t for t in r["result"]["tools"]
+                 if t["name"] == "memory_save")["inputSchema"]["properties"]
+    assert "source_session_id" in props
+    assert props["source_session_id"]["type"] == "string"
+    req = next(t for t in r["result"]["tools"]
+               if t["name"] == "memory_save")["inputSchema"]["required"]
+    assert req == ["content"]
+
+
+def _save_with(args: dict, *, inferred: str = ""):
+    """跑一次 memory_save，返回 (传给 save_direct_memory 的 kwargs)。
+
+    推断函数一律 mock：不 mock 的话测试会去读**真实**的 `~/.dsh/sessions`，
+    结果随开发机当前开没开 DSH 而变（本机就有活跃会话），测试必然不稳。
+    """
+    save_trace = mock.MagicMock(return_value={"imported": 1, "skipped": 0})
+    sdm = mock.MagicMock(return_value="inserted")
+    idx = mock.MagicMock()
+    with mock.patch.object(engine_api, "auth_state", return_value={}), \
+         mock.patch("agentmemhub.rag_bridge.save_memory_trace", save_trace), \
+         mock.patch("agentmemhub.distill.save_direct_memory", sdm), \
+         mock.patch("agentmemhub.distill._pending_projection", return_value=[]), \
+         mock.patch("agentmemhub.rag.ingest.open_index", return_value=idx), \
+         mock.patch("agentmemhub.session_origin.infer_active_session",
+                    return_value=inferred):
+        h, _ = _handler()
+        assert h is not None
+        _call(h, _req("tools/call",
+                      {"name": "memory_save", "arguments": args}))
+    assert sdm.called, "没走到蒸馏表落库分支"
+    return sdm.call_args.kwargs
+
+
+def test_source_session_id_from_param_bare_value():
+    """调用方传裸会话 ID → 自动补 `dsh:` 前缀（DSH 是当前唯一原生支持来源）。"""
+    kwargs = _save_with({"content": "带来源的结论",
+                         "source_session_id": "session-50a7d24b"})
+    assert kwargs["source_session_id"] == "dsh:session-50a7d24b"
+    assert kwargs["audit_extra"]["source_session_origin"] == "param"
+
+
+def test_source_session_id_from_param_keeps_explicit_source():
+    """已带来源前缀的值原样保留 —— 这是兼容其它 harness 的接口。"""
+    kwargs = _save_with({"content": "来自别家 harness 的结论",
+                         "source_session_id": "claude:1f2e3d"})
+    assert kwargs["source_session_id"] == "claude:1f2e3d"
+    assert kwargs["audit_extra"]["source_session_origin"] == "param"
+
+
+def test_source_session_id_inferred_when_absent():
+    """没传 → 用推断值兜底（零成本，不逼 Agent 去调 shell）。"""
+    kwargs = _save_with({"content": "没传来源的结论"},
+                        inferred="dsh:session-inferred")
+    assert kwargs["source_session_id"] == "dsh:session-inferred"
+    assert kwargs["audit_extra"]["source_session_origin"] == "inferred"
+
+
+def test_source_session_id_empty_when_unresolvable():
+    """既没传、也推断不出 → 留空，**绝不猜一个错的**。"""
+    kwargs = _save_with({"content": "无从判断来源的结论"}, inferred="")
+    assert kwargs["source_session_id"] == ""
+    assert kwargs["audit_extra"]["source_session_origin"] == "none"
+
+
+def test_source_session_id_does_not_touch_conversation_id():
+    """来源会话只做溯源，**不参与分组** —— conversation_id 仍须按日落桶。
+
+    这是本次改造最容易被误改坏的地方：一旦让真实会话顶掉分桶，
+    直写记忆会重新挤回少数几个大会话，wiki L1 又要整批重编（实测近 30 倍放大）。
+    """
+    kwargs = _save_with({"content": "验证分桶不受影响",
+                         "source_session_id": "session-x"},
+                        inferred="")
+    assert "conversation_id" not in kwargs, \
+        "save_direct_memory 的 conversation_id 必须继续交给按日分桶逻辑"

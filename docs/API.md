@@ -107,6 +107,7 @@ GET  /api/admin/job  →  轮询进度
 | `dedup_of` / `merged_into` | 相似去重链：`merged_into` 仅在 `status != new` 时有值 |
 | `unit_id` / `value` / `manual_value` / `fb_polarity` | 记忆引擎侧打分与反馈 |
 | `conversation_title` / `session_uid` / `has_conversation` | 回跳会话用；`has_conversation=false` 表示采集库已无该会话（**不要给出能点的回跳**）|
+| `source_session_id` | **真实来源会话**（`dsh:<会话 ID>` 这类），由 Agent 传入或服务端推断；改造前写入的历史记忆为 `null`（数据当初没记录，**不可回填**）。注意与上面 `conversation_id` 区分：后者是虚拟分桶（MCP 直写为 `direct-YYYY-MM-DD`）|
 
 不存在返回 **404** `{"detail": "记忆 3711 不存在"}`。
 
@@ -121,8 +122,13 @@ GET  /api/admin/job  →  轮询进度
 | `q` | — | 关键字（内容/主题 LIKE）|
 | `conversationId` | — | 按会话 id（会话→记忆联动）|
 | `sessionUid` | — | 按全局会话 uid |
-| `sort` | `time` | `time\|value\|type\|confidence\|status\|source\|conversation` |
+| `sort` | `time` | `time\|value\|type\|confidence\|status\|source\|conversation`。`conversation` 按「来源会话」排：优先统一会话标题，无标题时退到 `source_session_id`，再退到 `conversation_id` |
 | `page` / `page_size` | 1 / 20 | 分页 |
+
+> 每条 item 均含 `source_session_id`（真实写入会话，可空）。面板**同一列**「来源会话」
+> 承载两种来源：有统一会话（蒸馏记忆）显示标题且可跳转，没有（MCP 直写）则显示
+> `dsh:<会话 ID>`。CLI `memory-log` 行尾的 `[会话 …]` 也取自它。
+> 它只做**溯源**，不参与分组与召回排序。
 
 **`POST /api/engine/feedback` 参数**
 
@@ -283,7 +289,7 @@ GET  /api/admin/job  →  轮询进度
 | 工具 | 参数 | 说明 |
 |---|---|---|
 | `memory_search` | `query`（必填）、`topK`、`origin`、`note` | 语义检索历史记忆（六路通道融合，见 `data-architecture.md` §4） |
-| `memory_save` | `content`（必填）、`importance`、`tags`、`note` | 写入一条记忆 |
+| `memory_save` | `content`（必填）、`importance`、`tags`、`type`、`source_session_id`、`note` | 写入一条记忆 |
 | `memory_recent` | `limit`、`note` | 最近记忆时间线 |
 | `memory_stats` | `note` | 引擎在线状态与记忆总量 |
 | `memory_score` | `trace_id`、`polarity`、`note` | 给记忆打极性分（**仅用户明确说重要时才用**）|
@@ -298,6 +304,17 @@ GET  /api/admin/job  →  轮询进度
 - **调用审计由服务端在唯一分发点自动写**，不依赖 Agent 手动记（feed 工具同样被覆盖）
 - `importance` 档位：`high` 0.8 / `normal` 0.6 / `low` 0.4（不传即 `normal`）
 - **写后不立即评分** —— 价值分由真实使用演化
+- `source_session_id`（2026-11-12 新增，**可选**）：记「这条记忆从哪个会话写出来的」，
+  **只做溯源**，不参与分组与召回排序。值形如 `dsh:session-<uuid>`（裸 ID 会自动补
+  `dsh:` 前缀，带 `claude:` / `cursor:` 等前缀的原样保留）。
+  **不传时服务端自动推断**（扫 `~/.dsh/sessions/*/` 取窗口内最近活动会话，
+  主会话优先于子代理）；推断不出就留空 —— 留空是正常结果，不影响写入与检索。
+  ⚠️ **不要让 Agent 为了填它专门多跑一次 shell**：DSH 单次 shell 调用固定约 3.3 秒
+  （空命令实测 3.5s），而 `memory_save` 本身中位才 5.9 秒，为溯源多花一半时间是亏的。
+  落库位置：`distilled_memories.source_session_id`（**独立列**，与按日分桶的
+  `conversation_id` 并存 —— 后者只为切小 wiki L1 脏单位，不能拿真实会话顶掉它）。
+  填充率与来源（`param` / `inferred` / `none`）记在 `logs/memory.log` 的
+  `source_session_origin` 字段。
 
 **feed 三个工具的三条约定**：
 

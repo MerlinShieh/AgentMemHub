@@ -96,7 +96,8 @@ MemOS 上游已于 v2.8 彻底移除（vendored `memOS/` 目录、`agentmemhub.m
 **一张图记住所有 ID**（以一条 Agent 直写记忆为例）：
 
 ```
-MCP memory_save(content="…", importance="high", type="lesson")
+MCP memory_save(content="…", importance="high", type="lesson",
+                source_session_id="dsh:session-…")
   │
   ├─ tid = _trace_id(content, ts)          ← AgentMemHub 计算：'mcp_<hash>'
   │    ├─ 返回给调用方（trace_id）           ← memory_score 靠它定位
@@ -108,6 +109,8 @@ MCP memory_save(content="…", importance="high", type="lesson")
   │    └─ 蒸馏表 distilled_memories（save_direct_memory）：
   │          slice_key = 'mcp:<tid 去 mcp_ 前缀>'   ← wiki/面板关联锚
   │          content_hash = fingerprint(content)    ← 内容指纹 sha256[:16]（规范化后）
+  │          conversation_id = 'direct-<日期>'      ← 虚拟分桶（只服务 wiki L1 切分）
+  │          source_session_id = 'dsh:<会话 ID>'    ← 真实来源会话（只做溯源）
   │          status = 'new'，type/importance 随参数
   │
   └─ 投影（S4/直写补投影）：
@@ -120,7 +123,8 @@ MCP memory_save(content="…", importance="high", type="lesson")
 | ID / 锚 | 生成者 | 存储位置 | 用途 | ⚠️ 易错点 |
 |---|---|---|---|---|
 | `session_uid` | 源库 ingest | conversations.session_uid | 全局会话唯一 id，面板双向跳转 | 与 (source, conversation_id) 1:1 |
-| `conversation_id` | 各 harness | 源库 + 蒸馏表 + units | 会话标识 | 直写记忆固定为 `'direct'`（source='mcp'） |
+| `conversation_id` | 各 harness | 源库 + 蒸馏表 + units | 会话标识 | 直写记忆是**虚拟分桶** `direct-YYYY-MM-DD`（source='mcp'），**不代表真实会话**——真实会话见下一行 |
+| `source_session_id` | 调用方传入 / MCP 服务端推断 | distilled_memories.source_session_id | **真实来源会话**（`dsh:<会话 ID>`）溯源；面板/CLI 可查"这条记忆从哪个会话写出来的" | **只做标签**：不参与分组、不参与召回排序。**别拿它顶掉 `conversation_id`**——那会让直写记忆重新挤回少数大会话，wiki L1 整批重编（实测近 30 倍放大）。历史记忆（改造前写入）该列为 NULL，**无法回填**（当初没记，数据不存在） |
 | `tid`（trace id） | `_trace_id(content, ts)` | 返回值；引擎 **legacy_id**；蒸馏表 slice_key 前缀 | memory_score 定位；面板去重关联 | **引擎的 units.src_id 不是 tid**，是内容锚 |
 | `units.src_id`（手写层） | `content_anchor(text)` | units.src_id（`'mcp_<sha256(原始内容)[:16]>'`） | 引擎幂等（同内容不重投影）；**召回侧的双投影去重也用它** | **不能假定它与 `content_hash` 相同**——它用**原始**内容算哈希，而 `content_hash`（`fingerprint`）用**规范化后**内容（去空行 + 每行 strip）。两者只在"入库未改动内容"时一致（实测 114 条直写单元里 **11 条因 `sanitize.redact` 改动内容而分叉**）|
 | `units.legacy_id` | save_memory_trace（存传入 tid） | units.legacy_id | trace id 的引擎侧真身 | **面板去重 / 直写关联的唯一正确锚** |

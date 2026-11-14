@@ -1234,11 +1234,21 @@ def cmd_memory_log(args) -> int:
                             _time.localtime(float(r.get("ts") or 0)))
         ev = r.get("event")
         if ev == "write":
-            print("%s [写·%s] id=%s %s/%s %s ← %s  (%d 字)" % (
+            # 来源会话：**真实会话**（`dsh:<会话 ID>`），只做溯源，与按日分桶的
+            # conversation_id 是两回事。括号里标出值是**谁给的**——
+            # `param` 调用方显式传入（可信）／`inferred` 服务端推断（可能因多会话
+            # 并发而偏）／缺省为空即改造前的历史记录（当时压根没记，不可回填）。
+            sid = str(r.get("source_session_id") or "")
+            origin = str(r.get("source_session_origin") or "")
+            sess = ""
+            if sid:
+                short = sid if len(sid) <= 30 else sid[:29] + "…"
+                sess = "  [会话 %s%s]" % (short, ("（%s）" % origin) if origin else "")
+            print("%s [写·%s] id=%s %s/%s %s ← %s  (%d 字)%s" % (
                 ts, r.get("path") or "?", r.get("memory_id"),
                 r.get("source") or "?", r.get("type") or "?",
                 (r.get("content") or "").replace("\n", " ")[:64],
-                r.get("result") or "", r.get("chars") or 0))
+                r.get("result") or "", r.get("chars") or 0, sess))
         elif ev == "read":
             print("%s [读·%s] q=%r 命中 %s 条 %s" % (
                 ts, r.get("path") or "?", (r.get("query") or "")[:36],
