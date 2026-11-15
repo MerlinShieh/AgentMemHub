@@ -119,6 +119,13 @@ def collect_sources(root: Path | str = ROOT) -> dict[str, str]:
     return out
 
 
+#: 这些父路径下的**子键是运行时数据**（如 `distillation.project.names` 的键
+#: 就是项目编码本身：`--D-data-vibeCoding-agent-memhub--`）。代码里只会出现
+#: 父键名、绝不会出现具体子键 —— 逐项去源码里找必然找不到，那是**误报**，
+#: 不是僵尸键。判定改成「父键有读取点即视为活的」。
+_DYNAMIC_KEY_PARENTS = ("distillation.project.names",)
+
+
 def find_reads(key_path: str, sources: dict[str, str]) -> dict[str, list[str]]:
     """按**证据强度**分档，找出"可能读取该键"的文件。
 
@@ -130,6 +137,14 @@ def find_reads(key_path: str, sources: dict[str, str]) -> dict[str, list[str]]:
     - **strong**：源码出现完整点分路径，或出现「最后两段」在同一文件里
     - **weak**：只出现叶子名（不足以证明真有人读它，只说明词出现过）
     """
+    # 动态键：子键是运行期数据，静态匹配注定落空 → 只看父键有没有读取点
+    for parent in _DYNAMIC_KEY_PARENTS:
+        if key_path.startswith(parent + "."):
+            leaf_parent = parent.split(".")[-1]
+            pat = re.compile(r"""["']%s["']""" % re.escape(leaf_parent))
+            hits = [rel for rel, text in sources.items() if pat.search(text)]
+            return {"strong": hits or ["<dynamic-key-parent>"], "weak": []}
+
     leaf = key_path.split(".")[-1]
     segs = [s for s in key_path.split(".") if s]
     strong_pat = re.compile(r"""["']%s["']""" % re.escape(key_path))

@@ -500,7 +500,8 @@ def test_source_session_id_in_schema_but_optional():
     assert req == ["content"]
 
 
-def _save_with(args: dict, *, inferred: str = "", inferred_project: str = ""):
+def _save_with(args: dict, *, inferred: str = "", inferred_project: str = "",
+               activity_project: str = ""):
     """跑一次 memory_save，返回 (传给 save_direct_memory 的 kwargs)。
 
     推断函数一律 mock：不 mock 的话测试会去读**真实**的 `~/.dsh/sessions`，
@@ -517,7 +518,9 @@ def _save_with(args: dict, *, inferred: str = "", inferred_project: str = ""):
          mock.patch("agentmemhub.session_origin.infer_active_session",
                     return_value=inferred), \
          mock.patch("agentmemhub.session_origin.infer_active_project",
-                    return_value=inferred_project):
+                    return_value=inferred_project), \
+         mock.patch("agentmemhub.session_origin.infer_project_from_activity",
+                    return_value=activity_project):
         h, _ = _handler()
         assert h is not None
         _call(h, _req("tools/call",
@@ -611,11 +614,39 @@ def test_source_project_accepts_logical_name():
 
 
 def test_source_project_inferred_as_workspace():
-    """没传 → 推断为当前会话的工作区编码（默认以工作区为项目）。"""
+    """没传、活动推断也判不出 → 回退当前会话的工作区编码。"""
     kwargs = _save_with({"content": "项目推断测试"},
-                        inferred_project="--D-data-vibeCoding--")
+                        inferred_project="--D-data-vibeCoding--",
+                        activity_project="")
     assert kwargs["source_project"] == "--D-data-vibeCoding--"
-    assert kwargs["audit_extra"]["source_project_origin"] == "inferred"
+    assert kwargs["audit_extra"]["source_project_origin"] == "workspace"
+
+
+def test_source_project_prefers_activity_over_workspace():
+    """活动推断（更细的子项目）优先于工作区回退 —— 这正是 C 混合模式的意义。
+
+    否则新记忆会落在工作区桶，与历史上按项目迁过去的那批分裂。
+    注意活动推断需要 `session_id`（日志按会话存），所以这里也 mock 出会话。
+    """
+    kwargs = _save_with(
+        {"content": "子项目推断测试"},
+        inferred="session-abc",
+        inferred_project="--D-data-vibeCoding--",
+        activity_project="--D-data-vibeCoding-Agent_Memory-AgentMemHub--")
+    assert kwargs["source_project"] == \
+        "--D-data-vibeCoding-Agent_Memory-AgentMemHub--"
+    assert kwargs["audit_extra"]["source_project_origin"] == "activity"
+
+
+def test_source_project_explicit_beats_both_inferences():
+    """显式传入压过两种推断（Agent 知道自己在哪个项目，比任何启发式都准）。"""
+    kwargs = _save_with(
+        {"content": "显式优先测试",
+         "source_project": r"D:\data\vibeCoding\Skills"},
+        inferred_project="--D-data-vibeCoding--",
+        activity_project="--D-data-vibeCoding-Agent_Memory-AgentMemHub--")
+    assert kwargs["source_project"] == "--D-data-vibeCoding-Skills--"
+    assert kwargs["audit_extra"]["source_project_origin"] == "param"
 
 
 def test_source_project_empty_falls_back_to_daily():

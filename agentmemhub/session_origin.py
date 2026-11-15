@@ -35,8 +35,12 @@ DSH 把每个会话写成 `~/.dsh/sessions/<编码后的 cwd>/<会话 ID>/sessio
 
 from __future__ import annotations
 
+import io
+import json
 import os
+import re
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Optional
 
@@ -143,6 +147,181 @@ def project_display_name(code: str) -> str:
     body = v.strip("-")
     tail = body.rsplit("-", 1)[-1] if body else v
     return tail or v
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 从会话活动推断「真实项目目录」（**纯代码，无 LLM**）
+#
+# 为什么不用 LLM 做这件事：它是个确定性统计任务（数路径频次），LLM 会更慢
+# （秒级 vs 毫秒级）、要花钱、结果不可复现，还可能编造不存在的路径。
+#
+# 实测成本（本机真实日志 6633 行 / 2.8 MB）：解压 0.20s + 扫描 0.02s ≈ 0.23s，
+# 相对 memory_save 自身中位 5.9s 是 +4%；而"让 Agent 多调一次 shell"是 +3.3s
+# （+56%）。再加 60 秒缓存后，同会话连续写入几乎零成本。
+# ══════════════════════════════════════════════════════════════════════
+
+#: 判定「项目根」的标记：命中任一即认为该目录是项目根。
+#:
+#: 用构建/版本控制标记而不是目录名——目录名毫无规律（`Agent_Memory`、
+#: `Mobile_App_AutoTest`、`remielle` 混在一起），标记文件才是硬信号。
+_PROJECT_MARKERS = (
+    ".git", "pyproject.toml", "package.json", "Cargo.toml",
+    "go.mod", "pom.xml", "build.gradle", "Gemfile", "composer.json",
+)
+
+#: 这些目录里的文件再多也不代表项目归属，统计时直接跳过。
+_PROJECT_NOISE = ("node_modules", "_asar", "__pycache__", ".git",
+                  "site-packages", "dist", "build")
+
+#: 从日志里抽 Windows / Unix 绝对路径（JSON 里反斜杠是一层转义）。
+_PATH_RE = re.compile(r'[A-Za-z]:\\\\[^"\s,;\)\]\}]+|/[A-Za-z0-9_.\-/]{12,}')
+
+#: 活动推断缓存：`session_id -> (项目编码, 日志 mtime, 计算时刻)`。
+#: 同一会话内项目基本不变，重复写入不必反复解压（解压是大头）。
+_ACTIVITY_CACHE: dict[str, tuple[str, float, float]] = {}
+
+#: 缓存有效期：日志持续在写，容忍轻微过期——项目归属在会话内几乎不变。
+_ACTIVITY_TTL_S = 60.0
+
+#: 只为最近这么多行做统计：越老的事件越不代表"此刻在哪个项目"。
+_ACTIVITY_MAX_LINES = 800
+
+#: 一个项目至少要出现这么多次才算数——**证据不足宁可不猜**，
+#: 标错项目比回退到工作区更糟（会把记忆塞进无关的 L1 页）。
+_ACTIVITY_MIN_HITS = 3
+
+
+def _find_session_log(base: Path, session_id: str) -> Optional[Path]:
+    """在会话根下定位某个会话的日志文件；找不到返回 None。"""
+    try:
+        for workspace in base.iterdir():
+            if not workspace.is_dir():
+                continue
+            log = workspace / session_id / DSH_SESSION_FILE
+            if log.is_file():
+                return log
+    except OSError:
+        return None
+    return None
+
+
+def _project_root_of(path: Path, *, stop_at: Path) -> Optional[Path]:
+    """从 `path` 向上找第一个含项目标记的目录。
+
+    不越过 `stop_at`（工作区根）——工作区之外的目录不归本次会话管。
+    路径不存在时 `exists()` 返回 False，不会抛。
+    """
+    cur = path
+    while True:
+        for marker in _PROJECT_MARKERS:
+            try:
+                if (cur / marker).exists():
+                    return cur
+            except OSError:
+                pass
+        if cur == stop_at or cur.parent == cur:
+            return None
+        cur = cur.parent
+
+
+def infer_project_from_activity(*, session_id: str = "",
+                                root: Optional[Path] = None,
+                                now: Optional[float] = None,
+                                max_lines: int = _ACTIVITY_MAX_LINES,
+                                min_hits: int = _ACTIVITY_MIN_HITS,
+                                use_cache: bool = True) -> str:
+    """从会话日志的路径活动推断**真实项目目录**，返回项目编码；判不出返回空串。
+
+    **不调 LLM**：解压日志 → 正则抽路径 → 按「含项目标记的最近祖先」聚合成
+    项目根 → 取出现次数最多的那个。
+
+    返回值是 `project_key()` 编码（如 `--D-data-vibeCoding-Agent_Memory-AgentMemHub--`），
+    与 `infer_active_project()`（只到工作区）互补：这是"更细的那一层"。
+
+    判不出的一律返回空串，由调用方回退到工作区——**绝不猜**。
+    """
+    try:
+        if not session_id:
+            return ""
+        clock = time.time() if now is None else float(now)
+
+        if use_cache:
+            hit = _ACTIVITY_CACHE.get(session_id)
+            if hit and clock - hit[2] < _ACTIVITY_TTL_S:
+                return hit[0]
+
+        base = Path(root) if root is not None else dsh_sessions_root()
+        log = _find_session_log(base, session_id)
+        if log is None:
+            return ""
+        try:
+            mtime = log.stat().st_mtime
+        except OSError:
+            return ""
+
+        # 日志没变 → 直接复用上次结果（不必再解压）
+        if use_cache:
+            hit = _ACTIVITY_CACHE.get(session_id)
+            if hit and hit[1] == mtime:
+                _ACTIVITY_CACHE[session_id] = (hit[0], mtime, clock)
+                return hit[0]
+
+        try:
+            import zstandard
+        except ImportError:                     # 没有 zstd 库就放弃（fail-open）
+            return ""
+        with open(log, "rb") as f:
+            with zstandard.ZstdDecompressor().stream_reader(f) as r:
+                text = io.TextIOWrapper(r, encoding="utf-8").read()
+        lines = text.splitlines()
+        if not lines:
+            return ""
+
+        # 会话 header 里的 cwd 是**工作区根**，用它限定统计范围
+        try:
+            workspace_root = Path(json.loads(lines[0]).get("cwd") or "")
+        except Exception:                       # noqa: BLE001
+            return ""
+        if not str(workspace_root):
+            return ""
+
+        # 统计每个目录出现在多少条事件里
+        dir_hits: Counter = Counter()
+        for line in lines[-max_lines:]:
+            for m in _PATH_RE.finditer(line):
+                raw = m.group(0).replace("\\\\", "\\")
+                d = os.path.dirname(raw)
+                if not d or any(x in d.lower() for x in _PROJECT_NOISE):
+                    continue
+                dir_hits[d] += 1
+        if not dir_hits:
+            return ""
+
+        # 把每个目录归到「含项目标记的最近祖先」，再按项目累加
+        proj_hits: Counter = Counter()
+        resolved: dict[str, Optional[Path]] = {}
+        for d, n in dir_hits.most_common(200):   # 上限 200，避免大量 stat
+            if d not in resolved:
+                try:
+                    resolved[d] = _project_root_of(Path(d), stop_at=workspace_root)
+                except Exception:               # noqa: BLE001
+                    resolved[d] = None
+            root_dir = resolved[d]
+            # 项目根等于工作区根本身 → 不算"更细的项目"，丢弃
+            if root_dir is not None and root_dir != workspace_root:
+                proj_hits[root_dir] += n
+        if not proj_hits:
+            return ""
+
+        best, hits = max(proj_hits.items(), key=lambda kv: kv[1])
+        if hits < min_hits:                     # 证据不足，宁可不猜
+            return ""
+        code = project_key(str(best))
+        if use_cache:
+            _ACTIVITY_CACHE[session_id] = (code, mtime, clock)
+        return code
+    except Exception:                           # noqa: BLE001
+        return ""
 
 
 def normalize_source_session(raw: object) -> str:

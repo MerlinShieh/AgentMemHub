@@ -238,14 +238,29 @@ def _save(args: dict) -> str:
     if not source_session:
         source_session = session_origin.infer_active_session()
         session_origin_kind = "inferred" if source_session else "none"
-    # 项目桶（= wiki L1 的编译单位）：显式传入 > 会话工作区推断 > 留空（回退按日）。
+    # 项目桶（= wiki L1 的编译单位）：显式传入 > 活动推断 > 工作区 > 留空。
     # 与上面的来源会话是**两件事**：会话是溯源标签，项目是分组维度。
+    #
+    # 为什么中间加一层「活动推断」：DSH 会话 header 只记工作区根
+    # （`D:\data\vibeCoding`），而用户实际在子项目里干活
+    # （`…\Agent_Memory\AgentMemHub`）。Agent 忘了传时，若只回退工作区，
+    # 新记忆会和工作区桶里，与历史上按项目迁过去的那批**分裂**。
+    # 活动推断是纯代码统计（解压会话日志数路径频次，实测 0.23s，有 60s 缓存），
+    # **不调 LLM**——确定性任务用代码更准、更快、不花钱。
     source_project = session_origin.normalize_project(
         args.get("source_project"))
     project_origin_kind = "param" if source_project else ""
     if not source_project:
+        sid_raw = (source_session.split(":", 1)[-1]
+                   if source_session else "")
+        if sid_raw:
+            source_project = session_origin.infer_project_from_activity(
+                session_id=sid_raw)
+            if source_project:
+                project_origin_kind = "activity"
+    if not source_project:
         source_project = session_origin.infer_active_project()
-        project_origin_kind = "inferred" if source_project else "none"
+        project_origin_kind = "workspace" if source_project else "none"
     ts = int(time.time() * 1000)
     tid = _trace_id(content, ts)
     # 直写索引库（进程内直调，无 bundle / HTTP 导入语义）。

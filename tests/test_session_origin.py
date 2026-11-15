@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -278,8 +279,15 @@ def test_infer_active_project_never_raises(tmp_path):
     # 逻辑名本来就是可读的，末段逻辑对它是恒等
     ("dsh-dev", "dsh-dev"),
 ])
-def test_project_display_name_falls_back_to_tail(code, expected):
+def test_project_display_name_falls_back_to_tail(code, expected, monkeypatch):
     """没有配置映射时退到编码末段 —— 面板至少能看懂，而不是一长串路径。"""
+    # 必须隔离真实配置：本机 yaml 里配了 names 映射，否则这里会读到 "DSH开发"
+    from agentmemhub import config as hub_config
+
+    class _Cfg:
+        distillation = {}
+
+    monkeypatch.setattr(hub_config, "config", lambda: _Cfg())
     assert so.project_display_name(code) == expected
 
 
@@ -292,3 +300,121 @@ def test_project_display_name_uses_config_mapping(monkeypatch):
 
     monkeypatch.setattr(hub_config, "config", lambda: _Cfg())
     assert so.project_display_name("--D-x--") == "自定义名"
+
+
+# ---------------------------------------------------------------------------
+# 活动推断（从会话日志的路径频次找真实项目，纯代码）
+# ---------------------------------------------------------------------------
+
+def _write_session_log(root: Path, workspace: str, sid: str,
+                       events: list[dict], cwd: str) -> Path:
+    """造一个 DSH 会话日志（单帧 zstd 的 jsonl，header 带 cwd）。"""
+    import json as _json
+
+    import zstandard
+
+    d = root / workspace / sid
+    d.mkdir(parents=True)
+    lines = [_json.dumps({"cwd": cwd}, ensure_ascii=False)]
+    lines += [_json.dumps(e, ensure_ascii=False) for e in events]
+    raw = "\n".join(lines).encode("utf-8")
+    p = d / so.DSH_SESSION_FILE
+    p.write_bytes(zstandard.ZstdCompressor().compress(raw))
+    return p
+
+
+def _events_for(paths: list[str]) -> list[dict]:
+    """每条事件里塞一个带路径的工具调用参数（与真实结构近似）。"""
+    return [{"type": "tool/call", "data": {"arguments": {"file_path": p}}}
+            for p in paths]
+
+
+def test_infer_project_from_activity_finds_marked_project(tmp_path):
+    """有 `pyproject.toml` 的那层被认作项目根（标记文件是硬信号，不是目录名）。"""
+    ws = tmp_path / "ws"
+    proj = ws / "Agent_Memory" / "AgentMemHub"
+    proj.mkdir(parents=True)
+    (proj / "pyproject.toml").write_text("", encoding="utf-8")
+
+    logs = tmp_path / "sessions"
+    _write_session_log(logs, "--D-x--", "session-aaa",
+                       _events_for([str(proj / f"f{i}.py") for i in range(5)]),
+                       cwd=str(ws))
+    code = so.infer_project_from_activity(
+        session_id="session-aaa", root=logs, use_cache=False)
+    assert code == so.project_key(str(proj))
+
+
+def test_infer_project_from_activity_rejects_bare_workspace(tmp_path):
+    """只引用工作区根的文件 → 不算"更细的项目"，返回空（让调用方回退）。"""
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True)
+    (ws / "readme.md").write_text("", encoding="utf-8")
+    logs = tmp_path / "sessions"
+    _write_session_log(logs, "--D-x--", "session-bbb",
+                       _events_for([str(ws / f"f{i}.md") for i in range(6)]),
+                       cwd=str(ws))
+    assert so.infer_project_from_activity(
+        session_id="session-bbb", root=logs, use_cache=False) == ""
+
+
+def test_infer_project_from_activity_needs_enough_evidence(tmp_path):
+    """命中次数低于阈值就不猜 —— 标错项目比回退工作区更糟。"""
+    ws = tmp_path / "ws"
+    proj = ws / "proj"
+    proj.mkdir(parents=True)
+    (proj / "pyproject.toml").write_text("", encoding="utf-8")
+    logs = tmp_path / "sessions"
+    # 只引用 2 次，低于默认阈值 3
+    _write_session_log(logs, "--D-x--", "session-ccc",
+                       _events_for([str(proj / "a.py"), str(proj / "b.py")]),
+                       cwd=str(ws))
+    assert so.infer_project_from_activity(
+        session_id="session-ccc", root=logs, use_cache=False) == ""
+
+
+def test_infer_project_from_activity_ignores_noise_dirs(tmp_path):
+    """`node_modules` / `.git` 之类的路径不参与统计。"""
+    ws = tmp_path / "ws"
+    proj = ws / "proj"
+    (proj / "node_modules" / "pkg").mkdir(parents=True)
+    (proj / "pyproject.toml").write_text("", encoding="utf-8")
+    noisy = [str(proj / "node_modules" / "pkg" / f"x{i}.js") for i in range(10)]
+    logs = tmp_path / "sessions"
+    _write_session_log(logs, "--D-x--", "session-ddd",
+                       _events_for(noisy), cwd=str(ws))
+    assert so.infer_project_from_activity(
+        session_id="session-ddd", root=logs, use_cache=False) == ""
+
+
+def test_infer_project_from_activity_missing_log(tmp_path):
+    """会话日志不存在 → 空串，不抛。"""
+    assert so.infer_project_from_activity(
+        session_id="nope", root=tmp_path, use_cache=False) == ""
+
+
+def test_infer_project_from_activity_empty_session_id(tmp_path):
+    assert so.infer_project_from_activity(
+        session_id="", root=tmp_path, use_cache=False) == ""
+
+
+def test_infer_project_from_activity_uses_cache(tmp_path, monkeypatch):
+    """缓存命中时不再解压日志（第二次调用不该再读文件）。"""
+    ws = tmp_path / "ws"
+    proj = ws / "proj"
+    proj.mkdir(parents=True)
+    (proj / "pyproject.toml").write_text("", encoding="utf-8")
+    logs = tmp_path / "sessions"
+    _write_session_log(logs, "--D-x--", "session-eee",
+                       _events_for([str(proj / f"f{i}.py") for i in range(5)]),
+                       cwd=str(ws))
+
+    so._ACTIVITY_CACHE.clear()
+    first = so.infer_project_from_activity(session_id="session-eee", root=logs)
+    assert first == so.project_key(str(proj))
+
+    # 第二次：把日志文件删掉——若仍能返回，说明走的是缓存而非重新解压
+    (logs / "--D-x--" / "session-eee" / so.DSH_SESSION_FILE).unlink()
+    second = so.infer_project_from_activity(session_id="session-eee", root=logs)
+    assert second == first
+    so._ACTIVITY_CACHE.clear()

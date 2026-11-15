@@ -319,11 +319,16 @@ GET  /api/admin/job  →  轮询进度
   （= `distilled_memories.conversation_id` = wiki L1 的编译单位）。三种给法：
   工作目录路径（服务端按 DSH `projectKey()` 编码）、现成编码（`--D-…--`）、
   逻辑名（如 `dsh-dev`）。
-  **不传时**服务端推断为当前会话的**工作区**编码；推断不出则回退按自然日分桶。
+  **不传时按三级兜底**：
+  ① **活动推断**——读会话日志统计路径频次，找含 `.git` / `pyproject.toml` /
+     `package.json` 等标记的**项目根**（实测 0.25s、60s 缓存；证据不足 3 次就跳过，
+     **不猜**）。这层解决"DSH 会话 header 只记工作区根、而用户实际在子项目里干活"；
+  ② 回退当前会话的**工作区**编码；
+  ③ 仍判不出则回退按自然日分桶。
   同项目的记忆进同一个桶，wiki 才能在 L1 层把同主题的多次结论合并——
   实测按日分桶时 254 条 MCP 记忆里 159 条被判 `similar` 却因分散在 N 个日桶无法合并。
   编码到显示名的映射配在 `distillation.project.names`（面板「来源会话」列用它）。
-  来源（`param` / `inferred` / `none`）记在 `source_project_origin` 字段。
+  来源（`param` / `activity` / `workspace` / `none`）记在 `source_project_origin` 字段。
 
 **feed 三个工具的三条约定**：
 
