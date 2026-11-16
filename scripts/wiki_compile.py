@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sqlite3
@@ -531,7 +532,56 @@ def _usage_report(tag: str = "") -> str:
 
 
 def _out_stem(source: str, cid: str) -> str:
-    return "%s__%s" % (source, re.sub(r"[^\w\-]+", "_", cid)[:60])
+    """会话 / 项目 → 输出文件名主干。
+
+    `cid` 可能很长（项目编码是整条路径的转义，如
+    `--D-data-vibeCoding-virtual-projects-second-brain-skill--`），而文件名要
+    控制在 60 字符内。**超限时不能简单截断**——两个不同项目截到同一前缀会
+    撞成同一个文件、互相覆盖。
+
+    所以超限时保留「可读前缀 + 全量 cid 的 md5 前 8 位」：
+    - 前缀回退到最近的 `-`，避免把路径段切成半截；
+    - md5 对**原始 cid** 取（不是清洗后的），保证唯一性。
+    """
+    safe = re.sub(r"[^\w\-]+", "_", cid)
+    if len(safe) > 60:
+        digest = hashlib.md5(cid.encode("utf-8")).hexdigest()[:8]
+        head = safe[:51]
+        cut = head.rfind("-")
+        if cut >= 30:                           # 回退到完整路径段边界
+            head = head[:cut]
+        safe = "%s-%s" % (head, digest)
+    return "%s__%s" % (source, safe)
+
+
+def _fill_coverage_gaps(result: dict, mems: list[dict]) -> list[int]:
+    """把模型**漏掉**的输入补进 `unclassified`，返回补录的编号列表。
+
+    实测（2026-11-16，1897 条输入）：**39 条记忆在 L1 页里既没成页、也没进
+    unclassified** —— LLM 直接漏了。被漏掉的记忆在知识库视图里完全不可见
+    （召回层仍能命中，但用户是靠 wiki 浏览知识库的）。这里补上，保证
+    「输入多少条，页面上就能看到多少条」。
+
+    **必须排除 `failed_members`**：那是组级失败的成员，会走 `failed_ids`
+    让调用方拒绝写进新基线、留待重试。若在这里把它们当作"已覆盖"，
+    下次 align 会认为编译过了 → 永久掩盖失败（项目踩过同类坑）。
+
+    返回补录编号（1 起）；空列表表示输出已完整覆盖。
+    """
+    all_nums = set(range(1, len(mems) + 1))
+    covered: set[int] = set()
+    for p in (result.get("pages") or []):
+        covered.update(_norm_nums(p.get("sources") or p.get("_members") or []))
+    unc = result.get("unclassified") or []      # 上游可能给 None，兜一下
+    result["unclassified"] = unc
+    for u in unc:
+        covered.update(_norm_nums([u.get("n")]))
+    failed = set(result.get("failed_members") or [])
+    missing = sorted(all_nums - covered - failed)
+    for n in missing:
+        text = " ".join((mems[n - 1].get("content") or "").split())
+        unc.append({"n": n, "why": "模型未覆盖，自动补录：%s" % text[:80]})
+    return missing
 
 
 def compile_one(db: Path, source: str, cid: str, out_dir: Path,
@@ -569,6 +619,14 @@ def compile_one(db: Path, source: str, cid: str, out_dir: Path,
                 "seconds": round(time.time() - t0, 1)}
 
     src_map = {i: ("m%d" % m["id"]) for i, m in enumerate(mems, 1)}
+
+    # 覆盖率闸：模型漏掉的输入补进 unclassified（详见函数 docstring）
+    _missing = _fill_coverage_gaps(result, mems)
+    if _missing:
+        _wlog(event="coverage_gap", script="wiki_compile",
+              target="%s/%s" % (source, cid),
+              missing=len(_missing), total=len(mems))
+
     if write:
         meta = {"title": "%s / %s" % (source, cid), "source": source,
                 "conversation_id": cid, "n_in": len(mems),
