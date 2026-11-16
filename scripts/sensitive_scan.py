@@ -58,32 +58,48 @@ def _username_patterns() -> dict[str, re.Pattern]:
 
 
 def _local_path_patterns() -> dict[str, re.Pattern]:
-    """本机专属路径（项目根、用户目录）的动态规则。
+    """**真实用户目录**（含用户名）的动态规则 —— 这条几乎零误报，保持致命。
 
-    这两条几乎零误报：它们带真实用户名或私有目录名，不会出现在示例里。
+    ⚠️ 项目根 / 工作区根**刻意不在这里**（2026-11-16 移出）：
+    本项目的「项目桶」编码就是路径转义（如 `--D-data-vibeCoding-...--`），
+    文档与测试**必须写真实路径**才能跟库里的 `conversation_id` 对上；
+    而仓库本名就叫 AgentMemHub，路径不构成额外信息。
+    把它们当致命 ⇒ 闸门对本仓库**恒红**，而恒红的闸门等于没有闸门
+    （见文件头那条教训）。它们由 soft 档的「任意盘符路径」兜一层提示。
     """
     out: dict[str, re.Pattern] = {}
-    root = Path(__file__).resolve().parents[1]
-    # 项目根的**上一级**（本机工作区根，如 `D:\data\vibeCoding`）：仓库里出现它
-    # 同样是泄漏，而根路径规则匹配不到它（根更长，子串方向不对）。
-    parent = root.parent
-    for label, p in (("本机项目根路径", root), ("本机工作区根路径", parent),
-                     ("本机用户目录", Path.home())):
-        s = str(p)
-        # 长度门槛：盘根（`D:\`）这种过短前缀会把全仓库路径都命中
-        if len(s) >= 8:
-            out[label] = re.compile(re.escape(s), re.I)
+    s = str(Path.home())
+    # 长度门槛：盘根（`D:\`）这种过短前缀会把全仓库路径都命中
+    if len(s) >= 8:
+        out["本机用户目录"] = re.compile(re.escape(s), re.I)
     return out
 
+
+#: 示例代码里反复出现的"假用户名 / 假目录段"。
+#: 不排除它们，`/home/user/proj`、`C:\Users\alice` 这类**纯示例**就会把闸门刷红。
+#: 注意只放"通用占位词"——任何真实用户名都绝不能进这个集合（否则等于放过它）。
+_PLACEHOLDER_SEGMENTS = (
+    "user", "users", "username", "name", "alice", "bob", "carol", "someone",
+    "example", "demo", "test", "sample", "foo", "bar", "yourname", "me",
+    "public", "shared", "data", "home", "opt", "tmp",
+)
+_PLACEHOLDER_ALT = "|".join(_PLACEHOLDER_SEGMENTS)
 
 # 只认 `C:\Users\<名字>` 这一种"必然带真实用户名"的形态。
 # 曾经写成"盘符 + 两级目录"，结果满仓库的示例（`D:/path/to`、`D:\tools\Obsidian`）
 # 全被命中 —— 闸门一旦每次报十几条假阳性，就没人再认真看它了。
 _WIN_PATH_RE = re.compile(
-    r"\b[A-Za-z]:[\\/]{1,2}Users[\\/]{1,2}[A-Za-z0-9_.\-]+", re.I)
+    r"\b[A-Za-z]:[\\/]{1,2}Users[\\/]{1,2}"
+    r"(?!(?:" + _PLACEHOLDER_ALT + r")(?:[\\/]|\b))"
+    r"[A-Za-z0-9_.\-]+", re.I)
 
 # 任意盘符路径（含单级）—— 噪音大，只当提示
 _WIN_PATH_SOFT_RE = re.compile(r"\b[A-Za-z]:[\\/]{1,2}[A-Za-z0-9_.\-]+", re.I)
+
+# POSIX 私有路径：同样排除通用占位段（`/home/user/proj` 是文档里的标准示例）
+_POSIX_PATH_RE = re.compile(
+    r"/(?:home|Users)/(?!(?:" + _PLACEHOLDER_ALT + r")(?:/|\b))"
+    r"[A-Za-z0-9_.-]+", re.I)
 
 
 def _fatal_patterns() -> dict[str, re.Pattern]:
@@ -106,7 +122,7 @@ def _fatal_patterns() -> dict[str, re.Pattern]:
         "Slack token (xox)": re.compile(r"xox[baprs]-[A-Za-z0-9-]+"),
         "AWS key (AKIA)": re.compile(r"AKIA[0-9A-Z]{16}"),
         "私有 Windows 路径": _WIN_PATH_RE,
-        "私有 POSIX 路径": re.compile(r"/home/[A-Za-z0-9_.-]+|/Users/[A-Za-z0-9_.-]+/", re.I),
+        "私有 POSIX 路径": _POSIX_PATH_RE,
         "疑似真实 API key 值": re.compile(r"\bapi[_-]?key\b\s*[:=]\s*['\"]?[A-Za-z0-9]{20,}", re.I),
     }
 

@@ -183,9 +183,9 @@ def test_dsh_root_points_at_user_home():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("cwd,expected", [
-    # 与 DSH 实测目录名逐字一致
+    # 与 DSH 实测目录名逐字一致（用户名换成了占位名 alice，编码规则不变）
     (r"D:\data\vibeCoding", "--D-data-vibeCoding--"),
-    (r"C:\Users\Mulin", "--C-Users-Mulin--"),
+    (r"C:\Users\alice", "--C-Users-alice--"),
     # Unix：根目录的 / 被 lstrip("-") 吃掉，不需要额外的分隔符
     ("/home/user/proj", "--home-user-proj--"),
     ("/home/data/vibeCoding", "--home-data-vibeCoding--"),

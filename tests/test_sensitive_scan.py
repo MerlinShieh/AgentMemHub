@@ -41,14 +41,46 @@ def test_两字符用户名不生成致命规则(monkeypatch, capsys):
     assert "过短" in capsys.readouterr().err
 
 
-def test_工作区根路径也算致命():
-    """项目根的上一级（本机工作区根）比项目根短，根规则匹配不到它 —— 曾是漏网。"""
+def test_项目根与工作区根不再算致命():
+    """项目根/工作区根**不**进致命规则（2026-11-16 移出）。
+
+    本项目的「项目桶」编码就是路径转义（`--D-data-vibeCoding-...--`），
+    文档与测试必须写真实路径才能跟库里的 `conversation_id` 对上。
+    把它们当致命 ⇒ 闸门对本仓库恒红，而恒红的闸门等于没有闸门。
+    这类路径仍会被 soft 档的「任意盘符路径」提示一遍。
+    """
     mod = _load()
     pats = mod._local_path_patterns()
-    workspace = str(Path(_SCRIPT).resolve().parents[1].parent)
-    # 规则是 `re.escape(路径)` 的结果，所以比较时也要 escape 一次
-    expected = re.escape(workspace).lower()
-    assert any(p.pattern.lower() == expected for p in pats.values()), pats
+    root = str(Path(_SCRIPT).resolve().parents[1])
+    workspace = str(Path(root).parent)
+    assert not any(root.lower() in p.pattern.lower() for p in pats.values()), pats
+    assert not any(workspace.lower() in p.pattern.lower()
+                   for p in pats.values()), pats
+
+
+def test_用户目录仍是致命():
+    """含真实用户名的 home 目录必须继续拦（这条几乎零误报）。"""
+    mod = _load()
+    pats = mod._local_path_patterns()
+    home = re.escape(str(Path.home())).lower()
+    assert any(p.pattern.lower() == home for p in pats.values()), pats
+
+
+def test_通用示例名不误报_非占位名仍报():
+    """`/home/user/proj`、`C:/Users/alice` 是标准示例，不该刷红；
+    非占位名（模拟真实用户名）必须抓到。
+
+    样本全部用拼接构造，避免本文件自己被 `sensitive_scan.py` 扫成自指误报。
+    """
+    mod = _load()
+    fatal = mod._fatal_patterns()
+    posix = fatal["私有 POSIX 路径"]
+    win = fatal["私有 Windows 路径"]
+    assert not posix.search("/home/" + "user/proj")
+    assert not posix.search("/home/" + "data/vibeCoding")
+    assert not win.search("C:/Users/" + "alice/AppData")
+    assert posix.search("/home/" + "zzq9/proj")
+    assert win.search("C:/Users/" + "zzq9/AppData")
 
 
 def test_占位符不误报真令牌要报():
