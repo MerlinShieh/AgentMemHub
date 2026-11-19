@@ -1428,6 +1428,142 @@ def create_app(db_path: Path | None = None):
                              "traces": traces})
 
     # ------------------------------------------------------------------
+    # 记忆生命周期（M3）：候选 / 归档 / 恢复 / 冲突队列
+    #
+    # ⚠️ 归档与恢复**不复用** `/api/engine/weight`：那个只写 `unit_values`
+    # （退召回层），退不掉 wiki 编译层 —— 正是 `memory-lifecycle.md` §11.5
+    # 踩过的"归档了但 wiki 还在教旧结论"。这里统一经 `agentmemhub/lifecycle.py`，
+    # 与 CLI 共用同一份实现，避免两处口径漂移。
+    # ------------------------------------------------------------------
+
+    def _lifecycle_ids(payload: dict) -> list[int]:
+        raw = payload.get("ids")
+        if not isinstance(raw, list):
+            raise HTTPException(status_code=400, detail="ids 必须是整数数组")
+        try:
+            return [int(x) for x in raw]
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="ids 必须是整数数组")
+
+    def _lifecycle_db():
+        from agentmemhub.rag.config import load_settings
+        return load_settings().index_db
+
+    @app.get("/api/lifecycle/summary",
+             summary="记忆生命周期概览（候选/已归档/锁定/冲突）")
+    def api_lifecycle_summary(days: int = Query(default=90, ge=1, le=3650)):
+        """面板顶部的数字条：候选多少、已归档多少、冲突待处置多少。"""
+        from agentmemhub import lifecycle
+        try:
+            return JSONResponse(lifecycle.summary(_lifecycle_db(), days=days))
+        except Exception as e:                      # 索引库不可读 → 503 而非 500
+            raise HTTPException(status_code=503, detail=f"生命周期概览失败：{e}")
+
+    @app.get("/api/lifecycle/stale",
+             summary="生命周期候选清单（已排除归档/锁定，带 tier）")
+    def api_lifecycle_stale(days: int = Query(default=90, ge=1, le=3650),
+                            limit: int = Query(default=200, ge=1, le=2000)):
+        """候选 = 创建满 N 天 + 最近 N 天零命中的记忆，**排除用户已表过态的**。
+
+        `tier` 只有两层（`conflict_old` / `never_hit`）——实测同源记忆价值分
+        完全相同，没有更多可计算区分度（见 `memory-lifecycle.md` §12.3）。
+        """
+        from agentmemhub import lifecycle
+        try:
+            rows = lifecycle.stale_candidates(_lifecycle_db(), days=days,
+                                              limit=limit)
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"候选清单失败：{e}")
+        return JSONResponse({"days": days, "count": len(rows), "items": rows})
+
+    @app.post("/api/lifecycle/archive",
+              summary="归档记忆（召回 + wiki 双层退场，可逆）")
+    def api_lifecycle_archive(payload: dict = Body(...)):
+        """body：`{"ids": [unit_id...], "reason": "..."}`
+
+        归档 = `manual_value=0`（召回退场）+ `wiki_ignore_at`（编译退场）
+        + 按 `content_hash` 把双投影**一起锁**。响应是三段式
+        （`changed` / `skipped` / `errors`），**部分失败必须能看见**。
+
+        ⚠️ **不自动触发 wiki 重编**：align 会把它判成 `removed`，下次增量会重编
+        受影响页面 —— 那笔花费由用户在面板上决定什么时候付。
+        """
+        from agentmemhub import lifecycle
+        ids = _lifecycle_ids(payload)
+        try:
+            r = lifecycle.archive_units(_lifecycle_db(), ids, by="panel",
+                                        reason=str(payload.get("reason") or ""))
+        except ValueError as e:                     # 超过 MAX_BATCH
+            raise HTTPException(status_code=400, detail=str(e))
+        return JSONResponse({"ok": not r["errors"], **r})
+
+    @app.post("/api/lifecycle/restore",
+              summary="恢复归档（清 manual_value 与 wiki_ignore_at）")
+    def api_lifecycle_restore(payload: dict = Body(...)):
+        """body：`{"ids": [unit_id...]}`
+
+        恢复后 align 会把该记忆判成 `added`，**下次增量会重编受影响页面**。
+        """
+        from agentmemhub import lifecycle
+        ids = _lifecycle_ids(payload)
+        try:
+            r = lifecycle.restore_units(_lifecycle_db(), ids, by="panel")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return JSONResponse({"ok": not r["errors"], **r})
+
+    @app.get("/api/lifecycle/archived",
+             summary="已归档条目（最近归档在前，供恢复）")
+    def api_lifecycle_archived(limit: int = Query(default=200, ge=1, le=1000)):
+        """`manual_value = 0` 的条目。双投影已去重（保留 `dst_`）。"""
+        from agentmemhub import lifecycle
+        try:
+            rows = lifecycle.archived_units(_lifecycle_db(), limit=limit)
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"已归档列表失败：{e}")
+        return JSONResponse({"count": len(rows), "items": rows})
+
+    @app.get("/api/lifecycle/conflicts",
+             summary="冲突队列（带两侧正文摘要与规则证据）")
+    def api_lifecycle_conflicts(
+            status: str = Query(default="open",
+                                description="open / superseded / kept_both / "
+                                            "dismissed；空=全部"),
+            limit: int = Query(default=50, ge=1, le=500)):
+        from agentmemhub import lifecycle
+        try:
+            rows = lifecycle.list_conflicts(_lifecycle_db(), status=status,
+                                            limit=limit)
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"冲突列表失败：{e}")
+        return JSONResponse({"status": status, "count": len(rows),
+                             "items": rows})
+
+    @app.post("/api/lifecycle/conflicts/{conflict_id}/resolve",
+              summary="处置一条冲突（superseded / kept_both / dismissed）")
+    def api_lifecycle_resolve(conflict_id: int, payload: dict = Body(...)):
+        """body：`{"action": "...", "reason": "..."}`
+
+        `superseded` 会**归档旧方**（与 `/api/lifecycle/archive` 同一条底层路径）；
+        另外两个只打标记。三者都可逆（归档走恢复接口）。
+        """
+        from agentmemhub import lifecycle
+        action = str(payload.get("action") or "").strip()
+        if action not in ("superseded", "kept_both", "dismissed"):
+            raise HTTPException(
+                status_code=400,
+                detail="action 必须是 superseded / kept_both / dismissed")
+        try:
+            r = lifecycle.resolve_conflict(
+                _lifecycle_db(), conflict_id, action,
+                reason=str(payload.get("reason") or ""), by="panel")
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return JSONResponse(r)
+
+    # ------------------------------------------------------------------
     # 数据操作后台任务（ingest / 写入记忆 / 评分 / 清洗 / 补向量）：耗时
     # 操作放后台线程，前端轮询状态；同一时刻只允许一个任务（避免并发写库）
     # ------------------------------------------------------------------
