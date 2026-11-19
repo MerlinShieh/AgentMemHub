@@ -86,6 +86,21 @@ def test_设置页与记忆溯源的关键节点齐全():
         assert f'id="{eid}"' in html, f"缺少 #{eid}"
 
 
+def test_生命周期卡片的关键节点齐全():
+    """JS 里 `$('#id')` 拿不到元素会**静默失败** —— 生命周期卡片同样要钉住。
+
+    2026-11-19 加 M3.3 时新增：候选 / 冲突队列 / 已归档三块。
+    """
+    html = _html_stripped()
+    for eid in ("lifecycleChips", "lifecycleCandidates", "lifecycleEmpty",
+                "lifecycleConflicts", "lifecycleConflictCount",
+                "lifecycleConflictEmpty", "lifecycleArchived",
+                "lifecycleArchivedCount", "lifecycleArchivedToggle",
+                "lifecycleRefreshBtn", "lifecycleArchiveBtn",
+                "lifecycleArchiveBtnLabel"):
+        assert f'id="{eid}"' in html, f"缺少 #{eid}"
+
+
 def test_视图顺序与标签顺序一致():
     """标签栏顺序（会话/记忆/知识库/设置）应与 DOM 中视图顺序一致，
     否则键盘与读屏顺序跟视觉顺序对不上。"""

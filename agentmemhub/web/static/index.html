@@ -498,6 +498,59 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       </div>
     </section>
 
+    <!-- 记忆生命周期（M3）：候选归档 / 冲突处置 / 已归档恢复。
+         数据全部来自 /api/lifecycle/*；"归档 = 召回层 + wiki 层双层退场、
+         双投影一起锁"由后端 lifecycle.py 封死，这里只做展示与二次确认。 -->
+    <section class="px-5 pb-4">
+      <div class="rounded-xl border border-border bg-card p-3.5 shadow-sm">
+        <div class="flex flex-wrap items-center gap-2">
+          <i data-lucide="archive" class="h-4 w-4 text-primary"></i>
+          <span class="text-xs font-medium text-foreground">生命周期</span>
+          <span id="lifecycleChips" class="flex flex-wrap items-center gap-1 text-[10px]"></span>
+          <span class="text-[10px] text-muted-foreground">
+            候选 = 创建满 90 天且最近 90 天零召回命中；<b>已归档 / 已加权的不列出</b>。
+            归档可逆，下次 wiki 增量会重编受影响页面。
+          </span>
+          <span class="ml-auto flex items-center gap-1.5">
+            <button id="lifecycleRefreshBtn" title="重新拉取候选 / 冲突 / 已归档（只读，不写库）"
+                    class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
+              <i data-lucide="refresh-cw" class="h-3.5 w-3.5 text-primary"></i>刷新
+            </button>
+            <button id="lifecycleArchiveBtn" disabled
+                    title="归档选中的记忆：撤出召回面 + 不进 wiki（两层都可逆）"
+                    class="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50 transition-colors">
+              <i data-lucide="archive" class="h-3.5 w-3.5 text-primary"></i><span id="lifecycleArchiveBtnLabel">归档所选</span>
+            </button>
+          </span>
+        </div>
+        <div id="lifecycleCandidates" class="mt-2.5 max-h-72 space-y-1 overflow-y-auto scroll-thin"></div>
+        <div id="lifecycleEmpty" class="mt-2.5 hidden text-[11px] text-muted-foreground">
+          没有满足条件的候选（需创建满 90 天且最近 90 天零召回命中）。
+        </div>
+
+        <div class="mt-3 border-t border-border pt-2.5">
+          <div class="flex flex-wrap items-center gap-2">
+            <i data-lucide="git-compare" class="h-3.5 w-3.5 text-primary"></i>
+            <span class="text-[11px] font-medium text-foreground">冲突队列</span>
+            <span id="lifecycleConflictCount" class="rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">—</span>
+            <span class="text-[10px] text-muted-foreground">被新结论取代的旧记忆；三种处置都可逆</span>
+          </div>
+          <div id="lifecycleConflicts" class="mt-2 max-h-64 space-y-1.5 overflow-y-auto scroll-thin"></div>
+          <div id="lifecycleConflictEmpty" class="mt-2 hidden text-[11px] text-muted-foreground">暂无待处置冲突</div>
+        </div>
+
+        <div class="mt-3 border-t border-border pt-2.5">
+          <button id="lifecycleArchivedToggle" class="inline-flex items-center gap-1.5 text-[11px] font-medium text-foreground">
+            <i data-lucide="package-open" class="h-3.5 w-3.5 text-primary"></i>
+            <span>已归档</span>
+            <span id="lifecycleArchivedCount" class="rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">—</span>
+            <span class="text-[10px] font-normal text-muted-foreground">（点开展开，可恢复）</span>
+          </button>
+          <div id="lifecycleArchived" class="mt-2 hidden max-h-56 space-y-1 overflow-y-auto scroll-thin"></div>
+        </div>
+      </div>
+    </section>
+
     <!-- 语义检索（按相关度召回；结果可点开原始会话） -->
     <section class="px-5 pb-4">
       <div class="rounded-xl border border-border bg-card p-3.5 shadow-sm">
@@ -1253,9 +1306,11 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
     buildMemFilters();                  // 状态下拉 + 来源下拉（含 MCP）+ 类型/置信 chips
     bindMemEvents();                    // 事件绑定 + 索引状态轮询（含按钮置灰）
     bindHealthEvents();                 // 健康卡片：刷新 / 回收滞留投影
+    bindLifecycleEvents();              // 生命周期卡片：归档 / 恢复 / 冲突处置
     $('#memTimelineBtn').onclick = () => openMemTimeline();   // 记忆时间线浮层
     loadMemories().catch(()=>{});       // 首次加载记忆列表
     loadHealth().catch(()=>{});         // 首次采集一致性指标
+    loadLifecycle().catch(()=>{});      // 首次拉取生命周期候选/冲突/已归档
   }
   function renderEngineStatus(s){
     const dot = $('#engineDot'), state = $('#engineState'),
@@ -1346,6 +1401,199 @@ code, pre, .mono, .font-mono { font-family: var(--as-font-mono); }
       finally{ btn.disabled = false; }
     };
   }
+  // ---- 记忆生命周期（M3）----------------------------------------------
+  // "归档 = 召回层 manual_value=0 + wiki 层 wiki_ignore_at、双投影一起锁"
+  // 这套语义封在后端 lifecycle.py；前端只做展示 + 二次确认，不重算口径。
+  const LIFECYCLE = { candidates: [], conflicts: [], archived: [],
+                      summary: {}, selected: new Set(), archivedOpen: false,
+                      busy: false };
+
+  function lifecycleChip(label, n, tone){
+    const map = { warn:'bg-amber-500/15 text-amber-700',
+                  ok:'bg-emerald-500/15 text-emerald-700',
+                  mute:'bg-muted text-muted-foreground' };
+    return `<span class="rounded px-1.5 py-0.5 font-semibold ${map[tone]||map.mute}">${esc(label)} ${n}</span>`;
+  }
+  function lifecycleAge(ts){
+    if(!ts) return '—';
+    const d = Math.floor((Date.now()/1000 - ts)/86400);
+    return d >= 0 ? `${d} 天` : '—';
+  }
+  function syncLifecycleArchiveBtn(){
+    const n = LIFECYCLE.selected.size, btn = $('#lifecycleArchiveBtn'),
+          lab = $('#lifecycleArchiveBtnLabel');
+    if(!btn) return;
+    btn.disabled = (n === 0) || LIFECYCLE.busy;
+    if(lab) lab.textContent = n ? `归档所选（${n}）` : '归档所选';
+  }
+  async function loadLifecycle(){
+    try{
+      const [rs, rc, ra, rsum] = await Promise.all([
+        fetchWithTimeout('/api/lifecycle/stale?days=90&limit=200', {}, 30000),
+        fetchWithTimeout('/api/lifecycle/conflicts?status=open&limit=20', {}, 30000),
+        fetchWithTimeout('/api/lifecycle/archived?limit=200', {}, 30000),
+        fetchWithTimeout('/api/lifecycle/summary?days=90', {}, 30000),
+      ]);
+      const ds = await rs.json().catch(()=>({}));
+      const dc = await rc.json().catch(()=>({}));
+      const da = await ra.json().catch(()=>({}));
+      const dsum = await rsum.json().catch(()=>({}));
+      if(!rs.ok){ toast(typeof ds.detail==='string' ? ds.detail : '生命周期加载失败'); return; }
+      LIFECYCLE.candidates = ds.items || [];
+      LIFECYCLE.conflicts = dc.items || [];
+      LIFECYCLE.archived = da.items || [];
+      LIFECYCLE.summary = dsum || {};
+      LIFECYCLE.selected.clear();
+      renderLifecycle();
+    }catch(e){ toast('生命周期加载失败：'+(e.message||e)); }
+  }
+  function renderLifecycle(){
+    const s = LIFECYCLE.summary || {};
+    const nCand = (s.candidates != null) ? s.candidates : LIFECYCLE.candidates.length;
+    const nOpen = (s.conflicts_by_status && s.conflicts_by_status.open != null)
+                  ? s.conflicts_by_status.open : LIFECYCLE.conflicts.length;
+    const nArch = (s.archived != null) ? s.archived : LIFECYCLE.archived.length;
+    $('#lifecycleChips').innerHTML =
+      lifecycleChip('候选', nCand, nCand ? 'warn' : 'mute')
+      + lifecycleChip('已归档', nArch, 'mute')
+      + lifecycleChip('冲突待处置', nOpen, nOpen ? 'warn' : 'ok');
+
+    // 候选：tier 只有两层（conflict_old / never_hit），见 memory-lifecycle §12.3
+    $('#lifecycleCandidates').innerHTML = LIFECYCLE.candidates.map(c=>{
+      const tier = c.tier === 'conflict_old'
+        ? '<span class="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">有未处置冲突</span>'
+        : '<span class="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">从未命中</span>';
+      return `<div class="flex items-start gap-2 rounded-md border border-border/60 px-2 py-1.5 hover:bg-muted/40">
+        <input type="checkbox" class="lifecycle-pick mt-0.5" data-id="${c.id}" aria-label="选择记忆 ${c.id}">
+        ${tier}
+        <span class="min-w-0 flex-1 text-[11px] text-foreground">${esc((c.text||'').slice(0,140))}</span>
+        <span class="shrink-0 text-[10px] text-muted-foreground tnum">${lifecycleAge(c.time)}</span>
+        <button class="lifecycle-archive-one shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] hover:bg-muted" data-id="${c.id}">归档</button>
+      </div>`;
+    }).join('');
+    $('#lifecycleEmpty').classList.toggle('hidden', LIFECYCLE.candidates.length > 0);
+
+    // 冲突队列：两侧对照 + 规则证据 + 三个可逆处置
+    $('#lifecycleConflicts').innerHTML = LIFECYCLE.conflicts.map(c=>{
+      const sim = (c.similarity != null) ? Number(c.similarity).toFixed(2) : '—';
+      return `<div class="rounded-md border border-border/60 px-2 py-1.5">
+        <div class="flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+          <span class="rounded bg-muted px-1.5 py-0.5 tnum">#${c.id}</span>
+          <span>${esc(c.kind || '')}</span>
+          <span>规则 ${esc(c.rule_hit || '—')}</span>
+          <span class="tnum">相似 ${sim}</span>
+        </div>
+        <div class="mt-1 grid gap-1 sm:grid-cols-2">
+          <div class="text-[11px] text-foreground"><span class="text-muted-foreground">新：</span>${esc((c.new_text||'').slice(0,90))}</div>
+          <div class="text-[11px] text-foreground"><span class="text-muted-foreground">旧：</span>${esc((c.old_text||'').slice(0,90))}</div>
+        </div>
+        <div class="mt-1.5 flex flex-wrap gap-1.5">
+          <button class="lifecycle-resolve rounded border border-border px-1.5 py-0.5 text-[10px] hover:bg-muted" data-id="${c.id}" data-action="superseded">归档旧方</button>
+          <button class="lifecycle-resolve rounded border border-border px-1.5 py-0.5 text-[10px] hover:bg-muted" data-id="${c.id}" data-action="kept_both">都保留</button>
+          <button class="lifecycle-resolve rounded border border-border px-1.5 py-0.5 text-[10px] hover:bg-muted" data-id="${c.id}" data-action="dismissed">误报</button>
+        </div>
+      </div>`;
+    }).join('');
+    $('#lifecycleConflictCount').textContent = LIFECYCLE.conflicts.length;
+    $('#lifecycleConflictEmpty').classList.toggle('hidden', LIFECYCLE.conflicts.length > 0);
+
+    // 已归档（双投影已由后端去重）
+    $('#lifecycleArchived').innerHTML = LIFECYCLE.archived.map(a=>`
+      <div class="flex items-start gap-2 rounded-md border border-border/60 px-2 py-1.5">
+        <span class="min-w-0 flex-1 text-[11px] text-foreground">${esc((a.text||'').slice(0,120))}</span>
+        <span class="shrink-0 text-[10px] text-muted-foreground tnum">#${a.id}</span>
+        <button class="lifecycle-restore shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] hover:bg-muted" data-id="${a.id}">恢复</button>
+      </div>`).join('');
+    $('#lifecycleArchivedCount').textContent = LIFECYCLE.archived.length;
+    syncLifecycleArchiveBtn();
+  }
+  function bindLifecycleEvents(){
+    $('#lifecycleRefreshBtn').onclick = ()=>loadLifecycle();
+    $('#lifecycleArchivedToggle').onclick = ()=>{
+      LIFECYCLE.archivedOpen = !LIFECYCLE.archivedOpen;
+      $('#lifecycleArchived').classList.toggle('hidden', !LIFECYCLE.archivedOpen);
+    };
+    $('#lifecycleArchiveBtn').onclick = ()=>lifecycleArchive([...LIFECYCLE.selected]);
+    $('#lifecycleCandidates').addEventListener('change', ev=>{
+      const cb = ev.target.closest('.lifecycle-pick'); if(!cb) return;
+      const id = Number(cb.dataset.id);
+      if(cb.checked) LIFECYCLE.selected.add(id); else LIFECYCLE.selected.delete(id);
+      syncLifecycleArchiveBtn();
+    });
+    $('#lifecycleCandidates').addEventListener('click', ev=>{
+      const b = ev.target.closest('.lifecycle-archive-one'); if(!b) return;
+      lifecycleArchive([Number(b.dataset.id)]);
+    });
+    $('#lifecycleConflicts').addEventListener('click', ev=>{
+      const b = ev.target.closest('.lifecycle-resolve'); if(!b) return;
+      lifecycleResolve(Number(b.dataset.id), b.dataset.action);
+    });
+    $('#lifecycleArchived').addEventListener('click', ev=>{
+      const b = ev.target.closest('.lifecycle-restore'); if(!b) return;
+      lifecycleRestore([Number(b.dataset.id)]);
+    });
+  }
+  // 三个动作都要二次确认：归档/恢复会改变 wiki 基线（下次增量重编受影响页面），
+  // 而重编要花钱 —— 文案里必须写清，别让用户以为点了就完事。
+  async function lifecycleArchive(ids){
+    if(!ids.length || LIFECYCLE.busy) return;
+    if(!confirm(`归档 ${ids.length} 条记忆？\n\n`
+      + '· 撤出召回面，并标记为不进 wiki（两层都退场，都可逆）\n'
+      + '· 下次 wiki 增量更新会重编受影响页面（本操作不自动触发）\n'
+      + '· 之后可在「已归档」里恢复')) return;
+    LIFECYCLE.busy = true; syncLifecycleArchiveBtn();
+    try{
+      const r = await fetchWithTimeout('/api/lifecycle/archive',
+        {method:'POST', headers:{'Content-Type':'application/json'},
+         body: JSON.stringify({ids, reason:'面板归档'})}, 60000);
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok){ toast(typeof d.detail==='string' ? d.detail : '归档失败'); return; }
+      const ok = (d.changed||[]).length, sk = (d.skipped||[]).length,
+            er = (d.errors||[]).length;
+      toast(`已归档 ${ok} 条` + (sk?`，跳过 ${sk} 条`:'') + (er?`，失败 ${er} 条`:''));
+      await loadLifecycle();
+    }catch(e){ toast('归档失败：'+(e.message||e)); }
+    finally{ LIFECYCLE.busy = false; syncLifecycleArchiveBtn(); }
+  }
+  async function lifecycleRestore(ids){
+    if(!ids.length || LIFECYCLE.busy) return;
+    if(!confirm(`恢复 ${ids.length} 条记忆？\n\n`
+      + '· 重新进召回面与 wiki 编译输入\n'
+      + '· 下次 wiki 增量会把它当新增输入重编受影响页面')) return;
+    LIFECYCLE.busy = true;
+    try{
+      const r = await fetchWithTimeout('/api/lifecycle/restore',
+        {method:'POST', headers:{'Content-Type':'application/json'},
+         body: JSON.stringify({ids})}, 60000);
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok){ toast(typeof d.detail==='string' ? d.detail : '恢复失败'); return; }
+      toast(`已恢复 ${(d.changed||[]).length} 条`);
+      await loadLifecycle();
+    }catch(e){ toast('恢复失败：'+(e.message||e)); }
+    finally{ LIFECYCLE.busy = false; }
+  }
+  async function lifecycleResolve(cid, action){
+    if(!cid || LIFECYCLE.busy) return;
+    const label = action==='superseded' ? '归档旧方（旧结论退场，可恢复）'
+                : action==='kept_both'  ? '两者都保留（仅标记已确认）'
+                :                         '标记为误报（不再重复提示）';
+    if(!confirm(`处置冲突 #${cid}：${label}？\n\n`
+      + (action==='superseded'
+          ? '旧方会被归档：撤出召回面 + 不进 wiki（可恢复）；\n'
+            + '下次 wiki 增量会重编受影响页面。' : ''))) return;
+    LIFECYCLE.busy = true;
+    try{
+      const r = await fetchWithTimeout(`/api/lifecycle/conflicts/${cid}/resolve`,
+        {method:'POST', headers:{'Content-Type':'application/json'},
+         body: JSON.stringify({action, reason:'面板处置'})}, 60000);
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok){ toast(typeof d.detail==='string' ? d.detail : '处置失败'); return; }
+      toast(d.changed ? `已处置冲突 #${cid}` : (d.note || '该冲突已处置过'));
+      await loadLifecycle();
+    }catch(e){ toast('处置失败：'+(e.message||e)); }
+    finally{ LIFECYCLE.busy = false; }
+  }
+
   // ⭐ 加权（两态：加权 1.0 ↔ 取消）。锁定值优先于自动聚合且不随时间衰减。
   // 成功后只改本地对象并重建 DOM——不重拉列表（不闪、不丢滚动与筛选位置）。
   async function setWeight(unitRef, value, rowKey){
