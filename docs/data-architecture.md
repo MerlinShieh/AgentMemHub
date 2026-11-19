@@ -499,7 +499,8 @@ L1 页面**不进召回面**（只作下钻）：实测 L2 覆盖了 98.7% 的 L
     引擎里根本没有 per-memory 的命中记录（`hybrid_search` 只在日志里留
     `fused_ids`，出不了「某条记忆是否被用过」）。现状：命中事实**已开始记录**
     （`recall_hits.db`，见 §0 架构图 ③′），但**尚未回灌 `unit_values`** ——
-    当前只服务 `stale` 报表，不改变排序。要让它参与演化，需先定口径
+    当前只服务 `stale` 报表（M3.1 起，候选清单还按 `manual_value` 排除已归档/
+    已加权条目，并为每条打 `tier`），**不改变排序**。要让它参与演化，需先定口径
     （命中即加分？还是只做"零命中"的降权信号？）并防"被高频召回 → 分更高 →
     更容易被召回"的正反馈自激。
 - ⚠️ 投影初始分曾写死 0.3，把 Agent 主动记忆系统性低估——已改为按来源区分
@@ -521,6 +522,11 @@ new ──(S3 投影时相似 0.80~0.92)──→ similar（保留，打标互�
 - **wiki 编译输入 = `status IN ('new','similar')`**；merged/duplicate 是被蒸馏
   过程淘汰/吸收的归档，不进 wiki 也不在面板默认视图显示
 - 归档条目内容复现时会**复活**为 new（save_memories / save_direct_memory 均有）
+- **另一条维度是「人工归档」**，与 `status` 无关：`wiki_ignore_at`（编译退场）
+  + `unit_values.manual_value = 0`（召回退场），**双层都可逆**。M2 的冲突处置
+  （`superseded`）与 M3 的生命周期归档走的是同一条底层路径
+  （`conflicts.archive_unit()`）。M3.1 起，归档条目**也不再出现在 `stale` 候选里**
+  —— 否则会让人重复确认一件做过的事。
 
 ---
 
@@ -534,7 +540,7 @@ new ──(S3 投影时相似 0.80~0.92)──→ similar（保留，打标互�
 ```
 
 - **域**：LLM 对全部 L1 页标题的主题聚类（约束 `dmin–dmax`，默认 20–60，
-  当前 20 个）。**全量跑时生成、暂时固定**；增量只往现有域放（放不下的进
+  当前 **25 个**）。**全量跑时生成、暂时固定**；增量只往现有域放（放不下的进
   "待整理"，积累过多触发全量归域重建）
 - 编译收尾自动写 **manifest**（输入快照：id → 内容指纹 + 会话归属；L2 另附
   域 → L1 文件映射）。指纹**现算 md5(content)**，不用库里的 content_hash
@@ -1017,6 +1023,18 @@ GET  /api/wiki/pending/ignored  POST /api/wiki/pending/restore
     （两个页面根互不嵌套）；③ **能力缺口与数据损坏分开报**（`needs_ocr` 是 P1，数据不一致才是 P0）。
     召回侧因此多两个锚：`units.doc_id`（页面回指原件）与 `wiki_path`（**绝对路径** ——
     两阶段召回第二阶段必须能直接打开）。
+24. **记忆生命周期 M1 / M2 / M3.1**（2026-11-07 ~ 11-19）：补"数据只增不减"的三个缺口。
+    **M1 衰减**：半衰期 30 → **180 天**、新增 **90 天保鲜期**、衰减锚点改为
+    `max(创建时间, 最后命中)` —— 命中可以续命，但 boost 有界（`BOOST_CAP=0.3`），
+    只做 tie-breaker。**M2 冲突**：规则层检测"新旧结论取代"（`memory_conflicts`，
+    `--from-wiki` 优先做语义判断、`--scan` 兜底），处置三态（`superseded` /
+    `kept_both` / `dismissed`）都可逆；`superseded` 归档旧方必须**双层退场
+    （召回 + 编译）+ 双投影一起锁**，只锁一层等于没归档（踩坑实录见
+    [`memory-lifecycle.md`](memory-lifecycle.md) §11.5）。**M3.1 数据层**：
+    `stale` 候选排除用户已表态的条目（实测曾混入 6 条已归档）、新增 `tier`
+    证据分层（`conflict_old` / `never_hit`）、新建 `lifecycle.py` service、
+    补 4 个日志事件。设计与两次判断纠正见 [`memory-lifecycle.md`](memory-lifecycle.md)
+    §12，M3 计划见 [`lifecycle-panel-plan.md`](lifecycle-panel-plan.md)。
 
 ---
 

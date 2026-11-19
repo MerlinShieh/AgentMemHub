@@ -105,7 +105,7 @@ rel = max(该 unit 在所有通道的原始分) + rrf_weight * Σ 1/(rrf_k + ran
 | 来源 | 写入方 | 行为 |
 |---|---|---|
 | base | `ensure_base_value` / `backfill_base_values` | 来源决定起点（Agent 主动写入 0.6、蒸馏按置信度等） |
-| manual | `set_manual_value` | ⭐ 手动加权 → **锁定，不随时间衰减**（`no_decay_ids` 查询器） |
+| manual | `set_manual_value` | ⭐ 手动加权 → **锁定，不随时间衰减**（`no_decay_ids` 查询器）。⚠️ `0` 是**特殊值**：不是"打 0 分"而是**归档/退场**（`apply_value_boost` 硬剔除），M2 冲突处置与 M3 生命周期都靠它；清空（`None`）即恢复。归档时还要同时写 `distilled_memories.wiki_ignore_at`，否则退得掉召回、退不掉 wiki（见 `memory-lifecycle.md` §11.5）|
 | feedback | `put_feedback` / `set_user_feedback` | 👍/👎 **状态式**（一个 unit 一条，可撤销，回退到来源初始分） |
 
 衰减用 `ext.decayed_value(value, age_seconds, ...)`，加成用 `apply_value_boost`。

@@ -238,12 +238,13 @@ Tier 3（硬删）对"已进 wiki"的记忆**必须走那份设计的墓碑 + �
 
 ## 6. 入口设计
 
-| 入口 | 形态 |
-|---|---|
-| **CLI** | `stale`（已上线）扩展 `--suggest-action`：按 §5.2 标注建议层级；新增 `conflicts [--scan] [--status open] [--resolve]`：扫描 / 列表 / 处置 |
-| **HTTP** | `GET /api/lifecycle/stale`（报表数据源）、`GET/POST /api/lifecycle/conflicts`（列表与处置）。归档/恢复复用既有 `/api/engine/weight` |
-| **面板** | 记忆报表页新增「生命周期」视图：stale 清单（按建议层级分组）+ 冲突队列（证据链展示 + 二选一按钮）。**所有处置动作二次确认**（面板既有纪律）|
-| **日志** | 新事件登记 `docs/logging.md`：`conflict_detected`（层/规则/相似度）、`lifecycle_archive`（unit/层级/操作者）|
+| 入口 | 形态 | 状态（2026-11-19） |
+|---|---|---|
+| **CLI** | `stale` 扩展 `--suggest-action`：按 §5.2 标注建议层级；`conflicts [--scan] [--status open] [--resolve]`：扫描 / 列表 / 处置 | `stale`、`conflicts`（含 `--scan` / `--list` / `--resolve` / `--from-wiki`）**已上线**；`stale --suggest` **待做**（M3.4）|
+| **HTTP** | `GET /api/lifecycle/stale`（报表数据源）、`GET/POST /api/lifecycle/conflicts`（列表与处置）。归档/恢复**不复用** `/api/engine/weight`（它只退召回层、退不掉 wiki 层，见 §11.5） | ✅ **已落地**（M3.2，6 个路由，见 [`API.md`](API.md) §3.9）|
+| **面板** | 记忆报表页新增「生命周期」视图：stale 清单（按建议层级分组）+ 冲突队列（证据链展示 + 二选一按钮）。**所有处置动作二次确认**（面板既有纪律）| ✅ **已落地**（M3.3）：概览 chips + 候选（tier 徽章 / 单条与批量归档）+ 冲突队列 + 已归档抽屉（恢复）|
+| **日志** | 新事件登记 `docs/logging.md`：`conflict_detected`、`lifecycle_archive`、`lifecycle_restore`、`lifecycle_conflict_resolve` | ✅ **已落地**（M3.1）|
+| **service 层** | `agentmemhub/lifecycle.py`：CLI 与 HTTP 共用一份实现（避免两处口径漂移）| ✅ **已落地**（M3.1）|
 
 MCP 侧**不加**新工具：处置是人工决策，不给 Agent 无人值守入口
 （与"投喂不给删除"同一纪律）；只读的冲突查询可后续按需加。
@@ -267,7 +268,7 @@ MCP 侧**不加**新工具：处置是人工决策，不给 Agent 无人值守�
 |---|---|---|
 | **M1** 衰减升级 | freshness 双锚点 + 保鲜期 + 半衰期 180（§3.4 改造点）| 全量回归绿；新增测试：同龄记忆"最近被命中的 boost 满、从未命中的按新半衰期衰减"；⭐ 锁定值仍 no_decay |
 | **M2** 冲突检测规则层 | `memory_conflicts` 表 + L1/L2 规则 + 存量 `--scan` + CLI 列表 | 存量扫描跑通（记录耗时）；人工抽样 50 对，准确率 ≥ 80%（低于则先调规则不加层）|
-| **M3** 面板生命周期视图 | stale 按建议层级分组 + 冲突队列 + 归档/恢复按钮 | 路由↔前端对账脚本通过；处置动作二次确认有测试 |
+| **M3** 面板生命周期视图 | stale 按建议层级分组 + 冲突队列 + 归档/恢复按钮 | 路由↔前端对账脚本通过；处置动作二次确认有测试（**计划见 [`lifecycle-panel-plan.md`](lifecycle-panel-plan.md)**；**M3.1 数据层 + M3.2 HTTP 已于 2026-11-19 落地**，见 §12/§13。面板 M3.3 与 CLI 收尾 M3.4 待做）|
 | **M4**（可选） | NLI 或 LLM 兜底；自动归档（默认关） | 依据 M2/M3 运行数据再立项 |
 
 M1/M2 相互独立可并行；M3 依赖 M2 的表结构。
@@ -488,3 +489,168 @@ unit#31121  dst_fb7902...  manual=0.0    ← 已归档
 
 存量也已补齐（31 条里 18 条存在配对投影）。**验证方式**：用被归档记忆的
 原文去 `rag_bridge.search`，确认它不再返回、而是新结论排在前面。
+
+---
+
+## 12. M3.1 实施记录：数据层（2026-11-19）
+
+把 M1/M2 的数据变成可操作清单的第一步。**只动数据层、不碰前端**，所以可单独上线。
+完整计划见 [`lifecycle-panel-plan.md`](lifecycle-panel-plan.md)。
+
+### 12.1 修掉一个真 bug：候选清单混进已归档条目
+
+`stale_memories()` 此前只按「够老 + 零命中」筛，**没看 `unit_values.manual_value`**。
+实测 1076 条候选里有 **6 条已经归档**（`manual_value=0`）。后果不是数据错，而是
+**让人重复确认一件做过的事**：面板上点归档毫无反应（本来就是 0），用户会以为坏了。
+
+修法：`AND v.manual_value IS NULL` —— 用户表过态的一律不进候选
+（`manual_value=0` 是已归档，非 0 是 ⭐ 加权）。修后 **1076 → 1070**。
+
+### 12.2 一个规划假设被实测否掉：`superseded` 旧方不在候选里
+
+原计划把「已被取代的旧结论」当最高优先级证据。真跑发现**恒为 0**：
+`resolve("superseded")` 会**立刻归档**旧方（`manual_value=0`），而归档条目已被
+12.1 的排除条件滤掉 —— **"已判取代但还没归档"这个中间态根本不存在**。
+真实库：`superseded` 31 条，其旧方出现在候选里的 **0 条**。
+
+于是 `tier` 改为 **`conflict_old`**：`status='open'` 的冲突旧方。语义是
+"有未处置的冲突，先去队列定夺"，而不是"该归档"。`dismissed` / `kept_both`
+是用户已表过态，不算证据。
+
+**教训**：判据要在真实数据上跑一遍再写进设计 —— 否则上线就是空清单。
+
+### 12.3 为什么 `tier` 只分两层
+
+实测 1070 条候选彼此的 `value` 全是 0.3（蒸馏默认分，**中位数 = 最大值**），
+`freshness` 最低 0.849（最老记忆 132 天，够不到 §5.2 要求的 270 天）。
+**没有任何可计算信号能区分它们**。所以不硬凑阈值，只区分「有未处置冲突」与
+「其余」，把判断权交给人。等数据满 270 天、或引入内容特征后再回来加阈值。
+
+### 12.4 新增 `agentmemhub/lifecycle.py`（service 层）
+
+面板（HTTP）与 CLI 共用一份实现，避免"两处各写一遍 SQL 然后悄悄漂移"
+（对齐审计踩过这类分裂）。
+
+| 函数 | 用途 |
+|---|---|
+| `stale_candidates(days, limit)` | 候选清单（已排除归档/锁定）+ `tier` |
+| `summary(days)` | 面板概览：候选 / 已归档 / 锁定 / 冲突分状态 |
+| `archive_units(ids, by, reason)` | 归档：双层退场 + 双投影；三段式返回 `changed/skipped/errors` |
+| `restore_units(ids, by)` | 恢复：清 `manual_value` + `wiki_ignore_at`（双投影两侧） |
+| `list_conflicts` / `resolve_conflict` / `scan_conflicts` | 冲突的读与处置 |
+
+`MAX_BATCH = 100`：防一手"误点全选"把半个知识库归档掉 —— 归档会改变 wiki 基线，
+一次影响太多条目会让下次增量的重编范围失控。
+
+`conflicts._archive_unit()` 同时提为公共 `archive_unit()`：归档只保留一条底层路径
+（`resolve("superseded")` 与 `lifecycle.archive_units()` 都走它）。
+
+### 12.5 补上 M2 欠的日志
+
+`conflicts.py` 此前**一条日志都没有**（实测 grep 0 处）。现在四个事件进
+`logs/memory.log`：`conflict_detected`、`lifecycle_archive`、`lifecycle_restore`、
+`lifecycle_conflict_resolve`（字段与用途见 [`logging.md`](logging.md) §5.2）。
+`logs._memory_msg()` 同步支持 `unit_ids` / `conflict_id` / `by` —— 否则
+`agentmemhub memory-log` 里只会剩一个光秃秃的 `lifecycle_archive`，看不出动了什么。
+
+### 12.6 守卫
+
+`tests/test_lifecycle.py`（12 个）：候选排除已归档/已加权、够老才进、
+未处置冲突旧方排最前、已处置不算证据、归档双层 + 双投影、归档幂等、
+不存在的 id、批量上限、恢复对称、概览数字、归档与恢复都落审计。
+
+---
+
+## 13. M3.2 实施记录：HTTP 接口（2026-11-19）
+
+6 个路由挂在 `/api/lifecycle/*`，全部薄封装 `lifecycle.py`（不写第二份逻辑）：
+
+| 方法 | 路径 |
+|---|---|
+| `GET` | `/api/lifecycle/summary` |
+| `GET` | `/api/lifecycle/stale` |
+| `POST` | `/api/lifecycle/archive` |
+| `POST` | `/api/lifecycle/restore` |
+| `GET` | `/api/lifecycle/conflicts` |
+| `POST` | `/api/lifecycle/conflicts/{id}/resolve` |
+
+三条契约：
+
+1. **三段式响应**：归档/恢复返回 `{ok, changed, skipped, errors}` —— 部分失败
+   必须能看见（不能只回 `ok: true`）。
+2. **错误码有语义**：`ids` 不是数组 / 超过 `MAX_BATCH=100` / `action` 非法 → 400；
+   冲突不存在 → 404；索引库不可读 → 503。
+3. **不自动触发重编**：归档改 wiki 基线，但重编要花钱 —— 何时付由用户在面板选。
+
+### 13.1 接口测试撞出来的一个真问题：双投影在候选里出现两次
+
+写 `test_restore_returns_item_to_candidates` 时发现：同一内容的
+`dst_<h>` 与 `mcp_<h>` 在 `units` 里是**两行**，而 `stale_memories` 只按行统计
+—— 归档后恢复，候选从 0 变成 **2**，两条一模一样的记忆。
+
+后果不是数据错，是**视图错**：面板上归档掉一条、另一条还在，用户会以为没生效
+（底层 `archive_unit` 其实把两侧一起锁了）。
+
+修法：`_dedup_projections()` 按 `src_id` 的 hash 去重，**保留 `dst_`**（蒸馏正本）。
+真实库当前候选 1070 条全是 `dst_`，所以去重后数字不变 —— 但这是**防御性的**：
+一旦某条 `mcp_` 行满 90 天且零命中，它就会和 `dst_` 一起进候选。
+
+### 13.2 守卫
+
+`tests/test_lifecycle_api.py`（11 个）：概览数字、候选排除与 tier、`days` 参数、
+冲突列表、归档双层+双投影、超上限 400、`ids` 非法 400、恢复后回候选、
+`superseded` 归档旧方、非法 action 400、冲突不存在 404。
+另有 `test_lifecycle.py::test_候选对双投影只出现一条` 守 13.1 的修复。
+
+---
+
+## 14. M3.3 实施记录：面板视图（2026-11-19）
+
+记忆报表页新增一张 **「生命周期」卡片**（在「记忆库健康」下方），三块：
+
+```
+┌─ 生命周期 ───────────────────────────────────────────────┐
+│ 候选 1070 │ 已归档 50 │ 冲突待处置 0        [刷新] [归档所选]│
+│ ☐ 从未命中  一条很老的记忆…            132 天  [归档]      │
+│ ☐ 有未处置冲突  …                      120 天  [归档]      │
+├─ 冲突队列  0 ───────────────────────────────────────────┤
+│ #12  evolution  规则 model  相似 0.95                    │
+│   新：…                     旧：…                        │
+│   [归档旧方] [都保留] [误报]                              │
+├─ 已归档  50 （点开展开，可恢复）──────────────────────────┤
+│ 一条更老的记忆…                        #35489  [恢复]     │
+└──────────────────────────────────────────────────────────┘
+```
+
+### 14.1 补了一个原计划漏掉的接口
+
+规划 §3.4 画了"已归档（可展开）→ 恢复"，但 §3.3 的接口表里**没有列出已归档的
+数据源** —— 恢复按钮没有数据可渲染。实施时补了
+`GET /api/lifecycle/archived`（`lifecycle.archived_units()`），并按 `content_hash`
+做双投影去重（归档会把两侧一起锁 0，原始查询会返回两条）。
+
+**教训**：面板设计里的每个"列表"都要在接口表里有对应行 —— 否则到前端才发现缺数据。
+
+### 14.2 为什么卡片里没有"建议删除"
+
+因为**判据给不出**。实测 1070 条候选的 `value` 全是 0.3、`freshness` 最低 0.849
+（§12.3），没有可计算依据说明"这条该删"。所以卡片只做两件事：
+把 `conflict_old` 标出来（提示去冲突队列定夺）、把其余交给人逐条看。
+**默认一条都不预选** —— 全选按钮设计成"归档所选（N）"，N 为 0 时禁用。
+
+### 14.3 二次确认文案必须写清代价
+
+三个动作都会改变 wiki 基线，重编要花钱：
+
+| 动作 | 确认框里写的 |
+|---|---|
+| 归档 | 撤出召回 + 不进 wiki（都可逆）；**下次增量会重编受影响页面，本操作不自动触发** |
+| 恢复 | 重新进召回与编译输入；下次增量会当新增输入重编 |
+| 处置冲突 | `superseded` 额外说明"旧方会被归档"；另两种说明"只打标记" |
+
+### 14.4 守卫
+
+- `test_web_layout.py::test_生命周期卡片的关键节点齐全`：12 个元素 id（JS 里
+  `$('#id')` 拿不到会**静默失败**，只能靠这条钉住）
+- `audit_frontend_api.py`：73 路由 / 已用 62（生命周期 7 个接口全部接上）
+- 内联 JS 用 `node --check` 过了 4 个 script 块（HTML 里的 JS 没有 lint，这是唯一兜底）

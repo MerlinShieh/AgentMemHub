@@ -6,7 +6,7 @@
 ## 1. 职责边界
 
 面板是**一个人看的界面**，不是给 Agent 的接口。它的价值在于把已有能力摆到人眼前，
-所以"有没有入口"和"能不能跑"是两件事——后端 64 个路由，2026-10-18 之前面板只调了 18 个。
+所以"有没有入口"和"能不能跑"是两件事——后端 73 个路由，2026-10-18 之前面板只调了 18 个。
 
 **做什么**
 
@@ -45,7 +45,7 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 交互式接口文档在 `/api/docs`（Swagger UI），每个端点都带 `summary`，关键 Query 参数带
 `description`——这部分是给排障用的，别删。
 
-### 2.2 路由分组（64 个）
+### 2.2 路由分组（73 个）
 
 | 组 | 代表路由 | 说明 |
 |---|---|---|
@@ -57,10 +57,11 @@ uv run python -m agentmemhub serve --port 9000 --no-open --db D:/path/to/agentme
 | 快照 | `/api/snapshots`、`/api/snapshots/create`、`/api/snapshots/restore` | 列表与创建是同步（秒级），回滚是长任务 |
 | 投喂 | `/api/feed/*`（11 个） | 清单/详情/投喂/上传/扫描/批量/重转/撤下/删除/体检/白名单 |
 | 配置 | `/api/config` | 只读；带 `entries[]`（注释 + 行号 + `value_raw`）、`env_overrides[]`、`drift` |
+| 记忆生命周期 | `/api/lifecycle/{summary,stale,archived,archive,restore,conflicts}`、`/api/lifecycle/conflicts/{id}/resolve`（7 个） | **M3.2 后端 + M3.3 面板均已落地**：候选（排除归档/锁定 + `tier`）/ 归档 / 恢复 / 冲突队列与处置。归档走 `conflicts.archive_unit()`（双层退场 + 双投影），**不复用** `/api/engine/weight` —— 那个退不掉 wiki 编译层 |
 
 对账工具：`python scripts/audit_frontend_api.py`（`--used` 连已用的列、`--json` 给机器读）。
 它同时扫 `app.py` 的路由装饰器和 `index.html` 里的 `fetch('/api/...')` 字面量与**字符串拼接**，
-2026-10-23 实测 **64 路由 / 已用 53 / 未用 11**。
+2026-11-19 实测 **73 路由 / 已用 62 / 未用 11**（M3.3 把生命周期 7 个接口全部接上）。
 
 ### 2.3 长任务契约（最容易踩的地方）
 

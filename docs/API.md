@@ -366,11 +366,13 @@ python -m agentmemhub wiki --action failures --out DIR          # 查 wiki 失�
 python -m agentmemhub wiki --action retry --out DIR --stage l2   # 定向补跑
 python scripts/health_check.py                                   # 记忆库一致性巡检
 python -m agentmemhub memory-log                                # 记忆操作事实流（写了/读了什么）
-  [--event write|read] [--path mcp|http|distill|cli] [--grep 关键词] [--limit N] [--json]
+  [--event write|read|conflict_detected|lifecycle_archive|lifecycle_restore]
+  [--path mcp|http|distill|cli] [--grep 关键词] [--limit N] [--json]
 python -m agentmemhub llm-config [--json]                       # 各 LLM 使用点**最终生效**的配置
                                                                 # （标出每项是继承还是覆盖）
 python -m agentmemhub stale [--days 90] [--limit 200] [--json]  # 低价值记忆报表：N 天零召回命中的
                                                                 # 记忆清单（清理候选，**只报告不删除**）
+                                                                # 已归档/已加权的不列出；每条带 tier
 python -m agentmemhub conflicts [--from-wiki] [--scan] [--list] [--reset] [--json]  # 记忆冲突
 python -m agentmemhub conflicts --from-wiki            # 首选：解析 L2 页面的 ⚠️ 标注（语义级）
 python -m agentmemhub conflicts --resolve 12 --action superseded [--reason 说明]  # 处置
@@ -379,6 +381,11 @@ python -m agentmemhub conflicts --resolve 12 --action superseded [--reason 说�
 > **`stale` 的口径**：记忆 = `role='distilled'`（蒸馏投影）或 `source='memory'`
 > （Agent 直写），与评分枚举一致；消息层不参与。"命中"= 检索**最终返回**
 > （准入 + 多样性 + 精判之后），不是候选池。
+> **用户已表过态的一律不列出**（2026-11-19 修）：`manual_value = 0` 是已归档、
+> 非 0 是 ⭐ 加权 —— 它们不是"待复核"，再列出来会让人重复确认（实测曾混入 6 条）。
+> 每条带 `tier`：`conflict_old`（有 `status='open'` 的冲突，排最前）/
+> `never_hit`（其余）。**只有这两层**，因为同源记忆价值分完全相同
+> （实测 1070 条全是 0.3），没有更多可计算区分度。
 > ⚠️ 命中统计（`recall_hits.db`，与索引库同目录的**独立库**）自 2026-11-07
 > 才开始积累 —— 此前没有任何命中数据，老记忆一律视为"从未命中"，
 > 上线首日报表≈全部老记忆，属预期；跑一段时间后才有区分度。
@@ -617,6 +624,47 @@ yaml 是手写维护的；整篇覆盖会连注释一起丢，逐段手工对照
 `agentmemhub.yaml`，所以中文注释不可能被程序冲掉。要加写入口必须先有"文本级定点替换"
 （按 `entries[].line` 改值、注释原样保留），理由与拆分 `config/` 目录的成本对比见
 [modules/config.md §8](modules/config.md)。
+
+---
+
+### 3.9 记忆生命周期（`/api/lifecycle/*`，M3.2）
+
+把「哪些记忆该复核」从 CLI 报表变成面板能操作的接口。**归档与恢复不复用
+`/api/engine/weight`** —— 那个只写 `unit_values`（退召回层），**退不掉 wiki
+编译层**，正是 [`memory-lifecycle.md`](memory-lifecycle.md) §11.5 踩过的
+"归档了但 wiki 还在教旧结论"。这里统一经 `agentmemhub/lifecycle.py`，
+与 CLI 共用同一份实现，避免两处口径漂移。
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| `GET` | `/api/lifecycle/summary?days=90` | 概览：候选数 / 已归档 / 锁定 / 冲突分状态 |
+| `GET` | `/api/lifecycle/stale?days=90&limit=200` | 候选清单（**已排除归档与锁定**，每条带 `tier`）|
+| `POST` | `/api/lifecycle/archive` | body `{"ids":[...], "reason":""}` → 归档，**双层退场 + 双投影** |
+| `POST` | `/api/lifecycle/restore` | body `{"ids":[...]}` → 恢复（清 `manual_value` 与 `wiki_ignore_at`）|
+| `GET` | `/api/lifecycle/conflicts?status=open&limit=50` | 冲突队列（带两侧正文摘要与规则证据）|
+| `POST` | `/api/lifecycle/conflicts/{id}/resolve` | body `{"action":"superseded\|kept_both\|dismissed","reason":""}` |
+
+**响应契约**：归档/恢复返回三段式
+`{"ok": bool, "changed": [...], "skipped": [...], "errors": [...]}`
+—— **部分失败必须能看见**，不能只回 `ok: true`。
+
+**错误语义**：`ids` 不是数组 → 400；单次超过 `MAX_BATCH = 100` → 400
+（防一手"误点全选"）；冲突不存在 → 404；`action` 非法 → 400；
+索引库不可读 → 503。
+
+**副作用**：归档/恢复会改变 wiki 基线（align 判成 `removed` / `added`），
+**下次增量会重编受影响页面**；接口**不自动触发**重编 —— 那笔花费由用户决定时机。
+
+**CSRF**：与其他写接口一样受 `_same_site_guard` 保护（非只读方法校验
+`Origin` / `Sec-Fetch-Site`）。
+
+**`tier` 只有两层**：`conflict_old`（有 `status='open'` 的冲突，排最前）/
+`never_hit`（其余）。实测同源记忆价值分完全相同（1070 条全是 0.3），
+没有更多可计算区分度 —— 详见 [`memory-lifecycle.md`](memory-lifecycle.md) §12.3。
+
+> ✅ **已接入前端**（M3.3，记忆报表页「生命周期」卡片）：候选列表（含 tier 徽章与
+> 单条/批量归档）、冲突队列（两侧对照 + 三个处置按钮）、已归档抽屉（可恢复），
+> 处置动作一律二次确认。
 
 ---
 

@@ -391,7 +391,7 @@ hits = store.search("登录", role="tool")          # 搜索工具事件
 | `memory-log [--event write\|read] [--path mcp\|http\|distill\|cli] [--grep 词] [--json]` | **记忆操作事实流**：什么时候写了/读了什么记忆（含内容全文与来源路径）|
 | `snapshot [--snapshot-action create\|list\|restore]` | 快照与回滚（索引库整库 + wiki 产物目录）|
 | `llm-config [--json]` | **配置自检**：列出各 LLM 使用点（蒸馏/评分/Wiki 一级/二级）**最终生效**的配置，并标出每项是**继承**还是**覆盖** |
-| `stale [--days 90] [--limit 200] [--json]` | **低价值记忆报表**（记忆生命周期闭环的最后一块）：列出「创建已满 N 天且最近 N 天**零召回命中**」的蒸馏/直写记忆，按 `价值×新鲜度` 升序（最该复核的在前），带 `value`/`freshness`/`hit_count`/正文摘要。**只报告、不删除** —— 清理走 `wiki --action drop` 或面板勾选。命中数据记在独立库 `recall_hits.db`（2026-11-07 起积累，此前老记忆一律视为未命中，属预期）|
+| `stale [--days 90] [--limit 200] [--json]` | **低价值记忆报表**（记忆生命周期闭环的最后一块）：列出「创建已满 N 天且最近 N 天**零召回命中**」的蒸馏/直写记忆，按 `价值×新鲜度` 升序（最该复核的在前），带 `value`/`freshness`/`hit_count`/`tier`/正文摘要。**用户已表过态的（已归档 `manual_value=0` / ⭐ 加权）不再列出**（2026-11-19 修：此前 6 条已归档的混在 1076 条候选里）。`tier` 只有两层：`conflict_old`（有未处置冲突，排最前）/ `never_hit`（其余）—— 实测同源记忆价值分完全相同，没有更多可计算的区分度。**只报告、不删除** —— 清理走 `wiki --action drop` 或面板。命中数据记在独立库 `recall_hits.db`（2026-11-07 起积累，此前老记忆一律视为未命中，属预期）|
 | `conflicts [--from-wiki] [--scan] [--list] [--resolve ID --action A] [--reset] [--json]` | **记忆冲突**：找出被新结论取代的旧记忆。**首选 `--from-wiki`**：解析 L2 页面里 LLM 已写好的 `⚠️ 矛盾/取代关系` 标注并落表（零提示词改动，实测 1361 页 → 57 条独立冲突对，抽样 8~9 成准确）；`--scan` 是规则层兜底（只认同系列模型换代/唯一端口冲突，覆盖未进 wiki 的记忆）；`--resolve` 处置 —— `superseded`（归档旧方 = ⭐ 锁 0，可逆）/ `kept_both` / `dismissed`。详见 [docs/memory-lifecycle.md](docs/memory-lifecycle.md) §11.4 |
 | `stats` / `adapters` | 统计 / adapter 状态 |
 
@@ -919,6 +919,7 @@ uv run python -m agentmemhub llm-config --json   # 机器读
 | 通知与推送 | `notify.py`（**通道可插拔**）、`logs.py`（`audit_notify`） | [docs/modules/notify.md](docs/modules/notify.md) | 已写（2026-10-04） |
 | 外部投喂转译层 | `agentmemhub/feed/**`（转换器注册表 + 三段物料）、`cli.py`（`feed` 子命令）、`mcp_server.py`（`feed_add`/`feed_list`/`feed_status`） | [docs/modules/feed.md](docs/modules/feed.md) | **常用文档已适配**：md/txt · 网页（含本地另存）· 公众号 · **PDF** · **DOCX** · **PPTX** · **XLSX** · **XMIND** · **CSV/TSV**；MCP 三个投喂工具与通知已接（M5 ✅）；**面板投喂视图已落地**（清单/四形态投喂/扫描批量/重转/撤下/删除/体检/格式白名单，2026-10-22）；剩 T4 图片 OCR（见 [计划](docs/feed-adapter-plan.md)） |
 | 记忆引擎（内置 rag） | `agentmemhub/rag/**` | [docs/modules/memory-engine.md](docs/modules/memory-engine.md) | 已写（2026-10-23） |
+| 记忆生命周期 | `lifecycle.py`（service 层）、`conflicts.py`、`rag/recall_stats.py` | [docs/memory-lifecycle.md](docs/memory-lifecycle.md)（设计 + 实施记录）、[docs/lifecycle-panel-plan.md](docs/lifecycle-panel-plan.md)（M3 计划） | M1 衰减 ✅ / M2 冲突 ✅ / **M3.1 数据层 ✅ + M3.2 HTTP ✅ + M3.3 面板 ✅**；M3.4 收尾待做 |
 | 面板后端网关 | `agentmemhub/web/**`、`mdmini.py` | [docs/modules/panel.md](docs/modules/panel.md) | 已写（2026-10-23） |
 | 采集与适配 | `agentmemhub/adapters/**`、`store.py`、`models.py`、`watermarks.py` | [docs/modules/ingest-adapters.md](docs/modules/ingest-adapters.md) | 已写（2026-10-23） |
 | 蒸馏与 LLM 接入 | `distill.py`、`scoring.py`、`llm.py`、`export.py` | [docs/modules/distill-llm.md](docs/modules/distill-llm.md) | 已写（2026-10-23） |
