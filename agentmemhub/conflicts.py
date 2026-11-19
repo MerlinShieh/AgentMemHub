@@ -433,6 +433,18 @@ def _insert_conflict(conn: sqlite3.Connection, *, unit_new: int, unit_old: int,
          json.dumps(detail, ensure_ascii=False), now))
     created = bool(cur.rowcount)
     rid = cur.lastrowid if created else None
+    if created:
+        # 冲突检测是"系统自己做的判断"，必须留痕：事后要能回答
+        # "这条冲突哪来的、按哪条规则判的、相似度多少"（docs/logging.md）。
+        try:
+            from agentmemhub.logs import audit_memory
+            audit_memory({"event": "conflict_detected", "unit_new": unit_new,
+                          "unit_old": unit_old, "kind": kind,
+                          "rule_hit": rule_hit,
+                          "similarity": round(float(similarity), 4),
+                          "conflict_id": rid})
+        except Exception:                       # noqa: BLE001 —— 审计不阻断检测
+            pass
     return {"id": rid, "unit_new": unit_new, "unit_old": unit_old,
             "kind": kind, "rule_hit": rule_hit, "similarity": similarity,
             "created": created}
@@ -511,7 +523,7 @@ def list_conflicts(conn: sqlite3.Connection, *, status: str = "open",
     return out
 
 
-def _archive_unit(conn: sqlite3.Connection, unit_id: int, *, ts: int) -> dict:
+def archive_unit(conn: sqlite3.Connection, unit_id: int, *, ts: int) -> dict:
     """把一条记忆**完整退场**：召回层 + wiki 编译层同时排除。
 
     两层各用各的闸（2026-11-07 修）：
@@ -599,7 +611,7 @@ def resolve(conn: sqlite3.Connection, conflict_id: int, action: str, *,
             return {"id": conflict_id, "status": "open", "changed": False,
                     "note": f"旧方 #{unit_old} 已手动加权为 {old_manual[0]}，"
                             "归档会覆盖用户意志；请先清除加权或改选 kept_both"}
-        arch = _archive_unit(conn, unit_old, ts=now)
+        arch = archive_unit(conn, unit_old, ts=now)
         tagged = arch["distilled_tagged"]
         archived_units = arch["archived_units"]
     conn.execute(

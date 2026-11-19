@@ -613,8 +613,11 @@ def cmd_stale(args) -> int:
         fresh = r.get("freshness")
         fresh_s = "" if fresh is None else f"  fresh={float(fresh):.2f}"
         text = (r["text"] or "").replace("\n", " ")
+        # 有未处置冲突的排在前面并打标记（M3.1 的 tier）——这类不是"该归档"，
+        # 而是"先去冲突队列定夺"，所以只标注、不改变默认动作。
+        tier_s = "  [有未处置冲突]" if r.get("tier") == "conflict_old" else ""
         _stdout(f"  [{r['id']}] {r['src_id']}  {t}  value={val_s}{fresh_s}"
-                f"  hits={r['hit_count']}  {text[:80]}")
+                f"  hits={r['hit_count']}{tier_s}  {text[:80]}")
     return 0
 
 
@@ -1254,8 +1257,11 @@ def cmd_memory_log(args) -> int:
                 ts, r.get("path") or "?", (r.get("query") or "")[:36],
                 r.get("hits"), r.get("kinds") or ""))
         else:
+            # 生命周期事件（archive / restore / conflict_detected 等）走这里：
+            # 优先用落盘时已生成的单行摘要，比整条 JSON 截断可读得多。
             print("%s [%s] %s" % (ts, ev,
-                                  _json.dumps(r, ensure_ascii=False)[:160]))
+                                  (r.get("msg") or _json.dumps(
+                                      r, ensure_ascii=False))[:160]))
     print("\n共 %d 条（%s）" % (len(rows), _logs.memory_audit_file()))
     return 0
 

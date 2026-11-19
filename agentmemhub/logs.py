@@ -577,6 +577,16 @@ def _memory_msg(e: dict) -> str:
             bits.append("%s=%s" % (k, e[k]))
     if e.get("query"):
         bits.append("q=%s" % str(e["query"])[:80])
+    # 生命周期事件（M3）：批量目标与操作者。不列出来的话，`memory-log`
+    # 里只会剩一个光秃秃的 `lifecycle_archive`，排查时看不出动了哪些记忆。
+    ids = e.get("unit_ids") or []
+    if ids:
+        head = ",".join(str(i) for i in list(ids)[:5])
+        bits.append("ids=%s%s" % (head, "…" if len(ids) > 5 else ""))
+    if e.get("conflict_id") is not None:
+        bits.append("conflict=#%s" % e["conflict_id"])
+    if e.get("by"):
+        bits.append("by=%s" % e["by"])
     return " ".join(bits)
 
 

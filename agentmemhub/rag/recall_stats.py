@@ -120,8 +120,59 @@ def _freshness(anchor_ts: int | None, now: int) -> float:
                          HALF_LIFE_DAYS, FRESH_OFFSET_DAYS)
 
 
+#: 证据分层（M3 起）：候选清单里"为什么它在这儿"的唯一区分。
+#:
+#: 背景（2026-11-19 实测）：1070 条候选里 `value` 全部 ≤0.3、中位数=最大值
+#: （蒸馏默认分），按分数排没有区分度；`freshness` 最低 0.849（最老记忆才
+#: 132 天，够不到原设计要求的 270 天）。
+#:
+#: ⚠️ **不是"superseded 旧方"**：原计划想用「已被取代的旧结论」当高优先级证据，
+#: 但 `conflicts.resolve("superseded")` 会**立刻归档**旧方（`manual_value=0`），
+#: 而归档条目已被候选清单排除 —— 那个中间态根本不存在（实测 `superseded_old`
+#: 恒为 0）。真正值得提示的是**尚未处置**的冲突旧方：它提醒你去冲突队列先做决定，
+#: 而不是盲目归档。
+TIER_CONFLICT_OLD = "conflict_old"       # 有 status='open' 的冲突，等你定夺
+TIER_NEVER_HIT = "never_hit"             # 零命中 + 够老 + 用户从未表态
+
+
+def _open_conflict_olds(conn: sqlite3.Connection, tables: set[str]) -> set[int]:
+    """**未处置**冲突里的旧方 —— 候选清单里唯一的"有证据"标记。"""
+    if "memory_conflicts" not in tables:
+        return set()
+    try:
+        return {int(r[0]) for r in conn.execute(
+            "SELECT unit_old FROM memory_conflicts WHERE status='open'")}
+    except sqlite3.Error:
+        return set()
+
+
+def dedup_projections(rows: list[dict]) -> list[dict]:
+    """同一内容的双投影只保留一条（`dst_` 优先）。
+
+    同一份内容在 `units` 里可能有两行：`dst_<h>`（蒸馏投影，正本）与
+    `mcp_<h>`（Agent 直写落账），共享同一个 hash。**不去重的话，候选清单里会
+    出现两条一模一样的记忆**——面板上归档掉一条，另一条还在，用户会以为没生效
+    （归档底层其实会把两侧一起锁，但视图先错了）。
+
+    2026-11-19 由 M3 的 HTTP 测试撞出来：同一内容恢复后候选从 0 变 2。
+    """
+    picked: dict[str, dict] = {}
+    others: list[dict] = []
+    for d in rows:
+        head, _, h = (d.get("src_id") or "").partition("_")
+        if head in ("dst", "mcp") and h:
+            cur = picked.get(h)
+            # `dst_` 是蒸馏正本，两个都在时以它为准（排序无关）
+            if cur is None or (head == "dst"
+                               and (cur.get("src_id") or "").startswith("mcp_")):
+                picked[h] = d
+        else:
+            others.append(d)
+    return list(picked.values()) + others
+
+
 def stale_memories(index_db: Path, *, days: int = 90,
-                    limit: int = 200) -> list[dict[str, Any]]:
+                   limit: int = 200) -> list[dict[str, Any]]:
     """低价值记忆报表：创建已满 `days` 天且最近 `days` 天零召回命中的记忆。
 
     排序（M1 起）：`value × freshness` **升序**——低价值且已不新鲜的排最前。
@@ -141,9 +192,16 @@ def stale_memories(index_db: Path, *, days: int = 90,
             v_join = "LEFT JOIN unit_values v ON v.unit_id = u.id"
             v_cols = ("COALESCE(v.manual_value, v.value) AS value,"
                       " COALESCE(v.priority, 0) AS priority")
+            # 用户表过态的一律不进候选（2026-11-19 修）：
+            # - manual_value = 0  → 已归档（召回已退场），再列出来等于让人
+            #   重复确认一件做过的事，点归档也没反应；
+            # - manual_value ≠ 0  → 用户显式加权（⭐ 锁定），不该被建议清理。
+            # 修复前实测有 6 条已归档条目混在 1076 条候选里。
+            v_cond = "AND v.manual_value IS NULL"
         else:
             v_join = ("LEFT JOIN (SELECT NULL AS unit_id) v ON v.unit_id = u.id")
             v_cols = "NULL AS value, 0 AS priority"
+            v_cond = ""
         # 命中统计在**独立命中库**（见模块头"为什么分库"）——ATTACH 过来 JOIN；
         # 文件尚不存在 = 从未记录过命中，全部按"零命中"处理，无需 JOIN。
         hdb = hits_db_path(index_db)
@@ -171,10 +229,12 @@ def stale_memories(index_db: Path, *, days: int = 90,
                 {s_join}
                 WHERE (u.role='distilled' OR u.source='memory')
                   AND u.time <= ?
+                  {v_cond}
                   {s_cond}
                 ORDER BY u.time ASC
                 LIMIT ?""",
             args + [max(1, int(limit))]).fetchall()
+        sup_olds = _open_conflict_olds(conn, tables)
         out: list[dict[str, Any]] = []
         now = int(time.time())
         for r in rows:
@@ -187,9 +247,15 @@ def stale_memories(index_db: Path, *, days: int = 90,
             anchor = max(int(d.get("time") or 0), int(d.get("last_hit_at") or 0))
             d["freshness"] = round(_freshness(anchor, now), 4)
             d["stale_score"] = round(float(val) * d["freshness"], 4)
+            d["tier"] = (TIER_CONFLICT_OLD if d["id"] in sup_olds
+                         else TIER_NEVER_HIT)
             out.append(d)
-        # 排序：低价值且不新鲜的最前（报表语义 = 优先复核清理）
-        out.sort(key=lambda d: d["stale_score"])
+        # 双投影去重：同一内容在 units 里有两行（dst_/mcp_ 共享 hash），
+        # 不去重会让候选清单出现两条一模一样的记忆（详见 `dedup_projections`）。
+        out = dedup_projections(out)
+        # 排序：有未处置冲突的排最前，其余低价值且不新鲜的最前
+        out.sort(key=lambda d: (0 if d["tier"] == TIER_CONFLICT_OLD else 1,
+                                d["stale_score"]))
         return out
     finally:
         conn.close()
